@@ -2963,23 +2963,19 @@ def json_member(name: str) -> str:
     return f".{name}" if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) else f"[{json.dumps(name, ensure_ascii=False)}]"
 
 
-def json_strings(value: object, path: str = "", keys: tuple[str | int, ...] = ()
-                 ) -> Iterator[tuple[str, tuple[str | int, ...], str]]:
-    """(JSON path, keys, string) for each string of the decoded JSON VALUE and each member name, in order: GitHub
-    stores a body's strings as they decode, and some member names too (a gist's file names). The path is what a refusal
-    shows; the keys, the member names and list indexes the string is under from VALUE down, are what a rule reads
-    (gh_graphql_variable, gh_values), so that how a path is spelled (json_member) decides nothing. A member name's path
-    is the member's followed by ` (key)`, and its keys are those of the object it names a member of; the path of a
-    VALUE that is itself a string is `.`."""
+def json_strings(value: object, path: str = "") -> Iterator[tuple[str, str]]:
+    """(JSON path, string) for each string of the decoded JSON VALUE and each member name, in order: GitHub stores a
+    body's strings as they decode, and some member names too (a gist's file names). A member name's path is the
+    member's followed by ` (key)`; the path of a VALUE that is itself a string is `.`."""
     if isinstance(value, str):
-        yield path or ".", keys, value
+        yield path or ".", value
     elif isinstance(value, JsonObject):
         for name, member in value:
-            yield f"{path}{json_member(name)} (key)", keys, name
-            yield from json_strings(member, path + json_member(name), (*keys, name))
+            yield f"{path}{json_member(name)} (key)", name
+            yield from json_strings(member, path + json_member(name))
     elif isinstance(value, list):
         for index, item in enumerate(value):
-            yield from json_strings(item, f"{path}[{index}]", (*keys, index))
+            yield from json_strings(item, f"{path}[{index}]")
 
 
 # An escape in a GraphQL string: `\u{…}` (any code point), `\uXXXX`, or one of JSON's simple escapes.
@@ -3088,72 +3084,21 @@ class GraphQLSyntaxError(Exception):
     """Tokens that do not make an executable GraphQL document."""
 
 
-@dataclass(frozen=True)
-class GraphqlLeaf:
-    """One value in the arguments of a top-level field of a GraphQL document (graphql_parses), at any depth: NAME, the
-    argument or input-object field it is the value of (a list's items are values of the list's name), and either PLACE,
-    the place in the tokens of a literal (a string, a number, an enum, true, false or null), or VARIABLE, the variable
-    it uses."""
-
-    name: str
-    place: int | None = None
-    variable: str | None = None
-
-
-@dataclass(frozen=True)
-class GraphqlOperation:
-    """One operation of a GraphQL document (graphql_parses): KIND, `query` (a bare selection set too), `mutation` or
-    `subscription`, and DECLARED, the variables its variable definitions declare."""
-
-    kind: str
-    declared: frozenset[str]
-
-
-@dataclass(frozen=True)
-class GraphqlDocument:
-    """What graphql_parses reads of an executable GraphQL document: OPERATIONS, each of its operations; FRAGMENTS,
-    whether a fragment of any kind occurs (a fragment definition, a fragment spread or an inline fragment); FIELDS, the
-    leaves of the arguments of each top-level field of each operation, in order, a field's number its place there;
-    USES, each place a variable is used (a directive's arguments included), as the variable and the number of the
-    top-level field it is in (None for none); and STRINGS, each string token's place in the tokens, in order, with the
-    number of the top-level field it is in."""
-
-    operations: tuple[GraphqlOperation, ...]
-    fragments: bool
-    fields: tuple[tuple[GraphqlLeaf, ...], ...]
-    uses: tuple[tuple[str, int | None], ...]
-    strings: tuple[tuple[int, int | None], ...]
-
-
-def graphql_parses(tokens: Sequence[tuple[str, str]]) -> GraphqlDocument | None:
-    """What TOKENS (graphql_tokens) hold when they make an executable GraphQL document, as the spec's grammar reads one
-    (GraphqlDocument), else None: one or more operations (a bare selection set, or `query`, `mutation` or
-    `subscription` with an optional name, variable definitions and directives) and fragment definitions, their
-    selections (fields with an alias, arguments, directives and a selection set; fragment spreads; inline fragments),
-    arguments, values and directives. Directives are read past: GitHub's executable directives are only `@skip` and
-    `@include`, which choose no target, but a variable a directive uses is a use. The one walk of the grammar the
-    check has: until review round 4 of dispatch://INFRA-3365 gh_graphql walked it twice more, by hand, and trusted
-    that what this walk accepted paired as its own walks read it."""
+def graphql_parses(tokens: Sequence[tuple[str, str]]) -> bool:
+    """Whether TOKENS (graphql_tokens) make an executable GraphQL document, as the spec's grammar reads one: one or more
+    operations (a bare selection set, or `query`, `mutation` or `subscription` with an optional name, variable
+    definitions and directives) and fragment definitions, their selections (fields with an alias, arguments, directives
+    and a selection set; fragment spreads; inline fragments), arguments, values and directives."""
     position = 0
-    # The number of the top-level field being read, None outside every one.
-    field_number: int | None = None
-    operations: list[GraphqlOperation] = []
-    fields: list[tuple[GraphqlLeaf, ...]] = []
-    uses: list[tuple[str, int | None]] = []
-    strings: list[tuple[int, int | None]] = []
-    fragments = False
 
     def peek(kind: str | None = None, text: str | None = None) -> bool:
         return position < len(tokens) and kind in (None, tokens[position][0]) and text in (None, tokens[position][1])
 
-    def take(kind: str | None = None, text: str | None = None) -> str:
+    def take(kind: str | None = None, text: str | None = None) -> None:
         nonlocal position
         if not peek(kind, text):
             raise GraphQLSyntaxError
-        if tokens[position][0] == "string":
-            strings.append((position, field_number))
         position += 1
-        return tokens[position - 1][1]
 
     def optional(kind: str, text: str | None = None) -> bool:
         found = peek(kind, text)
@@ -3161,36 +3106,30 @@ def graphql_parses(tokens: Sequence[tuple[str, str]]) -> GraphqlDocument | None:
             take(kind, text)
         return found
 
-    def value(const: bool, name: str, leaves: list[GraphqlLeaf] | None) -> None:
-        """A value, the value of the argument or input-object field NAME; each leaf is added to LEAVES, when given."""
+    def value(const: bool) -> None:
         if optional("punct", "$"):
             if const:
                 raise GraphQLSyntaxError
-            variable = take("name")
-            uses.append((variable, field_number))
-            if leaves is not None:
-                leaves.append(GraphqlLeaf(name, variable=variable))
+            take("name")
         elif optional("punct", "["):
             while not optional("punct", "]"):
-                value(const, name, leaves)
+                value(const)
         elif optional("punct", "{"):
             while not optional("punct", "}"):
-                member = take("name")
+                take("name")
                 take("punct", ":")
-                value(const, member, leaves)
+                value(const)
         elif peek("int") or peek("float") or peek("string") or peek("name"):
-            if leaves is not None:
-                leaves.append(GraphqlLeaf(name, place=position))
             take()
         else:
             raise GraphQLSyntaxError
 
-    def arguments(const: bool, leaves: list[GraphqlLeaf] | None = None) -> None:
+    def arguments(const: bool) -> None:
         if optional("punct", "("):
             while True:
-                name = take("name")
+                take("name")
                 take("punct", ":")
-                value(const, name, leaves)
+                value(const)
                 if optional("punct", ")"):
                     break
 
@@ -3207,18 +3146,15 @@ def graphql_parses(tokens: Sequence[tuple[str, str]]) -> GraphqlDocument | None:
             take("name")
         optional("punct", "!")
 
-    def selection_set(top: bool) -> None:
-        """A selection set, an operation's own when TOP, whose fields are then its top-level fields."""
+    def selection_set() -> None:
         take("punct", "{")
         while True:
-            selection(top)
+            selection()
             if optional("punct", "}"):
                 break
 
-    def selection(top: bool) -> None:
-        nonlocal field_number, fragments
+    def selection() -> None:
         if optional("punct", "..."):
-            fragments = True
             if peek("name") and not peek("name", "on"):
                 take("name")
                 directives(False)
@@ -3226,114 +3162,53 @@ def graphql_parses(tokens: Sequence[tuple[str, str]]) -> GraphqlDocument | None:
             if optional("name", "on"):
                 take("name")
             directives(False)
-            selection_set(False)
+            selection_set()
             return
-        leaves: list[GraphqlLeaf] | None = [] if top else None
-        if top:
-            field_number = len(fields)
         take("name")
         if optional("punct", ":"):
             take("name")
-        arguments(False, leaves)
+        arguments(False)
         directives(False)
         if peek("punct", "{"):
-            selection_set(False)
-        if leaves is not None:
-            fields.append(tuple(leaves))
-            field_number = None
+            selection_set()
 
     def definition() -> None:
-        nonlocal fragments
         if peek("punct", "{"):
-            operations.append(GraphqlOperation("query", frozenset()))
-            selection_set(True)
+            selection_set()
         elif optional("name", "fragment"):
-            fragments = True
             if peek("name", "on"):
                 raise GraphQLSyntaxError
             take("name")
             take("name", "on")
             take("name")
             directives(False)
-            selection_set(False)
+            selection_set()
         else:
             if not any(peek("name", kind) for kind in ("query", "mutation", "subscription")):
                 raise GraphQLSyntaxError
-            kind = take()
+            take()
             optional("name")
-            declared: set[str] = set()
             if optional("punct", "("):
                 while True:
                     take("punct", "$")
-                    declared.add(take("name"))
+                    take("name")
                     take("punct", ":")
                     type_reference()
                     if optional("punct", "="):
-                        value(True, "", None)
+                        value(True)
                     directives(True)
                     if optional("punct", ")"):
                         break
             directives(False)
-            operations.append(GraphqlOperation(kind, frozenset(declared)))
-            selection_set(True)
+            selection_set()
 
     try:
         definition()
         while position < len(tokens):
             definition()
     except GraphQLSyntaxError:
-        return None
-    return GraphqlDocument(tuple(operations), fragments, tuple(fields), tuple(uses), tuple(strings))
-
-
-@dataclass(frozen=True)
-class GhValue:
-    """One value a text of a gh call holds, as gh_values reads it: PATH, its path in the text ("" for the text itself),
-    which a refusal shows; VALUE; BOTH, whether it is read both ways, as written and with its JSON escapes decoded;
-    STRING, for a string of a GraphQL document, its number, from 1, in the order of the document's string tokens
-    (GraphqlDocument.strings); and VARIABLE, the GraphQL variable the value gives (gh_graphql_variable, which reads a
-    gh field's key or the keys of the value in an --input body, json_strings). GhGraphql.field_of ties a value to one
-    field of a mutation by STRING and VARIABLE, and no rule reads PATH: until review round 3 of dispatch://INFRA-3365
-    field_of parsed the number out of PATH, and until its review round 4 gh_graphql_variable parsed an --input body's
-    variable out of it, so a change to the label changed where a value went, and nothing said so."""
-
-    path: str
-    value: str
-    both: bool = False
-    string: int | None = None
-    variable: str | None = None
-
-
-def gh_field_keys(key: str) -> list[str]:
-    """The keys gh 2.98.0 nests the value of the field KEY=… under, as parseFields builds its key stack
-    (pkg/cmd/api/fields.go): the name before the first `[`, then each name in brackets, so `b[k]` is the member k of
-    b, and an empty one (`v[]`) an item of an array."""
-    keys: list[str] = []
-    start = 0
-    for index, character in enumerate(key):
-        if character == "[":
-            if start == 0:
-                keys.append(key[:index])
-            start = index + 1
-        elif character == "]":
-            keys.append(key[start:index])
-    if start == 0:
-        keys.append(key)
-    return keys
-
-
-def gh_graphql_variable(piece: GhText, keys: tuple[str | int, ...] = ()) -> str | None:
-    """The GraphQL variable a value of PIECE gives, as gh 2.98.0 sends a GraphQL call: for a gh field, its first key
-    (gh_field_keys) but `query` and `operationName`, which gh sends beside the variables (pkg/cmd/api/http.go,
-    groupGraphQLVariables), the rule gh_graphql reads a gh field's variable by too; for a value of an --input body,
-    NAME when KEYS, the member names and list indexes the value is under (json_strings), begin with `variables` and
-    NAME, the keys gh_graphql walks to read that variable's value. None for any other value."""
-    if piece.json_body:
-        return keys[1] if len(keys) > 1 and keys[0] == "variables" and isinstance(keys[1], str) else None
-    if piece.key is None:
-        return None
-    name = gh_field_keys(piece.key)[0]
-    return None if name in ("query", "operationName") else name
+        return False
+    return True
 
 
 def graphql_strings(document: str) -> list[str] | None:
@@ -3347,77 +3222,19 @@ def graphql_strings(document: str) -> list[str] | None:
     return [text for kind, text in tokens if kind == "string"]
 
 
-def graphql_values(path: str, document: str) -> list[GhValue]:
+def graphql_values(path: str, document: str) -> list[tuple[str, str, bool]]:
     """gh_values of the GraphQL DOCUMENT at PATH: each string by its number (`.query string 2`), or, when the document
     does not parse (graphql_strings), the document read both ways."""
     strings = graphql_strings(document)
     if strings is None:
-        return [GhValue(path, document, True)]
-    return [GhValue(f"{path} string {number}".lstrip(), value, string=number)
-            for number, value in enumerate(strings, start=1)]
+        return [(path, document, True)]
+    return [(f"{path} string {number}".lstrip(), value, False) for number, value in enumerate(strings, start=1)]
 
 
-# The input field by which a GraphQL mutation names the repository it goes to by name, not by node id
-# (createCommitOnBranch's branch, a CommittableBranch), and an `owner/name` as GitHub reads one there.
-GRAPHQL_NAMED = "repositoryNameWithOwner"
-GH_OWNER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+")
-# The name of an argument or input-object field that takes a node id: `id` (updateIssue's, CommittableBranch's), a
-# name that ends in `Id` or `Ids` (subjectId, labelIds), and the three ID-typed input fields of GitHub's schema whose
-# name is neither, addPullRequestReviewComment's `inReplyTo`, DismissalRestrictionInput's `allowedActors` and
-# UpdateEnvironmentInput's `reviewers` (the tester's introspection, dispatch://INFRA-3365/artifact/tester-break9-run-md,
-# section 3). A value there that is neither null nor a node id (gh_node_id) leaves a GraphQL call unresolved
-# (gh_field_targets); the name chooses no target. clientMutationId is not one: GitHub only echoes its value back. Until
-# test round 9 of dispatch://INFRA-3365 those three were not read, so a value of one that was no node id was no target
-# and left nothing unresolved.
-GRAPHQL_ID_NAME = re.compile(r"id|inReplyTo|allowedActors|reviewers|[_0-9A-Za-z]*(?:Id|Ids)")
-# The name of an argument or input-object field that names an account by its login (`sponsorableLogin`,
-# `repositoryOwnerLogin`, `login`, `adminLogins`). The check cannot read where such an account's text goes, so a
-# value there that is not null leaves a GraphQL call unresolved (gh_field_targets): createSponsorsTier publishes its
-# description on the account's public Sponsors page, and a repositoryId beside the login would otherwise judge it by
-# that repository alone (review round 4 of dispatch://INFRA-3365, the implementer's class search).
-GRAPHQL_LOGIN_NAME = re.compile(r"login|[_0-9A-Za-z]*(?:Login|Logins)")
-
-
-def graphql_mutation(document: GraphqlDocument) -> GraphqlOperation | None:
-    """The one operation of the parsed GraphQL DOCUMENT (graphql_parses) when the check can read it field by field: a
-    mutation, the document's only operation, with no fragment of any kind (`fragment S on T`, `...S`, `... on T`,
-    `... {`). Each top-level field of its selection set (GraphqlDocument.fields) GitHub runs as a mutation of its own.
-    None for any other document: a field inside a fragment is no top-level field the check can see, and until review
-    round 3 of dispatch://INFRA-3365 one took the targets of the fields beside it."""
-    if document.fragments or len(document.operations) != 1 or document.operations[0].kind != "mutation":
-        return None
-    return document.operations[0]
-
-
-@dataclass(frozen=True)
-class GhLeaf:
-    """One value a top-level field of a GraphQL mutation takes, as gh_graphql reads the field's targets: NAME, the
-    argument or input-object field it is the value of, None for a value a variable gives that is under no member of
-    it, which the argument the variable is given to names; STRING, its text when it is a string, else None; and NULL,
-    whether it is null, which names nothing. A number, an enum or a boolean has neither."""
-
-    name: str | None
-    string: str | None = None
-    null: bool = False
-
-
-def json_leaves(value: object, name: str | None = None) -> Iterator[GhLeaf]:
-    """Each value inside the decoded JSON VALUE that is neither an object nor an array, at any depth, as a GhLeaf named
-    by the member it is the value of (NAME, for one under no member; a list's items are values of the list's name):
-    the leaves of a GraphQL variable's value (gh_graphql_inputs)."""
-    if isinstance(value, JsonObject):
-        for member, item in value:
-            yield from json_leaves(item, member)
-    elif isinstance(value, list):
-        for item in value:
-            yield from json_leaves(item, name)
-    else:
-        yield GhLeaf(name, value if isinstance(value, str) else None, value is None)
-
-
-def gh_values(piece: GhText, text: str, graphql: bool) -> list[GhValue]:
+def gh_values(piece: GhText, text: str, graphql: bool) -> list[tuple[str, str, bool]]:
     """Each value TEXT holds as its endpoint stores it, each read on its own, so that two values never make one match
-    (dispatch://INFRA-4383, R1), as a GhValue. A body GitHub stores as JSON fields (GhText.json_body: an --input or
+    (dispatch://INFRA-4383, R1): (its path in TEXT, "" for TEXT itself; the value; whether it is read both ways, as
+    written and with its JSON escapes decoded). A body GitHub stores as JSON fields (GhText.json_body: an --input or
     `workflow run --json` body that parses as JSON, never a release asset's, gh_is_upload) is each string and member
     name, decoded, by its JSON path; a GraphQL document that parses (GRAPHQL: the text, or for a JSON body its
     `.query`) is each of its strings, decoded, and its comments, which nobody stores, are not read. A body that does not
@@ -3425,15 +3242,14 @@ def gh_values(piece: GhText, text: str, graphql: bool) -> list[GhValue]:
     and a refusal across two values beats a miss. Any other text, a release asset's bytes and a field's value among
     them, is read as written: GitHub stores a body's `\\u0041` as those six characters."""
     if not piece.json_body:
-        return graphql_values("", text) if graphql else [GhValue("", text, variable=gh_graphql_variable(piece))]
+        return graphql_values("", text) if graphql else [("", text, False)]
     try:
         decoded = json.loads(text, object_pairs_hook=JsonObject)
     except (ValueError, RecursionError):
-        return [GhValue("", text, True)]
-    values: list[GhValue] = []
-    for path, keys, value in json_strings(decoded):
-        values += (graphql_values(path, value) if graphql and keys == ("query",)
-                   else [GhValue(path, value, variable=gh_graphql_variable(piece, keys))])
+        return [("", text, True)]
+    values: list[tuple[str, str, bool]] = []
+    for path, value in json_strings(decoded):
+        values += graphql_values(path, value) if graphql and path == ".query" else [(path, value, False)]
     return values
 
 
@@ -3454,16 +3270,14 @@ def markdown_unescaped(text: str) -> str:
 class GhMatch:
     """A listed term gh_findings finds in a value of a gh call's text: FINDING, what a refusal shows; SPAN, the match in
     VIEW, the view of the value it is in, where gh_check reads the destination's own name (gh_own_name); TWINS, for a
-    match of a later view, the as-written view's matches of its term, list and allowed tokens, as (match, view);
-    PIECE, the text; and VALUE, the value (GhValue), whose STRING and VARIABLE say, with PIECE, where it goes
-    (gh_goes_to, GhGraphql.field_of)."""
+    match of a later view, the as-written view's matches of its term, list and allowed tokens, as (match, view); and
+    PIECE, the text, which says where it goes (gh_goes_to)."""
 
     finding: Finding
     span: Span
     view: str
     twins: tuple[tuple[Span, str], ...]
     piece: GhText
-    value: GhValue
 
 
 def gh_findings(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText], bool],
@@ -3484,11 +3298,11 @@ def gh_findings(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhTex
     shows it only when no twin counts, since a twin that counts shows the same term."""
     found: list[GhMatch] = []
     for piece, text in contents:
-        for value in gh_values(piece, text, graphql(piece)):
-            label = piece.shown() + (f" {value.path}" if value.path else "")
-            views = [("", value.value)]
-            if value.both and "\\" in value.value:
-                views.append(("escapes decoded", escapes_decoded(value.value)))
+        for path, value, both in gh_values(piece, text, graphql(piece)):
+            label = piece.shown() + (f" {path}" if path else "")
+            views = [("", value)]
+            if both and "\\" in value:
+                views.append(("escapes decoded", escapes_decoded(value)))
             for how, view in list(views):
                 rendered = markdown_unescaped(view)
                 if all(rendered != seen for _, seen in views):
@@ -3503,7 +3317,7 @@ def gh_findings(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhTex
                     line = view.count("\n", 0, span.start) + 1
                     place = f"{label}{f' ({how})' if how else ''} line {line}"
                     found.append(GhMatch(Finding(place, *excerpt(view, span.start, span.end), span.scope), span, view,
-                                         twins, piece, value))
+                                         twins, piece))
     return found
 
 
@@ -3696,14 +3510,11 @@ class GhTie:
     (GhBase.source) the call reaches it with, "" for a target that depends on no base, since a text gh fills from a
     base repository goes out only when gh takes that one; OPTION, for a repository that -R or --branch-repo names,
     that option and its value (`("--repo", "o/r")`), since gh sends that value as that repository's address (and a
-    --branch-repo value to the issue's repository too), and None for any other target; FIELDS, for a target of a
-    GraphQL mutation the check resolves into its top-level fields (gh_graphql), the number of each field it is a target
-    of, since each field is a mutation of its own, and () for a target of no one field."""
+    --branch-repo value to the issue's repository too), and None for any other target."""
 
     every: bool = False
     base: str = ""
     option: tuple[str, str] | None = None
-    fields: tuple[int, ...] = ()
 
 
 # The tie of a target gh_reach returns alone, which every text of the call goes to.
@@ -3726,16 +3537,14 @@ class GhTarget:
     tie: GhTie = GH_EVERY_TEXT
 
 
-def gh_goes_to(piece: GhText, mutation_field: int | None, tie: GhTie) -> bool:
-    """Whether a value of PIECE, in the top-level field MUTATION_FIELD of a GraphQL mutation (GhGraphql.field_of; None
-    for a value that goes to every field, and for any other call), goes to a target tied so (TIE): every value to a
-    target gh_reach returns alone; else the value of -R only to the repository it names, as that repository's address;
-    the value of --branch-repo to the repository it names and to the issue's, every target that no other --branch-repo
-    value names, since `issue develop` links the branch to the issue, whose page shows the branch by its repository's
-    name; a text gh fills from a base repository (GhText.bases) only to a target the call reaches with one of those
-    bases, or with none; a value of one field only to that field's targets; and any other value to every target.
-    gh_check judges each match against the open targets its value goes to; until review round 2 of
-    dispatch://INFRA-3365 each was judged against every target, so `issue develop -R theorem-labs/ygo --branch-repo
+def gh_goes_to(piece: GhText, tie: GhTie) -> bool:
+    """Whether a value of PIECE goes to a target tied so (TIE): every value to a target gh_reach returns alone; else the
+    value of -R only to the repository it names, as that repository's address; the value of --branch-repo to the
+    repository it names and to the issue's, every target that no other --branch-repo value names, since `issue develop`
+    links the branch to the issue, whose page shows the branch by its repository's name; a text gh fills from a base
+    repository (GhText.bases) only to a target the call reaches with one of those bases, or with none; and any other
+    value to every target. gh_check judges each match against the open targets its value goes to; until review round 2
+    of dispatch://INFRA-3365 each was judged against every target, so `issue develop -R theorem-labs/ygo --branch-repo
     sjawhar/ygo` was refused for the -R value judged against sjawhar/ygo; until its review round 3 the value of
     --branch-repo went only to the repository it names, so a private repository's name went out unread on a public
     issue's page, and a target returned alone took a value only by a fallback outside this rule."""
@@ -3745,8 +3554,7 @@ def gh_goes_to(piece: GhText, mutation_field: int | None, tie: GhTie) -> bool:
         return tie.option == (piece.option, piece.text)
     if piece.option == "--branch-repo":
         return tie.option is None or tie.option[0] != piece.option or tie.option[1] == piece.text
-    return ((not piece.bases or not tie.base or tie.base in piece.bases)
-            and (mutation_field is None or mutation_field in tie.fields))
+    return not piece.bases or not tie.base or tie.base in piece.bases
 
 
 def gh_own_name(target: GhTarget, view: str, span: Span) -> bool:
@@ -3768,302 +3576,45 @@ def gh_own_name(target: GhTarget, view: str, span: Span) -> bool:
     return any(found.start() <= span.start and span.end <= found.end() for found in own.finditer(view))
 
 
-# A mutation that makes a repository: the three of GitHub's GraphQL schema that set a repository's visibility,
-# createRepository and cloneTemplateRepository (`visibility`) and startRepositoryMigration (`targetRepoVisibility`).
-GH_GRAPHQL_NEW_REPOSITORY = re.compile(r"\b(?:createRepository|cloneTemplateRepository|startRepositoryMigration)\b")
-# Each Node type of GitHub's public GraphQL schema (https://docs.github.com/public/fpt/schema.docs.graphql, read
-# 2026-11-19) with a `repository` field, which names the repository the node is in, by the interface or type a query
-# selects it under: RepositoryNode (Issue, PullRequest, IssueComment, PullRequestReview, PullRequestReviewComment,
-# CommitComment, CommitCommentThread, PullRequestCommitCommentThread, Discussion, DiscussionCategory, PinnedDiscussion,
-# RepositoryVulnerabilityAlert), GitObject (Commit, Tree, Blob, Tag) and RepositoryAuditEntryData (each audit entry
-# of a repository), and each other type. Fields that merge must have one shape, and the field is `Repository!` on
-# the first kind (GH_REPOSITORY_NODES) and `Repository` on the second (GH_OPTIONAL_REPOSITORY_NODES; a
-# RepositoryInvitation's is a `RepositoryInfo`), which is read under an alias. A DiscussionComment, which
-# addDiscussionComment's `replyToId` and the discussion comment mutations take, has no `repository`, so its repository
-# is its `discussion`'s (a `Discussion`, which may be null, whose `repository` is a `Repository!`); no other spread
-# selects `discussion`, so it needs no alias. Not the `repository(name:)` of User, Organization and Query, which looks
-# a repository up by its name: such a node is in no repository, as a ProjectV2 is in none. Until review round 4 of
-# dispatch://INFRA-3365 only RepositoryNode, PullRequestReviewThread and Repository were read, so a Label, a
-# Milestone, a Ref or a DiscussionComment gave no repository, and its field was read as public.
-GH_REPOSITORY_NODES = ("RepositoryNode", "GitObject", "CheckRun", "CheckSuite", "DependencyGraphManifest", "Deployment",
-                       "Label", "Milestone", "PinnedEnvironment", "PinnedIssue", "PullRequestReviewThread",
-                       "PullRequestThread", "Push", "Ref", "Release")
-GH_OPTIONAL_REPOSITORY_NODES = ("BranchProtectionRule", "MergeQueue", "Package", "RepositoryAuditEntryData",
-                                "RepositoryInvitation")
-GH_NODES_QUERY = (
-    "query($ids: [ID!]!) { nodes(ids: $ids) { ... on Repository { nameWithOwner } "
-    + "".join(f"... on {name} {{ repository {{ nameWithOwner }} }} " for name in GH_REPOSITORY_NODES)
-    + "".join(f"... on {name} {{ optionalRepository: repository {{ nameWithOwner }} }} "
-              for name in GH_OPTIONAL_REPOSITORY_NODES)
-    + "... on DiscussionComment { discussion { repository { nameWithOwner } } } } }"
-)
-# The repository GH_NODES_QUERY gives each node, in order: "" for one it gives none.
-GH_NODES_JQ = ('.data.nodes[] | (.nameWithOwner // .repository.nameWithOwner // .optionalRepository.nameWithOwner'
-               ' // .discussion.repository.nameWithOwner // "")')
+# The one target of a raw `gh api graphql` mutation (gh_reach). The check does not read where a mutation goes: each one
+# is read whole, as public, whatever repository or node it names, so one whose text holds a listed term is refused
+# even to a private repository, and its text is judged with no own-name exemption (gh_own_name). A query is a read,
+# which gh_check passes before it reads any text (GH_GRAPHQL_MUTATION). Until review round 5 of dispatch://INFRA-3365
+# the check read a mutation's fields, node ids and named repositories to find its targets, and each round of tests
+# found one more way that reading and GitHub's differed.
+GH_GRAPHQL_TARGET = "a raw GraphQL mutation, which is read as public"
+# The gh subcommand or REST route that does what a GraphQL mutation does, judged by its repository: the refusal of a
+# mutation names the one for each of these its document names (gh_graphql_advice).
+GH_THREAD_REPLY = "gh api repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies -f body=…"
+GH_GRAPHQL_ROUTES = {
+    "addPullRequestReviewThreadReply": GH_THREAD_REPLY,
+    "addPullRequestReviewComment": GH_THREAD_REPLY,
+    "addComment": "gh issue comment or gh pr comment",
+    "createIssue": "gh issue create",
+    "updateIssue": "gh issue edit",
+    "createPullRequest": "gh pr create",
+    "updatePullRequest": "gh pr edit",
+    "addPullRequestReview": "gh pr review",
+    "submitPullRequestReview": "gh pr review",
+    "updatePullRequestReviewComment": "gh api -X PATCH repos/{owner}/{repo}/pulls/comments/{id}",
+    "updateIssueComment": "gh api -X PATCH repos/{owner}/{repo}/issues/comments/{id}",
+    "createCommitOnBranch": "gh api -X PUT repos/{owner}/{repo}/contents/{path}, or git push",
+}
+GH_GRAPHQL_ROUTE_NAME = re.compile(rf"\b({'|'.join(GH_GRAPHQL_ROUTES)})\b")
 
 
-@dataclass(frozen=True)
-class GhMutation:
-    """One top-level field of a GraphQL mutation the check resolves, as gh_reach reads its targets (gh_graphql): NAMES,
-    the `owner/name` of each repository it names by name (GRAPHQL_NAMED); IDS, each node id GitHub reads a whole string
-    value of one of its arguments or input-object fields but clientMutationId as (gh_node_id, gh_field_targets), whose
-    repositories are its targets too."""
-
-    names: tuple[str, ...] = ()
-    ids: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class GhGraphql:
-    """Where a GraphQL call's mutations go (gh_graphql): MAKES_REPOSITORY, whether its text names a mutation that makes
-    a repository (GH_GRAPHQL_NEW_REPOSITORY); FIELDS, each top-level field of the document when the check resolves the
-    call, else None, and such a call (a call that is not GraphQL too) is judged whole. For a resolved call, DOCUMENT is
-    the text that holds the document, STRINGS the number of the field each of its strings is in (by the string's
-    number, GhValue.string; None for one outside every field), and VARIABLES each variable it uses with the one field
-    that alone uses it (None for a variable two fields use, or one used outside every field), which field_of reads."""
-
-    makes_repository: bool = False
-    fields: tuple[GhMutation, ...] | None = None
-    document: GhText | None = None
-    strings: tuple[int | None, ...] = ()
-    variables: Mapping[str, int | None] = field(default_factory=dict)
-
-    def field_of(self, piece: GhText, value: GhValue) -> int | None:
-        """The number of the one field VALUE, a value of PIECE (GhMatch), goes to: the string of the document numbered
-        GhValue.string goes to the field it is in; a value of the variable GhValue.variable (a gh field `-F v=…`,
-        `-F v[k]=…`, or a value under an --input body's `variables.v`, gh_graphql_variable), to the one field that
-        alone uses it. None for a value that goes to every field: any other value, a value that cannot be given to
-        exactly one field, and every value of a call the check does not resolve."""
-        if self.fields is None:
-            return None
-        if piece == self.document and value.string is not None:
-            return self.strings[value.string - 1] if 0 < value.string <= len(self.strings) else None
-        return self.variables.get(value.variable) if value.variable else None
-
-
-def gh_graphql_inputs(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText], bool]
-                      ) -> tuple[list[tuple[GhText, str]], dict[str, list[GhLeaf]]] | None:
-    """The documents of the GraphQL call whose texts are CONTENTS and the values it gives its variables, as gh 2.98.0
-    sends them: each text GRAPHQL says is a document, and each string `query` member of a JSON body (an --input body);
-    and for each variable, the leaves of each value the call gives it (GhLeaf): those of a JSON body's `variables`
-    member of that name (json_leaves), and a gh field's text (gh_graphql_variable), a string under the field's later
-    keys (gh_field_keys). None for a JSON body that does not parse as an object, or whose `query` or `variables` is
-    neither null nor a string or an object: such a call is not resolved."""
-    documents: list[tuple[GhText, str]] = []
-    given: dict[str, list[GhLeaf]] = {}
-    for piece, text in contents:
-        if piece.part == "key":
-            continue
-        if piece.json_body:
-            try:
-                decoded = json.loads(text, object_pairs_hook=JsonObject)
-            except (ValueError, RecursionError):
-                return None
-            if not isinstance(decoded, JsonObject):
-                return None
-            for name, value in decoded:
-                if name == "query" and isinstance(value, str):
-                    documents.append((piece, value))
-                elif name == "variables" and isinstance(value, JsonObject):
-                    for variable, member in value:
-                        given.setdefault(variable, []).extend(json_leaves(member))
-                elif name in ("query", "variables") and value is not None:
-                    return None
-        elif graphql(piece):
-            documents.append((piece, text))
-        elif piece.key is not None and (variable := gh_graphql_variable(piece)) is not None:
-            keys = [key for key in gh_field_keys(piece.key)[1:] if key]
-            given.setdefault(variable, []).append(GhLeaf(keys[-1] if keys else None, text))
-    return documents, given
-
-
-# A GitHub node id as GitHub reads one (gh_node_id), measured, not guessed: on 2026-11-19 read-only `node(id:)`
-# queries through gh sent 278 spellings of eight known ids, each as a GraphQL variable
-# (dispatch://INFRA-3365/artifact/node-id-forms-md, test round 9). Run on each spelling offline, this rule calls every
-# one GitHub resolves an id, keys each new-form one as GitHub resolves it, and calls 34 that GitHub refuses ids, so it
-# errs only toward an id: a value it calls an id that names no node gets no repository from the node read, and its
-# field is read as public.
-#
-# A new-form id (`PRRC_kwDO…`, `I_kwDO…`, `R_kgDO…`: a type prefix, `_` and a url-safe base64 payload) resolves
-# followed by any run of the characters Ruby's String#rstrip takes off (GH_NODE_ID_SPACE: NUL, tab, line feed, vertical
-# tab, form feed, carriage return and space, mixed and repeated); by the base64 padding that makes the payload's length
-# a multiple of four (`==` after a payload of length 2 mod 4, `=` after one of 3 mod 4); and by that padding and then
-# such characters. It is refused with any other padding, with whitespace before the padding, followed by a Unicode
-# space (U+00A0, U+2003, U+3000) or by any other character, with any character before it or whitespace inside it,
-# truncated, with any change of case, with `-` for its `_`, and with `+` and `/` for `-` and `_`. GH_NEW_NODE_ID, after
-# those trailing characters are taken off, calls an id none that GitHub refuses for its form (its padding, whitespace, a
-# Unicode space, a character before it, `-` for `_`, a prefix in lower case, `+` or `/`); 24 of the 34 it calls ids are
-# of an id's shape but name no node (characters added or one taken off, the payload's case changed), which no rule of
-# form can tell from an id.
-#
-# A legacy id (`MDEwOlJl…`, base64 of `010:Repository<number>` or `05:Issue<number>`) GitHub decodes as Ruby's lenient
-# `unpack1("m")` does (ruby_m): a character outside the base64 alphabet is skipped anywhere, leading and inside
-# included; `=` in the third or fourth place of a quantum ends the decoding, so text after the padding is ignored; and
-# GitHub's number parse stops at the bytes that base64 characters past the number's digits decode to. GH_LEGACY_NODE_ID
-# on that decoding of the value, as written or with `-` and `_` read as `+` and `/`, gives the other 10 of the 34: five
-# that hold a `_`, and five that decode to another name or number (truncated, its case changed, an `=` inside it, base64
-# characters added). Such an id goes to the node read as written, for GitHub to decode as it does.
-#
-# Until test round 9 of dispatch://INFRA-3365 an id was one only as written exactly, so `inReplyTo: "<public comment
-# id> "`, or `-F reply=@file` whose file ends in a line feed, was no target, and the field was judged by a private side
-# reference alone.
-GH_NODE_ID_SPACE = "\0\t\n\v\f\r "
-GH_NEW_NODE_ID = re.compile(r"([A-Z][A-Za-z]{0,7})_([A-Za-z0-9_-]{6,})(={0,2})")
-GH_LEGACY_NODE_ID = re.compile(rb"\d+:[A-Z][A-Za-z]*")
-GH_URL_SAFE_BASE64 = str.maketrans("-_", "+/")
-BASE64_VALUES = {c: i for i, c in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")}
-
-
-def ruby_m(s: str) -> bytes:
-    """Ruby's lenient String#unpack1("m"), as pack.c reads it: characters outside the alphabet are skipped, and '='
-    in the third or fourth place of a quantum ends the decoding."""
-    out = bytearray()
-    i = 0
-    n = len(s)
-    while i < n:
-        q = []
-        for place in range(4):
-            while i < n and s[i] not in BASE64_VALUES:
-                if place >= 2 and s[i] == "=":
-                    break
-                i += 1
-            if i >= n or (place >= 2 and s[i] == "="):
-                break
-            q.append(BASE64_VALUES[s[i]])
-            i += 1
-        if len(q) == 4:
-            out += bytes([(q[0] << 2 | q[1] >> 4) & 255, (q[1] << 4 | q[2] >> 2) & 255, (q[2] << 6 | q[3]) & 255])
-            continue
-        if len(q) >= 2:
-            out.append((q[0] << 2 | q[1] >> 4) & 255)
-        if len(q) == 3:
-            out.append((q[1] << 4 | q[2] >> 2) & 255)
-        break
-    return bytes(out)
-
-
-def gh_node_id(value: str) -> str | None:
-    """The node id GitHub reads VALUE as, else None: a new-form id without the trailing whitespace and the padding
-    GitHub reads past (GH_NEW_NODE_ID), as the node read and the fakes of the tests key it; or a legacy id
-    (GH_LEGACY_NODE_ID), as written, which the node read sends for GitHub to decode."""
-    new = GH_NEW_NODE_ID.fullmatch(value.rstrip(GH_NODE_ID_SPACE))
-    if new and (not new[3] or (len(new[2]) + len(new[3])) % 4 == 0):
-        return f"{new[1]}_{new[2]}"
-    if any(GH_LEGACY_NODE_ID.match(ruby_m(spelling)) for spelling in (value, value.translate(GH_URL_SAFE_BASE64))):
-        return value
-    return None
-
-
-def gh_field_targets(arguments: Sequence[GraphqlLeaf], tokens: Sequence[tuple[str, str]],
-                     given: Mapping[str, Sequence[GhLeaf]], times: Mapping[str, int]) -> GhMutation | None:
-    """The targets of one top-level field of a GraphQL mutation (gh_graphql), read from the leaves of its arguments
-    (ARGUMENTS, in TOKENS; graphql_parses), a variable's leaves those the call gives it (GIVEN, gh_graphql_inputs): each
-    string value of one of them that GitHub reads whole as a node id (gh_node_id), as that id, whatever its name but
-    clientMutationId, and each `owner/name` GRAPHQL_NAMED takes. None when the field leaves the call unresolved: a
-    value of GRAPHQL_NAMED that is not an `owner/name`; a value of an argument GRAPHQL_LOGIN_NAME names that is not
-    null, since the check cannot read where an account named by login takes the text; a value of an argument
-    GRAPHQL_ID_NAME names that is neither null nor a node id, a guard that adds refusals and chooses no target; a
-    variable the document uses more than once (TIMES) whose value holds a node id or a GRAPHQL_NAMED value; and a field
-    with no target."""
-    names: list[str] = []
-    ids: list[str] = []
-    for argument in arguments:
-        if argument.variable is None:
-            kind, text = tokens[argument.place]
-            leaves = [GhLeaf(argument.name, text if kind == "string" else None, (kind, text) == ("name", "null"))]
-        else:
-            leaves = [leaf if leaf.name is not None else replace(leaf, name=argument.name)
-                      for leaf in given[argument.variable]]
-            if times[argument.variable] > 1 and any(
-                    not leaf.null and (leaf.name == GRAPHQL_NAMED
-                                       or (leaf.string is not None and gh_node_id(leaf.string) is not None))
-                    for leaf in leaves):
-                return None
-        for leaf in leaves:
-            if leaf.null or leaf.name == "clientMutationId":
-                continue
-            if GRAPHQL_LOGIN_NAME.fullmatch(leaf.name):
-                return None
-            if leaf.name == GRAPHQL_NAMED:
-                if leaf.string is None or not GH_OWNER_NAME.fullmatch(leaf.string):
-                    return None
-                names.append(leaf.string.lower())
-            elif leaf.string is not None and (node := gh_node_id(leaf.string)) is not None:
-                ids.append(node)
-            elif GRAPHQL_ID_NAME.fullmatch(leaf.name):
-                return None
-    if not (names or ids):
-        return None
-    return GhMutation(tuple(dict.fromkeys(names)), tuple(sorted(set(ids))))
-
-
-def gh_graphql(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText], bool]) -> GhGraphql:
-    """Where the GraphQL call whose texts are CONTENTS (GRAPHQL saying which text is a document or carries one) goes:
-    whether it makes a repository, and, when the check resolves the call, each top-level field of its mutation, which
-    GitHub runs as a mutation of its own, with its targets.
-
-    The check resolves a call only when all of these hold: the call has one document, which parses (graphql_parses);
-    the document is one mutation operation, with no fragment of any kind (graphql_mutation); every variable the call
-    gives (gh_graphql_inputs) is one the operation declares, and every variable the document uses is one the call
-    gives; and each field's targets come from its own input (gh_field_targets). A field's targets are the repository
-    of every node id GitHub reads a whole string value of one of its arguments or input-object fields as (gh_node_id:
-    trailing whitespace and padding included, as measured), at any depth, list items included, whatever the argument's
-    name but clientMutationId, whose value GitHub only echoes back; and every repository it names by the input field
-    GRAPHQL_NAMED (createCommitOnBranch's branch). A declared variable is read as the call gives it. No list of argument
-    names says which one is the subject: a field that changes one node and refers to another (updateIssue's `id` and
-    `stateInput.duplicateIssueId`, addPullRequestReviewComment's `pullRequestId` and `inReplyTo`, an
-    `agentAssignment.targetRepositoryId`, createCommitOnBranch's `branch.id` and `branch.repositoryNameWithOwner`) has
-    both as targets, and its text is judged as public when any of its targets is public or any of its node ids does not
-    resolve (gh_reach), a node with no repository among them (a User, an Organization, a ProjectV2; GH_NODES_QUERY).
-    The accepted cost: a write to a private repository that holds a listed term and also refers to a public node is
-    refused, such as updateIssue of a private issue marked as a duplicate of a public one.
-
-    A value that should hold a target but does not, an account named by login (GRAPHQL_LOGIN_NAME), a variable the
-    document uses more than once whose value holds one, and a field with no target leave the call unresolved
-    (gh_field_targets). A node id anywhere else (inside a longer string such as a body or a message, in a comment, in
-    a variable the operation does not declare, in clientMutationId) is no target and is ignored. A call the check does
-    not resolve, several documents and one that does not parse among them, is judged whole, as one target read as
-    public, with no node read (gh_reach). In a resolved call a value inside one field, or of a variable only that field
-    uses, goes to that field alone
-    (GhGraphql.field_of). Until review round 2 of dispatch://INFRA-3365 every call was read whole, every node id its
-    texts held a target, so a status change beside a commit to a private repository named by name went out with a
-    listed term; until its review round 3 a node id in a comment, in clientMutationId or in an undeclared variable was
-    a target too, and a field inside a fragment took the targets of the fields beside it; until its review round 4
-    only an argument whose name ends in `Id` or `Ids` gave a target, so `updateIssue(input: {id: <public issue>, body:
-    <term>, stateInput: {duplicateIssueId: <private issue>}})` went out, judged by the private issue alone; until its
-    test round 9 an id was one only as written exactly, so a public comment's id that `inReplyTo` took with a trailing
-    space went out the same way, judged by the private pull request beside it."""
-    views = [view for piece, text in contents if piece.part != "key"
-             for view in dict.fromkeys((text, escapes_decoded(text)))]
-    makes = any(GH_GRAPHQL_NEW_REPOSITORY.search(view) for view in views)
-    unresolved = GhGraphql(makes)
-    inputs = gh_graphql_inputs(contents, graphql)
-    if inputs is None or len(inputs[0]) != 1:
-        return unresolved
-    documents, given = inputs
-    piece, text = documents[0]
-    tokens = graphql_tokens(text)
-    document = graphql_parses(tokens) if tokens is not None else None
-    operation = graphql_mutation(document) if document is not None else None
-    if tokens is None or document is None or operation is None:
-        return unresolved
-    times: dict[str, int] = {}
-    for variable, _ in document.uses:
-        times[variable] = times.get(variable, 0) + 1
-    if not set(given) <= operation.declared or not set(times) <= set(given):
-        return unresolved
-    fields: list[GhMutation] = []
-    for arguments in document.fields:
-        targets = gh_field_targets(arguments, tokens, given, times)
-        if targets is None:
-            return unresolved
-        fields.append(targets)
-    users: dict[str, set[int | None]] = {}
-    for variable, number in document.uses:
-        users.setdefault(variable, set()).add(number)
-    return GhGraphql(makes, tuple(fields), piece, tuple(number for _, number in document.strings),
-                     {variable: next(iter(numbers)) if len(numbers) == 1 else None
-                      for variable, numbers in users.items()})
+def gh_graphql_advice(documents: Sequence[str]) -> str:
+    """What the refusal of a raw GraphQL mutation advises: for each mutation of GH_GRAPHQL_ROUTES that DOCUMENTS name,
+    as written or with their JSON escapes decoded, the gh subcommand or REST route to use instead, which is judged by
+    its repository; for a document that names none, that a gh subcommand or the REST API is."""
+    named = dict.fromkeys(found[1] for document in documents
+                          for view in dict.fromkeys((document, escapes_decoded(document)))
+                          for found in GH_GRAPHQL_ROUTE_NAME.finditer(view))
+    read = "a raw GraphQL mutation is read as public, whatever it names"
+    if not named:
+        return f"{read}; a gh subcommand or the REST API is judged by its repository"
+    routes = "; ".join(f"for {name} use {GH_GRAPHQL_ROUTES[name]}" for name in named)
+    return f"{read}. Instead, {routes}. Each of these is judged by its repository"
 
 
 def gh_made_public(group: str, sub: str, read: Sequence[tuple[str | None, str | None]], shape: str,
@@ -4110,28 +3661,6 @@ def gh_made_public(group: str, sub: str, read: Sequence[tuple[str | None, str | 
     return False
 
 
-def gh_node_repositories(ids: Sequence[str]) -> dict[str, str] | None:
-    """The repository (`owner/name`, in lower case) of each GitHub node id of IDS, read with one GraphQL query
-    (GH_NODES_QUERY, GH_NODES_JQ) through this checkout's shims/gh: that of every node of a type with a repository,
-    and a DiscussionComment's discussion's, and "" for one of a type with none (a User, an Organization, a ProjectV2),
-    whose field gh_reach then reads as public.
-    None when the read fails, and when an id is one no argument can carry (a NUL, which a legacy id can hold and GitHub
-    skips, gh_node_id), so that its field is read as public."""
-    gh = Path(__file__).resolve().parent.parent / "shims" / "gh"
-    fields = [argument for node in ids for argument in ("-f", f"ids[]={node}")]
-    try:
-        completed = subprocess.run(
-            [str(gh), "api", "graphql", "-f", f"query={GH_NODES_QUERY}", *fields, "--jq", GH_NODES_JQ],
-            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False,
-        )
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return None
-    lines = [line.strip() for line in completed.stdout.splitlines()]
-    if completed.returncode != 0 or len(lines) != len(ids):
-        return None
-    return {node: line.lower() if GH_OWNER_NAME.fullmatch(line) else "" for node, line in zip(ids, lines)}
-
-
 @dataclass(frozen=True)
 class GhCall:
     """gh_check's reading of a gh call, from which gh_reach reads where it goes: GROUP and SUB, its command; READ, its
@@ -4154,8 +3683,8 @@ class GhCall:
 class GhRepository:
     """A repository a gh call can reach, before gh_reach reads its visibility: SHOWN names it in a refusal, HOST is
     where gh sends the call for it (decided where its name is read: gh_repository_address for -R, --branch-repo,
-    GH_REPO and a repository argument, gh_url_repository for a URL argument; github.com for a remote, an endpoint's
-    repository and a GraphQL mutation's), URL is its address, REPOSITORY its `owner/name` ("" for one the check cannot
+    GH_REPO and a repository argument, gh_url_repository for a URL argument; github.com for a remote and an
+    endpoint's repository), URL is its address, REPOSITORY its `owner/name` ("" for one the check cannot
     read), NAMED says the call names it (a base repository the call takes from a remote does not count, and is no
     target when its URL is not GitHub's), and TIE says which texts go to it (GhTie)."""
 
@@ -4167,19 +3696,19 @@ class GhRepository:
     tie: GhTie = GhTie()
 
 
-def gh_reach(call: GhCall, bases: Callable[[], Sequence[GhBase]], mutation: GhGraphql) -> list[GhTarget]:
+def gh_reach(call: GhCall, bases: Callable[[], Sequence[GhBase]]) -> list[GhTarget]:
     """Every target the call (CALL, gh_check's reading of it) can reach: its host, where gh sends it (gh_host), and on
     github.com the repositories it names, else its base repository (BASES, gh_bases: GH_REPO's for a command with
     -R/--repo, else this directory's remotes, which gh_check reads at most once for every reading that takes them),
     and the repository `issue develop --branch-repo` names; for a `gh api` call, the repository the `repos/O/R` of its
     endpoint names once gh has filled its placeholders from each base repository (GhCall.fillings), or a new
-    repository (GH_API_NEW_REPOSITORY; GhCall.shape says which endpoint it is); for a GraphQL mutation, the targets of
-    each of its fields (MUTATION, gh_graphql). A repository the call makes public (GhCall.made_public) is open, and
-    so is one whose visibility cannot be read, and a target with no repository: a gist (anyone with its address reads
-    it), a project, a repository on another host, a new repository, a base repository the check cannot read, a GraphQL
-    mutation the check cannot resolve, or one of whose nodes gh cannot read. A repository whose visibility is read as
-    public is public (GhTarget.public). Each target says which texts go to it (GhTie, gh_goes_to); every text goes to
-    a target returned alone (GH_EVERY_TEXT, GhTarget's default tie)."""
+    repository (GH_API_NEW_REPOSITORY; GhCall.shape says which endpoint it is). A `gh api graphql` call, which gh_check
+    passes before here unless it is a mutation or holds a text the check cannot read, is one target read as public
+    (GH_GRAPHQL_TARGET). A repository the call makes public (GhCall.made_public) is open, and so is one whose
+    visibility cannot be read, and a target with no repository: a gist (anyone with its address reads it), a project, a
+    repository on another host, a new repository, a base repository the check cannot read, a raw GraphQL mutation. A
+    repository whose visibility is read as public is public (GhTarget.public). Each target says which texts go to it
+    (GhTie, gh_goes_to); every text goes to a target returned alone (GH_EVERY_TEXT, GhTarget's default tie)."""
     group, sub = call.group, call.sub
     long = gh_long_names(GH_TEXT_COMMANDS[(group, sub)])
     if call.host != "github.com":
@@ -4188,6 +3717,8 @@ def gh_reach(call: GhCall, bases: Callable[[], Sequence[GhBase]], mutation: GhGr
         return [GhTarget("a gist, which anyone with its address can read", "", True)]
     if group == "project":
         return [GhTarget("a project, read as public", "", True)]
+    if group == "api" and call.endpoint == "graphql":
+        return [GhTarget(GH_GRAPHQL_TARGET, "", True)]
     values: dict[str, list[str | None]] = {}
     positionals: list[str] = []
     for option, value in call.read:
@@ -4215,36 +3746,7 @@ def gh_reach(call: GhCall, bases: Callable[[], Sequence[GhBase]], mutation: GhGr
         if argument is not None:
             shown, host, url = argument
             add(shown, host, url)
-    if group == "api" and call.endpoint == "graphql":
-        # A mutation names what it changes, and what it refers to, by node id, and each id gh can read gives its
-        # repository; it can also name a repository by name (createCommitOnBranch, gh_graphql), or make one. Each field
-        # of a document the check resolves (gh_graphql) has its own targets, tied to it (GhTie.fields), one for each
-        # repository however many name it: until 2026-11-17 only the node ids were targets, so a commit to a public
-        # repository by name went out when the text also held an id of a private one. A new repository, a document the
-        # check cannot resolve, and a field with a node gh cannot read or that is in no repository (a User, an
-        # Organization, a ProjectV2) leave the target unknown, read as public; a document it cannot resolve is one
-        # target, and none of its nodes is read.
-        unknown = "a GraphQL mutation whose repository could not be read, read as public"
-        if mutation.makes_repository:
-            return [GhTarget("a GraphQL mutation that makes a repository, read as public", "", True)]
-        if mutation.fields is None:
-            return [GhTarget(unknown, "", True)]
-        ids = sorted({node for made in mutation.fields for node in made.ids})
-        resolved = gh_node_repositories(ids) if ids else {}
-        unread: list[int] = []
-        owners: dict[str, list[int]] = {}
-        for number, made in enumerate(mutation.fields):
-            nodes = None if resolved is None and made.ids else [(resolved or {})[node] for node in made.ids]
-            if nodes is None or not all(nodes):
-                unread.append(number)
-            else:
-                for repository in dict.fromkeys([*made.names, *sorted(set(nodes))]):
-                    owners.setdefault(repository, []).append(number)
-        if unread:
-            reached.append(GhTarget(unknown, "", True, tie=GhTie(fields=tuple(unread))))
-        for repository, numbers in owners.items():
-            add(repository, "github.com", f"https://github.com/{repository}", GhTie(fields=tuple(numbers)))
-    elif group == "api":
+    if group == "api":
         # The endpoint as gh sends it, its placeholders filled from each base repository gh may take and with the
         # current branch (gh_fill). Until 2026-11-19 an endpoint with `{owner}` or `{repo}` was read as the base
         # repository itself and one with `:owner` as no repository, so `orgs/{owner}/repos` and `repos/{owner}/R` were
@@ -4408,9 +3910,7 @@ def gh_check(arguments: Sequence[str]) -> int:
             findings = gh_findings(contents, graphql, matcher)
     if not findings and list_problem is None and not unreadable:
         return 0
-    # Where each mutation of a GraphQL call goes (gh_graphql).
-    mutation = gh_graphql(contents, graphql) if endpoint == "graphql" else GhGraphql()
-    reached = gh_reach(GhCall(group, sub, tuple(read), host, endpoint, shape, fillings, made_public), bases, mutation)
+    reached = gh_reach(GhCall(group, sub, tuple(read), host, endpoint, shape, fillings, made_public), bases)
     open_targets = [target for target in reached if target.open]
     if not open_targets:
         return 0
@@ -4425,9 +3925,7 @@ def gh_check(arguments: Sequence[str]) -> int:
                        for target in targets)
 
         def kept(found: GhMatch) -> bool:
-            mutation_field = mutation.field_of(found.piece, found.value)
-            targets = [target for target in reached if target.open
-                       and gh_goes_to(found.piece, mutation_field, target.tie)]
+            targets = [target for target in reached if target.open and gh_goes_to(found.piece, target.tie)]
             return (counts(found.span, found.view, targets)
                     and not any(counts(span, view, targets) for span, view in found.twins))
 
@@ -4443,6 +3941,10 @@ def gh_check(arguments: Sequence[str]) -> int:
     if list_problem:
         print(list_problem, file=sys.stderr)
         print(f"leak terms: {name} to {target}: its text cannot be checked without the list", file=sys.stderr)
+    if group == "api" and endpoint == "graphql" and host == "github.com":
+        # The refusal of a raw GraphQL mutation (GH_GRAPHQL_TARGET) names what to use instead (gh_graphql_advice).
+        print(f"leak terms: {name}: {gh_graphql_advice([text for piece, text in contents if graphql(piece)])}.",
+              file=sys.stderr)
     advice = f" To send it, {REMOVE_ADVICE}." if findings else ""
     print(f"leak terms: {name}: refused before gh ran, so nothing was sent.{advice}", file=sys.stderr)
     return FOUND_EXIT if findings else LIST_EXIT if list_problem else TEXT_EXIT

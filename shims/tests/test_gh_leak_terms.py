@@ -43,8 +43,8 @@ UNREAD = "o/unread"
 # The release repository of knives's ygo-fork entry, whose own name holds `theorem-labs`, a term of that entry's list.
 YGO = "theorem-labs/ygo"
 YGO_LIST = "the knives ygo-fork list"
-# The one target of a GraphQL call the check does not resolve (gh_graphql), and of a field with a node it cannot read.
-UNRESOLVED = "a GraphQL mutation whose repository could not be read, read as public"
+# The one target of every raw GraphQL mutation (GH_GRAPHQL_TARGET): the check reads no mutation as going anywhere else.
+MUTATION = "a raw GraphQL mutation, which is read as public"
 # The variables that make a shim read its caller as an agent (shims/AGENTS.md, "Who is an agent").
 AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION", "CLAUDECODE",
                  "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "SSH_CONNECTION", "SSH_TTY")
@@ -956,7 +956,7 @@ class GhLeakTerms(unittest.TestCase):
 
     def test_the_branch_gh_fills_into_a_graphql_variable_is_read(self) -> None:
         # gh fills `{branch}` in an -F value of a GraphQL call too, so createCommitOnBranch's `branchName` sends the
-        # branch's name to the repository the mutation names, here a public one.
+        # branch's name, here in a raw mutation, which is read as public.
         query = ('query=mutation($b: CommittableBranch!) { createCommitOnBranch(input: {branch: $b, '
                  'expectedHeadOid: "x", message: {headline: "m"}}) { commit { oid } } }')
         argv = ["api", "graphql", "-f", query, "-F", f"b[repositoryNameWithOwner]={PUBLIC}",
@@ -965,7 +965,7 @@ class GhLeakTerms(unittest.TestCase):
             self.on_branch()
             refused = self.run_gh(argv)
             self.assert_refused(refused, "--field b[branchName]", CANARY, line=1)
-            self.assertIn(f"to {PUBLIC} (public)", refused.stderr.decode())
+            self.assertIn(f"to {MUTATION}:", refused.stderr.decode())
         # Control: the same commit from a branch with a clean name goes out.
         with self.subTest(control="clean branch"):
             self.on_branch("notes")
@@ -1041,18 +1041,20 @@ class GhLeakTerms(unittest.TestCase):
 
         refused = self.run_gh(mutation("PR_kwDOfork1234"))
         self.assertEqual(refused.returncode, 2, refused.stderr.decode())
-        self.assertIn("cybermonklabs/oh-my-pi (public)", refused.stderr.decode())
+        self.assertIn(f"to {MUTATION}:", refused.stderr.decode())
         self.assertEqual(self.gh_calls(), [])
-        # A node of a private repository, and one of a public repository the registry entry does not name: sent.
+        # A node of a private repository, and one of a public repository the registry entry does not name: refused
+        # too, read as public.
         for node in ("PR_kwDOpriv5678", "PR_kwDOpub09876"):
             with self.subTest(node=node):
                 self.setUp_calls()
-                self.assert_sent(self.run_gh(mutation(node)), mutation(node))
+                self.assert_refused(self.run_gh(mutation(node)), "--raw-field query string 2", term,
+                                    "the knives oh-my-pi list", line=1)
         # A node whose repository cannot be read is any repository's.
         self.setUp_calls()
         unread = self.run_gh(mutation("PR_kwDOunknown1"))
         self.assertEqual(unread.returncode, 2, unread.stderr.decode())
-        self.assertIn("could not be read, read as public", unread.stderr.decode())
+        self.assertIn(f"to {MUTATION}:", unread.stderr.decode())
 
     # --- found by the review of the change that added this check (2026-11-17) ----------------------------------------
 
@@ -1161,7 +1163,7 @@ class GhLeakTerms(unittest.TestCase):
 
         refused = self.run_gh(commit(PUBLIC))
         self.assert_refused(refused, "--raw-field query string 5")
-        self.assertIn(f"{PUBLIC} (public)", refused.stderr.decode())
+        self.assertIn(f"to {MUTATION}:", refused.stderr.decode())
         # The same name as a JSON variable of an --input payload, and as a gh field.
         payload = json.dumps({"query": "mutation($b: CommittableBranch!) { createCommitOnBranch(input: {branch: $b, "
                                        f'message: {{headline: "{TEXT.strip()}"}}}}) {{ commit {{ oid }} }} }}',
@@ -1175,295 +1177,69 @@ class GhLeakTerms(unittest.TestCase):
                                                       f'visibility: PUBLIC, description: "{TEXT.strip()} PR_kwDOpriv5678"}}) '
                                                       "{ repository { url } } }"])
         self.assertEqual(made.returncode, 2, made.stderr.decode())
-        self.assertIn("a GraphQL mutation that makes a repository", made.stderr.decode())
-        # Control: the same commit to the private repository, named and by node id, goes out.
+        self.assertIn(f"to {MUTATION}:", made.stderr.decode())
+        # The same commit to the private repository, named and by node id, is refused too, read as public.
         self.setUp_calls()
-        self.assert_sent(self.run_gh(commit(PRIVATE)), commit(PRIVATE))
+        self.assert_refused(self.run_gh(commit(PRIVATE)), "--raw-field query string 5")
 
-    def test_a_term_inside_the_name_of_the_public_repository_a_graphql_mutation_names_counts_for_nothing(self) -> None:
-        # Given the knives ygo-fork list and theorem-labs/ygo public: createCommitOnBranch names the repository it
-        # commits to by name, as a gh field, a GraphQL argument or a JSON variable. That name is text the call sends,
-        # read as every text is, and the term it holds lies inside the own name of a repository read as public, which
-        # sends nothing new, wherever the commit gives it (gh_own_name); until 2026-11-19 it was refused
-        # (dispatch://INFRA-3365).
-        env = self.ygo_fork()
-        self.answer(YGO, "public")
+    # --- every raw GraphQL mutation is read whole, as public (dispatch://INFRA-3365, review round 5) ----------------
 
-        def field(headline: str, branch: str = "main") -> list[str]:
-            query = ('query=mutation($b: CommittableBranch!) { createCommitOnBranch(input: {branch: $b, '
-                     f'expectedHeadOid: "x", message: {{headline: "{headline}"}}}}) {{ commit {{ oid }} }} }}')
-            return ["api", "graphql", "-f", query, "-F", f"b[repositoryNameWithOwner]={YGO}", "-F",
-                    f"b[branchName]={branch}"]
-
-        def argument(headline: str) -> list[str]:
+    def test_a_raw_graphql_mutation_is_read_whole_as_public_and_its_refusal_names_what_to_use_instead(self) -> None:
+        # The check does not read where a raw GraphQL mutation goes: each is one target, read as public, whatever
+        # repository or node it names. So a mutation that holds a listed term is refused even to a private repository,
+        # with no visibility read, and the own name of the public repository it names earns no exemption. Its refusal
+        # names the gh subcommand or REST route to use instead, which is judged by its repository, and keeps the
+        # advice every refusal gives.
+        def commit(repository: str, headline: str) -> list[str]:
             return ["api", "graphql", "-f",
                     "query=mutation { createCommitOnBranch(input: {branch: {repositoryNameWithOwner: "
-                    f'"{YGO}", branchName: "main"}}, expectedHeadOid: "x", message: {{headline: "{headline}"}}}}) '
-                    "{ commit { oid } } }"]
+                    f'"{repository}", branchName: "main"}}, expectedHeadOid: "x", '
+                    f'message: {{headline: "{headline}"}}}}) {{ commit {{ oid }} }} }}']
 
-        def variable(path: str) -> list[str]:
-            payload = json.dumps({
-                "query": "mutation($b: CommittableBranch!, $f: FileChanges!) { createCommitOnBranch(input: {"
-                         'branch: $b, expectedHeadOid: "x", message: {headline: "m"}, fileChanges: $f}) '
-                         "{ commit { oid } } }",
-                "variables": {"b": {"repositoryNameWithOwner": YGO, "branchName": "main"},
-                              "f": {"additions": [{"path": path, "contents": "aGk="}]}}})
-            return ["api", "graphql", "--input", self.file("commit.json", payload)]
-
-        for name, argv in (("gh field", field("m")), ("GraphQL argument", argument("m")),
-                           ("JSON variable", variable("notes.md")),
-                           ("gh field, the name as the branch", field("m", YGO))):
-            with self.subTest(form=name):
-                self.setUp_calls()
-                self.assert_sent(self.run_gh(argv, env=env), argv)
-        # Control: a term of the list anywhere else in the commit is refused, by the field that holds it.
-        for name, argv, refused_field, matched in (
-                ("gh field, headline", field("Fixes INFRA-1"), "--raw-field query string 2", "INFRA-"),
-                ("GraphQL argument, headline", argument("Fixes INFRA-1"), "--raw-field query string 4", "INFRA-"),
-                ("JSON variable, file path", variable("dispatch://notes.md"),
-                 "--input commit.json .variables.f.additions[0].path", "dispatch://"),
-                ("gh field, branch", field("m", "INFRA-1"), "--field b[branchName]", "INFRA-")):
-            with self.subTest(form=name):
-                self.setUp_calls()
-                self.assert_refused(self.run_gh(argv, env=env), refused_field, matched, YGO_LIST, line=1)
-
-    def test_an_owner_name_a_graphql_mutation_holds_elsewhere_is_read(self) -> None:
-        # Given the knives ygo-fork list and theorem-labs/ygo public: only the value of the input field
-        # repositoryNameWithOwner is the address a commit goes to. An owner/name anywhere else, after that field's own
-        # name too, is text the commit stores, and is read (dispatch://INFRA-3365, tester round 2).
-        env = self.ygo_fork()
-        self.answer(YGO, "public")
-        smuggled = "repositoryNameWithOwner=theorem-labs/INFRA-1 leaked"
-        to_branch = ('mutation($b: CommittableBranch!) { createCommitOnBranch(input: {branch: $b, expectedHeadOid: "x", '
-                     f'message: {{headline: "{smuggled}"}}}}) {{ commit {{ oid }} }} }}')
-        with_message = ("mutation($b: CommittableBranch!, $m: CommitMessage!) { createCommitOnBranch(input: {branch: $b, "
-                        'expectedHeadOid: "x", message: $m}) { commit { oid } } }')
-        branch = {"repositoryNameWithOwner": YGO, "branchName": "main"}
-        by_variable = ("query=mutation($repositoryNameWithOwner: String!) { createCommitOnBranch(input: {branch: "
-                       f'{{repositoryNameWithOwner: "{YGO}", branchName: "main"}}, expectedHeadOid: "x", '
-                       "message: {headline: $repositoryNameWithOwner}}) { commit { oid } } }")
-        # Two `query` members: the one GitHub keeps names theorem-labs/ygo, and its headline holds what the other
-        # gives the field at the same path. Two documents are not resolved, so the call is judged whole, read as public.
-        first = ("mutation { createCommitOnBranch(input: {branch: {repositoryNameWithOwner: \"theorem-labs/INFRA-1\", "
-                 'branchName: "main"}, expectedHeadOid: "x", message: {headline: "m"}}) { commit { oid } } }')
-        second = ('mutation { createCommitOnBranch(input: {message: {headline: "theorem-labs/INFRA-1"}, branch: '
-                  f'{{repositoryNameWithOwner: "{YGO}", branchName: "main"}}, expectedHeadOid: "x"}}) '
-                  "{ commit { oid } } }")
-        for name, argv, field, shown in (
-                ("gh field, headline in the document",
-                 ["api", "graphql", "-F", f"b[repositoryNameWithOwner]={YGO}", "-f", f"query={to_branch}"],
-                 "--raw-field query string 2", f"{YGO} (public)"),
-                ("--input, headline in the document",
-                 ["api", "graphql", "--input", self.file("d.json", json.dumps({"query": to_branch,
-                                                                               "variables": {"b": branch}}))],
-                 "--input d.json .query string 2", f"{YGO} (public)"),
-                ("--input, headline in a variable",
-                 ["api", "graphql", "--input", self.file("v.json", json.dumps({
-                     "query": with_message, "variables": {"b": branch, "m": {"headline": smuggled}}}))],
-                 "--input v.json .variables.m.headline", f"{YGO} (public)"),
-                ("a variable named for the field, used as the headline",
-                 ["api", "graphql", "-f", by_variable, "-F", "repositoryNameWithOwner=theorem-labs/INFRA-1"],
-                 "--field repositoryNameWithOwner", f"{YGO} (public)"),
-                ("two query members",
-                 ["api", "graphql", "--input",
-                  self.file("t.json", '{"query": %s, "query": %s}' % (json.dumps(first), json.dumps(second)))],
-                 "--input t.json .query string 1", UNRESOLVED)):
-            with self.subTest(form=name):
-                self.setUp_calls()
-                refused = self.run_gh(argv, env=env)
-                self.assert_refused(refused, field, "INFRA-", YGO_LIST, line=1)
-                self.assertIn(shown, refused.stderr.decode())
-        # A variable the field takes and the headline uses too is read, and leaves where the commit goes unknown.
-        both = ('query=mutation($r: String!) { createCommitOnBranch(input: {branch: {repositoryNameWithOwner: $r, '
-                'branchName: "main"}, expectedHeadOid: "x", message: {headline: $r}}) { commit { oid } } }')
-        self.setUp_calls()
-        refused = self.run_gh(["api", "graphql", "-f", both, "-F", f"r={YGO}"], env=env)
-        self.assert_refused(refused, "--field r", "theorem-labs", YGO_LIST, line=1)
-        self.assertIn("could not be read, read as public", refused.stderr.decode())
-        # Controls: a variable the document gives the field alone names where the commit goes, by any name.
-        for variable in ("repositoryNameWithOwner", "r"):
-            with self.subTest(control=variable):
-                query = (f"query=mutation(${variable}: String!) {{ createCommitOnBranch(input: {{branch: "
-                         f'{{repositoryNameWithOwner: ${variable}, branchName: "main"}}, expectedHeadOid: "x", '
-                         'message: {headline: "m"}}) { commit { oid } } }')
-                argv = ["api", "graphql", "-f", query, "-F", f"{variable}={YGO}"]
-                self.setUp_calls()
-                self.assert_sent(self.run_gh(argv, env=env), argv)
-
-    def test_each_mutation_of_a_graphql_document_is_judged_by_its_own_targets(self) -> None:
-        # GitHub runs each top-level field of a mutation operation as a mutation of its own. Given a commit to a private
-        # repository named by name and a comment on a node of a public one: a term in the comment, or in a variable
-        # both fields use, goes to the public repository, and a term only the commit carries goes only to the private
-        # one. A field that names nothing, such as a status change, leaves the document unresolved, so it is judged
-        # whole, read as public, a term in the commit beside it too. Until review round 2 of dispatch://INFRA-3365 the
-        # document was judged by the commit's repository alone, and a status change beside it went out with a listed
-        # term; until its review round 3 a status change was read as public on its own, and the commit beside it by
-        # its repository alone.
-        term = TEST_TERMS[1]
-        (self.nodes / "PR_kwDOpub09876").write_text(f"{PUBLIC}\n", encoding="utf-8")
-        commit = ("createCommitOnBranch(input: {branch: {repositoryNameWithOwner: \"%s\", branchName: \"main\"}, "
-                  "expectedHeadOid: \"x\", message: {headline: %s}}) { commit { oid } }")
-
-        def document(headline: str, body: str, variables: str = "") -> str:
-            return ("query=mutation%s { %s addComment(input: {subjectId: \"PR_kwDOpub09876\", body: %s}) "
-                    "{ clientMutationId } }" % (variables, commit % (PRIVATE, headline), body))
-
-        with self.subTest(form="the comment's body"):
-            refused = self.run_gh(["api", "graphql", "-f", document('"m"', f'"{term}"')])
-            self.assert_refused(refused, "--raw-field query string 6", term, line=1)
-            targets = refused.stderr.decode().partition(": --raw-field query string 6")[0]
-            for shown in (f"{PRIVATE} (private)", f"{PUBLIC} (public)"):
-                self.assertIn(shown, targets)
-        status = "changeUserStatus(input: {message: %s}) { status { message } }"
-        for name, argv, field, shown in (
-                ("a variable both fields use", ["api", "graphql", "-f", document("$h", "$h", "($h: String!)"), "-F",
-                                                f"h={term}"],
-                 "--field h", f"to {PRIVATE} (private), {PUBLIC} (public):"),
-                ("one status change", ["api", "graphql", "-f", "query=mutation { %s }" % (status % f'"{term}"')],
-                 "--raw-field query string 1", f"to {UNRESOLVED}:"),
-                ("the commit's headline, beside a status change",
-                 ["api", "graphql", "-f", "query=mutation { %s %s }" % (commit % (PRIVATE, f'"{term}"'),
-                                                                        status % '"clean"')],
-                 "--raw-field query string 4", f"to {UNRESOLVED}:")):
-            with self.subTest(form=name):
-                self.setUp_calls()
-                refused = self.run_gh(argv)
-                self.assert_refused(refused, field, term, line=1)
-                self.assertIn(shown, refused.stderr.decode())
-        # Controls: the term in the commit's headline, or in a variable only the commit uses, goes to the private
-        # repository alone.
-        for name, argv in (("headline", ["api", "graphql", "-f", document(f'"{term}"', '"clean"')]),
-                           ("a variable only the commit uses",
-                            ["api", "graphql", "-f", document("$h", '"clean"', "($h: String!)"), "-F", f"h={term}"])):
-            with self.subTest(control=name):
-                self.setUp_calls()
-                self.assert_sent(self.run_gh(argv), argv)
-
-    def test_a_graphql_document_with_a_fragment_is_judged_whole(self) -> None:
-        # GitHub runs a fragment's fields as top-level fields of the mutation, which the check does not split out of
-        # it, so a document with a fragment spread or an inline fragment anywhere is not resolved: it is judged whole,
-        # read as public. Given a commit to a private repository named by name and a status change that holds a listed
-        # term, each form of fragment is refused. Until review round 3 of dispatch://INFRA-3365 such a document was read
-        # whole with the commit's repository as its one target, and the status message went out.
-        commit = ('createCommitOnBranch(input: {branch: {repositoryNameWithOwner: "%s", branchName: "main"}, '
-                  'expectedHeadOid: "x", message: {headline: "%s"}}) { commit { oid } }')
-        private = commit % (PRIVATE, "m")
-        status = 'changeUserStatus(input: {message: "%s"}) { status { message } }' % CANARY
-        for name, document, string in (
-                ("... on Mutation", f"mutation {{ {private} ... on Mutation {{ {status} }} }}", 5),
-                ("a named fragment", f"mutation {{ {private} ...S }} fragment S on Mutation {{ {status} }}", 5),
-                ("... with no type", f"mutation {{ ... {{ {status} }} {private} }}", 1),
-                ("the commit in the fragment", f"mutation {{ ... on Mutation {{ {private} }} {status} }}", 5)):
-            with self.subTest(form=name):
-                self.setUp_calls()
-                refused = self.run_gh(["api", "graphql", "-f", f"query={document}"])
-                self.assert_refused(refused, f"--raw-field query string {string}", CANARY, line=1)
-                self.assertIn(f"to {UNRESOLVED}:", refused.stderr.decode())
-        # Controls: the commit alone goes to the private repository, with a clean headline and with the term in it.
-        for name, headline in (("a clean headline", "m"), ("the term in the headline", CANARY)):
-            with self.subTest(control=name):
-                argv = ["api", "graphql", "-f", f"query=mutation {{ {commit % (PRIVATE, headline)} }}"]
-                self.setUp_calls()
-                self.assert_sent(self.run_gh(argv), argv)
-
-    def test_a_node_id_outside_what_a_field_acts_on_is_no_target(self) -> None:
-        # A field's targets are the repositories of the node ids that are the whole string value of one of its
-        # arguments or input-object fields, whatever its name, but clientMutationId, whose value GitHub only echoes
-        # back. A node id anywhere else (a comment, clientMutationId, a variable the document does not declare, inside a
-        # message) is no target and is ignored: a status change beside such an id names nothing, so the document is
-        # not resolved and is read as public, with no node read. Until review round 3 of dispatch://INFRA-3365 each such
-        # id was a target, so the status message went out as a write to the private repository of that id.
-        (self.nodes / "PR_kwDOpriv5678").write_text(f"{PRIVATE}\n", encoding="utf-8")
-        (self.nodes / "PR_kwDOpub09876").write_text(f"{PUBLIC}\n", encoding="utf-8")
-        status = 'changeUserStatus(input: {message: "%s"%s}) { clientMutationId }'
-        alone = "mutation { %s }" % (status % (CANARY, ""))
-        cid = ', clientMutationId: "PR_kwDOpriv5678"'
-        commit = ('createCommitOnBranch(input: {branch: {repositoryNameWithOwner: "%s", branchName: "main"}, '
-                  'expectedHeadOid: "x", message: {headline: "m"}}) { commit { oid } }' % PRIVATE)
-        for name, argv, string in (
-                ("a comment", ["api", "graphql", "-f", f"query={alone} # PR_kwDOpriv5678"], 1),
-                ("clientMutationId", ["api", "graphql", "-f", "query=mutation { %s }" % (status % (CANARY, cid))], 1),
-                ("an undeclared variable", ["api", "graphql", "-f", f"query={alone}", "-F", "x=PR_kwDOpriv5678"], 1),
-                ("the message", ["api", "graphql", "-f",
-                                 "query=mutation { %s }" % (status % (f"{CANARY} PR_kwDOpriv5678", ""))], 1),
-                ("clientMutationId of a second field",
-                 ["api", "graphql", "-f", "query=mutation { %s %s }" % (commit, status % (CANARY, cid))], 5)):
-            with self.subTest(form=name):
-                self.setUp_calls()
-                refused = self.run_gh(argv)
-                self.assert_refused(refused, f"--raw-field query string {string}", CANARY, line=1)
-                targets = refused.stderr.decode().partition(f": --raw-field query string {string}")[0]
-                self.assertIn(f"to {UNRESOLVED}", targets)
-                self.assertNotIn(PRIVATE, targets)
-        # An id in the body of a field that acts on a real target changes nothing: the body's term is judged by that
-        # target, a private one here, as test_a_graphql_mutation_that_names_its_repository_is_judged_by_that_repository_too
-        # judges it by a public one. Control: the ids the other way round, the target public, are refused.
-        comment = 'mutation { addComment(input: {subjectId: "%s", body: "%s after %s"}) { clientMutationId } }'
-        with self.subTest(form="a public node's id in a comment on a private node"):
-            argv = ["api", "graphql", "-f", "query=" + comment % ("PR_kwDOpriv5678", CANARY, "PR_kwDOpub09876")]
+        contents = "for createCommitOnBranch use gh api -X PUT repos/{owner}/{repo}/contents/{path}, or git push"
+        remove = "To send it, remove the term"
+        with self.subTest(row="a global term, to a private repository"):
+            refused = self.run_gh(commit(PRIVATE, TEXT.strip()))
+            self.assert_refused(refused, "--raw-field query string 4", line=1)
+            self.assertIn(f"to {MUTATION}:", refused.stderr.decode())
+            self.assertEqual(self.visibility_reads(), [])
+            for advice in (contents, remove):
+                self.assertIn(advice, refused.stderr.decode())
+        with self.subTest(row="the same mutation without a term"):
+            argv = commit(PRIVATE, CLEAN.strip())
             self.setUp_calls()
             self.assert_sent(self.run_gh(argv), argv)
-        with self.subTest(control="a private node's id in a comment on a public node"):
+        with self.subTest(row="a query with a term"):
+            argv = ["api", "graphql", "-f",
+                    'query=query { search(query: "%s", type: ISSUE, first: 1) { issueCount } }' % CANARY]
             self.setUp_calls()
-            refused = self.run_gh(["api", "graphql", "-f",
-                                   "query=" + comment % ("PR_kwDOpub09876", CANARY, "PR_kwDOpriv5678")])
-            self.assert_refused(refused, "--raw-field query string 2", CANARY, line=1)
-            self.assertIn(f"to {PUBLIC} (public):", refused.stderr.decode())
-
-    def test_an_honest_graphql_write_is_judged_by_its_own_repository(self) -> None:
-        # The writes Legion's roles send, each one field whose node or repository a declared variable gives, are
-        # resolved: a term in the text goes to that one repository, so it goes out to a private one and is refused for
-        # a public one, and a clean text goes out to a public one. resolveReviewThread and enqueuePullRequest have no
-        # body, so their text here is clientMutationId's.
-        nodes = {"thread": ("PRRT_kwDOpriv5678", "PRRT_kwDOpub09876"), "pull": ("PR_kwDOpriv5678", "PR_kwDOpub09876"),
-                 "issue": ("I_kwDOpriv5678", "I_kwDOpub09876")}
-        for private, public in nodes.values():
-            (self.nodes / private).write_text(f"{PRIVATE}\n", encoding="utf-8")
-            (self.nodes / public).write_text(f"{PUBLIC}\n", encoding="utf-8")
-        oid = "0" * 40
-
-        def writes(side: int, repository: str, text: str) -> list[tuple[str, list[str], str]]:
-            thread, pull, issue = (nodes[kind][side] for kind in ("thread", "pull", "issue"))
-            return [
-                ("resolveReviewThread", ["api", "graphql", "-f",
-                                         "query=mutation($id: ID!, $c: String) { resolveReviewThread(input: {threadId: "
-                                         "$id, clientMutationId: $c}) { thread { id } } }",
-                                         "-F", f"id={thread}", "-f", f"c={text}"], "--raw-field c"),
-                ("addPullRequestReviewThreadReply",
-                 ["api", "graphql", "-f", "query=mutation($id: ID!, $body: String!) { addPullRequestReviewThreadReply("
-                                          "input: {pullRequestReviewThreadId: $id, body: $body}) { comment { id } } }",
-                  "-F", f"id={thread}", "-f", f"body={text}"], "--raw-field body"),
-                ("enqueuePullRequest", ["api", "graphql", "-f",
-                                        "query=mutation($id: ID!, $oid: GitObjectID, $c: String) { enqueuePullRequest("
-                                        "input: {pullRequestId: $id, expectedHeadOid: $oid, clientMutationId: $c}) "
-                                        "{ mergeQueueEntry { id } } }",
-                                        "-F", f"id={pull}", "-f", f"oid={oid}", "-f", f"c={text}"], "--raw-field c"),
-                ("addComment", ["api", "graphql", "-f", "query=mutation($id: ID!, $body: String!) { addComment(input: "
-                                                        "{subjectId: $id, body: $body}) { clientMutationId } }",
-                                "-F", f"id={issue}", "-f", f"body={text}"], "--raw-field body"),
-                ("createCommitOnBranch", ["api", "graphql", "-f",
-                                          "query=mutation($b: CommittableBranch!, $oid: GitObjectID!, $headline: "
-                                          "String!) { createCommitOnBranch(input: {branch: $b, expectedHeadOid: $oid, "
-                                          "message: {headline: $headline}}) { commit { oid } } }",
-                                          "-F", f"b[repositoryNameWithOwner]={repository}", "-f", "b[branchName]=main",
-                                          "-f", f"oid={oid}", "-f", f"headline={text}"], "--raw-field headline"),
-            ]
-
-        for case, side, repository, text, refused in (("private, the term", 0, PRIVATE, TEXT.strip(), False),
-                                                      ("public, the term", 1, PUBLIC, TEXT.strip(), True),
-                                                      ("public, clean", 1, PUBLIC, CLEAN.strip(), False)):
-            for name, argv, field in writes(side, repository, text):
-                with self.subTest(write=name, case=case):
-                    self.setUp_calls()
-                    result = self.run_gh(argv)
-                    if refused:
-                        self.assert_refused(result, field, line=1)
-                        self.assertIn(f"to {PUBLIC} (public):", result.stderr.decode())
-                    else:
-                        self.assert_sent(result, argv)
-
-    # --- every node id a field is given whole is its target, and every node with a repository gives it (review round 4
-    # of dispatch://INFRA-3365) ---------------------------------------------------------------------------------------
+            self.assert_sent(self.run_gh(argv), argv)
+        with self.subTest(row="a thread reply and a comment"):
+            document = ("query=mutation { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: "
+                        '"PRRT_kwDOpriv5678", body: "%s"}) { comment { id } } addComment(input: {subjectId: '
+                        '"PR_kwDOpriv5678", body: "ok"}) { clientMutationId } }' % TEXT.strip())
+            self.setUp_calls()
+            refused = self.run_gh(["api", "graphql", "-f", document])
+            self.assert_refused(refused, "--raw-field query string 2", line=1)
+            for advice in ("for addPullRequestReviewThreadReply use gh api "
+                           "repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies -f body=…",
+                           "for addComment use gh issue comment or gh pr comment", remove):
+                self.assertIn(advice, refused.stderr.decode())
+        with self.subTest(row="a mutation with no route"):
+            self.setUp_calls()
+            refused = self.run_gh(["api", "graphql", "-f", 'query=mutation { changeUserStatus(input: {message: "%s"}) '
+                                                            "{ status { message } } }" % TEXT.strip()])
+            self.assert_refused(refused, "--raw-field query string 1", line=1)
+            self.assertIn("a gh subcommand or the REST API is judged by its repository", refused.stderr.decode())
+        with self.subTest(row="the public destination's own name, under the knives ygo-fork list"):
+            env = self.ygo_fork()
+            self.answer(YGO, "public")
+            self.setUp_calls()
+            refused = self.run_gh(commit(YGO, "m"), env=env)
+            self.assert_refused(refused, "--raw-field query string 1", "theorem-labs", YGO_LIST, line=1)
+            self.assertIn(f"to {MUTATION}:", refused.stderr.decode())
+            for advice in (contents, remove):
+                self.assertIn(advice, refused.stderr.decode())
 
     def nodes_of_types(self, nodes: dict[str, tuple[str, str]]) -> None:
         """Answer each `nodes(ids:)` read as GitHub does from now on (NODES_GH): NODES gives each node id its repository
@@ -1474,90 +1250,6 @@ class GhLeakTerms(unittest.TestCase):
         for node, (repository, names) in nodes.items():
             (self.nodes / node).write_text(f"{repository}\n", encoding="utf-8")
             (self.nodes / f"{node}.on").write_text(f"{names}\n", encoding="utf-8")
-
-    def test_every_node_id_a_graphql_field_is_given_whole_is_its_target(self) -> None:
-        # GitHub's schema names the node a mutation changes by any name (`id`, `inReplyTo`, `branch.id`), and a field
-        # can refer to another node beside it (`stateInput.duplicateIssueId`, `agentAssignment.targetRepositoryId`), so
-        # every node id that is the whole value of an argument or input-object field of a field, but clientMutationId,
-        # is a target of it, and its text is judged as public when any of its targets is public. Until review round 4
-        # of dispatch://INFRA-3365 only an argument named `…Id` or `…Ids` gave a target, so each of these writes went
-        # out with a listed term to a public issue, pull request comment or ref, judged by the private node beside it.
-        self.nodes_of_types({
-            "I_kwDOpub10001": (PUBLIC, "Issue RepositoryNode"), "I_kwDOpriv20001": (PRIVATE, "Issue RepositoryNode"),
-            "I_kwDOpriv20002": (PRIVATE, "Issue RepositoryNode"),
-            "PR_kwDOpriv20003": (PRIVATE, "PullRequest RepositoryNode"),
-            "PRRC_kwDOpub10004": (PUBLIC, "PullRequestReviewComment RepositoryNode"),
-            "PRRC_kwDOpriv20004": (PRIVATE, "PullRequestReviewComment RepositoryNode"),
-            "R_kgDOpriv20005": (PRIVATE, "Repository"),
-            "REF_kwDOpub10006": (PUBLIC, "Ref"), "REF_kwDOpriv20006": (PRIVATE, "Ref")})
-        body = f"see {CANARY}"
-
-        def update_issue(issue: str, duplicate: str, state: str = "OPEN") -> str:
-            return ('query=mutation { updateIssue(input: {id: "%s", body: "%s", stateInput: {value: %s, '
-                    'duplicateIssueId: "%s"}}) { issue { id } } }' % (issue, body, state, duplicate))
-
-        def reply(pull: str, comment: str) -> str:
-            return ('query=mutation { addPullRequestReviewComment(input: {pullRequestId: "%s", inReplyTo: "%s", '
-                    'body: "%s"}) { comment { id } } }' % (pull, comment, body))
-
-        def assignment(issue: str, repository: str) -> str:
-            return ('query=mutation { updateIssue(input: {id: "%s", body: "%s", agentAssignment: '
-                    '{targetRepositoryId: "%s"}}) { issue { id } } }' % (issue, body, repository))
-
-        def commit(ref: str, repository: str) -> str:
-            return ('query=mutation { createCommitOnBranch(input: {branch: {id: "%s", repositoryNameWithOwner: "%s"}, '
-                    'message: {headline: "%s"}, expectedHeadOid: "%s"}) { commit { oid } } }'
-                    % (ref, repository, body, "0" * 40))
-
-        payload = json.dumps({"query": "mutation($i: UpdateIssueInput!) { updateIssue(input: $i) { issue { id } } }",
-                              "variables": {"i": {"id": "I_kwDOpub10001", "body": body,
-                                                  "agentAssignment": {"targetRepositoryId": "R_kgDOpriv20005"}}}})
-        for name, argv, field in (
-                ("updateIssue, a private duplicate",
-                 ["api", "graphql", "-f", update_issue("I_kwDOpub10001", "I_kwDOpriv20001")],
-                 "--raw-field query string 2"),
-                ("addPullRequestReviewComment, a public comment replied to",
-                 ["api", "graphql", "-f", reply("PR_kwDOpriv20003", "PRRC_kwDOpub10004")],
-                 "--raw-field query string 3"),
-                ("updateIssue, -F variables",
-                 ["api", "graphql", "-f", "query=mutation($id: ID!, $body: String, $dup: ID) { updateIssue(input: "
-                                          "{id: $id, body: $body, stateInput: {value: OPEN, duplicateIssueId: $dup}}) "
-                                          "{ issue { id } } }",
-                  "-F", "id=I_kwDOpub10001", "-f", f"body={body}", "-F", "dup=I_kwDOpriv20001"], "--raw-field body"),
-                ("addPullRequestReviewComment, -F variables",
-                 ["api", "graphql", "-f", "query=mutation($pr: ID, $reply: ID, $body: String) { "
-                                          "addPullRequestReviewComment(input: {pullRequestId: $pr, inReplyTo: $reply, "
-                                          "body: $body}) { comment { id } } }",
-                  "-F", "pr=PR_kwDOpriv20003", "-F", "reply=PRRC_kwDOpub10004", "-f", f"body={body}"],
-                 "--raw-field body"),
-                ("agentAssignment, inline",
-                 ["api", "graphql", "-f", assignment("I_kwDOpub10001", "R_kgDOpriv20005")],
-                 "--raw-field query string 2"),
-                ("agentAssignment, an --input object", ["api", "graphql", "--input", self.file("a.json", payload)],
-                 "--input a.json .variables.i.body"),
-                ("createCommitOnBranch, a public ref and a private name",
-                 ["api", "graphql", "-f", commit("REF_kwDOpub10006", PRIVATE)], "--raw-field query string 3"),
-                # The accepted cost: a write to a private repository that refers to a public node is refused too.
-                ("a private issue marked a duplicate of a public one",
-                 ["api", "graphql", "-f", update_issue("I_kwDOpriv20002", "I_kwDOpub10001",
-                                                       "CLOSED, stateReason: DUPLICATE")],
-                 "--raw-field query string 2")):
-            with self.subTest(write=name):
-                self.setUp_calls()
-                refused = self.run_gh(argv)
-                self.assert_refused(refused, field, CANARY, line=1)
-                targets = refused.stderr.decode().partition(f": {field} line")[0]
-                for shown in (f"{PUBLIC} (public)", f"{PRIVATE} (private)"):
-                    self.assertIn(shown, targets)
-        # Controls: the same writes with every node and name private go out.
-        for name, document in (("updateIssue", update_issue("I_kwDOpriv20002", "I_kwDOpriv20001")),
-                               ("addPullRequestReviewComment", reply("PR_kwDOpriv20003", "PRRC_kwDOpriv20004")),
-                               ("agentAssignment", assignment("I_kwDOpriv20001", "R_kgDOpriv20005")),
-                               ("createCommitOnBranch", commit("REF_kwDOpriv20006", PRIVATE))):
-            with self.subTest(control=name):
-                argv = ["api", "graphql", "-f", document]
-                self.setUp_calls()
-                self.assert_sent(self.run_gh(argv), argv)
 
     def test_a_node_id_github_reads_past_trailing_whitespace_or_padding_is_a_target(self) -> None:
         # GitHub resolves a node id with trailing whitespace (a space, a tab, a line feed) or with `==` appended to the
@@ -1593,184 +1285,10 @@ class GhLeakTerms(unittest.TestCase):
             with self.subTest(write=name):
                 self.setUp_calls()
                 self.assert_refused(self.run_gh(argv), field, CANARY, line=1)
-        # Control: the reply to a private comment, its id written exactly, goes out.
+        # Control: the reply to a private comment, its id written exactly, is refused too, read as public.
         argv = ["api", "graphql", "-f", reply("PRRC_kwDOpriv20004")]
         self.setUp_calls()
-        self.assert_sent(self.run_gh(argv), argv)
-
-    def test_a_value_is_a_node_id_exactly_when_github_reads_it_as_one(self) -> None:
-        # GitHub reads a node id as measured on 2026-11-19 (gh_node_id,
-        # dispatch://INFRA-3365/artifact/node-id-forms-md): a new-form id past any trailing run of Ruby's whitespace
-        # (NUL, tab, line feed, vertical tab, form feed, carriage return, space) and past the base64 padding its payload
-        # needs, and a legacy id as Ruby's lenient base64 decoding reads it, text after its padding ignored. Such a value
-        # is a target, the node GitHub reads it as; any other value of a name that takes a node id, inReplyTo's too,
-        # leaves the call unresolved, read as public. Until test round 9 of dispatch://INFRA-3365 an id was one only as
-        # written exactly, so an honest updateIssue whose id came from a file ending in a line feed was refused, and a
-        # reply by such an id to a public comment went out.
-        legacy = {PUBLIC: "MDU6SXNzdWUxMDAwMQ== (the issue)",  # 05:Issue10001, then text past its padding
-                  PRIVATE: "MDU6SXNzdWUyMDAwMQ== (the issue)"}  # 05:Issue20001
-        self.nodes_of_types({
-            "I_kwDOygo10001": (YGO, "Issue RepositoryNode"), "I_kwDOpriv20001": (PRIVATE, "Issue RepositoryNode"),
-            "PR_kwDOpriv20003": (PRIVATE, "PullRequest RepositoryNode"),
-            "PRRC_kwDOpub10004": (PUBLIC, "PullRequestReviewComment RepositoryNode"),
-            "PRRC_kwDOpriv20004": (PRIVATE, "PullRequestReviewComment RepositoryNode"),
-            # Payloads of 14 characters, 2 mod 4, which GitHub reads with `==` after them and not with `=`.
-            "PRRC_kwDOpub1000444": (PUBLIC, "PullRequestReviewComment RepositoryNode"),
-            "PRRC_kwDOpriv200044": (PRIVATE, "PullRequestReviewComment RepositoryNode"),
-            # The node read sends a legacy id as the call gives it, for GitHub to decode.
-            legacy[PUBLIC]: (PUBLIC, "Issue RepositoryNode"), legacy[PRIVATE]: (PRIVATE, "Issue RepositoryNode")})
-        env = self.ygo_fork()
-        self.answer(YGO, "public")
-        # The architect's row: an honest updateIssue whose id `-F i=@file` reads from a file ending in a line feed, as
-        # `echo "$id" > file` writes it, is judged by its issue's repository.
-        update = "query=mutation($i: ID!, $b: String) { updateIssue(input: {id: $i, body: $b}) { issue { id } } }"
-        for case, issue, text, refused in (("the destination's own name", "I_kwDOygo10001", f"see {YGO}", False),
-                                           ("a term of the list", "I_kwDOygo10001", "Fixes INFRA-1", True),
-                                           ("a global term, private", "I_kwDOpriv20001", TEXT.strip(), False)):
-            issue_file = self.file("issue.txt", f"{issue}\n")
-            argv = ["api", "graphql", "-f", update, "-F", f"i=@{issue_file}", "-f", f"b={text}"]
-            with self.subTest(write="updateIssue, -F i=@file", case=case):
-                self.setUp_calls()
-                result = self.run_gh(argv, env=env)
-                if refused:
-                    self.assert_refused(result, "--raw-field b", "INFRA-", YGO_LIST, line=1)
-                    self.assertIn(f"to {YGO} (public):", result.stderr.decode())
-                else:
-                    self.assert_sent(result, argv)
-
-        body = f"see {CANARY}"
-
-        def reply(comment: str) -> list[str]:
-            return ["api", "graphql", "-f", 'query=mutation { addPullRequestReviewComment(input: {pullRequestId: '
-                                            '"PR_kwDOpriv20003", inReplyTo: "%s", body: "%s"}) { comment { id } } }'
-                                            % (comment, body)]
-
-        variables = ("mutation($reply: ID, $body: String) { addPullRequestReviewComment(input: {pullRequestId: "
-                     '"PR_kwDOpriv20003", inReplyTo: $reply, body: $body}) { comment { id } } }')
-
-        def by_input(name: str, document: str, given: dict[str, str]) -> list[str]:
-            # An --input body, whose JSON can carry a NUL as `\u0000`; an argument cannot carry one.
-            return ["api", "graphql", "--input", self.file(name, json.dumps({"query": document, "variables": given}))]
-
-        def update_by(issue: str) -> list[str]:
-            return ["api", "graphql", "-f",
-                    'query=mutation { updateIssue(input: {id: "%s", body: "%s"}) { issue { id } } }' % (issue, body)]
-
-        string_3, unresolved = "--raw-field query string 3", f"to {UNRESOLVED}"
-        # (name, argv, the field the refusal names, a target it shows; None for a call that goes out).
-        for name, argv, field, shown in (
-                ("== after a payload of 2 mod 4, a public comment", reply("PRRC_kwDOpub1000444=="), string_3,
-                 f"{PUBLIC} (public)"),
-                ("== after a payload of 2 mod 4, a private comment", reply("PRRC_kwDOpriv200044=="), "", None),
-                ("= after a payload of 2 mod 4", reply("PRRC_kwDOpriv200044="), string_3, unresolved),
-                ("a trailing no-break space", reply("PRRC_kwDOpriv20004\u00a0"), string_3, unresolved),
-                ("a leading space", reply(" PRRC_kwDOpriv20004"), string_3, unresolved),
-                ("a trailing carriage return, a public comment",
-                 ["api", "graphql", "-f", f"query={variables}", "-f", "reply=PRRC_kwDOpub10004\r",
-                  "-f", f"body={body}"], "--raw-field body", f"{PUBLIC} (public)"),
-                ("a trailing carriage return, a private comment",
-                 ["api", "graphql", "-f", f"query={variables}", "-f", "reply=PRRC_kwDOpriv20004\r",
-                  "-f", f"body={body}"], "", None),
-                ("a trailing NUL, a public comment",
-                 by_input("nul-pub.json", variables, {"reply": "PRRC_kwDOpub10004\0", "body": body}),
-                 "--input nul-pub.json .variables.body", f"{PUBLIC} (public)"),
-                ("a trailing NUL, a private comment",
-                 by_input("nul-priv.json", variables, {"reply": "PRRC_kwDOpriv20004\0", "body": body}), "", None),
-                ("a legacy id with text past its padding, a public issue", update_by(legacy[PUBLIC]),
-                 "--raw-field query string 2", f"{PUBLIC} (public)"),
-                ("a legacy id with text past its padding, a private issue", update_by(legacy[PRIVATE]), "", None),
-                # GitHub skips a NUL in a legacy id, which no argument of the node read can carry: the field is unread.
-                ("a legacy id with a NUL",
-                 by_input("nul-legacy.json", update.removeprefix("query="), {"i": legacy[PRIVATE] + "\0", "b": body}),
-                 "--input nul-legacy.json .variables.b", unresolved)):
-            with self.subTest(write=name):
-                self.setUp_calls()
-                result = self.run_gh(argv)
-                if shown is None:
-                    self.assert_sent(result, argv)
-                else:
-                    self.assert_refused(result, field, CANARY, line=1)
-                    self.assertIn(shown, result.stderr.decode().partition(f": {field} line")[0])
-
-    def test_a_graphql_field_that_names_an_account_by_login_is_judged_whole(self) -> None:
-        # createSponsorsTier names the account by login and publishes its description on that account's public Sponsors
-        # page; a repositoryId beside the login names a private repository the tier gives access to. The check cannot
-        # read where an account named by login takes the text, so such a field is judged whole, as public. Until review
-        # round 4 of dispatch://INFRA-3365 the field was judged by the private repository alone, and the term went out.
-        self.nodes_of_types({"R_kgDOpriv20007": (PRIVATE, "Repository")})
-        tier = ('query=mutation($login: String) { createSponsorsTier(input: {sponsorableLogin: %s, amount: 5, '
-                'description: "see %s", repositoryId: "R_kgDOpriv20007"}) { sponsorsTier { id } } }')
-        for name, argv, string in (
-                ("inline", ["api", "graphql", "-f", tier % ('"o"', CANARY)], 2),
-                ("a -F variable", ["api", "graphql", "-f", tier % ("$login", CANARY), "-F", "login=o"], 1)):
-            with self.subTest(write=name):
-                self.setUp_calls()
-                refused = self.run_gh(argv)
-                self.assert_refused(refused, f"--raw-field query string {string}", CANARY, line=1)
-                self.assertIn(f"to {UNRESOLVED}:", refused.stderr.decode())
-        # Control: with the login null, the private repository is the field's one target, and the write goes out.
-        argv = ["api", "graphql", "-f", tier % ("null", CANARY)]
-        self.setUp_calls()
-        self.assert_sent(self.run_gh(argv), argv)
-
-    def test_an_honest_graphql_write_by_any_argument_is_judged_by_its_own_repository(self) -> None:
-        # Given the knives ygo-fork list and theorem-labs/ygo public: a write that names its node by `id` or
-        # `inReplyTo`, or that carries a Label, a Ref or a DiscussionComment, resolves to the repository of its nodes,
-        # which the node read gives for every Node type with a repository, and for a DiscussionComment its
-        # discussion's. So text that holds only the destination's own name goes to theorem-labs/ygo, a term of the list
-        # is refused there, and a global term goes to a private repository. The text is a variable, and
-        # addLabelsToLabelable's is clientMutationId's. Until review round 4 of dispatch://INFRA-3365 each was refused:
-        # a field by `id` or `inReplyTo` named no target, and a Label, a Ref or a DiscussionComment gave no repository,
-        # so its field was read as public.
-        nodes = {"issue": ("I_kwDOygo10001", "I_kwDOpriv20001", "Issue RepositoryNode"),
-                 "comment": ("IC_kwDOygo10002", "IC_kwDOpriv20002", "IssueComment RepositoryNode"),
-                 "review comment": ("PRRC_kwDOygo10003", "PRRC_kwDOpriv20003",
-                                    "PullRequestReviewComment RepositoryNode"),
-                 "repository": ("R_kgDOygo10004", "R_kgDOpriv20004", "Repository"),
-                 "label": ("LA_kwDOygo10005", "LA_kwDOpriv20005", "Label"),
-                 "other label": ("LA_kwDOygo10006", "LA_kwDOpriv20006", "Label"),
-                 "ref": ("REF_kwDOygo10007", "REF_kwDOpriv20007", "Ref"),
-                 "discussion": ("D_kwDOygo10008", "D_kwDOpriv20008", "Discussion RepositoryNode"),
-                 "discussion comment": ("DC_kwDOygo10009", "DC_kwDOpriv20009", "DiscussionComment")}
-        self.nodes_of_types({node: (repository, names) for public, private, names in nodes.values()
-                             for node, repository in ((public, YGO), (private, PRIVATE))})
-        env = self.ygo_fork()
-        self.answer(YGO, "public")
-
-        def writes(side: int) -> list[tuple[str, str]]:
-            (issue, comment, review_comment, repository, label, other, ref, discussion,
-             discussion_comment) = (ids[side] for ids in nodes.values())
-            return [
-                ("updateIssue by id", 'updateIssue(input: {id: "%s", body: $t}) { issue { id } }' % issue),
-                ("updateIssueComment by id",
-                 'updateIssueComment(input: {id: "%s", body: $t}) { issueComment { id } }' % comment),
-                ("addPullRequestReviewComment by inReplyTo",
-                 'addPullRequestReviewComment(input: {inReplyTo: "%s", body: $t}) { comment { id } }' % review_comment),
-                ("createIssue with labelIds", 'createIssue(input: {repositoryId: "%s", labelIds: ["%s", "%s"], '
-                                              'title: $t}) { issue { id } }' % (repository, label, other)),
-                ("addLabelsToLabelable", 'addLabelsToLabelable(input: {labelableId: "%s", labelIds: ["%s"], '
-                                         'clientMutationId: $t}) { clientMutationId }' % (issue, label)),
-                ("createCommitOnBranch by branch.id",
-                 'createCommitOnBranch(input: {branch: {id: "%s"}, expectedHeadOid: "%s", message: {headline: $t}}) '
-                 '{ commit { oid } }' % (ref, "0" * 40)),
-                ("addDiscussionComment by replyToId",
-                 'addDiscussionComment(input: {discussionId: "%s", replyToId: "%s", body: $t}) { comment { id } }'
-                 % (discussion, discussion_comment)),
-            ]
-
-        for case, side, text, refused in (("the destination's own name", 0, f"see {YGO}", False),
-                                          ("a term of the list", 0, "Fixes INFRA-1", True),
-                                          ("a global term, private", 1, TEXT.strip(), False)):
-            for name, write in writes(side):
-                argv = ["api", "graphql", "-f", "query=mutation($t: String!) { %s }" % write, "-f", f"t={text}"]
-                with self.subTest(write=name, case=case):
-                    self.setUp_calls()
-                    result = self.run_gh(argv, env=env)
-                    if refused:
-                        self.assert_refused(result, "--raw-field t", "INFRA-", YGO_LIST, line=1)
-                        self.assertIn(f"to {YGO} (public):", result.stderr.decode())
-                    else:
-                        self.assert_sent(result, argv)
+        self.assert_refused(self.run_gh(argv), "--raw-field query string 3", CANARY, line=1)
 
     def test_a_gh_alias_under_a_command_is_read_as_the_command_it_expands_to(self) -> None:
         config = self.tmp / "config" / "gh"
@@ -1790,12 +1308,12 @@ class GhLeakTerms(unittest.TestCase):
         payload = json.dumps({"query": mutation}).replace("NODE", "\\u0050R_kwDOpub09876")
         refused = self.run_gh(["api", "graphql", "--input", self.file("n.json", payload)])
         self.assert_refused(refused, "--input n.json .query string 2")
-        self.assertIn(f"{PUBLIC} (public)", refused.stderr.decode())
-        # Control: the same payload whose node is the private repository's goes out.
+        self.assertIn(f"to {MUTATION}:", refused.stderr.decode())
+        # The same payload whose node is the private repository's is refused too, read as public.
         argv = ["api", "graphql", "--input", self.file("p.json", json.dumps({"query": mutation.replace(
             "NODE", "PR_kwDOpriv5678")}))]
         self.setUp_calls()
-        self.assert_sent(self.run_gh(argv), argv)
+        self.assert_refused(self.run_gh(argv), "--input p.json .query string 2")
 
     def test_a_pull_request_url_with_a_user_or_a_port_names_its_repository(self) -> None:
         # gh takes the URL's host without its user and port, so these name o/pub, not the directory's private remote.
@@ -1978,7 +1496,8 @@ class GhLeakTerms(unittest.TestCase):
                 refused = self.run_gh(form(PUBLIC), env={**self.env, "GH_REPO": PRIVATE})
                 self.assert_refused(refused, "--input asset.bin" if name == "upload" else "--raw-field body")
                 self.assertIn(f"to {PUBLIC} (public)", refused.stderr.decode())
-        # A GraphQL address is GraphQL: a mutation on a private repository's node goes out, and a query is a read.
+        # A GraphQL address is GraphQL: a mutation, on a private repository's node too, is read as public, and a
+        # query is a read.
         (self.nodes / "PR_kwDOpriv5678").write_text(f"{PRIVATE}\n", encoding="utf-8")
         for query in ('mutation { addComment(input: {subjectId: "PR_kwDOpriv5678", body: "%s"}) '
                       "{ clientMutationId } }" % TEXT.strip(),
@@ -1986,7 +1505,10 @@ class GhLeakTerms(unittest.TestCase):
             with self.subTest(graphql=query.split()[0]):
                 self.setUp_calls()
                 argv = ["api", "https://api.github.com/graphql", "-f", f"query={query}"]
-                self.assert_sent(self.run_gh(argv), argv)
+                if query.startswith("mutation"):
+                    self.assert_refused(self.run_gh(argv), "--raw-field query string 2")
+                else:
+                    self.assert_sent(self.run_gh(argv), argv)
 
     def test_gh_api_to_another_host_is_read_as_public(self) -> None:
         # An address on another host, and --hostname, send the text to that host, whatever repository the path names.

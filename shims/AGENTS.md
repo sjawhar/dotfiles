@@ -168,7 +168,7 @@ behavior before handing the call to the real one. One file is data: `person-name
   `--jq`, `--template` and `--cache` of `gh api`, the `--jq`, `--template` and `--format` of `gh
   project`), and for a file gh reads (`--body-file`, `--notes-file`, `--from-file`, `--recover`,
   `--input`, `-F key=@file`, a gist's files) what the file holds, never its path. The repository a
-  call names (`-R`, a URL, a `gh api` endpoint, a GraphQL mutation's `repositoryNameWithOwner`) is
+  call names (`-R`, a URL, a `gh api` endpoint) is
   text too, under one rule: a match does not count for a target whose visibility was read as
   public when it lies wholly inside an occurrence, in the same value, of that repository's own
   name, its `owner/name` or its owner alone, in any letter case and as a whole word by GitHub's
@@ -234,7 +234,7 @@ behavior before handing the call to the real one. One file is data: `person-name
   read: `-R`, `--branch-repo`, `GH_REPO` and a repository argument as gh reads `[HOST/]OWNER/REPO`
   or a URL, a URL argument by its host, and any other git URL (`git@host:o/r`, `ssh://…`) as
   github.com's, which `scripts/github-repo-visibility` reads as ssh does, a URL it does not read as
-  GitHub's then read as public. A remote, an endpoint's repository and a GraphQL mutation's are
+  GitHub's then read as public. A remote and an endpoint's repository are
   github.com's: the directory's remotes are kept only when that helper reads them as GitHub's,
   resolving an ssh host alias with `ssh -G` as gh does (`ssh.NewTranslator`), so `git@gh-work:o/r.git`
   and `gh-work:o/r.git`, gh-work an alias of github.com, are github.com's o/r (until review round 3
@@ -305,74 +305,43 @@ behavior before handing the call to the real one. One file is data: `person-name
   the base repository), which is always a target, since the issue's page shows the branch by R's
   name. Until review round 3 of 2026-11-19 R was read as the call's repository, so with no `-R`
   the issue's repository was no target, and a term in `--name` went to a public issue, judged by a
-  private R alone. For a GraphQL mutation the targets are those of each top-level field, which
-  GitHub runs as a mutation of its own, when the check can resolve the document: the call has one
-  document, which parses; it is one mutation operation, with no fragment of any kind (`fragment S
-  on T`, `...S`, `... on T`, `... {`); every variable the call gives (a gh field but `query` and
-  `operationName`, or a member of an `--input` body's `variables`, read by its JSON keys, never by
-  the path a refusal shows) is one the operation declares, and every variable the document uses is
-  one the call gives; and each field's targets come from its own input, at any depth, list items
-  included, a declared variable read as the call gives it. A field's targets are the repository of
-  every node id that is the whole string value of any of its arguments or input-object fields,
-  whatever the name (`id`, `subjectId`, `inReplyTo`, `branch.id`, `labelIds`,
-  `stateInput.duplicateIssueId`), but `clientMutationId`, whose value GitHub only echoes back; and
-  every repository it names by the string `owner/name` of createCommitOnBranch's input field
-  `repositoryNameWithOwner`. A node id is a value GitHub reads as one, as measured on 2026-11-19
-  (dispatch://INFRA-3365/artifact/node-id-forms-md): a new-form id (`PRRC_kwDO…`) with any
-  trailing run of NUL, tab, line feed, vertical tab, form feed, carriage return and space, or with
-  the base64 padding its payload needs, is that id, and a legacy id (`MDEwOl…`) is any value that
-  Ruby's lenient base64 decoding, which skips characters outside the alphabet and stops at the
-  padding, reads as `<number>:<Type>`; a value of an id's shape that names no node is an id too,
-  whose node read gives no repository. Each node's repository is read with one `nodes(ids:)` read
-  through this shim, for every node type of GitHub's schema that has a repository (an issue, a pull
-  request, a comment, a review thread, a label, a milestone, a ref, a commit, a release, the
-  repository itself, and the others the schema lists), and for a discussion comment, which has no
-  repository of its own, its discussion's. A field's text is judged as public when any
-  of its targets is public, or when one of its node ids gives no repository (a user, an
-  organization, a project). No list of argument names says which argument is the subject, so a
-  write to a private repository that holds a listed term and also refers to a public node is
-  refused, such as `updateIssue` of a private issue marked as a duplicate of a public one: that is
-  the accepted cost. A node id anywhere else (inside a body or a message, a comment,
-  `clientMutationId`, a variable the operation does not declare) is no target and is ignored. A
-  `repositoryNameWithOwner` that is not `owner/name`, a value of an argument named `id`,
-  `inReplyTo`, `allowedActors` or `reviewers` or ending in `Id` or `Ids` that is neither null nor a
-  node id, an account named by login (an argument named `login` or ending in `Login` or `Logins`,
-  such as createSponsorsTier's `sponsorableLogin`, whose description goes to that account's public
-  Sponsors page) that is not null, a variable the document uses more than once whose value holds a
-  node id or a `repositoryNameWithOwner`, and a field with no target (a status change) leave the
-  document unresolved, and so do several documents and one that does not parse:
-  such a call is judged whole, as one target, `a GraphQL mutation whose repository could not be
-  read, read as public`, with no node read. A directive is read past, not read as public: GitHub's
-  only executable directives are `@skip` and `@include`, and a variable one uses counts as used.
-  Until review round 3 of 2026-11-19 an id in a comment, in `clientMutationId` or in an undeclared
-  variable was a target, and a field inside a fragment took the targets of the fields beside it,
-  so a status change holding a listed term went out as a write to a private repository; until
-  review round 4 only an argument whose name ends in `Id` or `Ids` gave a target, so a listed term
-  went to a public issue changed by `id`, judged by the private issue its `duplicateIssueId` names,
-  and a label, a milestone or a ref gave no repository; until test round 9 an id was one only as
-  written exactly, so a reply by `inReplyTo` to a public comment whose id ended in a space went
-  out, judged by the private pull request. Each target's visibility is read through
+  private R alone. A raw GraphQL mutation (`gh api graphql` whose text holds `mutation`) is read
+  whole, as one target, `a raw GraphQL mutation, which is read as public`, whatever repository or
+  node it names: the check does not read where a mutation goes, and the mutation's text is judged
+  with no own-name exemption. The cost: a raw GraphQL mutation whose text holds a listed term is
+  refused even to a private repository, and so is one that names a public repository whose own name
+  holds a term (createCommitOnBranch's `repositoryNameWithOwner: "theorem-labs/ygo"` under the
+  knives ygo-fork list). Its refusal names what to use instead, each judged by its repository, for
+  each mutation the document names (`GH_GRAPHQL_ROUTES`): for a thread reply
+  (`addPullRequestReviewThreadReply`, `addPullRequestReviewComment`) `gh api
+  repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies -f body=…`; for `addComment`
+  `gh issue comment` or `gh pr comment`; for `createIssue`, `updateIssue`, `createPullRequest` and
+  `updatePullRequest` `gh issue create`, `gh issue edit`, `gh pr create` and `gh pr edit`; for
+  `addPullRequestReview` and `submitPullRequestReview` `gh pr review`; for
+  `updatePullRequestReviewComment` `gh api -X PATCH repos/{owner}/{repo}/pulls/comments/{id}`; for
+  `updateIssueComment` `gh api -X PATCH repos/{owner}/{repo}/issues/comments/{id}`; and for
+  `createCommitOnBranch` `gh api -X PUT repos/{owner}/{repo}/contents/{path}` or `git push`. For a
+  document that names none of these, it says that a gh subcommand or the REST API is judged by its
+  repository. Until review round 5 of 2026-11-19 the check read each top-level field of a mutation,
+  its node ids (with one `nodes(ids:)` read through this shim) and the repositories it named, to
+  find its targets, and each test round found one more way that reading and GitHub's differed
+  (dispatch://INFRA-3365). Each target's visibility is read through
   `scripts/github-repo-visibility` (the
   leak check's per-repository
   cache, else one gh read, whose answer it caches). A text counts only for the targets it goes to:
   a text gh fills from a base repository for those the call reaches with that base and those that
   depend on none; the value of `-R` for the repository it names, as that repository's address; the
-  value of `--branch-repo` for its own repository and the issue's; a value inside one top-level
-  field of a resolved GraphQL document, or a variable only that field uses, for that field's; any
-  other text, a variable two fields use among them, for every target; and every text for the one
-  target of a call that can reach no other (a gist, a project, another host, a new repository, an
-  unresolved GraphQL document). Until review round 2 of 2026-11-19 every text counted for
-  every target, so in a ygo checkout a reply to `repos/{owner}/{repo}/…` was refused for the
-  theorem-labs/ygo remote's filling judged against sjawhar/ygo, and a status change beside a
-  commit to a private repository went out with a listed term. A term of the list every repository
-  has is refused when any target its text goes to is not confirmed private or internal; a term of
-  a scoped list or of the registry only when such a target is one its scope names. A visibility it
-  cannot read, a gist, a project, another host (`GH_HOST`, `gh api --hostname`, a `gh api` address
-  on any host but those two, or a URL or repository argument on one), a GraphQL mutation the check
-  cannot resolve, one with a node gh cannot read, or one that makes a repository
-  (`createRepository`, `cloneTemplateRepository`,
-  `startRepositoryMigration`), a `gh
-  api` call that makes one (`user/repos`, `orgs/O/repos`, or a template's `repos/O/R/generate`,
+  value of `--branch-repo` for its own repository and the issue's; any other text for every target;
+  and every text for the one target of a call that can reach no other (a gist, a project, another
+  host, a new repository, a raw GraphQL mutation). Until review round 2 of 2026-11-19 every text
+  counted for every target, so in a ygo checkout a reply to `repos/{owner}/{repo}/…` was refused
+  for the theorem-labs/ygo remote's filling judged against sjawhar/ygo. A term of the list every
+  repository has is refused when any target its text goes to is not confirmed private or internal;
+  a term of a scoped list or of the registry only when such a target is one its scope names. A
+  visibility it cannot read, a gist, a project, another host (`GH_HOST`, `gh api --hostname`, a
+  `gh api` address on any host but those two, or a URL or repository argument on one), a raw
+  GraphQL mutation, a `gh api` call that makes a repository (`user/repos`, `orgs/O/repos`, or a
+  template's `repos/O/R/generate`,
   whatever the template's visibility), a base repository whose name it cannot read, and any other
   endpoint count as public and as any repository. Not checked, because the shim runs before the
   text exists or nothing new is typed: text
