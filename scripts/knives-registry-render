@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Render the committed knives registry, knives/repos.toml, into this machine's copy,
-# ~/.config/knives/repos.toml, and record the sha256 of the source it rendered in
-# ~/.config/knives/repos.toml.source-sha256. A merge that changed knives/repos.toml used to reach
-# a machine's copy only when someone re-ran install.sh. Three callers run this step:
-# installers/knives.sh with no flag, so an install always replaces a hand-edited copy, and
-# scripts/dotfiles-follow and scripts/dotfiles-sync's tools step with --if-changed, which writes
-# nothing while the copy is a plain file and the source's sha256 is the recorded one.
+# ~/.config/knives/repos.toml, and record what the render depends on in
+# ~/.config/knives/repos.toml.source-sha256: the source's sha256 and the oh-my-pi workspaces path
+# the render wrote. A merge that changed knives/repos.toml used to reach a machine's copy only
+# when someone re-ran install.sh. Three callers run this step: installers/knives.sh with no flag,
+# so an install always replaces a hand-edited copy, and scripts/dotfiles-follow and
+# scripts/dotfiles-sync's tools step with --if-changed, which writes nothing while the copy is a
+# plain file and the record holds both the source's sha256 and the workspaces path this run would
+# write. So a copy rendered while the big local disk's directory was absent is rendered again
+# once it is there, and the other way round.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../installers/lib.sh"
 
@@ -27,25 +30,28 @@ mkdir -p "$HOME/.config/knives"
 sha="$(sha256sum <"$source_file")"
 sha="${sha%% *}"
 short="${sha:0:12}"
-
-plain_copy() { [[ -f "$registry" && ! -L "$registry" ]]; }
-# The record holds exactly the sha256 and a newline.
-record_holds_sha() { [[ -f "$record" ]] && printf '%s\n' "$sha" | cmp -s - "$record"; }
-
-if $if_changed && plain_copy && record_holds_sha; then
-    echo "knives-registry-render: $shown unchanged: knives/repos.toml has sha256 $short, as at the last render; wrote nothing"
-    exit 0
-fi
-
-rendered="" record_tmp=""
-trap 'rm -f -- ${rendered:+"$rendered"} ${record_tmp:+"$record_tmp"}' EXIT
 # The registry is rendered, not linked: a committed file names no machine's path, and oh-my-pi's
 # worktrees belong on the big local disk where the machine has one (the branches there are large
 # and rebuilt often). Everything else in the file is copied byte for byte.
 worktrees="$HOME/.worktrees/oh-my-pi"
 # The big disk's directory is named for the home it belongs to, not for the login name.
-nvme="/mnt/nvme/$(basename "$HOME")"
+# KNIVES_REGISTRY_NVME_ROOT replaces /mnt/nvme (the tests point it at a scratch tree).
+nvme="${KNIVES_REGISTRY_NVME_ROOT:-/mnt/nvme}/$(basename "$HOME")"
 [[ -d "$nvme" ]] && worktrees="$nvme/omp-worktrees/branches"
+
+plain_copy() { [[ -f "$registry" && ! -L "$registry" ]]; }
+# The record holds exactly these two lines. A record in an older form (the sha256 alone) differs,
+# so the copy is rendered again once.
+record_text() { printf 'sha256 %s\nworkspaces %s\n' "$sha" "$worktrees"; }
+record_current() { [[ -f "$record" ]] && record_text | cmp -s - "$record"; }
+
+if $if_changed && plain_copy && record_current; then
+    echo "knives-registry-render: $shown unchanged: knives/repos.toml has sha256 $short and the workspaces path is $worktrees, as at the last render; wrote nothing"
+    exit 0
+fi
+
+rendered="" record_tmp=""
+trap 'rm -f -- ${rendered:+"$rendered"} ${record_tmp:+"$record_tmp"}' EXIT
 rendered="$(mktemp "${registry}.XXXXXX")"
 sed "s#^workspaces = \"~/.worktrees/oh-my-pi\"\$#workspaces = \"${worktrees}\"#" \
     "$source_file" > "$rendered"
@@ -62,9 +68,9 @@ fi
 
 # The record is written after the copy: a run stopped between the two leaves the old record, so
 # the next --if-changed run renders again.
-if ! record_holds_sha; then
+if ! record_current; then
     record_tmp="$(mktemp "${record}.XXXXXX")"
-    printf '%s\n' "$sha" > "$record_tmp"
+    record_text > "$record_tmp"
     chmod 644 "$record_tmp"
     mv -fT "$record_tmp" "$record"
     record_tmp=""

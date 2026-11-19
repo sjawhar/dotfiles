@@ -12,11 +12,9 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import hashlib
 import importlib.machinery
 import importlib.util
 import os
-import shutil
 import signal
 import subprocess
 import threading
@@ -24,6 +22,8 @@ import time
 import unittest
 from collections.abc import Iterator
 from pathlib import Path
+
+from scripts.tests.test_dotfiles_follow import REGISTRY_V1, REGISTRY_V2, RegistryCopy, add_registry_render
 
 ROOT = Path(__file__).resolve().parents[2]
 SYNC = ROOT / "scripts" / "dotfiles-sync"
@@ -928,36 +928,20 @@ class DotfilesTools(ToolsStep):
         self.assertFalse((self.home / ".config" / "knives").exists())
 
 
-# A small knives registry. The render rewrites the oh-my-pi table's workspaces line to this
-# machine's path and copies every other line as it is, the hawk table's workspaces included.
-OMP_WORKSPACES = 'workspaces = "~/.worktrees/oh-my-pi"'
-REGISTRY_V1 = f"""[repos.hawk]
-upstream = "https://example.com/hawk"
-workspaces = "~/.worktrees/hawk"
-
-[repos.oh-my-pi]
-upstream = "https://example.com/oh-my-pi"
-release_branch = "sami"
-{OMP_WORKSPACES}
-"""
-REGISTRY_V2 = REGISTRY_V1.replace('release_branch = "sami"', 'release_branch = "sami-2"')
 RENDER = "knives-registry-render --if-changed"
 
 
-class KnivesRegistry(ToolsStep):
+class KnivesRegistry(RegistryCopy, ToolsStep):
     """sami-rocqperf, sami-leanperf and the laptop run no dotfiles-follow timer and move only
     through dotfiles-sync and dotfiles-publish, so the tools step starts with the real
     scripts/knives-registry-render --if-changed: the machine's copy of the knives registry,
     ~/.config/knives/repos.toml, follows the committed knives/repos.toml with no person's command
-    (dispatch://INFRA-3365, R5). The copy the render must leave is worked out here, never by
-    running the render."""
+    (dispatch://INFRA-3365, R5). The copy the render must leave is worked out by RegistryCopy
+    (test_dotfiles_follow), never by running the render."""
 
     def setUp(self) -> None:
         super().setUp()
-        # The real render, its executable mode kept (git records it), and the lib.sh it sources.
-        for name in ("scripts/knives-registry-render", "installers/lib.sh"):
-            (self.upstream / name).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(ROOT / name, self.upstream / name)
+        add_registry_render(self.upstream)
         self.commit_registry(REGISTRY_V1)
 
     def commit_registry(self, source: str) -> None:
@@ -965,35 +949,6 @@ class KnivesRegistry(ToolsStep):
         path.parent.mkdir(exist_ok=True)
         path.write_text(source)
         self.commit_upstream("knives registry")
-
-    def copy(self, home: Path | None = None) -> Path:
-        return (home or self.home) / ".config" / "knives" / "repos.toml"
-
-    def source_record(self, home: Path | None = None) -> Path:
-        return (home or self.home) / ".config" / "knives" / "repos.toml.source-sha256"
-
-    @staticmethod
-    def rendered(source: str, home: Path) -> str:
-        """SOURCE with the oh-my-pi workspaces line set to HOME's path: the big disk's directory,
-        named for the home, where there is one, else ~/.worktrees/oh-my-pi in full."""
-        nvme = Path("/mnt/nvme") / home.name
-        where = f"{nvme}/omp-worktrees/branches" if nvme.is_dir() else f"{home}/.worktrees/oh-my-pi"
-        return "".join(
-            f'workspaces = "{where}"\n' if line == OMP_WORKSPACES + "\n" else line
-            for line in source.splitlines(keepends=True)
-        )
-
-    @staticmethod
-    def identity(path: Path) -> tuple[int, int]:
-        """(inode, mtime in ns): a file replaced or rewritten gets another."""
-        st = path.stat()
-        return st.st_ino, st.st_mtime_ns
-
-    def assert_copy_renders(self, source: str, home: Path | None = None) -> None:
-        home = home or self.home
-        self.assertNotIn(OMP_WORKSPACES, self.rendered(source, home))
-        self.assertEqual(self.copy(home).read_text(), self.rendered(source, home))
-        self.assertEqual(self.source_record(home).read_text(), hashlib.sha256(source.encode()).hexdigest() + "\n")
 
     @staticmethod
     def render_passed(checkout: Path) -> str:
@@ -1010,14 +965,14 @@ class KnivesRegistry(ToolsStep):
         self.assertIn(f"dotfiles-sync: tools step: `{RENDER}` in {self.checkout} exited 1\nlast lines of its output:\n", result.stderr)
         # mktemp quotes the template as the locale does ('...' or ‘...’): only the words are checked.
         failure = next((line for line in result.stderr.splitlines() if "mktemp: failed to create file via template" in line), "")
-        self.assertIn(f"{self.copy()}.XXXXXX", failure)
+        self.assertIn(f"{self.copy}.XXXXXX", failure)
         self.assertTrue(failure.endswith(": Permission denied"), result.stderr)
         self.assertNotIn(self.render_passed(self.checkout), result.stdout)
-        self.assertEqual(self.copy().read_text(), self.rendered(REGISTRY_V1, self.home))
+        self.assertEqual(self.copy.read_text(), self.rendered(REGISTRY_V1))
 
     @contextlib.contextmanager
     def read_only_copy_directory(self) -> Iterator[None]:
-        knives = self.copy().parent
+        knives = self.copy.parent
         knives.chmod(0o555)
         try:
             yield
@@ -1028,7 +983,7 @@ class KnivesRegistry(ToolsStep):
         first = self.sync("local")
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assert_copy_renders(REGISTRY_V1)
-        before = self.identity(self.copy())
+        before = self.identity(self.copy)
         self.commit_registry(REGISTRY_V2)
         self.clear_records()
 
@@ -1036,7 +991,7 @@ class KnivesRegistry(ToolsStep):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_copy_renders(REGISTRY_V2)
-        self.assertNotEqual(self.identity(self.copy()), before)
+        self.assertNotEqual(self.identity(self.copy), before)
         self.assertIn(self.render_passed(self.checkout), result.stdout)
         self.assertLess(
             result.stdout.index(self.render_passed(self.checkout)),
@@ -1048,14 +1003,14 @@ class KnivesRegistry(ToolsStep):
         first = self.sync("local")
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assert_copy_renders(REGISTRY_V1)
-        written = (self.identity(self.copy()), self.identity(self.source_record()))
+        written = (self.identity(self.copy), self.identity(self.render_record))
         self.clear_records()
 
         again = self.sync("local")
 
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
         self.assertIn(self.render_passed(self.checkout), again.stdout)
-        self.assertEqual((self.identity(self.copy()), self.identity(self.source_record())), written)
+        self.assertEqual((self.identity(self.copy), self.identity(self.render_record)), written)
         self.assert_tools_ran()
 
     def test_tools_mode_after_a_pull_that_changes_the_registry_writes_the_copy(self) -> None:
@@ -1091,7 +1046,7 @@ class KnivesRegistry(ToolsStep):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((self.checkout / "knives" / "repos.toml").read_text(), REGISTRY_V1)
-        self.assertFalse(self.copy().exists())
+        self.assertFalse(self.copy.exists())
         self.assertEqual(self.records(), [])
 
     @unittest.skipIf(os.geteuid() == 0, "root writes into a read-only directory")

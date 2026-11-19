@@ -29,10 +29,12 @@ What one run does:
   6. On every run that leaves HEAD at origin/main (in git mode, with no uncommitted change), after
      any fast-forward or jj move: `scripts/knives-registry-render --if-changed`. It renders
      knives/repos.toml into ~/.config/knives/repos.toml unless the copy is a plain file and the
-     sha256 the step recorded at its last render is the file's, so a merged change to the
-     registry reaches this machine with no person's command. A failed render is a condition and
-     stops nothing: the tools step still runs. A checkout with no scripts/knives-registry-render
-     (a main older than the step) or no knives/repos.toml skips it.
+     record the step wrote at its last render holds the file's sha256 and the oh-my-pi workspaces
+     path this run would write, so a merged change to the registry reaches this machine with no
+     person's command, and a copy rendered while the big local disk's directory was absent is
+     rendered again once it is there. A failed render is a condition and stops nothing: the tools
+     step still runs. A checkout with no scripts/knives-registry-render (a main older than the
+     step) or no knives/repos.toml skips it.
   7. After a fast-forward or marketplace-lock recovery, and on later runs until it passes at HEAD:
      `mise install`, `bun install --frozen-lockfile` in omp/plugins, marketplace catalog refresh and
      upgrade for registered marketplace plugins below the lowest version their committed lock entries
@@ -937,12 +939,14 @@ def run_registry_step(
     """Render knives/repos.toml into this machine's copy, ~/.config/knives/repos.toml, at HEAD
     (scripts/knives-registry-render --if-changed), shared by git mode and jj mode.
 
-    The render writes the copy when the copy is missing or not a plain file, or when the file's
-    sha256 is not the one it recorded beside the copy at its last render. So every run at HEAD
-    runs it, whatever the tools step does: a copy with no record (one only an install wrote) is
-    rendered once, and after that a run renders when the file changed, by any route. A checkout
-    with no render script or no knives/repos.toml has nothing to render. The run's footer names
-    a write of the copy, judged by the copy's inode and mtime before and after the render."""
+    The render writes the copy when the copy is missing or not a plain file, or when the record it
+    wrote beside the copy at its last render does not hold the file's sha256 and the oh-my-pi
+    workspaces path this run would write (the big local disk's directory where it exists). So
+    every run at HEAD runs it, whatever the tools step does: a copy with no record (one only an
+    install wrote) is rendered once, and after that a run renders when the file changed, by any
+    route, or the workspaces path did. A checkout with no render script or no knives/repos.toml
+    has nothing to render. The run's footer names a write of the copy, judged by the copy's inode
+    and mtime before and after the render."""
     judged.add("registry")
     render = repo / "scripts/knives-registry-render"
     if not render.exists() or not (repo / "knives/repos.toml").exists():
@@ -954,7 +958,7 @@ def run_registry_step(
     if written:
         facts["registry_written"] = True
     if code != 0:
-        # A render stopped after it replaced the copy (before its sha256 record) did write it.
+        # A render stopped after it replaced the copy (before its record) did write it.
         held = "was replaced before the render failed" if written else "keeps what it held"
         found["registry"] = (
             f"`scripts/knives-registry-render --if-changed` in {display_path(repo)} exited {code}:\n{tail(out)}"

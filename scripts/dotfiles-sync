@@ -9,10 +9,11 @@
 #
 # After the move, each host path runs the tools step on the machine it moved, in the same ssh
 # session for a remote host. It starts with `scripts/knives-registry-render --if-changed` in the
-# checkout, which renders its knives/repos.toml into ~/.config/knives/repos.toml and records the
-# source's sha256 beside it; it writes nothing while the copy is a plain file and the recorded
-# sha256 is the source's, and a checkout without the script skips it. Then `mise install` in the
-# checkout, then `bun install --frozen-lockfile` in omp/plugins when its package.json is there,
+# checkout, which renders its knives/repos.toml into ~/.config/knives/repos.toml and records
+# beside it the source's sha256 and the oh-my-pi workspaces path it wrote; it writes nothing while
+# the copy is a plain file and the record holds the source's sha256 and the path this run would
+# write, and a checkout without the script skips it. Then `mise install` in the checkout, then
+# `bun install --frozen-lockfile` in omp/plugins when its package.json is there,
 # with the mise binary and MISE_DATA_DIR (and MISE_CACHE_DIR where it sets one) that the
 # checkout's .bashrc gives a shell. It runs after every move that ends on main, also when main
 # brought nothing new, so a later sync installs a pin an earlier step did not. `mise install`

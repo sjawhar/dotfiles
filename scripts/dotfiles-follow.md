@@ -75,15 +75,19 @@ Follow restores the managed marketplace lock before it calls the sync.
 6. On every run that leaves HEAD at origin/main (in git mode, with no uncommitted change), after
    any fast-forward or jj move: `scripts/knives-registry-render --if-changed`, bounded by
    `--check-timeout` (180 s). It renders `knives/repos.toml` into `~/.config/knives/repos.toml`
-   as `installers/knives.sh` does, and records the sha256 of the file it rendered in
-   `~/.config/knives/repos.toml.source-sha256`. It writes nothing while the copy is a plain file
-   and that sha256 is the file's. So a merged change to the registry reaches the machine with no
-   person's command, and `scripts/leak-terms-check`, which reads the same copy, sees it too. A
-   copy that a person edited by hand is replaced when the file changes, as an install replaces
-   it, and a symlink at the copy's path is replaced by a plain file. A directory there is never
-   replaced: the render fails. The first run of this version renders once, since no sha256 is
-   recorded yet. A failed render is a condition and stops nothing: the tools step still runs. A
-   checkout with no `scripts/knives-registry-render` (a main older than the step) or no
+   as `installers/knives.sh` does, and records what the render depends on in
+   `~/.config/knives/repos.toml.source-sha256`: the sha256 of the file it rendered and the
+   oh-my-pi workspaces path it wrote (`/mnt/nvme/<home name>/omp-worktrees/branches` where the
+   big local disk's directory `/mnt/nvme/<home name>` exists, else `~/.worktrees/oh-my-pi`). It
+   writes nothing while the copy is a plain file and the record holds the file's sha256 and the
+   path this run would write. So a merged change to the registry reaches the machine with no
+   person's command, and `scripts/leak-terms-check`, which reads the same copy, sees it too; and
+   a copy rendered while that directory was absent is rendered again once it is there. A copy
+   that a person edited by hand is replaced when the file changes, as an install replaces it,
+   and a symlink at the copy's path is replaced by a plain file. A directory there is never
+   replaced: the render fails. The first run of this version renders once, since no record of
+   this form exists yet. A failed render is a condition and stops nothing: the tools step still
+   runs. A checkout with no `scripts/knives-registry-render` (a main older than the step) or no
    `knives/repos.toml` skips it.
 7. After a fast-forward or managed-lock recovery, and on later runs until it passes at HEAD:
    `mise install`, `bun install --frozen-lockfile` in `omp/plugins`, then, for each registered
@@ -169,9 +173,9 @@ never describes, commits, or pushes. Both modes restore only the follow-managed 
 before dirty-file checks and after plugin commands. Other edits are discarded only when origin/main
 already holds their bytes, right before the fast-forward. Apart from managed-lock recovery, a
 refusal leaves HEAD, the index and every file as they were. Outside the checkout, step 6 writes
-`~/.config/knives/repos.toml` and its sha256 record only when the copy is missing or not a plain
-file, or `knives/repos.toml` changed since the last render. A run that writes the copy logs it,
-and the footer of any message that run sends says so.
+`~/.config/knives/repos.toml` and its record only when the copy is missing or not a plain file,
+or `knives/repos.toml` or the workspaces path changed since the last render. A run that writes
+the copy logs it, and the footer of any message that run sends says so.
 
 ## The kept files: SECRET_FILES that git tracks
 
@@ -264,9 +268,13 @@ JSON text, so the installer reads them as stored.
 The jj cases use a real colocated jj checkout whose `@` holds two local files, and check that the
 files keep their bytes and nothing is pushed.
 The registry cases (`KnivesRegistry`, and `JjKnivesRegistry` in the jj module) run the real
-`scripts/knives-registry-render` and work out the copy it must leave without running it. A pull
-that changes `knives/repos.toml` writes the copy in the run that fast-forwards, and the next run
-writes nothing. A hand-edited copy stays until the file changes. The first run of this version at
-HEAD renders once. A read-only `~/.config/knives` opens `KNIVES REGISTRY NOT WRITTEN` and stops
-neither the fast-forward nor the tools step, and the next render clears it. A refused jj sync
-leaves that condition open.
+`scripts/knives-registry-render` and work out the copy it must leave without running it
+(`RegistryCopy`, which `test_dotfiles_tools` and `test_knives_installer` use too). A pull that
+changes `knives/repos.toml` writes the copy in the run that fast-forwards, and the next run writes
+nothing. A hand-edited copy stays until the file changes. A copy rendered while the big disk's
+directory was absent is rendered again once it is there, and the next run writes nothing; that
+case points `KNIVES_REGISTRY_NVME_ROOT`, which replaces `/mnt/nvme` in the render, at a scratch
+tree.
+The first run of this version at HEAD renders once. A read-only `~/.config/knives` opens
+`KNIVES REGISTRY NOT WRITTEN` and stops neither the fast-forward nor the tools step, and the next
+render clears it. A refused jj sync leaves that condition open.

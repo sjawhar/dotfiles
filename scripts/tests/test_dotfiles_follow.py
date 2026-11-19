@@ -1176,6 +1176,9 @@ release_branch = "sami"
 {OMP_WORKSPACES}
 """
 REGISTRY_V2 = REGISTRY_V1.replace('release_branch = "sami"', 'release_branch = "sami-2"')
+# The machine's copy of the registry and the render's record of what it depends on, under a HOME.
+REGISTRY_COPY = Path(".config/knives/repos.toml")
+REGISTRY_RECORD = Path(".config/knives/repos.toml.source-sha256")
 
 
 def add_registry_render(upstream: Path) -> None:
@@ -1188,23 +1191,33 @@ def add_registry_render(upstream: Path) -> None:
 
 class RegistryCopy:
     """$HOME/.config/knives as the render must leave it, worked out here, never by running the
-    render. Mixed into a Harness."""
+    render: the one oracle of the render, which test_dotfiles_follow_jj, test_dotfiles_tools and
+    test_knives_installer use too. Mixed into a test case whose `home` is the HOME the render runs
+    with; a method given HOME works it out for that home instead. `nvme_root` is where the render
+    looks for the big local disk's directory: /mnt/nvme, as when KNIVES_REGISTRY_NVME_ROOT is not
+    set; a case that sets that variable sets `nvme_root` to the same path."""
 
     home: Path
+    nvme_root = Path("/mnt/nvme")
 
     @property
     def copy(self) -> Path:
-        return self.home / ".config/knives/repos.toml"
+        return self.home / REGISTRY_COPY
 
     @property
-    def record(self) -> Path:
-        return self.home / ".config/knives/repos.toml.source-sha256"
+    def render_record(self) -> Path:
+        return self.home / REGISTRY_RECORD
 
-    def rendered(self, source: str) -> str:
-        """SOURCE with the oh-my-pi workspaces line set to this machine's path: the big disk's
-        directory, named for the home, where there is one, else ~/.worktrees/oh-my-pi in full."""
-        nvme = Path("/mnt/nvme") / self.home.name
-        where = f"{nvme}/omp-worktrees/branches" if nvme.is_dir() else f"{self.home}/.worktrees/oh-my-pi"
+    def workspaces(self, home: Path | None = None) -> str:
+        """The oh-my-pi workspaces path the render writes for HOME: the big disk's directory, named
+        for the home, where there is one, else ~/.worktrees/oh-my-pi in full."""
+        home = home or self.home
+        nvme = self.nvme_root / home.name
+        return f"{nvme}/omp-worktrees/branches" if nvme.is_dir() else f"{home}/.worktrees/oh-my-pi"
+
+    def rendered(self, source: str, home: Path | None = None) -> str:
+        """SOURCE with the oh-my-pi workspaces line set to HOME's path."""
+        where = self.workspaces(home)
         return "".join(
             f'workspaces = "{where}"\n' if line == OMP_WORKSPACES + "\n" else line
             for line in source.splitlines(keepends=True)
@@ -1216,10 +1229,16 @@ class RegistryCopy:
         st = path.stat()
         return st.st_ino, st.st_mtime_ns
 
-    def assert_copy_renders(self, source: str) -> None:
-        self.assertNotIn(OMP_WORKSPACES, self.rendered(source))
-        self.assertEqual(self.copy.read_text(), self.rendered(source))
-        self.assertEqual(self.record.read_text(), hashlib.sha256(source.encode()).hexdigest() + "\n")
+    def assert_copy_renders(self, source: str, home: Path | None = None) -> None:
+        """HOME's copy holds the render of SOURCE, and the record beside it what that render
+        depends on: SOURCE's sha256 and the workspaces path."""
+        home = home or self.home
+        # SOURCE holds the line the render rewrites, and the oracle rewrote it.
+        self.assertIn(OMP_WORKSPACES + "\n", source)
+        self.assertNotIn(OMP_WORKSPACES, self.rendered(source, home))
+        self.assertEqual((home / REGISTRY_COPY).read_text(), self.rendered(source, home))
+        sha = hashlib.sha256(source.encode()).hexdigest()
+        self.assertEqual((home / REGISTRY_RECORD).read_text(), f"sha256 {sha}\nworkspaces {self.workspaces(home)}\n")
 
 
 class KnivesRegistry(RegistryCopy, Harness):
@@ -1272,14 +1291,40 @@ class KnivesRegistry(RegistryCopy, Harness):
         self.pull_registry_v2()
         self.assertEqual(self.run_follow(now=1_000_600.0), [])
         self.assert_copy_renders(REGISTRY_V2)
-        written = (self.identity(self.copy), self.identity(self.record))
+        written = (self.identity(self.copy), self.identity(self.render_record))
         with unittest.mock.patch.object(FOLLOW, "log", wraps=FOLLOW.log) as logged:
             self.assertEqual(self.run_follow(now=1_001_200.0), [])
-        self.assertEqual((self.identity(self.copy), self.identity(self.record)), written)
+        self.assertEqual((self.identity(self.copy), self.identity(self.render_record)), written)
         rendered = [call.args[0] for call in logged.call_args_list if call.args[0].startswith("registry: ")]
         self.assertEqual(len(rendered), 1)
         self.assertIn("~/.config/knives/repos.toml unchanged:", rendered[0])
         self.assertTrue(rendered[0].endswith("; wrote nothing"), rendered[0])
+
+    def test_a_copy_rendered_without_the_big_disk_is_rendered_again_once_it_is_there(self) -> None:
+        # The render depends on the workspaces path it writes as well as on knives/repos.toml: a
+        # copy rendered while the big disk's directory was absent is written again once it is
+        # there, with the file unchanged, and the run after that writes nothing.
+        self.nvme_root = Path(self.tmp.name) / "nvme"
+        os.environ["KNIVES_REGISTRY_NVME_ROOT"] = str(self.nvme_root)
+        self.first_render()
+        self.assertIn(f'workspaces = "{self.home}/.worktrees/oh-my-pi"\n', self.copy.read_text())
+        before = (self.identity(self.copy), self.identity(self.render_record))
+        (self.nvme_root / self.home.name).mkdir(parents=True)
+        with unittest.mock.patch.object(FOLLOW, "log", wraps=FOLLOW.log) as logged:
+            self.assertEqual(self.run_follow(now=1_000_600.0), [])
+        self.assert_copy_renders(REGISTRY_V1)
+        big_disk = self.nvme_root / self.home.name / "omp-worktrees/branches"
+        self.assertIn(f'workspaces = "{big_disk}"\n', self.copy.read_text())
+        self.assertNotEqual(self.identity(self.copy), before[0])
+        self.assertNotEqual(self.identity(self.render_record), before[1])
+        sha = hashlib.sha256(REGISTRY_V1.encode()).hexdigest()
+        self.assertIn(
+            f"registry: knives-registry-render: wrote ~/.config/knives/repos.toml from knives/repos.toml (sha256 {sha[:12]})",
+            [call.args[0] for call in logged.call_args_list],
+        )
+        written = (self.identity(self.copy), self.identity(self.render_record))
+        self.assertEqual(self.run_follow(now=1_001_200.0), [])
+        self.assertEqual((self.identity(self.copy), self.identity(self.render_record)), written)
 
     def test_a_pull_that_changes_another_file_leaves_a_hand_edited_copy_as_it_is(self) -> None:
         self.first_render()
@@ -1304,13 +1349,13 @@ class KnivesRegistry(RegistryCopy, Harness):
         self.tools_passed(slow_sweep_at=999_000.0)
         self.copy.parent.mkdir(parents=True)
         self.copy.write_text("# what install.sh wrote from an older knives/repos.toml\n")
-        self.assertFalse(self.record.exists())
+        self.assertFalse(self.render_record.exists())
         self.assertEqual(self.run_follow(), [])
         self.assert_copy_renders(REGISTRY_V1)
         self.assertEqual(self.installs(), 0)
-        written = (self.identity(self.copy), self.identity(self.record))
+        written = (self.identity(self.copy), self.identity(self.render_record))
         self.assertEqual(self.run_follow(now=1_000_600.0), [])
-        self.assertEqual((self.identity(self.copy), self.identity(self.record)), written)
+        self.assertEqual((self.identity(self.copy), self.identity(self.render_record)), written)
         self.assertEqual(self.installs(), 0)
 
     @unittest.skipIf(os.geteuid() == 0, "root writes into a read-only directory")
@@ -1364,7 +1409,7 @@ class KnivesRegistry(RegistryCopy, Harness):
         self.assertIn("KNIVES REGISTRY NOT WRITTEN", messages[0])
         self.assertIn("cannot overwrite directory", messages[0])
         self.assertIn("~/.config/knives/repos.toml keeps what it held.", messages[0])
-        self.assertFalse(self.record.exists())
+        self.assertFalse(self.render_record.exists())
 
     def test_a_copy_that_links_to_a_directory_is_replaced_by_the_render(self) -> None:
         # The link itself is replaced by a plain file, and the directory it named is left as it was.

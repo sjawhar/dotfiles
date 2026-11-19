@@ -18,7 +18,6 @@ and one the copy of repos.toml the installer renders through scripts/knives-regi
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -28,6 +27,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+
+from scripts.tests.test_dotfiles_follow import OMP_WORKSPACES, RegistryCopy
 
 DOTFILES = Path(__file__).resolve().parents[2]
 INSTALLER = DOTFILES / "installers" / "knives.sh"
@@ -83,7 +84,7 @@ def real_knives() -> str:
     return found.stdout.strip() if found.returncode == 0 else ""
 
 
-class KnivesInstallerMigratedPush(unittest.TestCase):
+class KnivesInstallerMigratedPush(RegistryCopy, unittest.TestCase):
     def setUp(self) -> None:
         knives = real_knives()
         has_ledger = bool(knives) and subprocess.run(
@@ -117,7 +118,7 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
             registry.write(
                 '\n[repos.omp]\nupstream = "https://github.com/sjawhar/legion-smoke-omp"\n'
                 'origin = "https://github.com/sjawhar/legion-smoke-omp-installer-test"\n'
-                'workspaces = "~/.worktrees/oh-my-pi"\n'
+                f"{OMP_WORKSPACES}\n"
             )
         # An existing knives user: one statement an older knives kept in state.json.
         (self.config / "state.json").write_text('{"tracked_pulls": {"smoke/feat/x": 544}}', encoding="utf-8")
@@ -284,28 +285,19 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
     def test_an_install_renders_the_registry_and_an_unchanged_source_rewrites_nothing(self) -> None:
         # Given: a new machine, and a committed registry with oh-my-pi's workspaces line.
         (self.config / "state.json").unlink()
-        source = (self.dotfiles / "knives" / "repos.toml").read_bytes()
-        # The machine's worktree directory: the big disk's, named for the home, where it exists.
-        nvme = Path("/mnt/nvme") / self.home.name
-        worktrees = nvme / "omp-worktrees" / "branches" if nvme.is_dir() else self.home / ".worktrees" / "oh-my-pi"
-        expected = source.replace(
-            b'\nworkspaces = "~/.worktrees/oh-my-pi"\n', f'\nworkspaces = "{worktrees}"\n'.encode()
-        )
-        self.assertNotEqual(expected, source)
+        source = (self.dotfiles / "knives" / "repos.toml").read_text(encoding="utf-8")
 
         # When: the installer joins it.
         result = self.install()
 
-        # Then: the copy is the render, and the record holds the sha256 of the source it rendered.
-        copy = self.config / "repos.toml"
-        record = self.config / "repos.toml.source-sha256"
+        # Then: the copy is the render, and the record holds what the render depends on
+        # (RegistryCopy works both out).
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertFalse(copy.is_symlink())
-        self.assertEqual(copy.read_bytes(), expected)
-        self.assertEqual(record.read_text(encoding="utf-8").strip(), hashlib.sha256(source).hexdigest())
+        self.assertFalse(self.copy.is_symlink())
+        self.assert_copy_renders(source)
 
         # When: the render step runs again with --if-changed, as a pull runs it.
-        before = [(p.stat().st_ino, p.stat().st_mtime_ns) for p in (copy, record)]
+        before = [self.identity(p) for p in (self.copy, self.render_record)]
         again = subprocess.run(
             [str(self.dotfiles / "scripts" / "knives-registry-render"), "--if-changed"],
             capture_output=True, text=True, env={**self.env, "DOTFILES_DIR": str(self.dotfiles)}, check=False,
@@ -314,7 +306,7 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         # Then: it succeeds and writes neither file.
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
         self.assertIn("unchanged", again.stdout)
-        self.assertEqual([(p.stat().st_ino, p.stat().st_mtime_ns) for p in (copy, record)], before)
+        self.assertEqual([self.identity(p) for p in (self.copy, self.render_record)], before)
 
 
 if __name__ == "__main__":
