@@ -16,7 +16,7 @@ You are read-only. Write nothing except the report file. Send no message to any 
 
 ## Tools
 
-- Read the `using-transcript-store` skill, then use `tq` (recipe below) to find the user's messages, the session's reports and its tool calls. Open the raw transcript only at the FILE:LINE that `tq` gives. The store lags the live files (tq warns when a host's last load is old): read the raw file after the store's last line for the tail.
+- Read skill://using-transcript-store, then use `tq` (recipe below) to find the user's messages, the session's reports and its tool calls. Open the raw transcript only at the FILE:LINE that `tq` gives. The store lags the live files (tq warns when a host's last load is old): read the raw file after the store's last line for the tail.
 - `dispatch read --issue KEY`, `dispatch open-asks`, `dispatch search --query '...'` to check whether an item reached Dispatch. A `dispatch ask` tool call in the transcript is an ask the session opened.
 - `gh pr view`, `git log` to check a claim of "merged" or "committed".
 - Read only this session's transcript and its own subagents' transcripts. Do not read other audits of this session.
