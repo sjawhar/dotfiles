@@ -20,7 +20,7 @@ python3 $S/extract-dispatch-human.py --since '<start>' --out dispatch-events.jso
 ```
 
 - Pick the window by his messages, not by active time: a window holding none returns tool trivia.
-- `enumerate-messages.py` reads the transcript store (`using-transcript-store`). Do not grep the sessions tree: a grep finds the phrase you guessed, not the message you missed. Read by hand the sessions the store does not hold, or name them as unread.
+- `enumerate-messages.py` reads the transcript store (`using-transcript-store`). Do not grep the sessions tree: a grep finds the phrase you guessed, not the message you missed. The store holds the hosts `tq sql "SELECT host, count() FROM sessions GROUP BY host"` lists, with Claude Code and Codex logs from some of them; read by hand the sessions of any other host, or name them as unread.
 - `fetch-legion.py` prints how many Legion volumes no pod mounts. Put that count in the report as unread; do not create a pod to read them.
 - Print the enumerator's counts before any reading: messages to read, rows excluded per reason, and whether Legion was read.
 - Open five excluded rows per reason and judge each; put any real message of his back into `messages.jsonl`. `agent-sent` and `single-prompt` exclude a real message he writes once to a fresh session.

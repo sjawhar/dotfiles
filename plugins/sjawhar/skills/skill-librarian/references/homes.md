@@ -6,7 +6,7 @@ A preference of Sami's is not a company rule. A rule is company-wide only when a
 - A company-wide Theorem rule: the `working-at-theorem` skill in theorem-labs/verification-skills. Every PR bumps the version; tag after the merge.
 - Sami's rule or preference beyond one repository: `~/.dotfiles/.claude/CLAUDE.md`, after his yes. No Theorem name, repository, person, operations contact or Dispatch project there. Quote Sami in the commit message, and publish with `scripts/dotfiles-publish`, which waits for his review.
 - A fact about Sami's people, places or phrasing, or Theorem's people, places or tools: memory, with `retain`.
-- A tool fact: `~/.dotfiles/plugins/sjawhar/skills/using-<tool>/SKILL.md`, after his yes; create or extend it. If a vendor skill for the tool exists, leave it unchanged and name it there.
+- A tool fact: `~/.dotfiles/plugins/sjawhar/skills/using-<tool>/SKILL.md`, after his yes; create or extend it. When a theorem-labs/verification-skills skill covers the tool (`using-transcript-store` for `tq`), that skill is the fact's home instead. If a vendor skill for the tool exists, leave it unchanged and name it there.
 - A blocker a skill or document covers: no write. `envoy_send` the pointer; ledger `replied`.
 - Already covered by a home, seen in one session only and not Sami's words, or not checkable by a command, file read or reproduction: no write. Ledger `dropped`, with the reason.
 
