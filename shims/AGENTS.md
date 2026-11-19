@@ -317,8 +317,14 @@ behavior before handing the call to the real one. One file is data: `person-name
   whatever the name (`id`, `subjectId`, `inReplyTo`, `branch.id`, `labelIds`,
   `stateInput.duplicateIssueId`), but `clientMutationId`, whose value GitHub only echoes back; and
   every repository it names by the string `owner/name` of createCommitOnBranch's input field
-  `repositoryNameWithOwner`. Each node's repository is read with one `nodes(ids:)` read through
-  this shim, for every node type of GitHub's schema that has a repository (an issue, a pull
+  `repositoryNameWithOwner`. A node id is a value GitHub reads as one, as measured on 2026-11-19
+  (dispatch://INFRA-3365/artifact/node-id-forms-md): a new-form id (`PRRC_kwDO…`) with any
+  trailing run of NUL, tab, line feed, vertical tab, form feed, carriage return and space, or with
+  the base64 padding its payload needs, is that id, and a legacy id (`MDEwOl…`) is any value that
+  Ruby's lenient base64 decoding, which skips characters outside the alphabet and stops at the
+  padding, reads as `<number>:<Type>`; a value of an id's shape that names no node is an id too,
+  whose node read gives no repository. Each node's repository is read with one `nodes(ids:)` read
+  through this shim, for every node type of GitHub's schema that has a repository (an issue, a pull
   request, a comment, a review thread, a label, a milestone, a ref, a commit, a release, the
   repository itself, and the others the schema lists), and for a discussion comment, which has no
   repository of its own, its discussion's. A field's text is judged as public when any
@@ -328,13 +334,13 @@ behavior before handing the call to the real one. One file is data: `person-name
   refused, such as `updateIssue` of a private issue marked as a duplicate of a public one: that is
   the accepted cost. A node id anywhere else (inside a body or a message, a comment,
   `clientMutationId`, a variable the operation does not declare) is no target and is ignored. A
-  `repositoryNameWithOwner` that is not `owner/name`, a value of an argument named `id` or ending
-  in `Id` or `Ids` that is neither null nor a node id, an account named by login (an argument named
-  `login` or ending in `Login` or `Logins`, such as createSponsorsTier's `sponsorableLogin`, whose
-  description goes to that account's public Sponsors page) that is not null, a variable the
-  document uses more than once whose value holds a node id or a `repositoryNameWithOwner`, and a
-  field with no target (a status change) leave the document unresolved, and so do several
-  documents and one that does not parse:
+  `repositoryNameWithOwner` that is not `owner/name`, a value of an argument named `id`,
+  `inReplyTo`, `allowedActors` or `reviewers` or ending in `Id` or `Ids` that is neither null nor a
+  node id, an account named by login (an argument named `login` or ending in `Login` or `Logins`,
+  such as createSponsorsTier's `sponsorableLogin`, whose description goes to that account's public
+  Sponsors page) that is not null, a variable the document uses more than once whose value holds a
+  node id or a `repositoryNameWithOwner`, and a field with no target (a status change) leave the
+  document unresolved, and so do several documents and one that does not parse:
   such a call is judged whole, as one target, `a GraphQL mutation whose repository could not be
   read, read as public`, with no node read. A directive is read past, not read as public: GitHub's
   only executable directives are `@skip` and `@include`, and a variable one uses counts as used.
@@ -343,7 +349,9 @@ behavior before handing the call to the real one. One file is data: `person-name
   so a status change holding a listed term went out as a write to a private repository; until
   review round 4 only an argument whose name ends in `Id` or `Ids` gave a target, so a listed term
   went to a public issue changed by `id`, judged by the private issue its `duplicateIssueId` names,
-  and a label, a milestone or a ref gave no repository. Each target's visibility is read through
+  and a label, a milestone or a ref gave no repository; until test round 9 an id was one only as
+  written exactly, so a reply by `inReplyTo` to a public comment whose id ended in a space went
+  out, judged by the private pull request. Each target's visibility is read through
   `scripts/github-repo-visibility` (the
   leak check's per-repository
   cache, else one gh read, whose answer it caches). A text counts only for the targets it goes to:

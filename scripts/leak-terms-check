@@ -3361,11 +3361,15 @@ def graphql_values(path: str, document: str) -> list[GhValue]:
 # (createCommitOnBranch's branch, a CommittableBranch), and an `owner/name` as GitHub reads one there.
 GRAPHQL_NAMED = "repositoryNameWithOwner"
 GH_OWNER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+")
-# The name of an argument or input-object field that takes a node id: `id` (updateIssue's, CommittableBranch's) or a
-# name that ends in `Id` or `Ids` (subjectId, labelIds). A value there that is neither null nor a node id leaves a
-# GraphQL call unresolved (gh_field_targets); the name chooses no target. clientMutationId is not one: GitHub only
-# echoes its value back.
-GRAPHQL_ID_NAME = re.compile(r"id|[_0-9A-Za-z]*(?:Id|Ids)")
+# The name of an argument or input-object field that takes a node id: `id` (updateIssue's, CommittableBranch's), a
+# name that ends in `Id` or `Ids` (subjectId, labelIds), and the three ID-typed input fields of GitHub's schema whose
+# name is neither, addPullRequestReviewComment's `inReplyTo`, DismissalRestrictionInput's `allowedActors` and
+# UpdateEnvironmentInput's `reviewers` (the tester's introspection, dispatch://INFRA-3365/artifact/tester-break9-run-md,
+# section 3). A value there that is neither null nor a node id (gh_node_id) leaves a GraphQL call unresolved
+# (gh_field_targets); the name chooses no target. clientMutationId is not one: GitHub only echoes its value back. Until
+# test round 9 of dispatch://INFRA-3365 those three were not read, so a value of one that was no node id was no target
+# and left nothing unresolved.
+GRAPHQL_ID_NAME = re.compile(r"id|inReplyTo|allowedActors|reviewers|[_0-9A-Za-z]*(?:Id|Ids)")
 # The name of an argument or input-object field that names an account by its login (`sponsorableLogin`,
 # `repositoryOwnerLogin`, `login`, `adminLogins`). The check cannot read where such an account's text goes, so a
 # value there that is not null leaves a GraphQL call unresolved (gh_field_targets): createSponsorsTier publishes its
@@ -3764,9 +3768,6 @@ def gh_own_name(target: GhTarget, view: str, span: Span) -> bool:
     return any(found.start() <= span.start and span.end <= found.end() for found in own.finditer(view))
 
 
-# A GitHub node id (`PR_kwDO…`, a legacy `MDExOl…`), which gh_graphql takes as a target of a field only as the whole
-# string value of one of the field's arguments or input-object fields (gh_field_targets).
-GH_NODE_ID = re.compile(r"\b(?:[A-Z][A-Za-z]{0,7}_[A-Za-z0-9_-]{6,}|MD[A-Za-z0-9+/]{8,}={0,2})(?![A-Za-z0-9_-])")
 # A mutation that makes a repository: the three of GitHub's GraphQL schema that set a repository's visibility,
 # createRepository and cloneTemplateRepository (`visibility`) and startRepositoryMigration (`targetRepoVisibility`).
 GH_GRAPHQL_NEW_REPOSITORY = re.compile(r"\b(?:createRepository|cloneTemplateRepository|startRepositoryMigration)\b")
@@ -3804,9 +3805,9 @@ GH_NODES_JQ = ('.data.nodes[] | (.nameWithOwner // .repository.nameWithOwner // 
 @dataclass(frozen=True)
 class GhMutation:
     """One top-level field of a GraphQL mutation the check resolves, as gh_reach reads its targets (gh_graphql): NAMES,
-    the `owner/name` of each repository it names by name (GRAPHQL_NAMED); IDS, each node id that is the whole string
-    value of one of its arguments or input-object fields but clientMutationId (gh_field_targets), whose repositories
-    are its targets too."""
+    the `owner/name` of each repository it names by name (GRAPHQL_NAMED); IDS, each node id GitHub reads a whole string
+    value of one of its arguments or input-object fields but clientMutationId as (gh_node_id, gh_field_targets), whose
+    repositories are its targets too."""
 
     names: tuple[str, ...] = ()
     ids: tuple[str, ...] = ()
@@ -3876,16 +3877,94 @@ def gh_graphql_inputs(contents: Sequence[tuple[GhText, str]], graphql: Callable[
     return documents, given
 
 
+# A GitHub node id as GitHub reads one (gh_node_id), measured, not guessed: on 2026-11-19 read-only `node(id:)`
+# queries through gh sent 278 spellings of eight known ids, each as a GraphQL variable
+# (dispatch://INFRA-3365/artifact/node-id-forms-md, test round 9). Run on each spelling offline, this rule calls every
+# one GitHub resolves an id, keys each new-form one as GitHub resolves it, and calls 34 that GitHub refuses ids, so it
+# errs only toward an id: a value it calls an id that names no node gets no repository from the node read, and its
+# field is read as public.
+#
+# A new-form id (`PRRC_kwDO…`, `I_kwDO…`, `R_kgDO…`: a type prefix, `_` and a url-safe base64 payload) resolves
+# followed by any run of the characters Ruby's String#rstrip takes off (GH_NODE_ID_SPACE: NUL, tab, line feed, vertical
+# tab, form feed, carriage return and space, mixed and repeated); by the base64 padding that makes the payload's length
+# a multiple of four (`==` after a payload of length 2 mod 4, `=` after one of 3 mod 4); and by that padding and then
+# such characters. It is refused with any other padding, with whitespace before the padding, followed by a Unicode
+# space (U+00A0, U+2003, U+3000) or by any other character, with any character before it or whitespace inside it,
+# truncated, with any change of case, with `-` for its `_`, and with `+` and `/` for `-` and `_`. GH_NEW_NODE_ID, after
+# those trailing characters are taken off, calls an id none that GitHub refuses for its form (its padding, whitespace, a
+# Unicode space, a character before it, `-` for `_`, a prefix in lower case, `+` or `/`); 24 of the 34 it calls ids are
+# of an id's shape but name no node (characters added or one taken off, the payload's case changed), which no rule of
+# form can tell from an id.
+#
+# A legacy id (`MDEwOlJl…`, base64 of `010:Repository<number>` or `05:Issue<number>`) GitHub decodes as Ruby's lenient
+# `unpack1("m")` does (ruby_m): a character outside the base64 alphabet is skipped anywhere, leading and inside
+# included; `=` in the third or fourth place of a quantum ends the decoding, so text after the padding is ignored; and
+# GitHub's number parse stops at the bytes that base64 characters past the number's digits decode to. GH_LEGACY_NODE_ID
+# on that decoding of the value, as written or with `-` and `_` read as `+` and `/`, gives the other 10 of the 34: five
+# that hold a `_`, and five that decode to another name or number (truncated, its case changed, an `=` inside it, base64
+# characters added). Such an id goes to the node read as written, for GitHub to decode as it does.
+#
+# Until test round 9 of dispatch://INFRA-3365 an id was one only as written exactly, so `inReplyTo: "<public comment
+# id> "`, or `-F reply=@file` whose file ends in a line feed, was no target, and the field was judged by a private side
+# reference alone.
+GH_NODE_ID_SPACE = "\0\t\n\v\f\r "
+GH_NEW_NODE_ID = re.compile(r"([A-Z][A-Za-z]{0,7})_([A-Za-z0-9_-]{6,})(={0,2})")
+GH_LEGACY_NODE_ID = re.compile(rb"\d+:[A-Z][A-Za-z]*")
+GH_URL_SAFE_BASE64 = str.maketrans("-_", "+/")
+BASE64_VALUES = {c: i for i, c in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")}
+
+
+def ruby_m(s: str) -> bytes:
+    """Ruby's lenient String#unpack1("m"), as pack.c reads it: characters outside the alphabet are skipped, and '='
+    in the third or fourth place of a quantum ends the decoding."""
+    out = bytearray()
+    i = 0
+    n = len(s)
+    while i < n:
+        q = []
+        for place in range(4):
+            while i < n and s[i] not in BASE64_VALUES:
+                if place >= 2 and s[i] == "=":
+                    break
+                i += 1
+            if i >= n or (place >= 2 and s[i] == "="):
+                break
+            q.append(BASE64_VALUES[s[i]])
+            i += 1
+        if len(q) == 4:
+            out += bytes([(q[0] << 2 | q[1] >> 4) & 255, (q[1] << 4 | q[2] >> 2) & 255, (q[2] << 6 | q[3]) & 255])
+            continue
+        if len(q) >= 2:
+            out.append((q[0] << 2 | q[1] >> 4) & 255)
+        if len(q) == 3:
+            out.append((q[1] << 4 | q[2] >> 2) & 255)
+        break
+    return bytes(out)
+
+
+def gh_node_id(value: str) -> str | None:
+    """The node id GitHub reads VALUE as, else None: a new-form id without the trailing whitespace and the padding
+    GitHub reads past (GH_NEW_NODE_ID), as the node read and the fakes of the tests key it; or a legacy id
+    (GH_LEGACY_NODE_ID), as written, which the node read sends for GitHub to decode."""
+    new = GH_NEW_NODE_ID.fullmatch(value.rstrip(GH_NODE_ID_SPACE))
+    if new and (not new[3] or (len(new[2]) + len(new[3])) % 4 == 0):
+        return f"{new[1]}_{new[2]}"
+    if any(GH_LEGACY_NODE_ID.match(ruby_m(spelling)) for spelling in (value, value.translate(GH_URL_SAFE_BASE64))):
+        return value
+    return None
+
+
 def gh_field_targets(arguments: Sequence[GraphqlLeaf], tokens: Sequence[tuple[str, str]],
                      given: Mapping[str, Sequence[GhLeaf]], times: Mapping[str, int]) -> GhMutation | None:
     """The targets of one top-level field of a GraphQL mutation (gh_graphql), read from the leaves of its arguments
     (ARGUMENTS, in TOKENS; graphql_parses), a variable's leaves those the call gives it (GIVEN, gh_graphql_inputs): each
-    node id that is the whole string value of one of them, whatever its name but clientMutationId, and each `owner/name`
-    GRAPHQL_NAMED takes. None when the field leaves the call unresolved: a value of GRAPHQL_NAMED that is not an
-    `owner/name`; a value of an argument GRAPHQL_LOGIN_NAME names that is not null, since the check cannot read where an
-    account named by login takes the text; a value of an argument GRAPHQL_ID_NAME names that is neither null nor a node
-    id, a guard that adds refusals and chooses no target; a variable the document uses more than once (TIMES) whose
-    value holds a node id or a GRAPHQL_NAMED value; and a field with no target."""
+    string value of one of them that GitHub reads whole as a node id (gh_node_id), as that id, whatever its name but
+    clientMutationId, and each `owner/name` GRAPHQL_NAMED takes. None when the field leaves the call unresolved: a
+    value of GRAPHQL_NAMED that is not an `owner/name`; a value of an argument GRAPHQL_LOGIN_NAME names that is not
+    null, since the check cannot read where an account named by login takes the text; a value of an argument
+    GRAPHQL_ID_NAME names that is neither null nor a node id, a guard that adds refusals and chooses no target; a
+    variable the document uses more than once (TIMES) whose value holds a node id or a GRAPHQL_NAMED value; and a field
+    with no target."""
     names: list[str] = []
     ids: list[str] = []
     for argument in arguments:
@@ -3896,7 +3975,8 @@ def gh_field_targets(arguments: Sequence[GraphqlLeaf], tokens: Sequence[tuple[st
             leaves = [leaf if leaf.name is not None else replace(leaf, name=argument.name)
                       for leaf in given[argument.variable]]
             if times[argument.variable] > 1 and any(
-                    not leaf.null and (leaf.name == GRAPHQL_NAMED or GH_NODE_ID.fullmatch(leaf.string or ""))
+                    not leaf.null and (leaf.name == GRAPHQL_NAMED
+                                       or (leaf.string is not None and gh_node_id(leaf.string) is not None))
                     for leaf in leaves):
                 return None
         for leaf in leaves:
@@ -3908,8 +3988,8 @@ def gh_field_targets(arguments: Sequence[GraphqlLeaf], tokens: Sequence[tuple[st
                 if leaf.string is None or not GH_OWNER_NAME.fullmatch(leaf.string):
                     return None
                 names.append(leaf.string.lower())
-            elif leaf.string is not None and GH_NODE_ID.fullmatch(leaf.string):
-                ids.append(leaf.string)
+            elif leaf.string is not None and (node := gh_node_id(leaf.string)) is not None:
+                ids.append(node)
             elif GRAPHQL_ID_NAME.fullmatch(leaf.name):
                 return None
     if not (names or ids):
@@ -3926,17 +4006,17 @@ def gh_graphql(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText
     the document is one mutation operation, with no fragment of any kind (graphql_mutation); every variable the call
     gives (gh_graphql_inputs) is one the operation declares, and every variable the document uses is one the call
     gives; and each field's targets come from its own input (gh_field_targets). A field's targets are the repository
-    of every node id that is the whole string value of one of its arguments or input-object fields, at any depth, list
-    items included, whatever the argument's name but clientMutationId, whose value GitHub only echoes back; and every
-    repository it names by the input field GRAPHQL_NAMED (createCommitOnBranch's branch). A declared variable is read
-    as the call gives it. No list of argument names says which one is the subject: a field that changes one node and
-    refers to another (updateIssue's `id` and `stateInput.duplicateIssueId`, addPullRequestReviewComment's
-    `pullRequestId` and `inReplyTo`, an `agentAssignment.targetRepositoryId`, createCommitOnBranch's `branch.id` and
-    `branch.repositoryNameWithOwner`) has both as targets, and its text is judged as public when any of its targets is
-    public or any of its node ids does not resolve (gh_reach), a node with no repository among them (a User, an
-    Organization, a ProjectV2; GH_NODES_QUERY). The accepted cost: a write to a private repository that holds a listed
-    term and also refers to a public node is refused, such as updateIssue of a private issue marked as a duplicate of
-    a public one.
+    of every node id GitHub reads a whole string value of one of its arguments or input-object fields as (gh_node_id:
+    trailing whitespace and padding included, as measured), at any depth, list items included, whatever the argument's
+    name but clientMutationId, whose value GitHub only echoes back; and every repository it names by the input field
+    GRAPHQL_NAMED (createCommitOnBranch's branch). A declared variable is read as the call gives it. No list of argument
+    names says which one is the subject: a field that changes one node and refers to another (updateIssue's `id` and
+    `stateInput.duplicateIssueId`, addPullRequestReviewComment's `pullRequestId` and `inReplyTo`, an
+    `agentAssignment.targetRepositoryId`, createCommitOnBranch's `branch.id` and `branch.repositoryNameWithOwner`) has
+    both as targets, and its text is judged as public when any of its targets is public or any of its node ids does not
+    resolve (gh_reach), a node with no repository among them (a User, an Organization, a ProjectV2; GH_NODES_QUERY).
+    The accepted cost: a write to a private repository that holds a listed term and also refers to a public node is
+    refused, such as updateIssue of a private issue marked as a duplicate of a public one.
 
     A value that should hold a target but does not, an account named by login (GRAPHQL_LOGIN_NAME), a variable the
     document uses more than once whose value holds one, and a field with no target leave the call unresolved
@@ -3950,7 +4030,9 @@ def gh_graphql(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText
     listed term; until its review round 3 a node id in a comment, in clientMutationId or in an undeclared variable was
     a target too, and a field inside a fragment took the targets of the fields beside it; until its review round 4
     only an argument whose name ends in `Id` or `Ids` gave a target, so `updateIssue(input: {id: <public issue>, body:
-    <term>, stateInput: {duplicateIssueId: <private issue>}})` went out, judged by the private issue alone."""
+    <term>, stateInput: {duplicateIssueId: <private issue>}})` went out, judged by the private issue alone; until its
+    test round 9 an id was one only as written exactly, so a public comment's id that `inReplyTo` took with a trailing
+    space went out the same way, judged by the private pull request beside it."""
     views = [view for piece, text in contents if piece.part != "key"
              for view in dict.fromkeys((text, escapes_decoded(text)))]
     makes = any(GH_GRAPHQL_NEW_REPOSITORY.search(view) for view in views)
@@ -4033,7 +4115,8 @@ def gh_node_repositories(ids: Sequence[str]) -> dict[str, str] | None:
     (GH_NODES_QUERY, GH_NODES_JQ) through this checkout's shims/gh: that of every node of a type with a repository,
     and a DiscussionComment's discussion's, and "" for one of a type with none (a User, an Organization, a ProjectV2),
     whose field gh_reach then reads as public.
-    None when the read fails."""
+    None when the read fails, and when an id is one no argument can carry (a NUL, which a legacy id can hold and GitHub
+    skips, gh_node_id), so that its field is read as public."""
     gh = Path(__file__).resolve().parent.parent / "shims" / "gh"
     fields = [argument for node in ids for argument in ("-f", f"ids[]={node}")]
     try:
@@ -4041,7 +4124,7 @@ def gh_node_repositories(ids: Sequence[str]) -> dict[str, str] | None:
             [str(gh), "api", "graphql", "-f", f"query={GH_NODES_QUERY}", *fields, "--jq", GH_NODES_JQ],
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
     lines = [line.strip() for line in completed.stdout.splitlines()]
     if completed.returncode != 0 or len(lines) != len(ids):

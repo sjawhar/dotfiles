@@ -1598,6 +1598,100 @@ class GhLeakTerms(unittest.TestCase):
         self.setUp_calls()
         self.assert_sent(self.run_gh(argv), argv)
 
+    def test_a_value_is_a_node_id_exactly_when_github_reads_it_as_one(self) -> None:
+        # GitHub reads a node id as measured on 2026-11-19 (gh_node_id,
+        # dispatch://INFRA-3365/artifact/node-id-forms-md): a new-form id past any trailing run of Ruby's whitespace
+        # (NUL, tab, line feed, vertical tab, form feed, carriage return, space) and past the base64 padding its payload
+        # needs, and a legacy id as Ruby's lenient base64 decoding reads it, text after its padding ignored. Such a value
+        # is a target, the node GitHub reads it as; any other value of a name that takes a node id, inReplyTo's too,
+        # leaves the call unresolved, read as public. Until test round 9 of dispatch://INFRA-3365 an id was one only as
+        # written exactly, so an honest updateIssue whose id came from a file ending in a line feed was refused, and a
+        # reply by such an id to a public comment went out.
+        legacy = {PUBLIC: "MDU6SXNzdWUxMDAwMQ== (the issue)",  # 05:Issue10001, then text past its padding
+                  PRIVATE: "MDU6SXNzdWUyMDAwMQ== (the issue)"}  # 05:Issue20001
+        self.nodes_of_types({
+            "I_kwDOygo10001": (YGO, "Issue RepositoryNode"), "I_kwDOpriv20001": (PRIVATE, "Issue RepositoryNode"),
+            "PR_kwDOpriv20003": (PRIVATE, "PullRequest RepositoryNode"),
+            "PRRC_kwDOpub10004": (PUBLIC, "PullRequestReviewComment RepositoryNode"),
+            "PRRC_kwDOpriv20004": (PRIVATE, "PullRequestReviewComment RepositoryNode"),
+            # Payloads of 14 characters, 2 mod 4, which GitHub reads with `==` after them and not with `=`.
+            "PRRC_kwDOpub1000444": (PUBLIC, "PullRequestReviewComment RepositoryNode"),
+            "PRRC_kwDOpriv200044": (PRIVATE, "PullRequestReviewComment RepositoryNode"),
+            # The node read sends a legacy id as the call gives it, for GitHub to decode.
+            legacy[PUBLIC]: (PUBLIC, "Issue RepositoryNode"), legacy[PRIVATE]: (PRIVATE, "Issue RepositoryNode")})
+        env = self.ygo_fork()
+        self.answer(YGO, "public")
+        # The architect's row: an honest updateIssue whose id `-F i=@file` reads from a file ending in a line feed, as
+        # `echo "$id" > file` writes it, is judged by its issue's repository.
+        update = "query=mutation($i: ID!, $b: String) { updateIssue(input: {id: $i, body: $b}) { issue { id } } }"
+        for case, issue, text, refused in (("the destination's own name", "I_kwDOygo10001", f"see {YGO}", False),
+                                           ("a term of the list", "I_kwDOygo10001", "Fixes INFRA-1", True),
+                                           ("a global term, private", "I_kwDOpriv20001", TEXT.strip(), False)):
+            issue_file = self.file("issue.txt", f"{issue}\n")
+            argv = ["api", "graphql", "-f", update, "-F", f"i=@{issue_file}", "-f", f"b={text}"]
+            with self.subTest(write="updateIssue, -F i=@file", case=case):
+                self.setUp_calls()
+                result = self.run_gh(argv, env=env)
+                if refused:
+                    self.assert_refused(result, "--raw-field b", "INFRA-", YGO_LIST, line=1)
+                    self.assertIn(f"to {YGO} (public):", result.stderr.decode())
+                else:
+                    self.assert_sent(result, argv)
+
+        body = f"see {CANARY}"
+
+        def reply(comment: str) -> list[str]:
+            return ["api", "graphql", "-f", 'query=mutation { addPullRequestReviewComment(input: {pullRequestId: '
+                                            '"PR_kwDOpriv20003", inReplyTo: "%s", body: "%s"}) { comment { id } } }'
+                                            % (comment, body)]
+
+        variables = ("mutation($reply: ID, $body: String) { addPullRequestReviewComment(input: {pullRequestId: "
+                     '"PR_kwDOpriv20003", inReplyTo: $reply, body: $body}) { comment { id } } }')
+
+        def by_input(name: str, document: str, given: dict[str, str]) -> list[str]:
+            # An --input body, whose JSON can carry a NUL as `\u0000`; an argument cannot carry one.
+            return ["api", "graphql", "--input", self.file(name, json.dumps({"query": document, "variables": given}))]
+
+        def update_by(issue: str) -> list[str]:
+            return ["api", "graphql", "-f",
+                    'query=mutation { updateIssue(input: {id: "%s", body: "%s"}) { issue { id } } }' % (issue, body)]
+
+        string_3, unresolved = "--raw-field query string 3", f"to {UNRESOLVED}"
+        # (name, argv, the field the refusal names, a target it shows; None for a call that goes out).
+        for name, argv, field, shown in (
+                ("== after a payload of 2 mod 4, a public comment", reply("PRRC_kwDOpub1000444=="), string_3,
+                 f"{PUBLIC} (public)"),
+                ("== after a payload of 2 mod 4, a private comment", reply("PRRC_kwDOpriv200044=="), "", None),
+                ("= after a payload of 2 mod 4", reply("PRRC_kwDOpriv200044="), string_3, unresolved),
+                ("a trailing no-break space", reply("PRRC_kwDOpriv20004\u00a0"), string_3, unresolved),
+                ("a leading space", reply(" PRRC_kwDOpriv20004"), string_3, unresolved),
+                ("a trailing carriage return, a public comment",
+                 ["api", "graphql", "-f", f"query={variables}", "-f", "reply=PRRC_kwDOpub10004\r",
+                  "-f", f"body={body}"], "--raw-field body", f"{PUBLIC} (public)"),
+                ("a trailing carriage return, a private comment",
+                 ["api", "graphql", "-f", f"query={variables}", "-f", "reply=PRRC_kwDOpriv20004\r",
+                  "-f", f"body={body}"], "", None),
+                ("a trailing NUL, a public comment",
+                 by_input("nul-pub.json", variables, {"reply": "PRRC_kwDOpub10004\0", "body": body}),
+                 "--input nul-pub.json .variables.body", f"{PUBLIC} (public)"),
+                ("a trailing NUL, a private comment",
+                 by_input("nul-priv.json", variables, {"reply": "PRRC_kwDOpriv20004\0", "body": body}), "", None),
+                ("a legacy id with text past its padding, a public issue", update_by(legacy[PUBLIC]),
+                 "--raw-field query string 2", f"{PUBLIC} (public)"),
+                ("a legacy id with text past its padding, a private issue", update_by(legacy[PRIVATE]), "", None),
+                # GitHub skips a NUL in a legacy id, which no argument of the node read can carry: the field is unread.
+                ("a legacy id with a NUL",
+                 by_input("nul-legacy.json", update.removeprefix("query="), {"i": legacy[PRIVATE] + "\0", "b": body}),
+                 "--input nul-legacy.json .variables.b", unresolved)):
+            with self.subTest(write=name):
+                self.setUp_calls()
+                result = self.run_gh(argv)
+                if shown is None:
+                    self.assert_sent(result, argv)
+                else:
+                    self.assert_refused(result, field, CANARY, line=1)
+                    self.assertIn(shown, result.stderr.decode().partition(f": {field} line")[0])
+
     def test_a_graphql_field_that_names_an_account_by_login_is_judged_whole(self) -> None:
         # createSponsorsTier names the account by login and publishes its description on that account's public Sponsors
         # page; a repositoryId beside the login names a private repository the tier gives access to. The check cannot
