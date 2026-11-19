@@ -307,27 +307,40 @@ behavior before handing the call to the real one. One file is data: `person-name
   the issue's repository was no target, and a term in `--name` went to a public issue, judged by a
   private R alone. For a GraphQL mutation the targets are those of each top-level field, which
   GitHub runs as a mutation of its own, when the check can resolve the document: the call has one
-  document, which parses; it is one mutation operation, with no fragment spread and no inline
-  fragment anywhere (`...S`, `... on T`, `... {`); every variable the call gives (a gh field but
-  `query` and `operationName`, or a member of an `--input` body's `variables`) is one the
-  operation declares, and every variable the document uses is one the call gives; and every field
-  names what it acts on in its own arguments, at any depth, a declared variable read as the call
-  gives it: the string `owner/name` that createCommitOnBranch's input field
-  `repositoryNameWithOwner` takes, or the node id that is the whole string an argument or
-  input-object field takes whose name ends in `Id` or `Ids` (`subjectId`, `pullRequestId`,
-  `threadId`, `pullRequestReviewThreadId`, but never `clientMutationId`, whose value GitHub only
-  echoes back), each node's repository read with one `nodes(ids:)` read through this shim. A node
-  id anywhere else (a comment, a message or a body, `clientMutationId`, a variable the operation
-  does not declare, text outside the fields) is never a target and is ignored: a body that
-  mentions a node is judged by its field's real target. Any other value where a field names what
-  it acts on (a name the check cannot read, an id inside a longer string, a number), such a
-  variable the document also uses elsewhere, and a field that names nothing (a status change)
-  leave the document unresolved, and so do several documents and one that does not parse: such a
-  call is judged whole, as one target, `a GraphQL mutation whose repository could not be read,
-  read as public`, with no node read. Until review round 3 of 2026-11-19 an id in a comment, in
-  `clientMutationId` or in an undeclared variable was a target, and a field inside a fragment
-  took the targets of the fields beside it, so a status change holding a listed term went out as
-  a write to a private repository. Each target's visibility is read through
+  document, which parses; it is one mutation operation, with no fragment of any kind (`fragment S
+  on T`, `...S`, `... on T`, `... {`); every variable the call gives (a gh field but `query` and
+  `operationName`, or a member of an `--input` body's `variables`, read by its JSON keys, never by
+  the path a refusal shows) is one the operation declares, and every variable the document uses is
+  one the call gives; and each field's targets come from its own input, at any depth, list items
+  included, a declared variable read as the call gives it. A field's targets are the repository of
+  every node id that is the whole string value of any of its arguments or input-object fields,
+  whatever the name (`id`, `subjectId`, `inReplyTo`, `branch.id`, `labelIds`,
+  `stateInput.duplicateIssueId`), but `clientMutationId`, whose value GitHub only echoes back; and
+  every repository it names by the string `owner/name` of createCommitOnBranch's input field
+  `repositoryNameWithOwner`. Each node's repository is read with one `nodes(ids:)` read through
+  this shim, for every node type of GitHub's schema that has a repository (an issue, a pull
+  request, a comment, a review thread, a label, a milestone, a ref, a commit, a release, the
+  repository itself, and the others the schema lists), and for a discussion comment, which has no
+  repository of its own, its discussion's. A field's text is judged as public when any
+  of its targets is public, or when one of its node ids gives no repository (a user, an
+  organization, a project). No list of argument names says which argument is the subject, so a
+  write to a private repository that holds a listed term and also refers to a public node is
+  refused, such as `updateIssue` of a private issue marked as a duplicate of a public one: that is
+  the accepted cost. A node id anywhere else (inside a body or a message, a comment,
+  `clientMutationId`, a variable the operation does not declare) is no target and is ignored. A
+  `repositoryNameWithOwner` that is not `owner/name`, a value of an argument named `id` or ending
+  in `Id` or `Ids` that is neither null nor a node id, a variable the document uses more than once
+  whose value holds a node id or a `repositoryNameWithOwner`, and a field with no target (a status
+  change) leave the document unresolved, and so do several documents and one that does not parse:
+  such a call is judged whole, as one target, `a GraphQL mutation whose repository could not be
+  read, read as public`, with no node read. A directive is read past, not read as public: GitHub's
+  only executable directives are `@skip` and `@include`, and a variable one uses counts as used.
+  Until review round 3 of 2026-11-19 an id in a comment, in `clientMutationId` or in an undeclared
+  variable was a target, and a field inside a fragment took the targets of the fields beside it,
+  so a status change holding a listed term went out as a write to a private repository; until
+  review round 4 only an argument whose name ends in `Id` or `Ids` gave a target, so a listed term
+  went to a public issue changed by `id`, judged by the private issue its `duplicateIssueId` names,
+  and a label, a milestone or a ref gave no repository. Each target's visibility is read through
   `scripts/github-repo-visibility` (the
   leak check's per-repository
   cache, else one gh read, whose answer it caches). A text counts only for the targets it goes to:
@@ -354,8 +367,12 @@ behavior before handing the call to the real one. One file is data: `person-name
   text exists or nothing new is typed: text
   typed into gh's own editor, browser or prompts (`-e`, `-w`, which need a terminal an agent's call
   has not got), the notes `--generate-notes` has GitHub build from pull requests already on it,
-  release asset contents (their names and labels are checked), `issue transfer` and the values of
-  `secret set`, `variable set` and key titles, which only the account or repository admins see.
+  release asset contents (their names and labels are checked), and the values of `secret set`,
+  `variable set` and key titles, which only the account or repository admins see. Nor is `issue
+  transfer`, by GitHub's rule, quoted from docs.github.com, "Transferring an issue to another
+  repository" (read 2026-11-19): "You can only transfer issues between repositories owned by the
+  same user or organization account. A private repository issue cannot be transferred to a public
+  repository." So a transfer into a public repository moves text that was public already.
   `label clone` copies another repository's labels, which the check could read only by asking
   GitHub for them. Extensions (`gh stack`) call the API themselves.
   It also logs and caches, because every session on a host shares the App installation's

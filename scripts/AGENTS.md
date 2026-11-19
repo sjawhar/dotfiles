@@ -82,16 +82,21 @@ Executables covering several areas:
     repository and to the issue's, which `issue develop` always reaches (`-R`, else the issue's URL,
     else the base repository), and a value of one top-level field of a GraphQL mutation only to
     that field's targets; every other text goes to every target. A GraphQL document is read field
-    by field only when the check resolves it: one document, one mutation operation, no fragment
-    spread or inline fragment, no variable it does not declare, and every field naming what it acts
-    on in its own arguments (a `repositoryNameWithOwner` string, or a node id that is the whole
-    value of a `…Id` or `…Ids` field but `clientMutationId`); a node id anywhere else is no target
-    and is ignored, and any other document is one target, read as public. A URL's host is read as
-    gh reads it, so `https://foo.github.com/O/R/pull/1` names github.com's O/R, a remote on an ssh
-    alias of github.com is github.com's, and a repository on another host is read as public. The
-    base repositories are
-    read from git only when a reading needs them. It exits 7 to ask
-    `shims/gh` for the call's stdin. Every mode's refusal names, for each match, the field or file
+    by field only when the check resolves it: one document, one mutation operation, no fragment of
+    any kind, no variable it does not declare, and every field's targets in its own input. A
+    field's targets are the repository of every node id that is the whole string value of any of
+    its arguments or input-object fields, whatever the name, but `clientMutationId`, and every
+    `repositoryNameWithOwner` it names; its text is judged as public when any target is public or
+    a node id gives no repository, so a write to a private repository that refers to a public node
+    (`updateIssue` of a private issue marked as a duplicate of a public one) is refused too, the
+    accepted cost. The node read gives the repository of every node type of GitHub's schema that
+    has one, and a discussion comment's discussion's. A node id anywhere else (inside a body, a
+    comment) is no target and is ignored, a directive is read past, not read as public, and any
+    other document is one target, read as public. A URL's host is read as gh reads it, so
+    `https://foo.github.com/O/R/pull/1` names github.com's O/R, a remote on an ssh alias of
+    github.com is github.com's, and a repository on another host is read as public. The base
+    repositories are read from git only when a reading needs them. It exits 7 to ask `shims/gh`
+    for the call's stdin. Every mode's refusal names, for each match, the field or file
     and the line, the text that matched as written, the list that holds the term and the line it is
     on. `push` reads the list's scoped blocks whose pattern matches its destination; commits read
     the list every repository has. `shims/AGENTS.md` documents its list, callers, gh census, editor
