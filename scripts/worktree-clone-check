@@ -36,7 +36,7 @@ optional locks off. Exit 1 when it finds a clone, so it can be used as a gate; 0
 
 Why scripts/ and not devbox/: devbox/ holds the box's systemd units and the files its install.sh
 links into place; this has no unit and no state. scripts/ is on PATH (.bashrc), so the check runs
-by name in any session, by hand or in a gate, the way scripts/pr-gate and scripts/docs-pr-gate do.
+by name in any session, by hand or in a gate, the way scripts/pr-gate does.
 """
 
 from __future__ import annotations
