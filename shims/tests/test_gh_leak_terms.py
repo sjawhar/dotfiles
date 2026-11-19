@@ -528,6 +528,193 @@ class GhLeakTerms(unittest.TestCase):
         self.setUp_calls()
         self.assert_sent(self.run_gh(argv), argv)
 
+    # --- every way a call makes a repository public, by every way gh names it (dispatch://INFRA-3365, tester round 3)
+
+    # A private repository whose name holds the canary, and the field a refusal names for the name a call publishes
+    # that no text of the call gives whole.
+    NOTES = f"o/notes-{CANARY}"
+    PUBLISHED = "the name of the repository the call makes public"
+
+    def remotes(self, *remotes: tuple[str, str], base: str = "") -> None:
+        """Make the work directory a new checkout whose remotes are REMOTES, (name, owner/name) pairs on github.com,
+        and whose `gh repo set-default` (a remote's gh-resolved) is the remote BASE when given."""
+        shutil.rmtree(self.work / ".git", ignore_errors=True)
+        subprocess.run(["git", "init", "-q", str(self.work)], check=True, env=self.env)
+        git = ["git", "-C", str(self.work)]
+        for name, repository in remotes:
+            subprocess.run([*git, "remote", "add", name, f"https://github.com/{repository}.git"], check=True,
+                           env=self.env)
+        if base:
+            subprocess.run([*git, "config", f"remote.{base}.gh-resolved", "base"], check=True, env=self.env)
+
+    def test_repo_edit_publishes_the_name_of_the_repository_it_edits_however_gh_names_it(self) -> None:
+        # Given a private repository whose name holds a listed term: `repo edit --visibility public` publishes its name,
+        # given as an argument in each form gh reads, or taken from the checkout's remote, which gh takes whatever
+        # GH_REPO says, and from the remote `gh repo set-default` chose.
+        self.answer(self.NOTES, "private")
+        edit = ["repo", "edit", "--visibility", "public", "--accept-visibility-change-consequences"]
+        for name, argument in (("HOST/OWNER/REPO", f"github.com/{self.NOTES}"),
+                               ("scp URL", f"git@github.com:{self.NOTES}.git"),
+                               ("ssh URL", f"ssh://git@github.com/{self.NOTES}.git")):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh([*edit[:2], argument, *edit[2:]]), "argument 1", CANARY, line=1)
+        for name, remotes, base, env, remote in (
+                ("remote", [("origin", self.NOTES)], "", self.env, "origin"),
+                ("remote, GH_REPO public", [("origin", self.NOTES)], "", {**self.env, "GH_REPO": PUBLIC}, "origin"),
+                ("gh repo set-default", [("origin", PRIVATE), ("upstream", self.NOTES)], "upstream", self.env,
+                 "upstream")):
+            with self.subTest(form=name):
+                self.remotes(*remotes, base=base)
+                self.setUp_calls()
+                refused = self.run_gh(edit, env=env)
+                self.assert_refused(refused, f"{self.PUBLISHED} (remote {remote})", CANARY, line=1)
+                self.assertIn(f"to remote {remote} (made public by the call)", refused.stderr.decode())
+        # Control: a private repository with a clean name is made public.
+        with self.subTest(control="clean name"):
+            self.remotes(("origin", PRIVATE))
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(edit), edit)
+
+    def test_repo_edit_takes_the_checkout_s_repository_whatever_gh_repo_says(self) -> None:
+        # gh reads GH_REPO only for a command with -R/--repo and for the placeholders of `gh api`; `repo edit` has no
+        # -R, so with no repository argument it edits the checkout's repository, here a public one.
+        argv = ["repo", "edit", "--description", TEXT]
+        with self.subTest(form="GH_REPO private, remote public"):
+            self.remotes(("origin", PUBLIC))
+            refused = self.run_gh(argv, env={**self.env, "GH_REPO": PRIVATE})
+            self.assert_refused(refused, "--description")
+            self.assertIn("to remote origin (public)", refused.stderr.decode())
+        # Control: the checkout's repository private, GH_REPO public: the text goes out.
+        with self.subTest(control="GH_REPO public, remote private"):
+            self.remotes(("origin", PRIVATE))
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(argv, env={**self.env, "GH_REPO": PUBLIC}), argv)
+
+    def test_repo_create_publishes_the_name_it_is_given_or_its_source_directory_s(self) -> None:
+        for name, argv in (
+                ("NAME", ["repo", "create", f"notes-{CANARY}", "--public"]),
+                ("URL", ["repo", "create", f"https://github.com/{self.NOTES}", "--public"]),
+                ("HOST/OWNER/REPO", ["repo", "create", f"github.com/{self.NOTES}", "--public"]),
+                ("no visibility flag", ["repo", "create", self.NOTES])):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(argv), "argument 1", CANARY, line=1)
+        # Given no name, gh names the repository after the directory --source names, here the working directory.
+        source = self.tmp / f"notes-{CANARY}"
+        source.mkdir()
+        subprocess.run(["git", "init", "-q", str(source)], check=True, env=self.env)
+        with self.subTest(form="--source"):
+            self.setUp_calls()
+            refused = self.run_gh(["repo", "create", "--source", ".", "--public"], cwd=source)
+            self.assert_refused(refused, "--source name", CANARY, line=1)
+        # Control: the same repository made private.
+        with self.subTest(control="--source --private"):
+            argv = ["repo", "create", "--source", ".", "--private"]
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(argv, cwd=source), argv)
+
+    def test_a_gh_api_call_makes_a_repository_public_by_every_way_gh_names_it(self) -> None:
+        # A PATCH of a repository's own endpoint that sets its visibility to public, or private to false, publishes the
+        # repository, however the endpoint names it: as written, or with placeholders gh fills from GH_REPO, else from
+        # the checkout's remote (the one `gh repo set-default` chose, when it chose one).
+        self.answer(self.NOTES, "private")
+        patch = ["api", "-X", "PATCH"]
+        visibility = self.file("visibility.txt", "public\n")
+        published = self.PUBLISHED
+        for name, remotes, base, gh_repo, argv, fields in (
+                ("-F visibility=@file", [], "", "", [*patch, f"repos/{self.NOTES}", "-F", f"visibility=@{visibility}"],
+                 ["argument 1"]),
+                ("{owner}/{repo}, remote", [("origin", self.NOTES)], "", "",
+                 [*patch, "repos/{owner}/{repo}", "-f", "visibility=public"], [f"{published} (remote origin)"]),
+                ("{owner}/{repo}, GH_REPO", [], "", PRIVATE,
+                 [*patch, "repos/{owner}/{repo}", "-f", "visibility=public", "-f", f"description={TEXT}"],
+                 ["--raw-field description"]),
+                ("{owner}/{repo}, GH_REPO's name", [], "", self.NOTES,
+                 [*patch, "repos/{owner}/{repo}", "-f", "visibility=public", "-f", "description=notes"],
+                 [f"{published} (GH_REPO)"]),
+                (":owner/:repo", [("origin", PRIVATE)], "", "",
+                 [*patch, "repos/:owner/:repo", "-f", "visibility=public", "-f", f"description={TEXT}"],
+                 ["--raw-field description"]),
+                ("O/{repo}", [("origin", self.NOTES)], "", "", [*patch, "repos/o/{repo}", "-f", "private=false"],
+                 [f"{published} (remote origin)"]),
+                ("{owner}/R", [("origin", PRIVATE)], "", "",
+                 [*patch, f"repos/{{owner}}/notes-{CANARY}", "-f", "visibility=public"],
+                 ["argument 1", f"{published} (remote origin)"]),
+                ("gh repo set-default", [("origin", PUBLIC), ("upstream", self.NOTES)], "upstream", "",
+                 [*patch, "repos/{owner}/{repo}", "-f", "visibility=public"], [f"{published} (remote upstream)"])):
+            with self.subTest(form=name):
+                self.remotes(*remotes, base=base)
+                self.setUp_calls()
+                refused = self.run_gh(argv, env={**self.env, "GH_REPO": gh_repo} if gh_repo else self.env)
+                for field in fields:
+                    self.assert_refused(refused, field, CANARY.upper() if "description" in field else CANARY)
+                self.assertIn("(made public by the call)", refused.stderr.decode())
+        # Control: the same text to the checkout's repository, kept private, goes out.
+        with self.subTest(control=":owner/:repo kept private"):
+            self.remotes(("origin", PRIVATE))
+            argv = [*patch, "repos/:owner/:repo", "-f", f"description={TEXT}"]
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(argv), argv)
+
+    def test_a_gh_api_call_that_makes_a_repository_is_read_as_public(self) -> None:
+        # REST's `user/repos`, `orgs/O/repos` and a template's `repos/O/R/generate`, and GraphQL's
+        # startRepositoryMigration, make a repository that is public unless the call says otherwise, whatever the
+        # visibility of the checkout's repository or of the template.
+        (self.nodes / "PR_kwDOpriv5678").write_text(f"{PRIVATE}\n", encoding="utf-8")
+        self.remotes(("origin", PRIVATE))
+        name = f"name=notes-{CANARY}"
+
+        def migration(owner: str) -> str:
+            return ('query=mutation{startRepositoryMigration(input:{sourceId:"x", ownerId:"%s", repositoryName:"%s", '
+                    'sourceRepositoryUrl:"https://example.com/r", continueOnError:true, targetRepoVisibility:"public"})'
+                    '{clientMutationId}}' % (owner, f"notes-{CANARY}"))
+
+        for form, argv, field in (
+                ("orgs/{owner}/repos", ["api", "orgs/{owner}/repos", "-f", name, "-f", "visibility=public"],
+                 "--raw-field name"),
+                ("orgs/:owner/repos", ["api", "orgs/:owner/repos", "-f", name, "-f", "visibility=public"],
+                 "--raw-field name"),
+                ("user/repos", ["api", "user/repos", "-f", name], "--raw-field name"),
+                ("a private template's generate", ["api", f"repos/{PRIVATE}/generate", "-f", "owner=o", "-f", name],
+                 "--raw-field name"),
+                ("{owner}/{repo}/generate", ["api", "repos/{owner}/{repo}/generate", "-f", "owner=o", "-f", name],
+                 "--raw-field name"),
+                ("startRepositoryMigration", ["api", "graphql", "-f", migration("y")], "--raw-field query string 3"),
+                ("startRepositoryMigration, a private node", ["api", "graphql", "-f", migration("PR_kwDOpriv5678")],
+                 "--raw-field query string 3")):
+            with self.subTest(form=form):
+                self.setUp_calls()
+                refused = self.run_gh(argv)
+                self.assert_refused(refused, field, CANARY)
+                self.assertIn("read as public", refused.stderr.decode())
+        # Control: a clean name goes out.
+        with self.subTest(control="clean name"):
+            argv = ["api", "orgs/{owner}/repos", "-f", "name=notes", "-f", "visibility=public"]
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(argv), argv)
+
+    def test_the_text_gh_fills_into_an_api_field_is_read(self) -> None:
+        # gh fills `{repo}` in an -F value from the base repository, here the checkout's private repository whose name
+        # holds a listed term, so the value it sends holds the term: as the name of a repository it makes, and as text
+        # sent to a public repository.
+        self.answer(self.NOTES, "private")
+        self.remotes(("origin", self.NOTES))
+        issue = ["api", f"repos/{PUBLIC}/issues", "-F", "title={repo}", "-f", "body=b"]
+        for form, argv, field in (
+                ("orgs/O/repos", ["api", "orgs/o/repos", "-F", "name={repo}", "-f", "visibility=public"],
+                 "--field name"),
+                ("generate", ["api", f"repos/{PRIVATE}/generate", "-F", "owner=o", "-F", "name={repo}"], "--field name"),
+                ("a public repository's issue", issue, "--field title")):
+            with self.subTest(form=form):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(argv), field, CANARY, line=1)
+        # Control: filled from a private repository with a clean name, the title goes out.
+        with self.subTest(control="clean base name"):
+            self.remotes(("origin", PRIVATE))
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(issue), issue)
+
     def test_a_graphql_mutation_is_judged_by_the_repositories_of_its_nodes(self) -> None:
         term = REGISTRY_TEST_TERMS["oh-my-pi"][0]
         self.answer("cybermonklabs/oh-my-pi", "public")

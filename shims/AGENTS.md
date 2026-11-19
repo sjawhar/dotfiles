@@ -184,14 +184,29 @@ behavior before handing the call to the real one. One file is data: `person-name
   body, such as a headline that holds `repositoryNameWithOwner=O/R`. A value the check cannot tie
   to that field alone (one that is not a plain `owner/name`, a variable used elsewhere too) is read,
   and leaves the mutation's target unknown. A repository the call makes public is not public yet,
-  so the call publishes its name, which is read whole: `repo edit --visibility public`, and a
-  `gh api` call to `repos/O/R` whose field or `--input` body sets `visibility` to public or
-  `private` to false, or whose `--input` cannot be read; each is read as public. Until 2026-11-19
+  so the call publishes its name, which is read whole: `repo edit --visibility public`, `repo
+  create` but with `--private` or `--internal` (given no name, gh names the repository after the
+  directory `--source` names, which is read as `--source name`), and a `gh api` call to a
+  repository's own endpoint `repos/O/R` whose field or `--input` body sets `visibility` to public
+  or `private` to false (in any letter case, and without the whitespace around the value, such as
+  the line break `-F visibility=@file` sends), or whose `--input` cannot be read; each is read as
+  public. A name that no text of the call gives whole is read as a text of its own, `the name of
+  the repository the call makes public (remote origin)` or `(GH_REPO)`: the checkout's repository
+  that a `repo edit` with no repository argument edits, and the repository gh fills a placeholder
+  endpoint (`repos/{owner}/{repo}`, `repos/:owner/R`, `repos/O/{repo}`) in to. Until 2026-11-19
   the repository was read, and every write to a public repository whose own name holds a listed
   term was refused (theorem-labs/ygo under the knives ygo-fork list, dispatch://INFRA-3365); the
   same day's second test round found a private name that `repo edit --visibility public`
   published unread, and a headline holding `repositoryNameWithOwner=O/R` that went to
-  theorem-labs/ygo unread. Which arguments name the repository comes from each command's usage in
+  theorem-labs/ygo unread; and its third found the same name published by a PATCH of
+  `repos/{owner}/{repo}`. gh fills `{owner}` and `:owner`, `{repo}` and `:repo` (its own pattern,
+  `pkg/cmd/api/api.go`) in a `gh api` endpoint and in each `-F` value but a file's (`@path`), from
+  the base repository: `GH_REPO` when it is set, else the directory's remote (the one `gh repo
+  set-default` chose, else each). The check reads each as gh sends it, once for each base
+  repository: `repos/{owner}/R` is the base owner's R, `orgs/{owner}/repos` names no repository,
+  and `-F name={repo}` sends the base repository's name. A base repository whose name it cannot
+  read leaves the endpoint's repository unknown, read as public, and the value read as written.
+  Which arguments name the repository comes from each command's usage in
   `gh <command> --help`
   (`GH_REPOSITORY_ARGUMENT`, `GH_URL_ARGUMENT`; the same test fails when they differ). A URL in any
   other argument, such as the description `gh agent-task create` sends, is text read whole, and
@@ -242,10 +257,13 @@ behavior before handing the call to the real one. One file is data: `person-name
   spells it). `pr create --dry-run` sends nothing and is not read. Only a found term (or a list it cannot
   decrypt, or a file it cannot read) makes the check read where the text goes: every repository
   the call names (`-R`, a pull-request or issue URL, a user or a port in it included,
-  `repos/OWNER/REPO/…` as a path or as an address on `api.github.com` or `uploads.github.com`,
+  `repos/OWNER/REPO/…` as a path, its placeholders filled as gh fills them (above), or as an
+  address on `api.github.com` or `uploads.github.com`,
   where gh sends a `gh api` endpoint holding `://`, `--branch-repo`, the repository `repo fork`
   forks, whose visibility a fork takes), else
-  `GH_REPO`, else each GitHub remote of the directory (the one `gh repo set-default` chose, else
+  `GH_REPO` for a command with `-R`/`--repo` (gh reads it for no other, so `repo edit` and `repo
+  fork` take the directory's remote; until 2026-11-19 they were read as `GH_REPO`'s), else each
+  GitHub remote of the directory (the one `gh repo set-default` chose, else
   all), and for a GraphQL mutation the repository of each node id it names (one `nodes(ids:)` read
   through this shim, its text read as written and with JSON escapes decoded) and each it names by
   name (the `repositoryNameWithOwner` values above), through `scripts/github-repo-visibility` (the
@@ -255,7 +273,9 @@ behavior before handing the call to the real one. One file is data: `person-name
   the registry only when such a target is one its scope names. A visibility it cannot read, a
   gist, a project, another host (`GH_HOST`, `gh api --hostname`, or a `gh api` address on any host
   but those two), a GraphQL mutation whose nodes or names cannot all be read or that makes a
-  repository, and any other
+  repository (`createRepository`, `cloneTemplateRepository`, `startRepositoryMigration`), a `gh
+  api` call that makes one (`user/repos`, `orgs/O/repos`, or a template's `repos/O/R/generate`,
+  whatever the template's visibility), a base repository whose name it cannot read, and any other
   endpoint count as public and as any repository. Not checked, because the shim runs before the
   text exists or nothing new is typed: text
   typed into gh's own editor, browser or prompts (`-e`, `-w`, which need a terminal an agent's call
