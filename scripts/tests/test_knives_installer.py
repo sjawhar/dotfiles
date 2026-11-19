@@ -135,6 +135,10 @@ class KnivesInstallerMigratedPush(RegistryCopy, unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
+    def render_script(self, home: Path | None = None) -> Path:
+        """The render the installer ran: this case's dotfiles copy, not one under HOME."""
+        return self.dotfiles / "scripts" / RENDER.name
+
     def refuse_pushes(self) -> None:
         hook = self.remote / "hooks" / "pre-receive"
         hook.write_text('#!/bin/sh\necho "push refused by the test" >&2\nexit 1\n', encoding="utf-8")

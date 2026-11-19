@@ -1195,7 +1195,9 @@ class RegistryCopy:
     test_knives_installer use too. Mixed into a test case whose `home` is the HOME the render runs
     with; a method given HOME works it out for that home instead. `nvme_root` is where the render
     looks for the big local disk's directory: /mnt/nvme, as when KNIVES_REGISTRY_NVME_ROOT is not
-    set; a case that sets that variable sets `nvme_root` to the same path."""
+    set; a case that sets that variable sets `nvme_root` to the same path. `render_script` is the
+    render the case ran, whose bytes are the render's rule: the oracle hashes them and never runs
+    them."""
 
     home: Path
     nvme_root = Path("/mnt/nvme")
@@ -1215,6 +1217,11 @@ class RegistryCopy:
         nvme = self.nvme_root / home.name
         return f"{nvme}/omp-worktrees/branches" if nvme.is_dir() else f"{home}/.worktrees/oh-my-pi"
 
+    def render_script(self, home: Path | None = None) -> Path:
+        """The render the case ran, in HOME's checkout: ~/.dotfiles/scripts/knives-registry-render.
+        A case whose render is elsewhere overrides this."""
+        return (home or self.home) / ".dotfiles/scripts/knives-registry-render"
+
     def rendered(self, source: str, home: Path | None = None) -> str:
         """SOURCE with the oh-my-pi workspaces line set to HOME's path."""
         where = self.workspaces(home)
@@ -1231,14 +1238,18 @@ class RegistryCopy:
 
     def assert_copy_renders(self, source: str, home: Path | None = None) -> None:
         """HOME's copy holds the render of SOURCE, and the record beside it what that render
-        depends on: SOURCE's sha256 and the workspaces path."""
+        depends on: SOURCE's sha256, the workspaces path and the sha256 of the render script."""
         home = home or self.home
         # SOURCE holds the line the render rewrites, and the oracle rewrote it.
         self.assertIn(OMP_WORKSPACES + "\n", source)
         self.assertNotIn(OMP_WORKSPACES, self.rendered(source, home))
         self.assertEqual((home / REGISTRY_COPY).read_text(), self.rendered(source, home))
         sha = hashlib.sha256(source.encode()).hexdigest()
-        self.assertEqual((home / REGISTRY_RECORD).read_text(), f"sha256 {sha}\nworkspaces {self.workspaces(home)}\n")
+        rule = hashlib.sha256(self.render_script(home).read_bytes()).hexdigest()
+        self.assertEqual(
+            (home / REGISTRY_RECORD).read_text(),
+            f"sha256 {sha}\nworkspaces {self.workspaces(home)}\nrender {rule}\n",
+        )
 
 
 class KnivesRegistry(RegistryCopy, Harness):
@@ -1325,6 +1336,39 @@ class KnivesRegistry(RegistryCopy, Harness):
         written = (self.identity(self.copy), self.identity(self.render_record))
         self.assertEqual(self.run_follow(now=1_001_200.0), [])
         self.assertEqual((self.identity(self.copy), self.identity(self.render_record)), written)
+
+    def test_a_pull_that_changes_only_the_render_script_renders_again(self) -> None:
+        # The render depends on its own rule, scripts/knives-registry-render, as well: a pull that
+        # changes that script by one comment line, with knives/repos.toml and the workspaces path
+        # as they were, renders again, and the run after that writes nothing. The render's bytes
+        # are the copy's bytes, so only the record is written.
+        self.first_render()
+        before = (self.identity(self.copy), self.identity(self.render_record))
+        script = self.upstream / "scripts/knives-registry-render"
+        new = self.commit_upstream(
+            "knives-registry-render: one more comment line",
+            **{"scripts/knives-registry-render": script.read_text() + "# one more comment line\n"},
+        )
+        with unittest.mock.patch.object(FOLLOW, "log", wraps=FOLLOW.log) as logged:
+            self.assertEqual(self.run_follow(now=1_000_600.0), [])
+        self.assertEqual(self.head(), new)
+        self.assertTrue(os.access(self.render_script(), os.X_OK))
+        self.assert_copy_renders(REGISTRY_V1)
+        self.assertEqual(self.identity(self.copy), before[0])
+        self.assertNotEqual(self.identity(self.render_record), before[1])
+        sha = hashlib.sha256(REGISTRY_V1.encode()).hexdigest()
+        self.assertIn(
+            f"registry: knives-registry-render: ~/.config/knives/repos.toml already held the render of"
+            f" knives/repos.toml (sha256 {sha[:12]}); wrote nothing to it",
+            [call.args[0] for call in logged.call_args_list],
+        )
+        written = (self.identity(self.copy), self.identity(self.render_record))
+        with unittest.mock.patch.object(FOLLOW, "log", wraps=FOLLOW.log) as logged:
+            self.assertEqual(self.run_follow(now=1_001_200.0), [])
+        self.assertEqual((self.identity(self.copy), self.identity(self.render_record)), written)
+        rendered = [call.args[0] for call in logged.call_args_list if call.args[0].startswith("registry: ")]
+        self.assertEqual(len(rendered), 1)
+        self.assertIn("~/.config/knives/repos.toml unchanged:", rendered[0])
 
     def test_a_pull_that_changes_another_file_leaves_a_hand_edited_copy_as_it_is(self) -> None:
         self.first_render()
