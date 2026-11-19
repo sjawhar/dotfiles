@@ -2568,19 +2568,19 @@ def gh_walk(arguments: Sequence[str], options: Mapping[str, bool]) -> list[tuple
     return read
 
 
-def gh_fill(text: str, repository: str, branch: str) -> str:
+def gh_fill(text: str, repository: str, branch: str | None) -> str:
     """TEXT as gh sends it once it has filled each placeholder `gh api --help` lists (GH_PLACEHOLDERS, GH_PLACEHOLDER),
     in one pass, so that a value it fills in is never filled again: the base placeholders from the base REPOSITORY
     (`owner/name`), left as written when that is "" (no base repository, or one the check cannot read); `{branch}` and
-    `:branch` with BRANCH, the current branch (gh_current_branch); and every other placeholder as written. gh sends
-    nothing for a call whose branch it cannot fill, which gh_check passes before it fills anything, so BRANCH is "" only
-    for a call that has no branch to fill."""
+    `:branch` with BRANCH, the current branch (gh_current_branch), left as written when that is None (no branch to
+    fill, or one git does not name, for which gh sends nothing: gh_check, gh_api_endpoint); and every other placeholder
+    as written."""
     owner, _, name = repository.partition("/")
 
     def fill(found: re.Match[str]) -> str:
         word = found[1] or found[2]
         if word == "branch":
-            return branch
+            return found[0] if branch is None else branch
         if not repository:
             return found[0]
         return owner if word == "owner" else name if word == "repo" else found[0]
@@ -2616,19 +2616,50 @@ def gh_source_name(path: str) -> str:
     return os.path.basename(os.path.normpath(path))
 
 
+# The hosts go-gh v2.13.0's auth package and gh 2.98.0's internal/ghinstance name apart: the local development host, the
+# domain of a tenancy (GHE.com) host, and garage.github.com, which ghinstance serves as it serves an Enterprise host.
+GH_LOCALHOST = "github.localhost"
+GH_TENANCY = "ghe.com"
+GH_GARAGE = "garage.github.com"
+
+
+def gh_normalized_host(host: str) -> str:
+    """HOST as go-gh v2.13.0's auth.NormalizeHostname reads it (pkg/auth/auth.go), by which gh 2.98.0 tells a host's
+    kind: in lower case; github.com for a host ending in `.github.com`, github.localhost for one ending in
+    `.github.localhost`, and for one ending in `.ghe.com` its last label before `.ghe.com`, with `.ghe.com`."""
+    host = host.lower()
+    if host.endswith(".github.com"):
+        return "github.com"
+    if host.endswith(f".{GH_LOCALHOST}"):
+        return GH_LOCALHOST
+    if host.endswith(f".{GH_TENANCY}"):
+        return f"{host.removesuffix(f'.{GH_TENANCY}').rpartition('.')[2]}.{GH_TENANCY}"
+    return host
+
+
+def gh_is_tenancy(host: str) -> bool:
+    """go-gh's auth.IsTenancy: whether HOST is a tenancy (GHE.com) host once normalized (gh_normalized_host)."""
+    return gh_normalized_host(host).endswith(f".{GH_TENANCY}")
+
+
+def gh_is_enterprise(host: str) -> bool:
+    """go-gh's auth.IsEnterprise: whether HOST is a GitHub Enterprise Server host, which is any host that is not
+    github.com, github.localhost or a tenancy host once normalized (gh_normalized_host), so `example.com` is, and so is
+    `github.com.`."""
+    normalized = gh_normalized_host(host)
+    return normalized not in ("github.com", GH_LOCALHOST) and not gh_is_tenancy(normalized)
+
+
 def gh_host(host: str) -> str:
     """The host gh 2.98.0 sends a call for HOST to: github.com for each host go-gh v2.13.0's auth.NormalizeHostname
-    makes github.com (pkg/auth/auth.go: `hostname := strings.ToLower(host); if strings.HasSuffix(hostname,
-    "."+github) { return github }`), which its API clients apply before they build the request's URL
+    makes github.com (gh_normalized_host), which its API clients apply before they build the request's URL
     (pkg/api/rest_client.go restPrefix, graphql_client.go graphQLEndpoint), but garage.github.com, which they send to
     itself (`if isGarage(host)` comes first); any other host, in lower case, is its own. The reviewer of
     dispatch://INFRA-3365 measured `gh pr view https://foo.github.com/sjawhar/dotfiles/pull/90 --json url` printing the
     github.com URL; until 2026-11-19 only github.com and www.github.com were github.com, so a comment on such a URL
     of a public repository was judged by the checkout's private remote and went out unread."""
     host = host.lower()
-    if host == "garage.github.com" or not (host == "github.com" or host.endswith(".github.com")):
-        return host
-    return "github.com"
+    return "github.com" if host != GH_GARAGE and gh_normalized_host(host) == "github.com" else host
 
 
 def gh_url_repository(value: str) -> tuple[str, str] | None:
@@ -2824,38 +2855,66 @@ def gh_local_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | 
 
 # The hosts of github.com's REST and GraphQL API, and of its release-asset uploads.
 GH_API_HOSTS = frozenset(("api.github.com", "uploads.github.com"))
+# A host of gh's hosts.yml: a key at the start of a line, plain, 'single-quoted' or "double-quoted", as gh writes it.
+GH_HOSTS_KEY = re.compile(r"""^("(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[^\s#:'"][^:]*?)[ \t]*:(?:\s|$)""")
 
 
-def gh_api_endpoint(read: Sequence[tuple[str | None, str | None]], environment: Mapping[str, str]) -> tuple[str, str]:
-    """(the host a `gh api` call sends to, its endpoint as a path on that host's API), as gh 2.98.0 builds the request
-    (pkg/cmd/api/http.go, api.go): an endpoint holding `://` is the address itself, whatever --hostname and GH_HOST say;
-    any other is a path on the host the last --hostname names, else GH_HOST's, else github.com, read as gh_host reads
-    it: for a host NormalizeHostname makes github.com, gh's own internal/ghinstance RESTPrefix and GraphQLEndpoint take
-    github.com's API, not an Enterprise server's, and build `https://api.<host>/`, a name under github.com
-    (api.foo.github.com has no address, so gh sends nothing at all). An http or https address on api.github.com or
-    uploads.github.com is github.com's, with its path (and query) as the endpoint, so
-    `https://uploads.github.com/repos/O/R/releases/1/assets?name=x` is O/R's as `repos/O/R/…` is, and
-    `https://api.github.com/graphql` is `graphql`. An address on any other host is that host's.
-
-    Until 2026-11-17 neither was read: an address named no repository, so a private repository's own release upload
-    with a scoped term in its address was refused, and a call with --hostname was judged as github.com's although gh
-    sent it to the other host."""
-    long = gh_long_names(GH_TEXT_COMMANDS[("api", "")])
-    endpoint = next((value or "" for option, value in read if option is None), "")
-    if "://" in endpoint:
-        try:
-            address = urllib.parse.urlsplit(endpoint)
-            hostname = address.hostname or ""
-        except ValueError:
-            return "an address gh was given that the check cannot read", endpoint
-        if address.scheme.lower() in ("http", "https") and hostname in GH_API_HOSTS:
-            return "github.com", address.path.lstrip("/") + (f"?{address.query}" if address.query else "")
-        return hostname or "an address gh was given that names no host", endpoint
-    hostnames = [value for option, value in read if option and long.get(option, option) == "--hostname" and value]
-    return gh_host(hostnames[-1] if hostnames else environment.get("GH_HOST") or "github.com"), endpoint
+def gh_default_host(environment: Mapping[str, str]) -> str:
+    """The host gh 2.98.0 sends a `gh api` call to when no --hostname names one (pkg/cmd/api/api.go apiRun:
+    cfg.Authentication().DefaultHost(), go-gh v2.13.0's pkg/auth/auth.go defaultHost): GH_HOST, else the one host gh's
+    hosts.yml lists when it lists exactly one, else github.com, which is also the host when hosts.yml cannot be read."""
+    if environment.get("GH_HOST"):
+        return environment["GH_HOST"]
+    try:
+        lines = (gh_config_directory(environment) / "hosts.yml").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return "github.com"
+    hosts = [yaml_scalar(found[1]) for line in lines if (found := GH_HOSTS_KEY.match(line))]
+    return hosts[0] if len(hosts) == 1 else "github.com"
 
 
-# The path of GitHub's GraphQL API on api.github.com (gh_api_graphql). Measured 2026-11-19 through gh 2.98.0, each call
+def gh_api_address(host: str, endpoint: str) -> str:
+    """The address gh 2.98.0 sends a `gh api` ENDPOINT that holds no `://`, its placeholders filled, to on HOST, the
+    host as gh takes it (pkg/cmd/api/http.go httpRequest; internal/ghinstance GraphQLEndpoint and RESTPrefix):
+    `graphql`, exactly, to the host's GraphQL API, and any other endpoint to its REST API with one leading `/` dropped.
+    Both are under `https://HOST/api/` for garage.github.com and an Enterprise host (gh_is_enterprise), the REST API
+    under its `v3/`; under `http://api.github.localhost/` for github.localhost; and under `https://api.HOST/` for any
+    other host, github.com and a tenancy host among them."""
+    enterprise = host.lower() == GH_GARAGE or gh_is_enterprise(host)
+    if enterprise:
+        root = f"https://{host}/api/"
+    elif host.lower() == GH_LOCALHOST:
+        root = f"http://api.{host}/"
+    else:
+        root = f"https://api.{host}/"
+    if endpoint == "graphql":
+        return f"{root}graphql"
+    return root + ("v3/" if enterprise else "") + endpoint.removeprefix("/")
+
+
+def dot_segments_removed(path: str) -> str:
+    """PATH with its `.` and `..` segments removed as RFC 3986 removes them (section 5.2.4, remove_dot_segments), so
+    `/api/v3/../graphql` is `/api/graphql`; an empty segment stays, so `//graphql` is itself."""
+    output: list[str] = []
+    while path:
+        if path.startswith(("../", "./")):
+            path = path.partition("/")[2]
+        elif path.startswith("/./") or path == "/.":
+            path = "/" + path[3:]
+        elif path.startswith("/../") or path == "/..":
+            path = "/" + path[4:]
+            if output:
+                output.pop()
+        elif path in (".", ".."):
+            path = ""
+        else:
+            end = path.find("/", 1)
+            output.append(path if end < 0 else path[:end])
+            path = "" if end < 0 else path[end:]
+    return "".join(output)
+
+
+# The path of GitHub's GraphQL API on api.github.com (gh_graphql_api). Measured 2026-11-19 through gh 2.98.0, each call
 # sending `-f query='query { viewer { login } }'` (dispatch://INFRA-3365, review round 6): GitHub answered with the
 # query's `data` for the endpoints `graphql`, `/graphql`, `graphql?`, `graphql?x=1`, `graphql#x`, `/graphql?x=1#y`,
 # `https://api.github.com/graphql?x=1`, `https://api.github.com/graphql#x`, `https://API.GITHUB.COM/graphql` and
@@ -2869,59 +2928,145 @@ def gh_api_endpoint(read: Sequence[tuple[str | None, str | None]], environment: 
 # `http://api.github.com/graphql`, which GitHub redirects to https and gh follows as a GET, were answered with the
 # schema, not the query; a GET sends no body (gh_api_sends), and http is read as GraphQL all the same.
 # `https://api.github.com:443/graphql` went out with no token, since gh sends none to a host written with a port, and
-# GitHub refused it for the rate limit of a call with no token; it is read as GraphQL too.
+# GitHub refused it for the rate limit of a call with no token; it is read as GraphQL too. `./graphql`, `x/../graphql`
+# and `https://api.github.com/./graphql` are read with their dot segments removed, as GraphQL, erring toward it.
+# Measured the same way in review round 7: `https://github.com/api/graphql` and `https://github.com/graphql` answered
+# 422 with a web page, `https://api.github.com./graphql` 400, and `--hostname github.com. graphql`, which gh sends to
+# `https://github.com./api/graphql` since go-gh reads `github.com.` as an Enterprise host, 404. None is GitHub's
+# GraphQL API; the last is GraphQL all the same by gh's own test (gh_api_endpoint).
 GH_GRAPHQL_PATH = "/graphql"
+# The path of the GraphQL API of garage.github.com and of an Enterprise host, under its `api/` (gh_api_address).
+GH_ENTERPRISE_GRAPHQL_PATH = "/api/graphql"
 
 
-def gh_api_graphql(read: Sequence[tuple[str | None, str | None]], host: str) -> bool:
-    """Whether a `gh api` call goes to GitHub's GraphQL API, its endpoint resolved into an address as gh 2.98.0 resolves
-    it (pkg/cmd/api/http.go httpRequest): an endpoint holding `://` is the address itself; `graphql` is the GraphQL
-    endpoint of HOST, where gh sends the call (gh_api_endpoint); any other is a path under HOST's REST prefix with one
-    leading `/` dropped, so on github.com `/graphql`, `graphql?x=1` and `graphql#x` are
-    `https://api.github.com/graphql` with a query string or a fragment. The address is GitHub's GraphQL API when it is
-    http or https on api.github.com (HOST github.com, for an endpoint that is no address) and its path, without the
-    query string and the fragment, is GH_GRAPHQL_PATH in any letter case, as measured (a mixed case erring toward
-    reading the call as GraphQL). gh_check reads this one value for the target
-    (gh_reach), the pass for a query, the documents it reads by GraphQL's grammar and the refusal's advice. Until review
-    round 6 of dispatch://INFRA-3365 only the endpoint `graphql` was GraphQL, so a mutation to `/graphql` was read as a
-    REST body, as written, and a term spelled with a GraphQL `\\u` escape, which GitHub decodes, went out."""
-    endpoint = next((value or "" for option, value in read if option is None), "")
-    if "://" not in endpoint:
-        if host != "github.com":
-            return False
-        endpoint = "https://api.github.com/" + endpoint.removeprefix("/")
+def gh_graphql_api(address: str) -> bool | None:
+    """Whether ADDRESS is a GraphQL API's, as gh_api_address builds one for any host: http or https, with the path
+    GH_GRAPHQL_PATH on api.github.com, api.github.localhost or the `api.` host of a tenancy host (gh_is_tenancy), or
+    GH_ENTERPRISE_GRAPHQL_PATH on garage.github.com or an Enterprise host (gh_is_enterprise). The path is read without
+    its query string and fragment, in any letter case and with its dot segments removed (dot_segments_removed), the
+    last two erring toward GraphQL; None for an address the check cannot read."""
     try:
-        address = urllib.parse.urlsplit(endpoint)
-        hostname = address.hostname
+        parts = urllib.parse.urlsplit(address)
+        host = parts.hostname or ""
     except ValueError:
+        return None
+    if parts.scheme.lower() not in ("http", "https"):
         return False
-    return (address.scheme.lower() in ("http", "https") and hostname == "api.github.com"
-            and address.path.lower() == GH_GRAPHQL_PATH)
+    path = dot_segments_removed(parts.path).lower()
+    if path == GH_GRAPHQL_PATH:
+        return (host in ("api.github.com", f"api.{GH_LOCALHOST}")
+                or host.startswith("api.") and gh_is_tenancy(host.removeprefix("api.")))
+    return path == GH_ENTERPRISE_GRAPHQL_PATH and (host == GH_GARAGE or gh_is_enterprise(host))
+
+
+@dataclass(frozen=True)
+class GhAddress:
+    """Where a gh call goes, resolved once for every reader in gh_check (gh_api_endpoint, for a `gh api` call): HOST,
+    the host gh sends it to as gh_host reads it, which gh_reach reads for its targets; and for a `gh api` call
+    ENDPOINT, its endpoint as a path on that host's API with its placeholders as written; SHAPE, that path filled in
+    with any base name (gh_made_public); FILLINGS, that path as gh fills it from each base repository it may take, when
+    it holds a base placeholder (gh_fill); URLS, each address gh may send it to, every placeholder filled, one for each
+    filling the check can make (gh_api_address); GRAPHQL, whether the call is read as a GraphQL request; and REST,
+    whether gh may send it to an address that is no GraphQL API."""
+
+    host: str
+    endpoint: str = ""
+    shape: str = ""
+    fillings: tuple[tuple[GhBase, str], ...] = ()
+    urls: tuple[str, ...] = ()
+    graphql: bool = False
+    rest: bool = False
+
+
+def gh_api_endpoint(read: Sequence[tuple[str | None, str | None]], environment: Mapping[str, str], branch: str | None,
+                    bases: Callable[[], Sequence[GhBase]]) -> GhAddress:
+    """Where a `gh api` call goes (GhAddress), resolved once, in gh 2.98.0's order: gh fills the endpoint's
+    placeholders first (pkg/cmd/api/api.go apiRun, fillPlaceholders), from the base repository (BASES, gh_bases, read
+    only for an endpoint with a base placeholder) and the current BRANCH (gh_fill), then builds the address from the
+    filled endpoint (pkg/cmd/api/http.go httpRequest): one holding `://` is the address itself, whatever --hostname and
+    GH_HOST say, and any other an address on the host the last --hostname names, else on gh's default host
+    (gh_default_host), any host at all (gh_api_address).
+
+    The call is GraphQL (GhAddress.graphql) when, for a filling of its endpoint, gh sends it to a GraphQL API: the
+    filled endpoint is `graphql`, gh's own test, or the address it reaches is a GraphQL API's (gh_graphql_api). It is
+    GraphQL too, failing closed, when the check cannot fill the endpoint for certain: from a base repository it cannot
+    read, or with no base repository it can take, since gh may take one the check does not read; with a branch git does
+    not name (BRANCH None: GH_REPO set, a detached HEAD, no git repository), for which gh refuses the call; and when the
+    address cannot be read. gh may send the call to an address that is no GraphQL API (GhAddress.rest) for a filling
+    that is not GraphQL and for a base repository the check cannot read, but never for a branch git does not name.
+
+    The host gh_reach reads (GhAddress.host) is the one gh sends to, read as gh_host reads it: for a host
+    NormalizeHostname makes github.com, gh_api_address builds `https://api.<host>/`, a name under github.com
+    (api.foo.github.com has no address, so gh sends nothing at all). An http or https address on api.github.com or
+    uploads.github.com is github.com's, with its path (and query) as the endpoint, so
+    `https://uploads.github.com/repos/O/R/releases/1/assets?name=x` is O/R's as `repos/O/R/…` is, and
+    `https://api.github.com/graphql` is `graphql`. An address on any other host is that host's.
+
+    Until 2026-11-17 neither host was read: an address named no repository, so a private repository's own release
+    upload with a scoped term in its address was refused, and a call with --hostname was judged as github.com's although
+    gh sent it to the other host. Until review round 7 of dispatch://INFRA-3365 a call was GraphQL only on github.com,
+    decided before gh fills the placeholders, and two more readers read the endpoint apart: so a mutation to
+    `--hostname ghe.example.com graphql`, or to `{branch}` on a branch named `graphql`, was read as a REST body, as
+    written, and a term spelled with a GraphQL `\\u` escape went out."""
+    long = gh_long_names(GH_TEXT_COMMANDS[("api", "")])
+    written = next((value or "" for option, value in read if option is None), "")
+    hostnames = [value for option, value in read if option and long.get(option, option) == "--hostname" and value]
+    named = hostnames[-1] if hostnames else gh_default_host(environment)
+    host, endpoint = gh_host(named), written
+    if "://" in written:
+        try:
+            given = urllib.parse.urlsplit(written)
+            hostname = given.hostname or ""
+        except ValueError:
+            host = "an address gh was given that the check cannot read"
+        else:
+            if given.scheme.lower() in ("http", "https") and hostname in GH_API_HOSTS:
+                host, endpoint = "github.com", given.path.lstrip("/") + (f"?{given.query}" if given.query else "")
+            else:
+                host = hostname or "an address gh was given that names no host"
+    shape = gh_fill(endpoint, "owner/repo", branch)
+    placeholders = gh_placeholders(written)
+    if "branch" in placeholders and branch is None:
+        return GhAddress(host, endpoint, shape, graphql=True)
+    fillings: tuple[tuple[GhBase, str], ...] = ()
+    filled: list[str | None] = [gh_fill(written, "", branch)]
+    if "base" in placeholders:
+        known = bases()
+        fillings = tuple((base, gh_fill(endpoint, base.repository, branch)) for base in known)
+        filled = [gh_fill(written, base.repository, branch) if base.repository else None for base in known] or [None]
+    urls: list[str] = []
+    graphql = rest = False
+    for value in filled:
+        if value is None:
+            graphql = rest = True
+            continue
+        urls.append(value if "://" in value else gh_api_address(named, value))
+        api = value == "graphql" or gh_graphql_api(urls[-1])
+        graphql = graphql or api is not False
+        rest = rest or api is not True
+    return GhAddress(host, endpoint, shape, fillings, tuple(urls), graphql, rest)
 
 
 # The path of a release's assets, where GitHub stores the request's body as an asset's bytes.
 GH_UPLOAD_PATH = re.compile(r"^/?repos/[^/]+/[^/]+/releases/[0-9]+/assets(?:[/?#]|$)")
 
 
-def gh_is_upload(group: str, sub: str, read: Sequence[tuple[str | None, str | None]],
-                 environment: Mapping[str, str]) -> bool:
+def gh_is_upload(group: str, sub: str, address: GhAddress) -> bool:
     """Whether the call uploads a release asset, whose body GitHub stores as the bytes gh sends and never decodes:
-    `gh release upload`, or a `gh api` call to a release's assets path (GH_UPLOAD_PATH) or to an address on
-    uploads.github.com. Such a body is read as written, never as JSON (gh_values): until the review of
-    dispatch://INFRA-4383 every --input was read as JSON, and an asset's `\\u002f`, decoded into the `/` of a token the
-    repository allows, sent the scoped term the token held although the uploaded bytes hold no such token."""
-    if (group, sub) == ("release", "upload"):
+    `gh release upload`, or a `gh api` call to a release's assets path (GH_UPLOAD_PATH, GhAddress.endpoint) or to an
+    address on uploads.github.com (GhAddress.urls). Such a body is read as written, never as JSON (gh_values): until
+    the review of dispatch://INFRA-4383 every --input was read as JSON, and an asset's `\\u002f`, decoded into the `/`
+    of a token the repository allows, sent the scoped term the token held although the uploaded bytes hold no such
+    token."""
+    if (group, sub) == ("release", "upload") or GH_UPLOAD_PATH.match(address.endpoint):
         return True
-    if group != "api":
-        return False
-    endpoint = next((value or "" for option, value in read if option is None), "")
-    if "://" in endpoint:
+    for url in address.urls:
         try:
-            if urllib.parse.urlsplit(endpoint).hostname == "uploads.github.com":
+            if urllib.parse.urlsplit(url).hostname == "uploads.github.com":
                 return True
         except ValueError:
             pass
-    return bool(GH_UPLOAD_PATH.match(gh_api_endpoint(read, environment)[1]))
+    return False
 
 
 def gh_api_sends(read: Sequence[tuple[str | None, str | None]]) -> bool:
@@ -3275,26 +3420,36 @@ def graphql_values(path: str, document: str) -> list[tuple[str, str, bool]]:
     return [(f"{path} string {number}".lstrip(), value, False) for number, value in enumerate(strings, start=1)]
 
 
-def gh_values(piece: GhText, text: str, graphql: bool) -> list[tuple[str, str, bool]]:
-    """Each value TEXT holds as its endpoint stores it, each read on its own, so that two values never make one match
-    (dispatch://INFRA-4383, R1): (its path in TEXT, "" for TEXT itself; the value; whether it is read both ways, as
-    written and with its JSON escapes decoded). A body GitHub stores as JSON fields (GhText.json_body: an --input or
-    `workflow run --json` body that parses as JSON, never a release asset's, gh_is_upload) is each string and member
-    name, decoded, by its JSON path; a GraphQL document that parses (GRAPHQL: the text, or for a JSON body its
-    `.query`) is each of its strings, decoded, and its comments, which nobody stores, are not read. A body that does not
-    parse as JSON, and a document that does not parse, are read both ways: there the check cannot tell what is stored,
-    and a refusal across two values beats a miss. Any other text, a release asset's bytes and a field's value among
-    them, is read as written: GitHub stores a body's `\\u0041` as those six characters."""
+def gh_stored_values(piece: GhText, text: str, graphql: bool) -> list[tuple[str, str, bool]] | None:
+    """Each value TEXT holds as its endpoint stores it, before a GraphQL document is read by its grammar: (its path in
+    TEXT, "" for TEXT itself; the value; whether it is a GraphQL document). A body GitHub stores as JSON fields
+    (GhText.json_body: an --input or `workflow run --json` body, never a release asset's, gh_is_upload) is each string
+    and member name, decoded, by its JSON path, its `.query` a document when GRAPHQL says the text carries one; None
+    for such a body that does not parse as JSON. Any other text is itself, a document when GRAPHQL says it is one.
+    gh_values and gh_graphql_documents both take a text's documents from here."""
     if not piece.json_body:
-        return graphql_values("", text) if graphql else [("", text, False)]
+        return [("", text, graphql)]
     try:
         decoded = json.loads(text, object_pairs_hook=JsonObject)
     except (ValueError, RecursionError):
+        return None
+    return [(path, value, graphql and path == ".query") for path, value in json_strings(decoded)]
+
+
+def gh_values(piece: GhText, text: str, graphql: bool) -> list[tuple[str, str, bool]]:
+    """Each value TEXT holds as its endpoint stores it, each read on its own, so that two values never make one match
+    (dispatch://INFRA-4383, R1): (its path in TEXT, "" for TEXT itself; the value; whether it is read both ways, as
+    written and with its JSON escapes decoded), for each value gh_stored_values gives, GRAPHQL saying whether the text
+    is a GraphQL document or carries one. A document that parses is each of its strings, decoded, and its comments,
+    which nobody stores, are not read. A body that does not parse as JSON, and a document that does not parse, are
+    read both ways: there the check cannot tell what is stored, and a refusal across two values beats a miss. Any
+    other text, a release asset's bytes and a field's value among them, is read as written: GitHub stores a body's
+    `\\u0041` as those six characters."""
+    stored = gh_stored_values(piece, text, graphql)
+    if stored is None:
         return [("", text, True)]
-    values: list[tuple[str, str, bool]] = []
-    for path, value in json_strings(decoded):
-        values += graphql_values(path, value) if graphql and path == ".query" else [(path, value, False)]
-    return values
+    return [item for path, value, document in stored
+            for item in (graphql_values(path, value) if document else [(path, value, False)])]
 
 
 # CommonMark's escapes, which GitHub undoes when it renders a text: a backslash before an ASCII punctuation character
@@ -3488,7 +3643,7 @@ def gh_fills_branch(texts: Sequence[GhText]) -> bool:
 
 
 def gh_filled(contents: Sequence[tuple[GhText, str]], bases: Callable[[], Sequence[GhBase]],
-              branch: str) -> list[tuple[GhText, str]]:
+              branch: str | None) -> list[tuple[GhText, str]]:
     """The CONTENTS of a `gh api` call as gh sends them once it has filled the placeholders (gh_fill) of its endpoint
     and of each -F value but a file's (gh_is_filled): one text for each distinct filling from a base repository gh may
     take, tied to the base repositories whose filling it is (GhText.bases), the base placeholders left as written for a
@@ -3620,25 +3775,28 @@ def gh_own_name(target: GhTarget, view: str, span: Span) -> bool:
     return any(found.start() <= span.start and span.end <= found.end() for found in own.finditer(view))
 
 
-# The one target of a raw GraphQL mutation, a call to GitHub's GraphQL API (gh_api_graphql) whose text holds `mutation`
-# (GH_GRAPHQL_MUTATION; gh_reach). The check does not read where a mutation goes: each one is read whole, as public,
-# whatever repository or node it names, so one whose text holds a listed term is refused even to a private repository,
-# and its text is judged with no own-name exemption (gh_own_name). A query, a call none of whose texts holds
-# `mutation`, is a read: gh_check passes it once it has read every text, before it looks for a listed term. A call
-# one of whose texts cannot be read (`-F query=@missing`) is not known to be a query or a mutation, so it is not passed
-# and its one target is GH_GRAPHQL_UNREAD_TARGET, which earns no mutation's advice. Until review round 5 of
+# The one target of a raw GraphQL mutation, a call read as GraphQL on any host (gh_api_endpoint, GhAddress.graphql)
+# whose text holds `mutation` (GH_GRAPHQL_MUTATION; gh_reach). The check does not read where a mutation goes: each one
+# is read whole, as public, whatever repository or node it names, so one whose text holds a listed term is refused even
+# to a private repository, and its text is judged with no own-name exemption (gh_own_name). A query, a call none of
+# whose texts holds `mutation`, is a read: gh_check passes it once it has read every text, before it looks for a listed
+# term, unless gh may send it to a REST API too (GhAddress.rest), where it is judged as that REST call. A call one of
+# whose texts cannot be read (`-F query=@missing`) is not known to be a query or a mutation, so it is not passed and
+# its one target is GH_GRAPHQL_UNREAD_TARGET, which earns no mutation's advice. Until review round 5 of
 # dispatch://INFRA-3365 the check read a mutation's fields, node ids and named repositories to find its targets, and
 # each round of tests found one more way that reading and GitHub's differed.
 GH_GRAPHQL_TARGET = "a raw GraphQL mutation, which is read as public"
 GH_GRAPHQL_UNREAD_TARGET = "a GraphQL call whose text could not be read, read as public"
 # The gh subcommand or REST route that does what a GraphQL mutation does, judged by its repository: the refusal of a
-# mutation names the one for each of these its document names (gh_graphql_advice). gh fills in only `{owner}`, `{repo}`
-# and `{branch}` (GH_PLACEHOLDERS); the caller writes every other `{…}`.
+# mutation names the one for each of these its document names (gh_graphql_advice). gh fills in only the placeholders of
+# GH_PLACEHOLDERS; the caller writes every other `{…}`. A new review comment takes `line`, which GitHub's REST API
+# says is "Required unless using subject_type:file" (docs.github.com, "Create a review comment for a pull request").
 GH_THREAD_REPLY = "gh api repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies -f body=…"
 GH_GRAPHQL_ROUTES = {
     "addPullRequestReviewThreadReply": GH_THREAD_REPLY,
     "addPullRequestReviewComment": GH_THREAD_REPLY + " to reply to a comment, or for a new review comment gh api "
-                                   "repos/{owner}/{repo}/pulls/{number}/comments -f body=… -f commit_id=… -f path=…",
+                                   "repos/{owner}/{repo}/pulls/{number}/comments -f body=… -f commit_id=… -f path=… "
+                                   "-F line=…, or -f subject_type=file for the whole file",
     "addComment": "gh issue comment or gh pr comment",
     "createIssue": "gh issue create",
     "updateIssue": "gh issue edit",
@@ -3653,27 +3811,16 @@ GH_GRAPHQL_ROUTES = {
 
 
 def gh_graphql_documents(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText], bool]) -> list[str]:
-    """Each GraphQL document of CONTENTS (GRAPHQL saying which text is one or carries one, as gh_findings reads them):
-    the text of a `query` field, and each `.query` string of a JSON body that parses, decoded."""
-    documents: list[str] = []
-    for piece, text in contents:
-        if not graphql(piece):
-            continue
-        if not piece.json_body:
-            documents.append(text)
-            continue
-        try:
-            decoded = json.loads(text, object_pairs_hook=JsonObject)
-        except (ValueError, RecursionError):
-            continue
-        documents += [value for path, value in json_strings(decoded) if path == ".query"]
-    return documents
+    """Each GraphQL document of CONTENTS (GRAPHQL saying which text is one or carries one, as gh_findings reads them;
+    gh_stored_values): the text of a `query` field, and each `.query` string of a JSON body that parses, decoded."""
+    return [value for piece, text in contents
+            for _, value, document in gh_stored_values(piece, text, graphql(piece)) or () if document]
 
 
 def gh_graphql_advice(documents: Sequence[str]) -> str:
     """What the refusal of a raw GraphQL mutation advises: for each mutation of GH_GRAPHQL_ROUTES that a name token of
     DOCUMENTS names (graphql_tokens), the gh subcommand or REST route to use instead, which is judged by its
-    repository, and, for a route with a placeholder, that gh fills in only `{owner}`, `{repo}` and `{branch}`; when a
+    repository, and, for a route with a placeholder, that gh fills in only the placeholders of GH_PLACEHOLDERS; when a
     document does not tokenize, or none names such a mutation, that a gh subcommand or the REST API is judged by its
     repository. A name inside a string or a comment is no name token, so it gives no advice: until review round 6 of
     dispatch://INFRA-3365 a name anywhere in the text did."""
@@ -3686,8 +3833,9 @@ def gh_graphql_advice(documents: Sequence[str]) -> str:
     if not named:
         return f"{read}; a gh subcommand or the REST API is judged by its repository"
     routes = "; ".join(f"for {name} use {GH_GRAPHQL_ROUTES[name]}" for name in named)
-    filled = (", and gh fills in only {owner}, {repo} and {branch}: write every other {…} by hand"
-              if any("{" in GH_GRAPHQL_ROUTES[name] for name in named) else "")
+    placeholders = [f"{{{word}}}" for word in GH_PLACEHOLDERS]
+    filled = (f", and gh fills in only {', '.join(placeholders[:-1])} and {placeholders[-1]}: write every other {{…}} "
+              "by hand" if any("{" in GH_GRAPHQL_ROUTES[name] for name in named) else "")
     return f"{read}. Instead, {routes}. Each of these is judged by its repository{filled}"
 
 
@@ -3738,20 +3886,15 @@ def gh_made_public(group: str, sub: str, read: Sequence[tuple[str | None, str | 
 @dataclass(frozen=True)
 class GhCall:
     """gh_check's reading of a gh call, from which gh_reach reads where it goes: GROUP and SUB, its command; READ, its
-    arguments as gh reads them (gh_walk); HOST, where gh sends it (gh_host); for a `gh api` call, ENDPOINT, its endpoint
-    as a path on that host's API (gh_api_endpoint), SHAPE, the endpoint filled in with any base name (gh_made_public),
-    and FILLINGS, the endpoint as gh fills it from each base repository it may take, when it holds a base placeholder
-    (gh_fill); MADE_PUBLIC, whether the call makes the repository it goes to public (gh_made_public); GRAPHQL, whether
-    it goes to GitHub's GraphQL API (gh_api_graphql); and MUTATION, whether a text of such a call holds `mutation`
-    (GH_GRAPHQL_MUTATION)."""
+    arguments as gh reads them (gh_walk); ADDRESS, where gh sends it (GhAddress, resolved once by gh_api_endpoint for a
+    `gh api` call); MADE_PUBLIC, whether the call makes the repository it goes to public (gh_made_public); GRAPHQL,
+    whether it is judged as a GraphQL call (GhAddress.graphql, when it is a mutation, a text cannot be read or gh sends
+    it to no REST API); and MUTATION, whether a text of such a call holds `mutation` (GH_GRAPHQL_MUTATION)."""
 
     group: str
     sub: str
     read: tuple[tuple[str | None, str | None], ...]
-    host: str
-    endpoint: str
-    shape: str
-    fillings: tuple[tuple[GhBase, str], ...]
+    address: GhAddress
     made_public: bool
     graphql: bool
     mutation: bool
@@ -3775,29 +3918,31 @@ class GhRepository:
 
 
 def gh_reach(call: GhCall, bases: Callable[[], Sequence[GhBase]]) -> list[GhTarget]:
-    """Every target the call (CALL, gh_check's reading of it) can reach: its host, where gh sends it (gh_host), and on
-    github.com the repositories it names, else its base repository (BASES, gh_bases: GH_REPO's for a command with
-    -R/--repo, else this directory's remotes, which gh_check reads at most once for every reading that takes them),
+    """Every target the call (CALL, gh_check's reading of it) can reach: its host, where gh sends it (GhAddress.host),
+    and on github.com the repositories it names, else its base repository (BASES, gh_bases: GH_REPO's for a command
+    with -R/--repo, else this directory's remotes, which gh_check reads at most once for every reading that takes them),
     and the repository `issue develop --branch-repo` names; for a `gh api` call, the repository the `repos/O/R` of its
-    endpoint names once gh has filled its placeholders from each base repository (GhCall.fillings), or a new
-    repository (GH_API_NEW_REPOSITORY; GhCall.shape says which endpoint it is). A call to GitHub's GraphQL API
-    (GhCall.graphql), which gh_check passes before here unless a text holds `mutation` or cannot be read, is one target
-    read as public: GH_GRAPHQL_TARGET for a mutation (GhCall.mutation), else GH_GRAPHQL_UNREAD_TARGET, since the text
-    that cannot be read may be the mutation. A repository the call makes public (GhCall.made_public) is open, and so is
-    one whose visibility cannot be read, and a target with no repository: a gist (anyone with its address reads it), a
-    project, a repository on another host, a new repository, a base repository the check cannot read, a GraphQL call. A
-    repository whose visibility is read as public is public (GhTarget.public). Each target says which texts go to it
-    (GhTie, gh_goes_to); every text goes to a target returned alone (GH_EVERY_TEXT, GhTarget's default tie)."""
-    group, sub = call.group, call.sub
+    endpoint names once gh has filled its placeholders from each base repository (GhAddress.fillings), or a new
+    repository (GH_API_NEW_REPOSITORY; GhAddress.shape says which endpoint it is). A call judged as GraphQL
+    (GhCall.graphql), on any host, which gh_check passes before here unless a text holds `mutation` or cannot be read,
+    is one target read as public: GH_GRAPHQL_TARGET for a mutation (GhCall.mutation), else GH_GRAPHQL_UNREAD_TARGET,
+    since the text that cannot be read may be the mutation. A repository the call makes public (GhCall.made_public) is
+    open, and so is one whose visibility cannot be read, and a target with no repository: a gist (anyone with its
+    address reads it), a project, a repository on another host, a new repository, a base repository the check cannot
+    read, a GraphQL call. A repository whose visibility is read as public is public (GhTarget.public). Each target says
+    which texts go to it (GhTie, gh_goes_to); every text goes to a target returned alone (GH_EVERY_TEXT, GhTarget's
+    default tie). Until review round 7 of dispatch://INFRA-3365 a call to another host was read as REST before it was
+    read as GraphQL."""
+    group, sub, address = call.group, call.sub, call.address
     long = gh_long_names(GH_TEXT_COMMANDS[(group, sub)])
-    if call.host != "github.com":
-        return [GhTarget(f"a repository on {call.host}, read as public", "", True)]
+    if group == "api" and call.graphql:
+        return [GhTarget(GH_GRAPHQL_TARGET if call.mutation else GH_GRAPHQL_UNREAD_TARGET, "", True)]
+    if address.host != "github.com":
+        return [GhTarget(f"a repository on {address.host}, read as public", "", True)]
     if group == "gist":
         return [GhTarget("a gist, which anyone with its address can read", "", True)]
     if group == "project":
         return [GhTarget("a project, read as public", "", True)]
-    if group == "api" and call.graphql:
-        return [GhTarget(GH_GRAPHQL_TARGET if call.mutation else GH_GRAPHQL_UNREAD_TARGET, "", True)]
     values: dict[str, list[str | None]] = {}
     positionals: list[str] = []
     for option, value in call.read:
@@ -3831,17 +3976,17 @@ def gh_reach(call: GhCall, bases: Callable[[], Sequence[GhBase]]) -> list[GhTarg
         # repository itself and one with `:owner` as no repository, so `orgs/{owner}/repos` and `repos/{owner}/R` were
         # judged by the checkout's private repository (dispatch://INFRA-3365, tester round 3). Each repository filled
         # in from a base is tied to that base (GhTie.base).
-        if GH_API_NEW_REPOSITORY.fullmatch(call.shape):
+        if GH_API_NEW_REPOSITORY.fullmatch(address.shape):
             # A new repository is public unless the call says otherwise, and a template's is not as visible as the
             # template: until 2026-11-19 `repos/O/R/generate` was judged by the template O/R.
             return [GhTarget("a new repository the call makes, read as public", "", True)]
-        given = GH_API_REPOSITORY.match(call.shape)
+        given = GH_API_REPOSITORY.match(address.shape)
         if given is None:
             return [GhTarget("no repository, read as public", "", True)]
-        if "base" not in gh_placeholders(call.endpoint):
+        if "base" not in gh_placeholders(address.endpoint):
             # With no base name to fill in, the shape is the endpoint as gh sends it.
             add(f"{given[1]}/{given[2]}", "github.com", f"https://github.com/{given[1]}/{given[2]}")
-        for base, filled in call.fillings:
+        for base, filled in address.fillings:
             found = GH_API_REPOSITORY.match(filled) if base.repository else None
             if found is None:
                 reached.append(GhTarget(f"a repository filled in from {base.source}, which could not be read, "
@@ -3899,34 +4044,26 @@ def gh_check(arguments: Sequence[str]) -> int:
     # `pr create --dry-run` prints the pull request it would create and sends none of its text.
     if (group, sub) == ("pr", "create") and gh_flag(read, long, "--dry-run"):
         return 0
-    # A release asset's body is its bytes: never read as JSON (gh_is_upload).
-    upload = gh_is_upload(group, sub, read, environment)
-    # Where gh sends the call, and a `gh api` call's endpoint as a path on that host's API.
-    host, endpoint = (gh_api_endpoint(read, environment) if group == "api"
-                      else (gh_host(environment.get("GH_HOST") or "github.com"), ""))
-    # Whether the call goes to GitHub's GraphQL API, its endpoint read as gh resolves it (gh_api_graphql): the one value
-    # that the target (gh_reach), the pass for a query, the reading of a document (graphql, below) and the advice take.
-    graphql_call = group == "api" and gh_api_graphql(read, host)
-    texts = [replace(piece, path="-" if piece.path not in (None, "-") and gh_is_stdin(piece.path) else piece.path,
-                     json_body=piece.json_body and not upload)
-             for piece in gh_texts(group, sub, read)]
-    # The current branch, read once, for a `gh api` call that has one to fill; with GH_REPO set gh fills none. A call
-    # with none to fill keeps "" (gh_fill).
-    branch = ""
-    if group == "api" and gh_fills_branch(texts):
-        current = None if environment.get("GH_REPO") else gh_current_branch()
-        if current is None:
-            # gh refuses a call whose `{branch}` or `:branch` it cannot fill before it sends anything, so the call
-            # passes, whatever else it holds. Measured on gh 2.98.0, each exits 1 with no request sent: with GH_REPO
-            # set, "unable to determine an appropriate value for the 'branch' placeholder"; on a detached HEAD, as a jj
-            # checkout that shares its git directory usually has, "unable to expand placeholder in path: could not
-            # determine current branch: failed to run git: not on any branch" (for an -F value, `error parsing "sha"
-            # value: could not determine current branch: …`); outside a git repository, "could not determine current
-            # branch: failed to run git: fatal: not a git repository".
+    pieces = [replace(piece, path="-" if piece.path not in (None, "-") and gh_is_stdin(piece.path) else piece.path)
+              for piece in gh_texts(group, sub, read)]
+    # The current branch, read once, for a `gh api` call that has one to fill; with GH_REPO set gh fills none. None for
+    # a call with none to fill, and where git names none (gh_fill leaves the branch as written then).
+    branch: str | None = None
+    if group == "api" and gh_fills_branch(pieces):
+        branch = None if environment.get("GH_REPO") else gh_current_branch()
+        if branch is None and gh_fills_branch([piece for piece in pieces if piece.option != "argument 1"]):
+            # gh refuses a call whose `{branch}` or `:branch` it cannot fill before it sends anything. Measured on gh
+            # 2.98.0, each exits 1 with no request sent: with GH_REPO set, "unable to determine an appropriate value for
+            # the 'branch' placeholder"; on a detached HEAD, as a jj checkout that shares its git directory usually
+            # has, "unable to expand placeholder in path: could not determine current branch: failed to run git: not
+            # on any branch" (for an -F value, `error parsing "sha" value: could not determine current branch: …`);
+            # outside a git repository, "could not determine current branch: failed to run git: fatal: not a git
+            # repository". gh fills the -F values before the endpoint (pkg/cmd/api/api.go apiRun: parseFields, then
+            # fillPlaceholders), so a call with such a value passes, whatever else it holds. One whose endpoint alone
+            # holds the branch is read as GraphQL instead, failing closed (gh_api_endpoint).
             return 0
-        branch = current
     stdin: str | None = None
-    if any(piece.path == "-" for piece in texts):
+    if any(piece.path == "-" for piece in pieces):
         pointer = environment.get(GH_STDIN)
         if not pointer:
             return GH_STDIN_EXIT
@@ -3934,12 +4071,12 @@ def gh_check(arguments: Sequence[str]) -> int:
             stdin = Path(pointer).read_bytes().decode("utf-8", errors="surrogateescape")
         except OSError:
             stdin = None
-    contents, unreadable = gh_contents(texts, stdin)
     # Each repository gh may take as the base repository (gh_bases), read at most once, and only for a reading that
-    # takes one: a text gh fills that holds a base placeholder (gh_filled), the repository a `repo edit` that names
-    # none makes public (gh_published_names), and, once a term is found, where a call that names no repository goes
-    # (gh_reach). Until review round 2 of dispatch://INFRA-3365 every checked call read them first (git twice, and
-    # scripts/github-repo-visibility for each remote), which made a clean `pr comment` 43 to 72 ms slower.
+    # takes one: an endpoint that holds a base placeholder (gh_api_endpoint), a text gh fills that holds one
+    # (gh_filled), the repository a `repo edit` that names none makes public (gh_published_names), and, once a term is
+    # found, where a call that names no repository goes (gh_reach). Until review round 2 of dispatch://INFRA-3365 every
+    # checked call read them first (git twice, and scripts/github-repo-visibility for each remote), which made a clean
+    # `pr comment` 43 to 72 ms slower.
     known: tuple[GhBase, ...] | None = None
 
     def bases() -> tuple[GhBase, ...]:
@@ -3948,31 +4085,34 @@ def gh_check(arguments: Sequence[str]) -> int:
             known = tuple(gh_bases(environment, group == "api" or "--repo" in long.values()))
         return known
 
-    # A `gh api` call's endpoint filled in with any base name, which says which endpoint it is (gh_made_public,
-    # gh_reach), since no base name holds a `/`, `?`, `#` or brace (scripts/github-repo-visibility --slug); the branch,
-    # which can, is filled in as gh fills it.
-    shape = gh_fill(endpoint, "owner/repo", branch)
-    # The endpoint as gh fills it from each base repository it may take, when it holds a base placeholder, which says
-    # where the call goes (gh_reach).
-    fillings = (tuple((base, gh_fill(endpoint, base.repository, branch)) for base in bases())
-                if group == "api" and "base" in gh_placeholders(endpoint) else ())
+    # Where gh sends the call, resolved once (gh_api_endpoint): every reader below takes it from here, the target
+    # (gh_reach), the pass for a query, the reading of a document (graphql, below), the advice and gh_is_upload.
+    address = (gh_api_endpoint(read, environment, branch, bases) if group == "api"
+               else GhAddress(gh_host(environment.get("GH_HOST") or "github.com")))
+    # A release asset's body is its bytes: never read as JSON (gh_is_upload).
+    upload = gh_is_upload(group, sub, address)
+    texts = [replace(piece, json_body=piece.json_body and not upload) for piece in pieces]
+    contents, unreadable = gh_contents(texts, stdin)
     if group == "api":
         # What gh sends once it has filled the placeholders of the endpoint and of its -F values (gh_filled).
         contents = gh_filled(contents, bases, branch)
     local_contents, local_unreadable = gh_local_texts(group, sub, read)
     contents += local_contents
     unreadable += local_unreadable
-    # A GraphQL call is a mutation when a text holds `mutation`. GitHub reads an --input payload as JSON, so
+    # A call read as GraphQL is a mutation when a text holds `mutation`. GitHub reads an --input payload as JSON, so
     # `\u006dutation` there is the keyword too: the decoded view counts.
-    mutation = graphql_call and any(GH_GRAPHQL_MUTATION.search(view) for _, text in contents
-                                    for view in (text, escapes_decoded(text)))
+    mutation = address.graphql and any(GH_GRAPHQL_MUTATION.search(view) for _, text in contents
+                                       for view in (text, escapes_decoded(text)))
+    # It is judged as GraphQL (gh_reach) when it is a mutation, when a text that cannot be read may be one, or when gh
+    # sends it to no REST API; else it is judged as the REST call gh may send it as (GhAddress.rest).
+    graphql_call = address.graphql and (mutation or bool(unreadable) or not address.rest)
     if graphql_call and not mutation and not unreadable:
         # A query, every text read and none holding `mutation`, is a read (GH_GRAPHQL_TARGET).
         return 0
-    made_public = gh_made_public(group, sub, read, shape, contents)
+    made_public = gh_made_public(group, sub, read, address.shape, contents)
     if made_public:
         # The name of a repository the call makes public that no text of the call gives whole (gh_published_names).
-        published, unread_names = gh_published_names(group, sub, read, endpoint, bases)
+        published, unread_names = gh_published_names(group, sub, read, address.endpoint, bases)
         contents += published
         unreadable += unread_names
 
@@ -3994,8 +4134,7 @@ def gh_check(arguments: Sequence[str]) -> int:
             findings = gh_findings(contents, graphql, matcher)
     if not findings and list_problem is None and not unreadable:
         return 0
-    reached = gh_reach(GhCall(group, sub, tuple(read), host, endpoint, shape, fillings, made_public, graphql_call,
-                              mutation), bases)
+    reached = gh_reach(GhCall(group, sub, tuple(read), address, made_public, graphql_call, mutation), bases)
     open_targets = [target for target in reached if target.open]
     if not open_targets:
         return 0
@@ -4027,7 +4166,7 @@ def gh_check(arguments: Sequence[str]) -> int:
         print(list_problem, file=sys.stderr)
         print(f"leak terms: {name} to {target}: its text cannot be checked without the list", file=sys.stderr)
     advice = f" To send it, {REMOVE_ADVICE}." if findings else ""
-    if findings and any(item.shown == GH_GRAPHQL_TARGET for item in reached):
+    if findings and mutation:
         # The refusal of a raw GraphQL mutation names what to use instead (gh_graphql_advice); a GraphQL call that is
         # not known to be a mutation (GH_GRAPHQL_UNREAD_TARGET), and a refusal with no term, get none.
         advice += f" {gh_graphql_advice(gh_graphql_documents(contents, graphql))}."

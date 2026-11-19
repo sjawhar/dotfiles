@@ -79,13 +79,13 @@ A caller can give a shim its own HOME and a bare PATH: a Legion test pane runs w
   word) counts for nothing there, for gh subcommand and REST writes (`gh_own_name`).
 - A text is read as GitHub renders it, CommonMark's backslash escapes and character references
   undone, and a GraphQL document's strings as GraphQL decodes them.
-- A request gh sends to a GraphQL API, its address resolved as gh resolves it (placeholders
-  filled, then the host, any host), is a read when no text holds `mutation`. A mutation is one
-  target, read as public and as any repository, so a term anywhere in it is refused, even to a
-  private repository and in its own name; a request whose address the check cannot resolve for
-  certain is read the same way. Its refusal names a route from `GH_GRAPHQL_ROUTES` in
-  `scripts/leak-terms-check`, such as `gh api
-  repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies -f body=…` for a thread reply.
+- A `gh api` request is GraphQL when gh, once it fills the placeholders, sends it to a GraphQL API
+  on any host, or when the check cannot fill them for certain. With no text holding `mutation` it
+  is a read, unless gh may also send it as REST. A mutation is one target, read as public and as
+  any repository, so a term anywhere in it is refused, even to a private repository and in its own
+  name. Its refusal names a route from `GH_GRAPHQL_ROUTES` (`scripts/leak-terms-check`), such as
+  `gh api repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies -f body=…` for a
+  reply.
 - `issue transfer` is not read. GitHub's rule: "You can only transfer issues between repositories
   owned by the same user or organization account. A private repository issue cannot be
   transferred to a public repository" (docs.github.com, "Transferring an issue to another
