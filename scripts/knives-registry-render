@@ -53,7 +53,9 @@ if plain_copy && cmp -s "$rendered" "$registry"; then
     did="$shown already held the render of knives/repos.toml (sha256 $short); wrote nothing to it"
 else
     chmod 644 "$rendered"
-    mv -f "$rendered" "$registry"
+    # -T: the copy itself is replaced, a symlink included. A directory at its path is refused, and
+    # the run fails, rather than taking the render inside it and saying it wrote the copy.
+    mv -fT "$rendered" "$registry"
     rendered=""
     did="wrote $shown from knives/repos.toml (sha256 $short)"
 fi
@@ -64,7 +66,7 @@ if ! record_holds_sha; then
     record_tmp="$(mktemp "${record}.XXXXXX")"
     printf '%s\n' "$sha" > "$record_tmp"
     chmod 644 "$record_tmp"
-    mv -f "$record_tmp" "$record"
+    mv -fT "$record_tmp" "$record"
     record_tmp=""
 fi
 echo "knives-registry-render: $did"

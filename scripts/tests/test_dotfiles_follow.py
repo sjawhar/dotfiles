@@ -1353,6 +1353,30 @@ class KnivesRegistry(RegistryCopy, Harness):
         self.assertEqual(self.state_data()["last_outcome"], "ok")
         self.assertEqual(self.installs(), 2)
 
+    def test_a_copy_that_is_a_directory_is_a_condition_and_nothing_goes_inside_it(self) -> None:
+        # A directory at the copy's path is refused (mv -T), not given the render as a file inside it.
+        self.copy.mkdir(parents=True)
+        (self.copy / "kept.txt").write_text("a person's file\n")
+        messages = self.run_follow()
+        self.assertEqual(sorted(path.name for path in self.copy.iterdir()), ["kept.txt"])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("is on main, but a post-update step failed", messages[0].splitlines()[0])
+        self.assertIn("KNIVES REGISTRY NOT WRITTEN", messages[0])
+        self.assertIn("cannot overwrite directory", messages[0])
+        self.assertIn("~/.config/knives/repos.toml keeps what it held.", messages[0])
+        self.assertFalse(self.record.exists())
+
+    def test_a_copy_that_links_to_a_directory_is_replaced_by_the_render(self) -> None:
+        # The link itself is replaced by a plain file, and the directory it named is left as it was.
+        elsewhere = self.home / "elsewhere"
+        elsewhere.mkdir()
+        self.copy.parent.mkdir(parents=True)
+        self.copy.symlink_to(elsewhere)
+        self.assertEqual(self.run_follow(), [])
+        self.assertFalse(self.copy.is_symlink())
+        self.assert_copy_renders(REGISTRY_V1)
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
     def test_the_footer_names_the_write_in_a_fast_forward_run(self) -> None:
         # The render writes the copy and the tools step fails in the same run: the one message says both.
         self.first_render()

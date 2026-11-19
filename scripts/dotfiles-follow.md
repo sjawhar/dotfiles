@@ -80,10 +80,11 @@ Follow restores the managed marketplace lock before it calls the sync.
    and that sha256 is the file's. So a merged change to the registry reaches the machine with no
    person's command, and `scripts/leak-terms-check`, which reads the same copy, sees it too. A
    copy that a person edited by hand is replaced when the file changes, as an install replaces
-   it. The first run of this version renders once, since no sha256 is recorded yet. A failed
-   render is a condition and stops nothing: the tools step still runs. A checkout with no
-   `scripts/knives-registry-render` (a main older than the step) or no `knives/repos.toml` skips
-   it.
+   it, and a symlink at the copy's path is replaced by a plain file. A directory there is never
+   replaced: the render fails. The first run of this version renders once, since no sha256 is
+   recorded yet. A failed render is a condition and stops nothing: the tools step still runs. A
+   checkout with no `scripts/knives-registry-render` (a main older than the step) or no
+   `knives/repos.toml` skips it.
 7. After a fast-forward or managed-lock recovery, and on later runs until it passes at HEAD:
    `mise install`, `bun install --frozen-lockfile` in `omp/plugins`, then, for each registered
    non-Bun marketplace plugin below the lowest version its lock entry requires,
