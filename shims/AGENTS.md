@@ -329,9 +329,12 @@ behavior before handing the call to the real one. One file is data: `person-name
   the accepted cost. A node id anywhere else (inside a body or a message, a comment,
   `clientMutationId`, a variable the operation does not declare) is no target and is ignored. A
   `repositoryNameWithOwner` that is not `owner/name`, a value of an argument named `id` or ending
-  in `Id` or `Ids` that is neither null nor a node id, a variable the document uses more than once
-  whose value holds a node id or a `repositoryNameWithOwner`, and a field with no target (a status
-  change) leave the document unresolved, and so do several documents and one that does not parse:
+  in `Id` or `Ids` that is neither null nor a node id, an account named by login (an argument named
+  `login` or ending in `Login` or `Logins`, such as createSponsorsTier's `sponsorableLogin`, whose
+  description goes to that account's public Sponsors page) that is not null, a variable the
+  document uses more than once whose value holds a node id or a `repositoryNameWithOwner`, and a
+  field with no target (a status change) leave the document unresolved, and so do several
+  documents and one that does not parse:
   such a call is judged whole, as one target, `a GraphQL mutation whose repository could not be
   read, read as public`, with no node read. A directive is read past, not read as public: GitHub's
   only executable directives are `@skip` and `@include`, and a variable one uses counts as used.

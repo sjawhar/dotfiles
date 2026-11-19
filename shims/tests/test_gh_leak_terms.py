@@ -1559,6 +1559,27 @@ class GhLeakTerms(unittest.TestCase):
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv), argv)
 
+    def test_a_graphql_field_that_names_an_account_by_login_is_judged_whole(self) -> None:
+        # createSponsorsTier names the account by login and publishes its description on that account's public Sponsors
+        # page; a repositoryId beside the login names a private repository the tier gives access to. The check cannot
+        # read where an account named by login takes the text, so such a field is judged whole, as public. Until review
+        # round 4 of dispatch://INFRA-3365 the field was judged by the private repository alone, and the term went out.
+        self.nodes_of_types({"R_kgDOpriv20007": (PRIVATE, "Repository")})
+        tier = ('query=mutation($login: String) { createSponsorsTier(input: {sponsorableLogin: %s, amount: 5, '
+                'description: "see %s", repositoryId: "R_kgDOpriv20007"}) { sponsorsTier { id } } }')
+        for name, argv, string in (
+                ("inline", ["api", "graphql", "-f", tier % ('"o"', CANARY)], 2),
+                ("a -F variable", ["api", "graphql", "-f", tier % ("$login", CANARY), "-F", "login=o"], 1)):
+            with self.subTest(write=name):
+                self.setUp_calls()
+                refused = self.run_gh(argv)
+                self.assert_refused(refused, f"--raw-field query string {string}", CANARY, line=1)
+                self.assertIn(f"to {UNRESOLVED}:", refused.stderr.decode())
+        # Control: with the login null, the private repository is the field's one target, and the write goes out.
+        argv = ["api", "graphql", "-f", tier % ("null", CANARY)]
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+
     def test_an_honest_graphql_write_by_any_argument_is_judged_by_its_own_repository(self) -> None:
         # Given the knives ygo-fork list and theorem-labs/ygo public: a write that names its node by `id` or
         # `inReplyTo`, or that carries a Label, a Ref or a DiscussionComment, resolves to the repository of its nodes,

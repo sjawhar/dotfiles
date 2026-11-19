@@ -3366,6 +3366,12 @@ GH_OWNER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+")
 # GraphQL call unresolved (gh_field_targets); the name chooses no target. clientMutationId is not one: GitHub only
 # echoes its value back.
 GRAPHQL_ID_NAME = re.compile(r"id|[_0-9A-Za-z]*(?:Id|Ids)")
+# The name of an argument or input-object field that names an account by its login (`sponsorableLogin`,
+# `repositoryOwnerLogin`, `login`, `adminLogins`). The check cannot read where such an account's text goes, so a
+# value there that is not null leaves a GraphQL call unresolved (gh_field_targets): createSponsorsTier publishes its
+# description on the account's public Sponsors page, and a repositoryId beside the login would otherwise judge it by
+# that repository alone (review round 4 of dispatch://INFRA-3365, the implementer's class search).
+GRAPHQL_LOGIN_NAME = re.compile(r"login|[_0-9A-Za-z]*(?:Login|Logins)")
 
 
 def graphql_mutation(document: GraphqlDocument) -> GraphqlOperation | None:
@@ -3876,9 +3882,10 @@ def gh_field_targets(arguments: Sequence[GraphqlLeaf], tokens: Sequence[tuple[st
     (ARGUMENTS, in TOKENS; graphql_parses), a variable's leaves those the call gives it (GIVEN, gh_graphql_inputs): each
     node id that is the whole string value of one of them, whatever its name but clientMutationId, and each `owner/name`
     GRAPHQL_NAMED takes. None when the field leaves the call unresolved: a value of GRAPHQL_NAMED that is not an
-    `owner/name`; a value of an argument GRAPHQL_ID_NAME names that is neither null nor a node id, a guard that adds
-    refusals and chooses no target; a variable the document uses more than once (TIMES) whose value holds a node id or
-    a GRAPHQL_NAMED value; and a field with no target."""
+    `owner/name`; a value of an argument GRAPHQL_LOGIN_NAME names that is not null, since the check cannot read where an
+    account named by login takes the text; a value of an argument GRAPHQL_ID_NAME names that is neither null nor a node
+    id, a guard that adds refusals and chooses no target; a variable the document uses more than once (TIMES) whose
+    value holds a node id or a GRAPHQL_NAMED value; and a field with no target."""
     names: list[str] = []
     ids: list[str] = []
     for argument in arguments:
@@ -3895,6 +3902,8 @@ def gh_field_targets(arguments: Sequence[GraphqlLeaf], tokens: Sequence[tuple[st
         for leaf in leaves:
             if leaf.null or leaf.name == "clientMutationId":
                 continue
+            if GRAPHQL_LOGIN_NAME.fullmatch(leaf.name):
+                return None
             if leaf.name == GRAPHQL_NAMED:
                 if leaf.string is None or not GH_OWNER_NAME.fullmatch(leaf.string):
                     return None
@@ -3929,12 +3938,13 @@ def gh_graphql(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText
     term and also refers to a public node is refused, such as updateIssue of a private issue marked as a duplicate of
     a public one.
 
-    A value that should hold a target but does not, a variable the document uses more than once whose value holds
-    one, and a field with no target leave the call unresolved (gh_field_targets). A node id anywhere else (inside a
-    longer string such as a body or a message, in a comment, in a variable the operation does not declare, in
-    clientMutationId) is no target and is ignored. A call the check does not resolve, several documents and one that
-    does not parse among them, is judged whole, as one target read as public, with no node read (gh_reach). In a
-    resolved call a value inside one field, or of a variable only that field uses, goes to that field alone
+    A value that should hold a target but does not, an account named by login (GRAPHQL_LOGIN_NAME), a variable the
+    document uses more than once whose value holds one, and a field with no target leave the call unresolved
+    (gh_field_targets). A node id anywhere else (inside a longer string such as a body or a message, in a comment, in
+    a variable the operation does not declare, in clientMutationId) is no target and is ignored. A call the check does
+    not resolve, several documents and one that does not parse among them, is judged whole, as one target read as
+    public, with no node read (gh_reach). In a resolved call a value inside one field, or of a variable only that field
+    uses, goes to that field alone
     (GhGraphql.field_of). Until review round 2 of dispatch://INFRA-3365 every call was read whole, every node id its
     texts held a target, so a status change beside a commit to a private repository named by name went out with a
     listed term; until its review round 3 a node id in a comment, in clientMutationId or in an undeclared variable was
