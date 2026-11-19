@@ -738,6 +738,107 @@ class GhLeakTerms(unittest.TestCase):
         self.setUp_calls()
         self.assert_sent(self.run_gh(argv), argv)
 
+    def on_branch(self, branch: str = f"notes-{CANARY}") -> None:
+        """Make the work directory a new checkout whose remote origin is PUBLIC and whose current branch is BRANCH, as
+        the test above makes it."""
+        self.remotes(("origin", PUBLIC))
+        subprocess.run(["git", "-C", str(self.work), "symbolic-ref", "HEAD", f"refs/heads/{branch}"], check=True,
+                       env=self.env)
+
+    def test_the_branch_gh_fills_into_an_api_endpoint_is_read(self) -> None:
+        # gh 2.98.0 fills `{branch}` and `:branch` in the endpoint too (`gh api --help`), so the rest of the endpoint
+        # after `repos/O/R` sends the branch's name, here as the ref a PATCH moves; a Legion branch (`legion/<KEY>`)
+        # holds a `/`, which the rest keeps (dispatch://INFRA-3365, tester round 4).
+        for form, branch, endpoint in (
+                ("{branch}", f"notes-{CANARY}", "repos/{owner}/{repo}/git/refs/heads/{branch}"),
+                (":branch", f"notes-{CANARY}", "repos/{owner}/{repo}/git/refs/heads/:branch"),
+                ("{branch} holding a /", f"legion/notes-{CANARY}", "repos/{owner}/{repo}/git/refs/heads/{branch}")):
+            with self.subTest(form=form):
+                self.on_branch(branch)
+                self.setUp_calls()
+                refused = self.run_gh(["api", "-X", "PATCH", endpoint, "-F", "sha=abc"])
+                self.assert_refused(refused, "argument 1", CANARY, line=1)
+                self.assertIn(f"to {PUBLIC}, filled in from remote origin (public)", refused.stderr.decode())
+        # Control: the same ref of a branch with a clean name goes out.
+        with self.subTest(control="clean branch"):
+            self.on_branch("notes")
+            argv = ["api", "-X", "PATCH", "repos/{owner}/{repo}/git/refs/heads/{branch}", "-F", "sha=abc"]
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(argv), argv)
+
+    def test_the_branch_gh_fills_into_a_graphql_variable_is_read(self) -> None:
+        # gh fills `{branch}` in an -F value of a GraphQL call too, so createCommitOnBranch's `branchName` sends the
+        # branch's name to the repository the mutation names, here a public one.
+        query = ('query=mutation($b: CommittableBranch!) { createCommitOnBranch(input: {branch: $b, '
+                 'expectedHeadOid: "x", message: {headline: "m"}}) { commit { oid } } }')
+        argv = ["api", "graphql", "-f", query, "-F", f"b[repositoryNameWithOwner]={PUBLIC}",
+                "-F", "b[branchName]={branch}"]
+        with self.subTest(form="b[branchName]={branch}"):
+            self.on_branch()
+            refused = self.run_gh(argv)
+            self.assert_refused(refused, "--field b[branchName]", CANARY, line=1)
+            self.assertIn(f"to {PUBLIC} (public)", refused.stderr.decode())
+        # Control: the same commit from a branch with a clean name goes out.
+        with self.subTest(control="clean branch"):
+            self.on_branch("notes")
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(argv), argv)
+
+    def test_a_call_whose_branch_gh_cannot_fill_is_passed_since_gh_sends_nothing(self) -> None:
+        # gh 2.98.0 refuses a call whose `{branch}` or `:branch` it cannot fill before it sends anything (measured:
+        # exit 1, and no request): with GH_REPO set, on a detached HEAD, as a jj checkout that shares its git directory
+        # usually has, and outside a git repository. The check passes such a call whatever else it holds, here a body
+        # with a listed term to a public repository.
+        git = ["git", "-C", str(self.work)]
+
+        def gh_repo() -> dict[str, str]:
+            self.on_branch()
+            return {**self.env, "GH_REPO": PUBLIC}
+
+        def detached() -> dict[str, str]:
+            self.on_branch()
+            subprocess.run([*git, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
+                            "commit", "-q", "--allow-empty", "-m", "x"], check=True, env=self.env)
+            subprocess.run([*git, "checkout", "-q", "--detach"], check=True, env=self.env)
+            return self.env
+
+        def no_repository() -> dict[str, str]:
+            shutil.rmtree(self.work / ".git", ignore_errors=True)
+            return {**self.env, "GIT_CEILING_DIRECTORIES": str(self.tmp)}
+
+        field = ["api", f"repos/{PUBLIC}/issues", "-F", "title={branch}", "-f", f"body={TEXT}"]
+        endpoint = ["api", "-X", "POST", f"repos/{PUBLIC}/branches/:branch/rename", "-f", f"new_name={TEXT}"]
+        raw = ["api", f"repos/{PUBLIC}/issues", "-f", "title={branch}", "-f", f"body={TEXT}"]
+        for condition, make, has_branch in (("GH_REPO set", gh_repo, True), ("detached HEAD", detached, False),
+                                            ("no git repository", no_repository, False)):
+            for form, argv in (("-F title={branch}", field), (":branch in the endpoint", endpoint)):
+                with self.subTest(condition=condition, form=form):
+                    env = make()
+                    # The checkout is as named: git names a current branch only in the one with GH_REPO set.
+                    current = subprocess.run([*git, "symbolic-ref", "--quiet", "HEAD"], env=env, capture_output=True,
+                                             check=False)
+                    self.assertEqual(current.returncode == 0, has_branch, current)
+                    self.setUp_calls()
+                    self.assert_sent(self.run_gh(argv, env=env), argv)
+            # Control: -f sends `{branch}` as written, so gh sends the call, and its body is read.
+            with self.subTest(condition=condition, control="-f title={branch}"):
+                env = make()
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(raw, env=env), "--raw-field body")
+        # Controls: with GH_REPO empty gh fills the branch, so the call is read; and a call with no branch placeholder
+        # is read, here from the branch the other rows have.
+        with self.subTest(control="GH_REPO empty"):
+            self.on_branch()
+            self.setUp_calls()
+            refused = self.run_gh(["api", f"repos/{PUBLIC}/issues", "-F", "title={branch}"],
+                                  env={**self.env, "GH_REPO": ""})
+            self.assert_refused(refused, "--field title", CANARY, line=1)
+        with self.subTest(control="no branch placeholder"):
+            self.on_branch()
+            self.setUp_calls()
+            self.assert_refused(self.run_gh(["api", f"repos/{PUBLIC}/issues", "-f", "title=t", "-f", f"body={TEXT}"]),
+                                "--raw-field body")
+
     def test_a_graphql_mutation_is_judged_by_the_repositories_of_its_nodes(self) -> None:
         term = REGISTRY_TEST_TERMS["oh-my-pi"][0]
         self.answer("cybermonklabs/oh-my-pi", "public")
@@ -1493,6 +1594,23 @@ class Tables(unittest.TestCase):
                 self.assertEqual((group, sub) in module.GH_REPOSITORY_ARGUMENT, first == "<repository>", usage)
                 urls = {"<url>", "<urls>", "<discussion-url>", "<comment-url>"}
                 self.assertEqual((group, sub) in module.GH_URL_ARGUMENT, bool(urls.intersection(arguments)), usage)
+
+    def test_the_placeholders_the_check_fills_are_the_installed_gh_s_own(self) -> None:
+        # `gh api --help` lists the placeholders gh fills in the endpoint and in an -F value; the check fills each one
+        # (GH_PLACEHOLDERS), so a gh that adds one fails here rather than sending its value unread.
+        gh = self.real_gh()
+        if gh is None:
+            self.skipTest("no gh on PATH")
+        text = " ".join(subprocess.run([gh, "api", "--help"], capture_output=True, text=True, check=True,
+                                       timeout=60).stdout.split())
+        filled = set(self.scanner().GH_PLACEHOLDERS)
+        for where, sentence in (("endpoint", r"Placeholder values (.*?) in the endpoint argument"),
+                                ("-F", r"placeholder values (.*?) get populated")):
+            with self.subTest(where=where):
+                found = re.search(sentence, text)
+                self.assertIsNotNone(found, text)
+                assert found is not None
+                self.assertEqual(set(re.findall(r"`\{([a-z]+)\}`", found[1])), filled, found[0])
 
     def test_the_shim_hands_every_text_command_to_the_check(self) -> None:
         text = GH.read_text(encoding="utf-8")

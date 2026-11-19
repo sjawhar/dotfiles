@@ -69,8 +69,11 @@ Executables covering several areas:
     `gh repo fork`, and the `owner/name` a GraphQL mutation gives only where it is the value of its
     input field `repositoryNameWithOwner`; a repository the call makes public, such as by
     `repo edit --visibility public` or a PATCH of `repos/{owner}/{repo}`, is read by its name, the
-    name gh takes from `GH_REPO` or the checkout's remote included; `gh api` placeholders
-    (`{owner}`, `:repo`) in the endpoint and in `-F` values are read as gh fills them; a URL in any
+    name gh takes from `GH_REPO` or the checkout's remote included; the `gh api` placeholders that
+    `gh api --help` lists (`{owner}`, `{repo}`, `{branch}`, and `:owner`, `:repo`, `:branch`) in the
+    endpoint and in `-F` values are read as gh fills them, the branch with the current branch, and
+    a call whose branch gh cannot fill (`GH_REPO` set, a detached HEAD, no git repository) passes,
+    since gh refuses it and sends nothing; a URL in any
     other argument is text; and the files and stdin gh reads), each value on its
     own as GitHub stores it (a JSON body's strings by their JSON path, a GraphQL document's strings,
     decoded), and refuses one that holds a listed term (with the tag message `--notes-from-tag` and

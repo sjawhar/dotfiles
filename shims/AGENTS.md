@@ -199,13 +199,22 @@ behavior before handing the call to the real one. One file is data: `person-name
   same day's second test round found a private name that `repo edit --visibility public`
   published unread, and a headline holding `repositoryNameWithOwner=O/R` that went to
   theorem-labs/ygo unread; and its third found the same name published by a PATCH of
-  `repos/{owner}/{repo}`. gh fills `{owner}` and `:owner`, `{repo}` and `:repo` (its own pattern,
-  `pkg/cmd/api/api.go`) in a `gh api` endpoint and in each `-F` value but a file's (`@path`), from
-  the base repository: `GH_REPO` when it is set, else the directory's remote (the one `gh repo
-  set-default` chose, else each). The check reads each as gh sends it, once for each base
-  repository: `repos/{owner}/R` is the base owner's R, `orgs/{owner}/repos` names no repository,
-  and `-F name={repo}` sends the base repository's name. A base repository whose name it cannot
-  read leaves the endpoint's repository unknown, read as public, and the value read as written.
+  `repos/{owner}/{repo}`. gh fills the placeholders `gh api --help` lists, `{owner}`, `{repo}` and
+  `{branch}`, each also as `:owner`, `:repo` and `:branch` (its own pattern, `pkg/cmd/api/api.go`),
+  in a `gh api` endpoint and in each `-F` value but a file's (`@path`): the owner and the name from
+  the base repository, `GH_REPO` when it is set, else the directory's remote (the one `gh repo
+  set-default` chose, else each), and the branch with the current branch, which `git symbolic-ref
+  --quiet HEAD` names. The check reads each as gh sends it, once for each base repository:
+  `repos/{owner}/R` is the base owner's R, `orgs/{owner}/repos` names no repository, `-F
+  name={repo}` sends the base repository's name, and `-F ref=refs/heads/{branch}` or
+  `repos/{owner}/{repo}/git/refs/heads/{branch}` the branch's (until the fourth test round of
+  2026-11-19 `{branch}` was read as written, so a branch whose name holds a listed term went to a
+  public repository unread). A base repository whose name it cannot read leaves the endpoint's
+  repository unknown, read as public, and the value read as written. gh sends nothing for a call
+  whose branch it cannot fill, with `GH_REPO` set, on a detached HEAD (as a jj checkout that shares
+  its git directory usually has) or outside a git repository: gh refuses it, and the check passes
+  it. The list is gh's (`GH_PLACEHOLDERS`): `shims/tests/test_gh_leak_terms.py` fails when the list
+  the installed gh's help gives differs.
   Which arguments name the repository comes from each command's usage in
   `gh <command> --help`
   (`GH_REPOSITORY_ARGUMENT`, `GH_URL_ARGUMENT`; the same test fails when they differ). A URL in any
