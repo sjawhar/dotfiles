@@ -311,8 +311,12 @@ behavior before handing the call to the real one. One file is data: `person-name
   with no own-name exemption. The cost: a raw GraphQL mutation whose text holds a listed term is
   refused even to a private repository, and so is one that names a public repository whose own name
   holds a term (createCommitOnBranch's `repositoryNameWithOwner: "theorem-labs/ygo"` under the
-  knives ygo-fork list). Its refusal names what to use instead, each judged by its repository, for
-  each mutation the document names (`GH_GRAPHQL_ROUTES`): for a thread reply
+  knives ygo-fork list). Its one target counts as any repository, so every scoped list and every
+  knives list counts too: on a machine with the knives registry copy, a mutation that names any
+  theorem-labs repository (createCommitOnBranch to `theorem-labs/agent-infra` with a clean
+  headline, measured 2026-11-19) is refused for `theorem-labs`. Its refusal names what to use
+  instead, each judged by its repository, for each mutation the document names
+  (`GH_GRAPHQL_ROUTES`): for a thread reply
   (`addPullRequestReviewThreadReply`, `addPullRequestReviewComment`) `gh api
   repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies -f body=…`; for `addComment`
   `gh issue comment` or `gh pr comment`; for `createIssue`, `updateIssue`, `createPullRequest` and
