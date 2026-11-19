@@ -82,8 +82,6 @@ class GhLeakTerms(unittest.TestCase):
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
         write_executable(self.bin / "gh", FAKE_GH)
-        # The fallback-write gate of an agent session asks gh-app-token which identity an owner gets.
-        write_executable(self.bin / "gh-app-token", "#!/bin/bash\necho app\n")
         self.calls = self.tmp / "calls"
         self.calls.mkdir()
         self.vis = self.tmp / "visibility"
@@ -118,9 +116,6 @@ class GhLeakTerms(unittest.TestCase):
             "DOTFILES_DIR": str(DOTFILES),
             "KNIVES_GH_BYPASS": "1",
             "AGENT_SHIM_PERSON": "1",
-            # The call log and read cache would otherwise go to the machine's own, canary and all.
-            "GH_READ_CACHE_DIR": str(self.tmp / "gh-read-cache"),
-            "GH_READ_CACHE_LOG": "0",
             "CALLS": str(self.calls),
             "VIS_DIR": str(self.vis),
             "VIS_LOG": str(self.vis_log),
@@ -136,9 +131,9 @@ class GhLeakTerms(unittest.TestCase):
         (self.vis / slug.replace("/", "_")).write_text(visibility + "\n", encoding="utf-8")
 
     def agent(self, **extra: str) -> dict[str, str]:
-        """An omp session's environment: the agent block, the public text gate (a stub that passes) and the read
-        cache all run before the term check."""
-        env = {key: value for key, value in self.env.items() if key not in ("AGENT_SHIM_PERSON", "GH_READ_CACHE_LOG")}
+        """An omp session's environment: the agent block and the public text gate (a stub that passes) run before the
+        term check."""
+        env = {key: value for key, value in self.env.items() if key != "AGENT_SHIM_PERSON"}
         env.update({"OMP_SESSION_ID": "01a0fa64-b3a5-7415-b143-c2a338b5da8b", "PUBLIC_LEAK_CHECK": "/bin/true"})
         env.update(extra)
         return env
@@ -885,15 +880,14 @@ class GhLeakTerms(unittest.TestCase):
         self.assertLess(len(line), 250, line)
         self.assertNotIn("second line", line)
 
-    def test_in_an_agent_session_a_refused_line_is_not_read_as_github_s_answer(self) -> None:
-        # The outer pass reads the call's stderr for GitHub's refusal of the App and for a spent rate limit. A refusal
-        # before gh ran prints the caller's own line, which may say anything.
-        body = f"Fixes the HTTP 403 and API rate limit exceeded answers for {CANARY.upper()}.\n"
-        refused = self.run_gh(["issue", "comment", "1", "-R", PUBLIC, "--body", body], env=self.agent())
-        self.assert_refused(refused, "--body", line=1)
-        stderr = refused.stderr.decode("utf-8", "replace")
-        self.assertNotIn("REFUSED by GitHub", stderr)
-        self.assertNotIn("RATE LIMITED", stderr)
+    def test_in_an_agent_session_the_check_refuses_before_gh_runs(self) -> None:
+        # The agent block (its config directory, the routing include, the public text gate) runs first, and the term
+        # is still refused with gh never run.
+        self.assert_refused(self.run_gh(["issue", "comment", "1", "-R", PUBLIC, "--body", TEXT], env=self.agent()),
+                            "--body", line=1)
+        # Control: the same text to a private repository goes out unchanged.
+        argv = ["issue", "comment", "1", "-R", PRIVATE, "--body", TEXT]
+        self.assert_sent(self.run_gh(argv, env=self.agent()), argv)
 
     # --- what the check does not touch --------------------------------------------------------------------------
 
@@ -996,6 +990,37 @@ class Tables(unittest.TestCase):
                 script = functions + "\ngh_shim_may_send_text " + " ".join(f"'{a}'" for a in argv) + " && echo yes"
                 out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60).stdout
                 self.assertEqual(out.strip(), "yes")
+
+
+class Writes(unittest.TestCase):
+    """gh_shim_is_write names every call that changes something on GitHub, so the check reads its text, and never a
+    read."""
+
+    @staticmethod
+    def is_write(argv: list[str]) -> bool:
+        """gh_shim_is_write, lifted out of the shim by text (sourcing shims/gh runs it), so these cases are checked
+        against the real file."""
+        text = GH.read_text(encoding="utf-8")
+        start = text.index("gh_shim_is_write() {")
+        script = text[start:text.index("\n}\n", start) + 3] + "\ngh_shim_is_write " + " ".join(f"'{a}'" for a in argv)
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60,
+                              check=False).returncode == 0
+
+    def test_write_verbs_are_writes(self) -> None:
+        for argv in (["issue", "comment"], ["issue", "create"], ["pr", "merge"], ["pr", "review"],
+                     ["pr", "edit"], ["pr", "close"], ["release", "create"], ["workflow", "run"],
+                     ["api", "-X", "POST", "repos/o/r/issues"],
+                     ["api", "--method", "DELETE", "repos/o/r"],
+                     ["api", "repos/o/r/issues", "-f", "title=x"]):
+            with self.subTest(argv=argv):
+                self.assertTrue(self.is_write(argv), f"{argv} should be a write")
+
+    def test_read_verbs_are_not_writes(self) -> None:
+        for argv in (["issue", "view"], ["issue", "list"], ["pr", "view"], ["pr", "diff"],
+                     ["repo", "view"], ["run", "view"], ["api", "repos/o/r"],
+                     ["api", "-X", "GET", "repos/o/r"]):
+            with self.subTest(argv=argv):
+                self.assertFalse(self.is_write(argv), f"{argv} should not be a write")
 
 
 if __name__ == "__main__":

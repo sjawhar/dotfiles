@@ -422,8 +422,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         for name, word in CACHE.items():
             (self.cache / name).write_text(word, encoding="utf-8")
         # shims/gh, which scripts/github-repo-visibility runs by path, in an agent session: its agent config directory,
-        # no knives, no read cache and no call log, and a token that is not one, so it hands the call straight to the
-        # fake gh.
+        # no knives, and a token that is not one, so it hands the call straight to the fake gh.
         gh_config = self.home / ".config" / "gh-agent"
         gh_config.mkdir(parents=True)
         (gh_config / "hosts.yml").touch()
@@ -435,9 +434,12 @@ class JjPushLeakGateTest(unittest.TestCase):
         # gate reads a command-scope hooks path as the caller's own choice.
         self.env = {
             **{k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG")},
-            # The fake gh first, ahead of this shims dir, whose dotfiles checkout holds shims/gh: no gh past it is
-            # reached. Then this shims dir, then the recording git and the sink helper.
-            "PATH": os.pathsep.join([str(self.ghdir), str(SHIMS), str(fake), str(real_jj().parent), os.environ["PATH"]]),
+            # The fake gh first, for the check's own gh calls, and again right after this shims dir, for
+            # shims/gh: the shim takes the first gh past its own PATH entry and never one above it (shims/AGENTS.md,
+            # "Adding to a shim"), so with the fake only first, its visibility reads reached the machine's real gh.
+            # Then the recording git and the sink helper.
+            "PATH": os.pathsep.join([str(self.ghdir), str(SHIMS), str(self.ghdir), str(fake), str(real_jj().parent),
+                                     os.environ["PATH"]]),
             "HOME": str(self.home),
             "JJ_CONFIG": str(cfg),
             "XDG_CACHE_HOME": str(self.home / ".cache"),
@@ -447,8 +449,6 @@ class JjPushLeakGateTest(unittest.TestCase):
             "GIT_ALLOW_PROTOCOL": "sink",
             "GIT_SSH_COMMAND": "false",
             "DOTFILES_DIR": str(SHIMS.parent),
-            "GH_READ_CACHE": "0",
-            "GH_READ_CACHE_LOG": "0",
             "KNIVES_GH_BYPASS": "1",
             "GH_TOKEN": "fixture-not-a-secret",
         }
