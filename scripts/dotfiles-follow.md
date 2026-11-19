@@ -1,8 +1,10 @@
 # dotfiles-follow
 
-Keeps a machine's `~/.dotfiles` on origin's main, then installs mise and omp pins. A git checkout
-moves by fast-forward; a colocated jj checkout moves through `scripts/dotfiles-sync`. When it
-cannot follow or install tools, it tells the box-health owner over Envoy, once per condition.
+Keeps a machine's `~/.dotfiles` on origin's main, writes the machine's knives registry copy again
+when `knives/repos.toml` changed, then installs mise and omp pins. A git checkout moves by
+fast-forward; a colocated jj checkout moves through `scripts/dotfiles-sync`. When it cannot
+follow, write the copy or install tools, it tells the box-health owner over Envoy, once per
+condition.
 
 Armed by `devbox/install.sh` as the `dotfiles-follow` user timer
 (`devbox/dotfiles-follow.{service,timer}`), on a Google VM only (`scripts/on-google-vm`:
@@ -70,7 +72,19 @@ Follow restores the managed marketplace lock before it calls the sync.
 3. **Refuses** when origin/main is not a fast-forward of HEAD (HEAD has commits origin/main lacks).
 4. **Refuses** when the commits to take change a kept file that is modified here.
 5. `git merge --ff-only origin/main`. An alert when git refuses.
-6. After a fast-forward or managed-lock recovery, and on later runs until it passes at HEAD:
+6. On every run that leaves HEAD at origin/main (in git mode, with no uncommitted change), after
+   any fast-forward or jj move: `scripts/knives-registry-render --if-changed`, bounded by
+   `--check-timeout` (180 s). It renders `knives/repos.toml` into `~/.config/knives/repos.toml`
+   as `installers/knives.sh` does, and records the sha256 of the file it rendered in
+   `~/.config/knives/repos.toml.source-sha256`. It writes nothing while the copy is a plain file
+   and that sha256 is the file's. So a merged change to the registry reaches the machine with no
+   person's command, and `scripts/leak-terms-check`, which reads the same copy, sees it too. A
+   copy that a person edited by hand is replaced when the file changes, as an install replaces
+   it. The first run of this version renders once, since no sha256 is recorded yet. A failed
+   render is a condition and stops nothing: the tools step still runs. A checkout with no
+   `scripts/knives-registry-render` or no `knives/repos.toml` (a main older than the step) skips
+   it.
+7. After a fast-forward or managed-lock recovery, and on later runs until it passes at HEAD:
    `mise install`, `bun install --frozen-lockfile` in `omp/plugins`, then, for each registered
    non-Bun marketplace plugin below the lowest version its lock entry requires,
    `shims/omp plugin marketplace update <source>` and `shims/omp plugin upgrade <name>@<source>`.
@@ -97,7 +111,7 @@ Follow restores the managed marketplace lock before it calls the sync.
    reports the plugin step as failed. Finally, `devbox/sami-devbox-check --pins` checks knives and
    mise pins. An alert when any step fails; the next run retries any marketplace plugin still below
    its entry.
-7. Unless `--no-hook-sweep` is set, every run makes one pass of the leak check's hook sweep,
+8. Unless `--no-hook-sweep` is set, every run makes one pass of the leak check's hook sweep,
    `sweep-hooks.sh` of the leak-check tag in `~/.local/share/public-leak-check-hooks`
    (`devbox/sami-devbox-provision --only prepush` installs it; `--hooks-dir`). It installs the
    pre-push hook in each checkout of a public repository under the sweep's roots that lacks one
@@ -129,7 +143,7 @@ Follow restores the managed marketplace lock before it calls the sync.
    So a run that spent 119 s on the fetch and 119 s on a refused merge (872 s left) makes a
    fast-root pass, and a later run with its time makes the slow-root pass whole.
 
-   **The tools step and the slow-root pass.** A run whose tools step (6) ran makes no slow-root
+   **The tools step and the slow-root pass.** A run whose tools step (7) ran makes no slow-root
    pass: that step's own limits (merge 120 s, mise 600 s, Bun 600 s, marketplace 300 s, pin check
    180 s) leave no room for 1000 s. A slow-root pass that is overdue (none ended in twice the
    interval, or none ever) is decided before the tools step: when the time left holds it, and no
@@ -153,7 +167,10 @@ dotfiles-sync rebases it and abandons commits whose changes main already has. do
 never describes, commits, or pushes. Both modes restore only the follow-managed marketplace lock
 before dirty-file checks and after plugin commands. Other edits are discarded only when origin/main
 already holds their bytes, right before the fast-forward. Apart from managed-lock recovery, a
-refusal leaves HEAD, the index and every file as they were.
+refusal leaves HEAD, the index and every file as they were. Outside the checkout, step 6 writes
+`~/.config/knives/repos.toml` and its sha256 record only when `knives/repos.toml` changed since
+the last render. A run that writes the copy logs it, and the footer of any message that run sends
+says so.
 
 ## The kept files: SECRET_FILES that git tracks
 
@@ -182,15 +199,17 @@ modified here, it refuses with `MAIN CHANGES A KEPT FILE` and names the diff to 
 | the commits to take change a modified kept file | `MAIN CHANGES A KEPT FILE` | they no longer do |
 | managed-lock restoration or `git merge --ff-only` failed | `FAST-FORWARD FAILED` | the managed lock is clean and HEAD is origin/main |
 | mise, Bun, a marketplace upgrade/version check or the pin lines failed | `TOOLS NOT INSTALLED` | all pass at the current HEAD |
+| `scripts/knives-registry-render --if-changed` failed or ran past `--check-timeout`; the message holds its output and says whether the copy kept what it held | `KNIVES REGISTRY NOT WRITTEN` | a later run on main renders, or finds nothing to write |
 | the hook sweep is missing, ran past its bound, exited without its summary line, could not hook a public checkout, or deferred one, or the run had no time left for a pass; the message names the kind of pass | `PRE-PUSH HOOK NOT INSTALLED` | a pass ends with 0 failed and 0 deferred; a condition a slow-root pass found clears only on a slow-root pass |
 | `git fetch`, or `jj git fetch` in a colocated checkout, failed on 3 runs in a row (`--fetch-grace`) | `CANNOT FETCH origin/main` | a fetch passes |
 
 All of one run's new conditions go in one message. Its headline considers **all open conditions**:
-if only tools/hooks remain open and HEAD is at origin/main, it says `<host> is on main, but a
-post-update step failed`. Any open fetch, dirty-checkout, sync, ancestry, kept-file, or merge
-condition keeps `DOTFILES NOT FOLLOWING MAIN on <host>`. A condition that still holds after
-`--escalate` (2 h) is said once more, with the corresponding post-update or
-`STILL NOT FOLLOWING MAIN` headline; a cleared one is said once (`DOTFILES FOLLOWING MAIN AGAIN`).
+if only tools, registry or hooks conditions remain open and HEAD is at origin/main, it says
+`<host> is on main, but a post-update step failed`. Any open fetch, dirty-checkout, sync,
+ancestry, kept-file, or merge condition keeps `DOTFILES NOT FOLLOWING MAIN on <host>`. A
+condition that still holds after `--escalate` (2 h) is said once more, with the corresponding
+post-update or `STILL NOT FOLLOWING MAIN` headline; a cleared one is said once
+(`DOTFILES FOLLOWING MAIN AGAIN`).
 Messages go where every box watch here sends them: `BOX_HEALTH_OWNER` (a drop-in that
 `ensure_box_health_owner` writes), else the `lead-box-health` role, else the SRE session. With
 `--box-health-role ROLE`, a run with no `BOX_HEALTH_OWNER` publishes to `notifications.role.ROLE`
@@ -200,7 +219,8 @@ holder keeps the message for the next holder.
 The run exits 0 after a refusal: the alert is the report, so `unit-health-watch` does not say the
 same thing a second time. A2 (`devbox/sami-devbox-check`, `host_follow`) reads the state file and
 passes only when the timer is active, the last run exited 0, and that run, at most 30 minutes ago,
-left HEAD on origin/main with no condition open and the tools installed at HEAD.
+left HEAD on origin/main with no condition open and the tools installed at HEAD, so an open
+`KNIVES REGISTRY NOT WRITTEN` fails A2 too.
 
 The run holds an exclusive, non-blocking `flock` on `state.json.lock` beside the state file for
 its whole length; a run that cannot take it skips its period. The state is replaced whole at each
@@ -242,3 +262,10 @@ scope, so no shared row requires agreement on it. Its raw rows are written into 
 JSON text, so the installer reads them as stored.
 The jj cases use a real colocated jj checkout whose `@` holds two local files, and check that the
 files keep their bytes and nothing is pushed.
+The registry cases (`KnivesRegistry`, and `JjKnivesRegistry` in the jj module) run the real
+`scripts/knives-registry-render` and work out the copy it must leave without running it. A pull
+that changes `knives/repos.toml` writes the copy in the run that fast-forwards, and the next run
+writes nothing. A hand-edited copy stays until the file changes. The first run of this version at
+HEAD renders once. A read-only `~/.config/knives` opens `KNIVES REGISTRY NOT WRITTEN` and stops
+neither the fast-forward nor the tools step, and the next render clears it. A refused jj sync
+leaves that condition open.

@@ -629,7 +629,7 @@ class MarketplacePlugins(Harness):
         (self.repo / "omp/plugins/omp-plugins.lock.json").write_text(self.lock_v1)
         # This run is FOLLOW.main() in a child, on the real clock and the real --slow-sweep-interval:
         # a slow-root pass ended just now, so it is not overdue and the run does not leave its tools
-        # step to the next run (dotfiles-follow.md step 7).
+        # step to the next run (dotfiles-follow.md step 8).
         data = self.state_data()
         data["slow_sweep_at"] = time.time()
         self.state.write_text(json.dumps(data))
