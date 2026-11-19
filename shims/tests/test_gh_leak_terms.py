@@ -715,6 +715,29 @@ class GhLeakTerms(unittest.TestCase):
             self.setUp_calls()
             self.assert_sent(self.run_gh(issue), issue)
 
+    def test_the_branch_gh_fills_into_an_api_field_is_read(self) -> None:
+        # gh 2.98.0 fills `{branch}` and `:branch` in an -F value with the checkout's current branch (`gh api --help`,
+        # and measured: `gh api -X GET … -F 'probe=refs/heads/{branch}' --verbose` sent the branch's name), so a branch
+        # whose name holds a listed term sends the term to a public repository, as the name of a ref the call makes or
+        # in a title (dispatch://INFRA-3365, tester round 4).
+        self.remotes(("origin", PUBLIC))
+        subprocess.run(["git", "-C", str(self.work), "symbolic-ref", "HEAD", f"refs/heads/notes-{CANARY}"], check=True,
+                       env=self.env)
+        for form, argv, field in (
+                ("{branch} in a new ref", ["api", "-X", "POST", "repos/{owner}/{repo}/git/refs",
+                                           "-F", "ref=refs/heads/{branch}", "-F", "sha=abc"], "--field ref"),
+                ("{branch} in a title", ["api", f"repos/{PUBLIC}/issues", "-F", "title=Work from {branch}"],
+                 "--field title"),
+                (":branch in a title", ["api", f"repos/{PUBLIC}/issues", "-F", "title=Work from :branch"],
+                 "--field title")):
+            with self.subTest(form=form):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(argv), field, CANARY, line=1)
+        # Control: -f sends its value as written, `{branch}` and all, so the same title goes out.
+        argv = ["api", f"repos/{PUBLIC}/issues", "-f", "title=Work from {branch}"]
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+
     def test_a_graphql_mutation_is_judged_by_the_repositories_of_its_nodes(self) -> None:
         term = REGISTRY_TEST_TERMS["oh-my-pi"][0]
         self.answer("cybermonklabs/oh-my-pi", "public")
