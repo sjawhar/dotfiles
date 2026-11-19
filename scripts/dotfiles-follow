@@ -31,8 +31,8 @@ What one run does:
      knives/repos.toml into ~/.config/knives/repos.toml unless the copy is a plain file and the
      sha256 the step recorded at its last render is the file's, so a merged change to the
      registry reaches this machine with no person's command. A failed render is a condition and
-     stops nothing: the tools step still runs. A checkout older than the step (no
-     scripts/knives-registry-render or no knives/repos.toml) skips it.
+     stops nothing: the tools step still runs. A checkout with no scripts/knives-registry-render
+     (a main older than the step) or no knives/repos.toml skips it.
   7. After a fast-forward or marketplace-lock recovery, and on later runs until it passes at HEAD:
      `mise install`, `bun install --frozen-lockfile` in omp/plugins, marketplace catalog refresh and
      upgrade for registered marketplace plugins below the lowest version their committed lock entries
@@ -937,13 +937,12 @@ def run_registry_step(
     """Render knives/repos.toml into this machine's copy, ~/.config/knives/repos.toml, at HEAD
     (scripts/knives-registry-render --if-changed), shared by git mode and jj mode.
 
-    A merge that changed knives/repos.toml used to reach the copy only when someone re-ran
-    install.sh. The render writes only when the file changed since its last render (it records
-    the sha256 it rendered beside the copy), so every run at HEAD runs it, whatever the tools step
-    does: the first run of this code, on a checkout already at HEAD whose tools passed, renders
-    once, and a later run renders exactly when the file changed since, by any route. A checkout
-    older than the step has nothing to render. The run's footer names a write of the copy, judged
-    by the copy's inode and mtime before and after the render."""
+    The render writes the copy when the copy is missing or not a plain file, or when the file's
+    sha256 is not the one it recorded beside the copy at its last render. So every run at HEAD
+    runs it, whatever the tools step does: a copy with no record (one only an install wrote) is
+    rendered once, and after that a run renders when the file changed, by any route. A checkout
+    with no render script or no knives/repos.toml has nothing to render. The run's footer names
+    a write of the copy, judged by the copy's inode and mtime before and after the render."""
     judged.add("registry")
     render = repo / "scripts/knives-registry-render"
     if not render.exists() or not (repo / "knives/repos.toml").exists():
@@ -1077,7 +1076,8 @@ def assess_jj_and_follow(
     facts["fast_forwarded"] = head != before
     if facts["fast_forwarded"]:
         log(f"moved colocated jj checkout {display} from {short(before)} to {short(head)}")
-    # The registry render runs on every run at main; it writes only when knives/repos.toml changed.
+    # The registry render runs on every run at main; it writes the copy only when it is missing or
+    # not a plain file, or knives/repos.toml changed since the last render.
     run_registry_step(repo, options, found, judged, facts)
     if data.get("tools_ok_head") != head:
         run_tools_step(repo, options, state, deadline, head, found, judged, facts)
@@ -1220,9 +1220,9 @@ def assess_and_follow(
                 log(f"fast-forwarded {display} from {short(head)} to {short(facts['head'])}: {behind} commit(s)")
                 head = facts["head"]
 
-    # At HEAD with nothing uncommitted: the registry render on every run (it writes only when
-    # knives/repos.toml changed since its last render), then the tools step after a fast-forward,
-    # and again on each run until it passes at HEAD.
+    # At HEAD with nothing uncommitted: the registry render on every run (it writes the copy only
+    # when it is missing or not a plain file, or knives/repos.toml changed since the last render),
+    # then the tools step after a fast-forward, and again on each run until it passes at HEAD.
     if head == target and "dirty" not in found:
         run_registry_step(repo, options, found, judged, facts)
         if facts["fast_forwarded"] or data.get("tools_ok_head") != head:

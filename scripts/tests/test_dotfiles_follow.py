@@ -1313,6 +1313,7 @@ class KnivesRegistry(RegistryCopy, Harness):
         self.assertEqual((self.identity(self.copy), self.identity(self.record)), written)
         self.assertEqual(self.installs(), 0)
 
+    @unittest.skipIf(os.geteuid() == 0, "root writes into a read-only directory")
     def test_a_render_that_cannot_write_stops_nothing_is_said_once_and_clears(self) -> None:
         self.first_render()
         old = self.copy.read_text()

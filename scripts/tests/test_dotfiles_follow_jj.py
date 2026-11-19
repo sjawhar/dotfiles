@@ -475,6 +475,7 @@ class JjKnivesRegistry(RegistryCopy, JjHarness):
         self.assertEqual(self.parent(), target)
         self.assert_copy_renders(REGISTRY_V2)
 
+    @unittest.skipIf(os.geteuid() == 0, "root writes into a read-only directory")
     def test_a_refused_sync_leaves_an_open_registry_condition_open(self) -> None:
         knives = self.copy.parent
         knives.mkdir(parents=True)

@@ -82,7 +82,7 @@ Follow restores the managed marketplace lock before it calls the sync.
    copy that a person edited by hand is replaced when the file changes, as an install replaces
    it. The first run of this version renders once, since no sha256 is recorded yet. A failed
    render is a condition and stops nothing: the tools step still runs. A checkout with no
-   `scripts/knives-registry-render` or no `knives/repos.toml` (a main older than the step) skips
+   `scripts/knives-registry-render` (a main older than the step) or no `knives/repos.toml` skips
    it.
 7. After a fast-forward or managed-lock recovery, and on later runs until it passes at HEAD:
    `mise install`, `bun install --frozen-lockfile` in `omp/plugins`, then, for each registered
@@ -168,9 +168,9 @@ never describes, commits, or pushes. Both modes restore only the follow-managed 
 before dirty-file checks and after plugin commands. Other edits are discarded only when origin/main
 already holds their bytes, right before the fast-forward. Apart from managed-lock recovery, a
 refusal leaves HEAD, the index and every file as they were. Outside the checkout, step 6 writes
-`~/.config/knives/repos.toml` and its sha256 record only when `knives/repos.toml` changed since
-the last render. A run that writes the copy logs it, and the footer of any message that run sends
-says so.
+`~/.config/knives/repos.toml` and its sha256 record only when the copy is missing or not a plain
+file, or `knives/repos.toml` changed since the last render. A run that writes the copy logs it,
+and the footer of any message that run sends says so.
 
 ## The kept files: SECRET_FILES that git tracks
 
