@@ -204,7 +204,14 @@ behavior before handing the call to the real one. One file is data: `person-name
   `repos/{owner}/{repo}/git/refs/heads/{branch}` the branch's (until the fourth test round of
   2026-11-19 `{branch}` was read as written, so a branch whose name holds a listed term went to a
   public repository unread). A base repository whose name it cannot read leaves the endpoint's
-  repository unknown, read as public, and the value read as written. gh sends nothing for a call
+  repository unknown, read as public, and the value read as written. Each filling is tied to its
+  base: gh sends it only when it takes that base, so it counts only for the targets the call
+  reaches with that base and those that depend on none (below). The check reads the base
+  repositories (`git remote -v`, `git config --get-regexp`) at most once per call, and only for a
+  text that holds a base placeholder, a `repo edit` that names no repository and makes it public,
+  or, once a term is found, where a call that names no repository goes: until review round 2 of
+  2026-11-19 it read them for every call, which made a clean `pr comment` 43 to 72 ms slower.
+  gh sends nothing for a call
   whose branch it cannot fill, with `GH_REPO` set, on a detached HEAD (as a jj checkout that shares
   its git directory usually has) or outside a git repository: gh refuses it, and the check passes
   it. The list is gh's (`GH_PLACEHOLDERS`): `shims/tests/test_gh_leak_terms.py` fails when the list
@@ -218,8 +225,10 @@ behavior before handing the call to the real one. One file is data: `person-name
   2.98.0 reads it: gh sends the call to github.com for each host go-gh's `auth.NormalizeHostname`
   makes github.com, the host in any letter case and any host ending in `.github.com` but
   `garage.github.com`, so `https://foo.github.com/O/R/pull/1` names github.com's O/R; a URL on any
-  other host names a repository there, read as public. `GH_HOST` and `gh api --hostname` are read
-  the same way. Until 2026-11-19 only github.com and www.github.com named a repository, so a
+  other host names a repository there, read as public, and so does a repository argument on one
+  (`repo edit ghe.example.com/o/r`, which until review round 2 of 2026-11-19 was read as a
+  github.com repository whose visibility could not be read). `GH_HOST` and `gh api --hostname` are
+  read the same way. Until 2026-11-19 only github.com and www.github.com named a repository, so a
   comment on such a URL of a public repository was judged by a private checkout's remote and went
   out unread (dispatch://INFRA-3365, review finding 1).
   Each body is read as its endpoint stores it, and each value on its own,
@@ -245,7 +254,14 @@ behavior before handing the call to the real one. One file is data: `person-name
   reading keeps its own matches.
   Within a value, the text is read as GitHub renders prose, a
   paragraph at a time (as a commit message is, "Leak-term list" below), so a term of several words
-  that a wrapped line or a no-break space splits is the term on the page. A file that is the call's
+  that a wrapped line or a no-break space splits is the term on the page. Each reading is read once
+  more with CommonMark's escapes undone, as GitHub renders them: a backslash before an ASCII
+  punctuation character and an entity or numeric character reference, so `INFRA\-1`, `INFRA&#45;1`
+  and `Quillfeather&nbsp;Lane 9` are the terms on the page (until review round 2 of 2026-11-19 they
+  went to a public repository unread); such a match is shown only when the as-written reading's
+  match of the same term does not count. Inline markup that splits a term (`IN*FRA*-1`) is not
+  undone, and a look-alike character is not the character it looks like (`&hyphen;` is U+2010, not
+  `-`). A file that is the call's
   stdin while that is a pipe or a
   terminal (`/dev/stdin`, `/dev/fd/0`) is read from the stdin buffer, as `-` is; any other pipe, a
   socket or a device but `/dev/null` is not read at all, since reading a pipe takes the text gh
@@ -280,15 +296,30 @@ behavior before handing the call to the real one. One file is data: `person-name
   name (the value of createCommitOnBranch's input field `repositoryNameWithOwner`: a string the
   document gives it, a variable the document gives it and uses nowhere else, a gh field whose key
   ends in `[repositoryNameWithOwner]`, or a member of that name in an `--input` body; a value the
-  check cannot tie to that field alone leaves the target unknown), through
+  check cannot tie to that field alone leaves the target unknown). A call whose one document
+  holds two or more top-level fields of a mutation operation, each of which GitHub runs as a
+  mutation of its own, is read field by field: a field's targets are the repositories it names by
+  name in its arguments and those of the node ids in its arguments and in the variables it uses,
+  else `a GraphQL mutation that names no repository, read as public`. A document that cannot be
+  split (several documents, one that does not parse, a mutation that spreads a fragment) is read
+  whole, as one field. Each target's visibility is read through
   `scripts/github-repo-visibility` (the
   leak check's per-repository
-  cache, else one gh read, whose answer it caches). A term of the list every repository has is
-  refused when any target is not confirmed private or internal; a term of a scoped list or of
-  the registry only when such a target is one its scope names. A visibility it cannot read, a
-  gist, a project, another host (`GH_HOST`, `gh api --hostname`, a `gh api` address on any host
-  but those two, or a URL argument on one), a GraphQL mutation whose nodes or names cannot all be
-  read or that makes a repository (`createRepository`, `cloneTemplateRepository`,
+  cache, else one gh read, whose answer it caches). A text counts only for the targets it goes to:
+  a text gh fills from a base repository for those the call reaches with that base and those that
+  depend on none; the value of `-R` or `--branch-repo` for the repository it names; a value inside
+  one top-level field of a split GraphQL document, or a variable only that field uses, for that
+  field's; and any other text, a variable two fields use among them, for every target (and so does
+  one tied to no target the call reaches). Until review round 2 of 2026-11-19 every text counted for
+  every target, so in a ygo checkout a reply to `repos/{owner}/{repo}/…` was refused for the
+  theorem-labs/ygo remote's filling judged against sjawhar/ygo, and a status change beside a
+  commit to a private repository went out with a listed term. A term of the list every repository
+  has is refused when any target its text goes to is not confirmed private or internal; a term of
+  a scoped list or of the registry only when such a target is one its scope names. A visibility it
+  cannot read, a gist, a project, another host (`GH_HOST`, `gh api --hostname`, a `gh api` address
+  on any host but those two, or a URL or repository argument on one), a GraphQL mutation whose
+  nodes or names cannot all be read, that names none or that makes a repository
+  (`createRepository`, `cloneTemplateRepository`,
   `startRepositoryMigration`), a `gh
   api` call that makes one (`user/repos`, `orgs/O/repos`, or a template's `repos/O/R/generate`,
   whatever the template's visibility), a base repository whose name it cannot read, and any other

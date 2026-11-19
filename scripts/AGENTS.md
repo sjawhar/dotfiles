@@ -71,12 +71,18 @@ Executables covering several areas:
     a call whose branch gh cannot fill (`GH_REPO` set, a detached HEAD, no git repository) passes,
     since gh refuses it and sends nothing; and the files and stdin gh reads), each value on its
     own as GitHub stores it (a JSON body's strings by their JSON path, a GraphQL document's strings,
-    decoded), and refuses one that holds a listed term (with the tag message `--notes-from-tag` and
-    the commit messages `--fill` take from git) when the call can reach a repository not confirmed
-    private (for a scoped list or a knives registry list, one its scope names), but for a match
-    that lies inside the own name (`owner/name`, or the owner as a whole word) of a target whose
-    visibility was read as public, since that name is public already; a URL's host is read as gh
-    reads it, so `https://foo.github.com/O/R/pull/1` names github.com's O/R; it exits 7 to ask
+    decoded) and as GitHub renders it (with CommonMark's backslash escapes and character
+    references undone, so `INFRA\-1` is `INFRA-1`), and refuses one that holds a listed term (with
+    the tag message `--notes-from-tag` and the commit messages `--fill` take from git) when a
+    target the text goes to is not confirmed private (for a scoped list or a knives registry list,
+    one its scope names), but for a match that lies inside the own name (`owner/name`, or the owner
+    as a whole word) of a target whose visibility was read as public, since that name is public
+    already. A text gh fills from one base repository goes only to the targets the call reaches with
+    that base, a `-R` or `--branch-repo` value only to the repository it names, and a value of one
+    top-level field of a GraphQL mutation only to that field's targets; every other text goes to
+    every target. A URL's host is read as gh reads it, so `https://foo.github.com/O/R/pull/1` names
+    github.com's O/R, and a repository on another host is read as public. The base repositories are
+    read from git only when a reading needs them. It exits 7 to ask
     `shims/gh` for the call's stdin. Every mode's refusal names, for each match, the field or file
     and the line, the text that matched as written, the list that holds the term and the line it is
     on. `push` reads the list's scoped blocks whose pattern matches its destination; commits read
