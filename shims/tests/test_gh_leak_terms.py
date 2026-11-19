@@ -1559,6 +1559,45 @@ class GhLeakTerms(unittest.TestCase):
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv), argv)
 
+    def test_a_node_id_github_reads_past_trailing_whitespace_or_padding_is_a_target(self) -> None:
+        # GitHub resolves a node id with trailing whitespace (a space, a tab, a line feed) or with `==` appended to the
+        # node the id names (measured 2026-11-19 with `query($id: ID!) { node(id: $id) { ... } }` on a public review
+        # comment of sjawhar/dotfiles#90, dispatch://INFRA-3365, tester round 9). `-F reply=@file` sends a file whose
+        # last line ends in a line feed, as `echo "$id" > file` writes it. inReplyTo is the one ID-typed input field
+        # beside a text whose name does not end in Id, so until then such a value there was no target and the reply
+        # to a public comment went out with a listed term, judged by the private pull request alone.
+        self.nodes_of_types({
+            "PR_kwDOpriv20003": (PRIVATE, "PullRequest RepositoryNode"),
+            "PRRC_kwDOpub10004": (PUBLIC, "PullRequestReviewComment RepositoryNode"),
+            "PRRC_kwDOpriv20004": (PRIVATE, "PullRequestReviewComment RepositoryNode")})
+        body = f"see {CANARY}"
+
+        def reply(comment: str) -> str:
+            return ('query=mutation { addPullRequestReviewComment(input: {pullRequestId: "PR_kwDOpriv20003", '
+                    'inReplyTo: "%s", body: "%s"}) { comment { id } } }' % (comment, body))
+
+        variables = ("query=mutation($reply: ID, $body: String) { addPullRequestReviewComment(input: {pullRequestId: "
+                     '"PR_kwDOpriv20003", inReplyTo: $reply, body: $body}) { comment { id } } }')
+        for name, argv, field in (
+                ("a trailing space", ["api", "graphql", "-f", reply("PRRC_kwDOpub10004 ")],
+                 "--raw-field query string 3"),
+                ("a trailing line feed, as a GraphQL escape", ["api", "graphql", "-f", reply("PRRC_kwDOpub10004\\n")],
+                 "--raw-field query string 3"),
+                ("== appended", ["api", "graphql", "-f", reply("PRRC_kwDOpub10004==")], "--raw-field query string 3"),
+                ("-F reply=@file, the file ending in a line feed",
+                 ["api", "graphql", "-f", variables, "-F", "reply=@" + self.file("reply.txt", "PRRC_kwDOpub10004\n"),
+                  "-f", f"body={body}"], "--raw-field body"),
+                ("-f reply with a trailing tab",
+                 ["api", "graphql", "-f", variables, "-f", "reply=PRRC_kwDOpub10004\t", "-f", f"body={body}"],
+                 "--raw-field body")):
+            with self.subTest(write=name):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(argv), field, CANARY, line=1)
+        # Control: the reply to a private comment, its id written exactly, goes out.
+        argv = ["api", "graphql", "-f", reply("PRRC_kwDOpriv20004")]
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+
     def test_a_graphql_field_that_names_an_account_by_login_is_judged_whole(self) -> None:
         # createSponsorsTier names the account by login and publishes its description on that account's public Sponsors
         # page; a repositoryId beside the login names a private repository the tier gives access to. The check cannot
