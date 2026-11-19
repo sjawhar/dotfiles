@@ -22,7 +22,7 @@
 //     Sami 2026-09-18): `abandon`/`rebase`/`squash` on another lane's commits
 //     fails without `--ignore-immutable`, the same guard that protects main.
 //     In a checkout that sets `git config omp.sessionTrailer false` shims/jj
-//     drops both for its call (scripts/omp-session-trailer, shims/AGENTS.md):
+//     drops both for its call (scripts/omp-session-trailer, shims/jj):
 //     no trailer there, and so no guard, which tells a session's own commits
 //     by that trailer.
 //     The revset guards the frontier — `ancestors(visible_heads(), 4)` minus

@@ -16,7 +16,7 @@ You are read-only. Write nothing except the report file. Send no message to any 
 
 ## Tools
 
-- Read skill://using-transcript-store, then use `tq` (recipe below) to find the user's messages, the session's reports and its tool calls. Open the raw transcript only at the FILE:LINE that `tq` gives. The store is about 10 minutes behind the live file: read the raw file after the store's last line for the tail.
+- Read skill://using-transcript-store, then use `tq` (recipe below) to find the user's messages, the session's reports and its tool calls. Open the raw transcript only at the FILE:LINE that `tq` gives. The store holds only the hosts `tq sql "SELECT host, count() FROM sessions GROUP BY host"` lists: read another host's session in its raw file, and say so. Read the raw file after the store's last line for the tail; `tq` warns about a stale host only if it expects that host to load.
 - `dispatch read --issue KEY`, `dispatch open-asks`, `dispatch search --query '...'` to check whether an item reached Dispatch. A `dispatch ask` tool call in the transcript is an ask the session opened.
 - `gh pr view`, `git log` to check a claim of "merged" or "committed".
 - Read only this session's transcript and its own subagents' transcripts. Do not read other audits of this session.
@@ -62,22 +62,23 @@ The user's own words in the window: what they typed, and what they wrote in Disp
 tq search --human --session '<id>' --from '<start>' --to '<end>' --limit 500
 ```
 
-Count the rows before you report. A session a person worked with for a day has tens of them; one or two rows means the session id or the window is wrong. `skill://using-transcript-store` says what `--human` covers.
+Count the rows before you report (`--format JSONEachRow`; a count equal to `--limit` means the cap bound: split the window). A day's work with a person gives tens of rows; one or two means the session id, the window or the host is wrong. `tq --help` says which messages `--human` keeps.
 
 Relays that may quote the user (a parent's brief, an agent's message):
 
 ```bash
 tq sql "SELECT ts, raw_line, substring(text, 1, 300) FROM messages
         WHERE session_id = '<id>' AND ts >= '<start>' AND ts < '<end>'
-          AND (role = 'user:agent' OR role = 'custom:envoy-message')
+          AND role IN ('user:agent', 'custom:envoy-message', 'user:meta')
           AND positionCaseInsensitive(text, '<user name>') > 0
         ORDER BY ts"
 ```
 
-The session's own words after a message, and what it did:
+What the session did after a message, and the asks and issues it opened (`tq next '<words>' --human --session '<id>'` works only for words unique in the session):
 
 ```bash
-tq next '<a phrase from the row>' --human --session '<id>' -n 8
+tq sql "SELECT started_at, tool, raw_line, substring(command, 1, 200) FROM calls
+        WHERE session_id = '<id>' AND started_at >= '<row time>' ORDER BY started_at LIMIT 8"
 tq sql "SELECT started_at, tool, raw_line, substring(command, 1, 200) FROM calls
         WHERE session_id = '<id>' AND started_at >= '<start>' AND started_at < '<end>'
           AND (positionCaseInsensitive(command, 'dispatch ask') > 0 OR positionCaseInsensitive(command, 'dispatch issue') > 0)

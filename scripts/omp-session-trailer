@@ -3,7 +3,7 @@
 # `GIT [GIT_OPTION…]` makes from an omp session carries the Omp-Session trailer. Exit 0 adds
 # it, exit 1 leaves it off; stdout says why. shims/git asks it for every commit it stamps (and
 # its prepare-commit-msg hook, shims/git-hooks/, asks again for the repository it runs in), and
-# shims/jj for every jj command that can write a description (`shims/AGENTS.md`), naming with
+# shims/jj for every jj command that can write a description, naming with
 # --overlay each `omp-attribution-*.toml` on JJ_CONFIG, the files that give jj its trailers.
 #
 # Every repository carries the trailer, public ones included: it is how a commit is

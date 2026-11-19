@@ -1,6 +1,6 @@
 # The page
 
-One page, read top to bottom in five minutes while it is on a shared screen.
+One page, read top to bottom in five minutes on a shared screen.
 
 ## Shape
 
@@ -24,21 +24,22 @@ Then one line, "Behind:", naming every goal that will be missed, with its date a
 <One line per project: the next delivery, not an intention.>
 ```
 
-A weekly page holds five or six projects; a daily standup holds the same shape with one item per project and no
-charts, as a message rather than a page.
+A weekly page holds five or six projects. A daily standup or chat recap keeps this shape with one item per project
+and no charts, as a message rather than a page.
 
 ## Charts
 
-- The timeline across the top: one row per project, one dot per delivery, the weekend shaded. It is the only
-  picture most readers will study.
-- At most one chart per project, each proving one item: a count over the window, a before and after, or a
+- The timeline across the top: one row per project, one dot per delivery, the weekend shaded. Most readers study
+  only this picture.
+- At most one more chart per project, each proving one item: a count over the window, a before and after, or a
   release-by-release bar.
-- `scripts/chart_style.py` holds the style (type sizes, the weekend band, day axis, SVG and PNG output). Write the
-  numbers in the chart script with their source in a comment, so the page can be rebuilt from it.
-- Look at every chart as an image before the page goes out.
+- Make the charts with `scripts/chart_style.py` (its docstring says how). Write each chart's numbers in the script
+  with a comment naming their source, so the page can be rebuilt from it.
 
-## Serving it
+## Building and serving
 
-Build with `scripts/build_page.py` (markdown to one self-contained HTML file) and serve the directory on the
-tailnet: `sudo tailscale serve --bg --https=<free port> <site dir>`. Check `tailscale serve status` for a free
-port, and take a full-page screenshot through `browser.open` before you send the link.
+1. Build with `uv run --with markdown python <skill dir>/scripts/build_page.py recap.md`.
+2. Pick a free port from `tailscale serve status`, then serve the site directory on the tailnet:
+   `sudo tailscale serve --bg --https=<port> <site dir>`.
+3. Before you send the link, open the page with `browser.open` and take a full-page screenshot
+   (`tab.screenshot({fullPage: true})`).

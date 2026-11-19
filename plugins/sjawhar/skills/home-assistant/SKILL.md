@@ -1,6 +1,6 @@
 ---
 name: home-assistant
-description: Use when accessing, configuring, or optimizing Home Assistant, such as controlling devices or querying entity states. Also for creating or debugging automations/scripts/scenes and managing dashboards, helpers, areas, HACS, or add-ons. Triggers on Home Assistant, home automation, smart home, lights, thermostat, sensors, automations, Lovelace.
+description: Use when controlling or querying Home Assistant devices and entity states, or when creating or debugging its automations, scripts, scenes, dashboards, helpers, areas, HACS or add-ons. Triggers on Home Assistant, home automation, smart home, lights, thermostat, sensors, Lovelace.
 mcp:
   home-assistant:
     command: secrets
@@ -9,64 +9,61 @@ mcp:
 
 # Home Assistant
 
-Read/write access through [ha-mcp](https://github.com/homeassistant-ai/ha-mcp) (78 tools on HA 2026.8), MCP server `home-assistant`. omp loads that server only in a session whose working directory holds a `.omp/mcp.json` that declares it (omp does not look in parent directories); there, write JSON args to `xd://mcp__home_assistant_<tool>`. Anywhere else, use `ha-mcp-call.sh` (Access, below). With `skill_mcp`, call `skill_mcp(mcp_name="home-assistant", ...)`.
+Read and write access through [ha-mcp](https://github.com/homeassistant-ai/ha-mcp), MCP server `home-assistant`.
 
-## Access
+- omp loads the server only in a session whose working directory holds a `.omp/mcp.json` that declares it (it does not look in parent directories). There, write JSON args to `xd://mcp__home_assistant_<tool>`.
+- With a `skill_mcp` tool: `skill_mcp(mcp_name="home-assistant", ...)`.
+- Anywhere else, and for batch calls: [ha-mcp-call.sh](ha-mcp-call.sh), with the commands below.
 
-- ha-mcp runs inside HA: HACS component "HA-MCP Custom Component", entry "HA-MCP Server". The admin-only **HA-MCP panel** in the HA sidebar sets tool enable/disable, Read Only Mode, feature flags and edit backups.
-- The agent-tier secret `HA_MCP_URL` is a webhook URL, and its id is the credential. It holds the Salt Lake instance's own Nabu Casa remote address followed by `/api/webhook/<id>`, which works from any network; only the secret holds that address. `dojo.thecybermonk.com` is not this webhook's host: that name is for Sami's primary instance, and it moves to the SF Green. The same id at the LAN address `http://10.0.51.23:8123/api/webhook/<id>` works only on the house's LAN.
-- The SF Home Assistant is a separate instance: a Home Assistant Green (Home Assistant OS) on the apartment LAN at `10.0.0.254`, a static address set on the Green, outside the gateway's assumed DHCP pool (the gateway reserves nothing for it; `skills/majordomo/references/sites/wiz.md` in sjawhar/dojo). Its key, the agent-tier `HA_MCP_URL_BUSH`, is the Green's ha-mcp webhook URL `http://10.0.0.254:8123/api/webhook/<id>`, and the id is a secret. It works from any machine on the apartment LAN, oryx among them, and from no other network. The webhook is in "Sign in with Home Assistant" mode (below), so each call also sends the agent-tier `HA_TOKEN_BUSH`, the Wren user's long-lived token; without it the webhook answers 401. There is no `HA_MCP_TOKEN_BUSH` secret: the `bash -c` of each call maps `HA_TOKEN_BUSH` to the name its caller reads. Call it with `secrets HA_MCP_URL_BUSH HA_TOKEN_BUSH -- bash -c 'export HA_MCP_URL="$HA_MCP_URL_BUSH" HA_MCP_TOKEN="$HA_TOKEN_BUSH"; ~/.dotfiles/plugins/sjawhar/skills/home-assistant/ha-mcp-call.sh <tool> "<json>"'`. Launch its MCP client with `secrets HA_MCP_URL_BUSH HA_TOKEN_BUSH -- bash -c 'export HA_MCP_TOKEN_BUSH="$HA_TOKEN_BUSH"; unset HA_TOKEN_BUSH; exec npx -y -p mcp-remote@0.14.3 mcp-remote-from-env HA_MCP_URL_BUSH --allow-http'`.
-- The container `homeassistant-sf` on oryx is no longer the SF Home Assistant: it is stopped and kept only for a rollback, and no agent starts it.
-- The MCP launch runs `~/.dotfiles/scripts/mcp-remote-from-env`. It takes the URL from `HA_MCP_URL`, unsets it, runs `mcp-remote` 0.14.3 in-process, and redacts the URL from stderr.
-- Never expand `$HA_MCP_URL` or a token into command arguments (`curl "$HA_MCP_URL"`, `mcp-remote "$HA_MCP_URL"`, `-H "Authorization: Bearer $TOKEN"`): every user can read `/proc/<pid>/cmdline`, and any agent's `ps` or `pgrep -af` prints the id into its transcript. Pass it through the environment, a config file or stdin.
-- Batch or scripted calls: `secrets HA_MCP_URL -- ha-mcp-call.sh <tool> '<json>'` ([ha-mcp-call.sh](ha-mcp-call.sh) gives curl the URL with `--config`). It prints each text content and exits 0; on a curl failure (such as a 401 refusal), a JSON-RPC error, a result with `isError` true, or no answer, it exits non-zero and prints the error on stderr.
-- File/YAML tools (`ha_read_file`, `ha_config_set_yaml`, ...) are beta and not enabled. They need the "HA-MCP File & YAML Tools" entry and feature flags.
+## Instances
 
-### Webhook in "Sign in with Home Assistant" mode
+- Salt Lake: the agent-tier `HA_MCP_URL` is its ha-mcp webhook URL on its Nabu Casa remote address, so it works from any network. The webhook id is the credential. The same id at `http://10.0.51.23:8123/api/webhook/<id>` works only on that house's LAN. Call: `secrets HA_MCP_URL -- ~/.dotfiles/plugins/sjawhar/skills/home-assistant/ha-mcp-call.sh <tool> '<json>'`.
+- SF: a Home Assistant Green at `10.0.0.254` on the apartment LAN. The agent-tier `HA_MCP_URL_BUSH` is its webhook URL and works only from that LAN (oryx is on it). Its webhook is in auth mode, so each call also sends the agent-tier `HA_TOKEN_BUSH`. There is no `HA_MCP_TOKEN_BUSH` secret; the `bash -c` maps the names:
+  - Call: `secrets HA_MCP_URL_BUSH HA_TOKEN_BUSH -- bash -c 'export HA_MCP_URL="$HA_MCP_URL_BUSH" HA_MCP_TOKEN="$HA_TOKEN_BUSH"; exec ~/.dotfiles/plugins/sjawhar/skills/home-assistant/ha-mcp-call.sh "$@"' _ <tool> '<json>'`
+  - MCP client: `secrets HA_MCP_URL_BUSH HA_TOKEN_BUSH -- bash -c 'export HA_MCP_TOKEN_BUSH="$HA_TOKEN_BUSH"; unset HA_TOKEN_BUSH; exec npx -y -p mcp-remote@0.14.3 mcp-remote-from-env HA_MCP_URL_BUSH --allow-http'`
+- The stopped container `homeassistant-sf` on oryx is a rollback copy, not the SF instance. Do not start it.
 
-An ha-mcp webhook whose auth mode (HA-MCP Server options, `webhook_auth: ha_auth`) is "Sign in with Home Assistant" answers 401 unless the call carries an HA access token as `Authorization: Bearer`. A long-lived access token works: the SF instance's is the agent-tier `HA_TOKEN_BUSH`, Salt Lake's `HA_TOKEN`. Both callers send it when the variable named next to the URL holds it, and send no Authorization header when it is unset or empty:
+## Auth mode and credentials
 
-- `ha-mcp-call.sh` reads `HA_MCP_TOKEN` (and puts it in curl's `--config`, like the URL): `secrets HA_MCP_URL HA_TOKEN -- bash -c 'export HA_MCP_TOKEN="$HA_TOKEN"; ~/.dotfiles/plugins/sjawhar/skills/home-assistant/ha-mcp-call.sh <tool> "<json>"'`. A refusal prints `curl: (22) The requested URL returned error: 401` and exits non-zero.
-- `mcp-remote-from-env <URL_NAME>` reads the name with its `URL` part replaced by `TOKEN` (`HA_MCP_URL` → `HA_MCP_TOKEN`, `HA_MCP_URL_BUSH` → `HA_MCP_TOKEN_BUSH`), unsets it, hands mcp-remote `--header "Authorization: Bearer <token>"` in-process, and redacts the token from stderr. For an auth-mode server, the launch becomes `secrets HA_MCP_URL HA_TOKEN -- bash -c 'export HA_MCP_TOKEN="$HA_TOKEN"; unset HA_TOKEN; exec npx -y -p mcp-remote@0.14.3 mcp-remote-from-env HA_MCP_URL --allow-http'`.
-
-`secrets` exports each key under its own name and cannot rename it, so the `bash -c` maps the token key to the name the caller reads.
+- A webhook whose HA-MCP Server option `webhook_auth` is `ha_auth` ("Sign in with Home Assistant") answers 401 without a long-lived HA token. Which variable each caller reads is in the header of `ha-mcp-call.sh` and `scripts/mcp-remote-from-env`; map a token key to it in `bash -c`, as the SF commands do. Salt Lake's token is `HA_TOKEN`.
+- Pass the URL and tokens only through those two callers, not in a command's arguments, where `ps` shows them to every user.
+- ha-mcp runs inside HA: HACS component "HA-MCP Custom Component", entry "HA-MCP Server". The admin-only HA-MCP panel in the HA sidebar turns tools on and off and sets Read Only Mode, feature flags and edit backups.
+- File and YAML tools (`ha_read_file`, `ha_config_set_yaml`, ...) are beta and off. They need the "HA-MCP File & YAML Tools" entry and its feature flags.
 
 ## Work
 
-1. Orient: `ha_get_overview` (summary), `ha_search` (fuzzy entity/config lookup), `ha_get_state` (live states).
-2. Before you write automations, scripts or helpers, read and follow the bundled guide. `ha_get_skill_guide` with no arguments returns its `SKILL.md`, which lists the reference files (`references/automation-actions.md`, `references/template-guidelines.md`, …); pass `file` to read one.
-3. Config writes (`ha_config_set_automation/_script/_scene/_helper/_dashboard`) fail without the current BestPracticeKey. It is in the answer of `ha_get_skill_guide` called with no arguments (checked on both instances, 2026-11-16; there is no `references/automation-patterns.md`). It rotates hourly, so read it again each session and each hour. Pass `MandatoryBPS=false` to skip receiving the reference content again.
+1. Orient: `ha_get_overview` (summary), `ha_search` (fuzzy entity and config lookup), `ha_get_state` (live states).
+2. Before you write automations, scripts or helpers, read and follow the bundled guide: `ha_get_skill_guide` with no arguments returns its `SKILL.md` and the list of its reference files; pass `file` to read one.
+3. Config writes (`ha_config_set_automation/_script/_scene/_helper/_dashboard`) fail without the current BestPracticeKey, which that no-argument answer holds. It rotates hourly: read it again each session and each hour. Pass `MandatoryBPS=false` to skip receiving the reference content again.
 4. Validate Jinja2 with `ha_eval_template` before you put it in a config.
 5. Debug automations: `ha_get_automation_traces`, `ha_get_history`, `ha_get_logs`.
 
 ## Safety
 
 - The server backs up config edits. Still, get the human's confirmation before deletes (`ha_config_remove_*`, `ha_remove_*`), `ha_restart`, and `ha_call_service` on locks, garage doors, climate entities and valves.
-- When you audit, call only the read tools (`readOnlyHint` in the tool annotations), so an audit changes nothing.
-- `ha_get_app(slug=...)` returns all add-on `options`, secrets included (Advanced SSH `ssh.password`). Select fields with `jq` (`.addon.options.ssh.authorized_keys`). Never print the raw options.
+- When you audit, call only the read tools (`readOnlyHint` in the tool annotations).
+- `ha_get_app(slug=...)` returns all add-on `options`, secrets included (Advanced SSH `ssh.password`). Select fields with `jq` (`.addon.options.ssh.authorized_keys`); do not print the raw options.
 - `ha_manage_app` config mode merges one nested level: `{"ssh": {"authorized_keys": [...]}}` keeps the other `ssh.*` fields.
 
 ## Tool quirks
 
-| Tool | Quirk |
-|---|---|
-| automations | Omit `identifier` to create. An update needs `identifier` + `config.id`. |
-| `ha_set_entity` | Sets `new_entity_id`, `name`, `enabled`, `area_id`. `name` replaces the WHOLE friendly name, even with `has_entity_name`. Pass "Kitchen Outlet Energy", not "Energy", or two devices' sensors look alike. |
-| `ha_remove_helpers_integrations` | Entry: `target` = entry_id. Helper: `target` + `helper_type`. Always `confirm: true`. |
-| `ha_manage_backup` | `scope: "snapshot"`. Snapshot delete needs a human-set server flag, and refuses backups with unprovable provenance. |
-| `ha_manage_hacs` | Only `add_repository`/`download`. Uninstall in the UI. |
-| `ha_get_history` | `entity_ids` list. States without attributes, ~24h, 100-point cap. |
-| `ha_manage_energy_prefs` | Needs `mode` + fresh `config_hash`. New `total`/`total_increasing` sensors give `statistics_not_defined` until the recorder's first statistics (~5 min). Harmless. |
-| updates | Install with `ha_call_service` `update.install`, not `ha_manage_updates`. |
-| `ha_restart` | The transport times out when HA goes down (expected). Poll the base URL for HTTP 200 (~60-90s). |
+- Automations: omit `identifier` to create. An update needs `identifier` and `config.id`.
+- `ha_set_entity` sets `new_entity_id`, `name`, `enabled`, `area_id`. `name` replaces the whole friendly name, even with `has_entity_name`: pass "Kitchen Outlet Energy", not "Energy", or two devices' sensors look alike.
+- `ha_remove_helpers_integrations`: an entry takes `target` = entry_id; a helper takes `target` and `helper_type`. Pass `confirm: true`.
+- `ha_manage_backup`: `scope: "snapshot"`. Deleting a snapshot needs a human-set server flag, and it refuses backups with unprovable provenance.
+- `ha_manage_hacs` does only `add_repository` and `download`. Uninstall in the UI.
+- `ha_get_history` takes an `entity_ids` list and returns states without attributes, about 24h, at most 100 points.
+- `ha_manage_energy_prefs` needs `mode` and a fresh `config_hash`. New `total`/`total_increasing` sensors give `statistics_not_defined` until the recorder's first statistics (about 5 min).
+- Install updates with `ha_call_service` `update.install`, not `ha_manage_updates`.
+- `ha_restart`: the transport times out when HA goes down. Poll the base URL for HTTP 200 (about 60-90s).
 
 ## Known behavior
 
-- Matter commissioning (pairing) through MCP fails, because the transport timeout aborts it. Always pair in the HA web UI or companion app.
+- Matter commissioning (pairing) through MCP fails: the transport timeout aborts it. Pair in the HA web UI or companion app.
 - Device-trigger automations (registry UUIDs) warn "not found in entity registry" on every write. Ignore it on a config that predates your edit.
-- Renames don't reach energy prefs. Update `ha_manage_energy_prefs` explicitly.
+- Renames do not reach energy prefs. Update `ha_manage_energy_prefs` explicitly.
 - New entities on a device with an area get the area in their entity_id (`sensor.bedroom_2_office_equipment_…`), attached helpers too. Expect to rename.
 - Give a device's entities one name prefix (`kitchen_outlet_`), or card auto-discovery breaks.
 - An automation that turns a device on must not override a human's off. Context `parent_id` none marks a human action; store it in a hold helper (`input_boolean.office_ac_hold`) and check it first.
 - Fans spoof mmWave occupancy. In an automation that acts on occupancy, require PIR motion as well as mmWave.
-- Matter or Tapo devices, firmware, or a UI-only action with no tool or service: read [matter-and-tapo.md](matter-and-tapo.md).
+- Read [references/matter-and-tapo.md](references/matter-and-tapo.md) when you work on Matter or Tapo devices or their firmware, or need a UI-only action that has no tool or service.

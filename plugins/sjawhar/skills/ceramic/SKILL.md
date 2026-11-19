@@ -1,6 +1,6 @@
 ---
 name: ceramic
-description: Use when a task needs fresh web results or built-in knowledge is likely stale. Examples: current events, recent news, time-sensitive facts, specific people, products or companies, technical docs. Triggers on "search the web", "look up", "find recent", "latest news", "current".
+description: 'Use when a task needs fresh web results or built-in knowledge is likely stale. Examples: current events, recent news, time-sensitive facts, specific people, products or companies, technical docs. Triggers on "search the web", "look up", "find recent", "latest news", "current".'
 ---
 
 # Ceramic Search
@@ -32,4 +32,9 @@ Rewrite a natural-language question into keywords before you search.
 
 ## Run several queries
 
-Searches are cheap, so run 2–4 keyword variants in parallel instead of one perfect query, then merge the results, drop duplicate URLs, and rank pages several queries returned first. Example, for climate impact on agriculture: `climate change agriculture impact`, `global warming crop yields`, `developing countries farming climate effects`.
+Searches are cheap, so run several variants instead of one perfect query:
+
+1. Write 2–4 keyword variants (for climate impact on agriculture: `climate change agriculture impact`, `global warming crop yields`, `developing countries farming climate effects`).
+2. Run them in parallel.
+3. Merge the results and drop duplicate URLs.
+4. Rank pages that several queries returned first.

@@ -21,7 +21,7 @@ agentbox runs each agent session in its own disposable [Sysbox](https://github.c
 
 This is part of Sami's dotfiles, not a stand-alone tool. It expects a host set up by this repository's
 `install.sh`. (`devbox/gce-host.sh` is for Sami's own Google Cloud devbox only: it needs its disks and must run
-before `install.sh`.) The details and the reasons for each choice are in
+before `install.sh`.) The traps to know before you change a box are in
 [AGENTS.md](AGENTS.md).
 
 ## What the host must have
@@ -140,8 +140,8 @@ or prints credential values.
 ~/.dotfiles/scripts/agentbox move --plan              # which host sessions could move into a box
 ```
 
-`scripts/agentbox` with no argument prints its usage (exit 2); the usage stops part way, so read the comment block at the top of `scripts/agentbox` and `agentbox/AGENTS.md`
-for the rest (`move <session-id>… | --all`, `move --to <machine>`, `doctor --here`).
+`scripts/agentbox` with no argument prints its usage (exit 2); the usage stops part way, so read the comment block at the top of `scripts/agentbox`
+and `scripts/agentbox move --help` for the rest (`move <session-id>… | --all`, `move --to <machine>`, `doctor --here`).
 Memory defaults to one twentieth of host memory, with a 24 GiB minimum. CPU defaults to 8 cores.
 The sparse disk defaults to 128 GiB on sami-devbox and 32 GiB on other hosts.
 Creating an image requires at least 500 GiB free on its host filesystem. Sparse capacity reserves no space.

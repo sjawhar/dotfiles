@@ -24,7 +24,7 @@ Find lessons of three kinds, kept apart:
 
 Report lessons, not conduct: never report what an agent failed to disclose or whom it blamed.
 
-VERIFY each lesson before you report it: run the command again, read the cited file at the
+Verify each lesson before you report it: run the command again, read the cited file at the
 quoted line, or reproduce it in a throwaway directory. Quoting the transcript again is not
 verification. Report each lesson as exactly:
 LESSON: <one sentence>

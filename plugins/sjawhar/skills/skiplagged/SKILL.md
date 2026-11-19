@@ -28,7 +28,8 @@ Live travel search through Skiplagged's public MCP server. No auth.
 2. Flexible dates: `sk_flex_departure_calendar` (one-way) or `sk_flex_return_calendar` (round trip), then `sk_flights_search`.
 3. Flexible destination: `sk_destinations_anywhere`.
 4. Multi-city trip: search each leg, add the leg prices, and have the user compare that total against the carrier's own multi-city fare.
-5. Give the user Skiplagged's booking link: its price is only an estimate until they click it.
+5. Hotels: `sk_hotels_search`. Rental cars: `sk_cars_search`. Award (miles) fares: `sk_award_search`.
+6. Give the user Skiplagged's booking link: its price is only an estimate until they click it.
 
 ## Hidden-city caveats
 

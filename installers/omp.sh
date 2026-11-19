@@ -79,7 +79,7 @@ ensure_link "${DOTFILES_DIR}/omp/extensions/running-script-guard.ts" "${OMP_AGEN
 ensure_link "${DOTFILES_DIR}/omp/extensions/decision-review-gate.ts" "${OMP_AGENT_DIR}/extensions/decision-review-gate.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/path-guard.ts" "${OMP_AGENT_DIR}/extensions/path-guard.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/span-account.ts" "${OMP_AGENT_DIR}/extensions/span-account.ts"
-# The experiments extension: four session features, each behind its own gate (omp/AGENTS.md).
+# The experiments extension: several session features, each behind its own gate (omp/extensions/experiments/index.ts).
 # Only the entry is linked; its sibling modules resolve from the link's real path.
 ensure_link "${DOTFILES_DIR}/omp/extensions/experiments/index.ts" "${OMP_AGENT_DIR}/extensions/experiments.ts"
 ensure_link "${DOTFILES_DIR}/omp/plugins" "${HOME}/.omp/plugins"
