@@ -507,6 +507,27 @@ class GhLeakTerms(unittest.TestCase):
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv), argv)
 
+    def test_a_gh_api_call_that_makes_the_checkout_s_repository_public_reads_its_text(self) -> None:
+        # Given a checkout whose one remote is a private repository: `repos/{owner}/{repo}` is that repository's own
+        # endpoint, which gh fills in from the remote, so a call there that sets its visibility to public, or private to
+        # false, publishes it as the same call to `repos/O/R` does, and its text goes to a public repository
+        # (dispatch://INFRA-3365, tester round 3).
+        subprocess.run(["git", "init", "-q", str(self.work)], check=True, env=self.env)
+        subprocess.run(["git", "-C", str(self.work), "remote", "add", "origin", f"https://github.com/{PRIVATE}.git"],
+                       check=True, env=self.env)
+        for name, argv in (
+                ("-f visibility=public", ["api", "-X", "PATCH", "repos/{owner}/{repo}", "-f", "visibility=public",
+                                          "-f", f"description={TEXT}"]),
+                ("-F private=false", ["api", "--method", "PATCH", "/repos/{owner}/{repo}", "-F", "private=false",
+                                      "-f", f"description={TEXT}"])):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(argv), "--raw-field description")
+        # Control: the same text to the same endpoint, with the repository kept private, goes out.
+        argv = ["api", "-X", "PATCH", "repos/{owner}/{repo}", "-f", f"description={TEXT}"]
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+
     def test_a_graphql_mutation_is_judged_by_the_repositories_of_its_nodes(self) -> None:
         term = REGISTRY_TEST_TERMS["oh-my-pi"][0]
         self.answer("cybermonklabs/oh-my-pi", "public")
