@@ -47,7 +47,7 @@ class HostCredential(unittest.TestCase):
         self.env = {
             "HOME": str(self.home), "LANG": "C.UTF-8", "TMPDIR": str(self.tmp),
             "PATH": os.pathsep.join([str(stubs), str(SHIMS), str(real), "/usr/bin", "/bin"]),
-            "KNIVES_GH_BYPASS": "1", "GH_READ_CACHE": "0", "GH_READ_CACHE_LOG": "0",
+            "KNIVES_GH_BYPASS": "1",
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
         }
 

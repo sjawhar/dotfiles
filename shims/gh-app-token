@@ -839,11 +839,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
              "no App installation is refused in an agent session rather than served the "
              "personal fallback. Only git's credential helper passes it.",
     )
-    parser.add_argument(
-        "--source", action="store_true",
-        help="print which identity this owner resolves to, 'app' or 'fallback-personal-token', "
-             "and exit 0 without printing a token; shims/gh gates writes on it",
-    )
     return parser.parse_args(argv)
 
 
@@ -925,9 +920,8 @@ def main(argv: list[str] | None = None) -> int:
                 ) from None
             token = fallback_token(args.profile, owner)
             # A write on the personal fallback is the account owner posting under their own
-            # name on someone else's project. It is refused here, at the mint, because the
-            # gate in shims/gh sees `gh` only: a `git push` reaches this same token through
-            # the credential helper, which execs this program first.
+            # name on someone else's project. A `git push` is refused here, at the mint: it
+            # reaches this token through the credential helper, which execs this program first.
             #
             # The signal is --for-write, which ONLY shims/gh's `gh auth git-credential` branch
             # passes, because that branch is git asking to authenticate a push. Credential mode
@@ -936,10 +930,8 @@ def main(argv: list[str] | None = None) -> int:
             # fails ordinary reads of uncovered owners.
             #
             # Only an agent session is refused; a person pushing from their own shell is what
-            # the fallback exists for. There is deliberately no approval route here yet:
-            # scripts/gh-approved-post verifies post text from gh arguments and cannot
-            # authorise a push from an ask reference. A push to the owner's own forks goes to
-            # an App-covered owner and never reaches this branch (dispatch://INFRA-2031).
+            # the fallback exists for. A push to the owner's own forks goes to an App-covered
+            # owner and never reaches this branch (dispatch://INFRA-2031).
             if args.for_write and agent_context():
                 raise AppTokenError(
                     f"refusing this credential request: a push to {owner} through this helper "
@@ -958,15 +950,6 @@ def main(argv: list[str] | None = None) -> int:
             print("quit=1")
         log_decision_after_answer(args.profile, owner, request, "refused", str(error))
         return 1
-
-    if args.source:
-        # The caller is deciding whether to allow a write, not making one, so the token itself
-        # never leaves this process. shims/gh asks this before a write in an agent session: a
-        # write that would go out on the personal fallback is the user posting under their own
-        # name without having approved it (dispatch://INFRA-2006).
-        print(decision)
-        log_decision_after_answer(args.profile, owner, request, f"source:{decision}", "no token printed")
-        return 0
 
     if credential_mode:
         print(f"protocol={request.get('protocol', 'https')}")

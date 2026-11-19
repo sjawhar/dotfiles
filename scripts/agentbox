@@ -10366,10 +10366,10 @@ check_durable
 check_compute_inventory
 if top="$(git rev-parse --show-toplevel 2>/dev/null)" && [ ! -e "$top/.jj" ]; then ok "cwd is a git clone of its own"; else fail "cwd is not a git clone of its own (cwd-dependent: run doctor from your checkout, not /tmp)"; fi
 out="$(gh api user 2>&1)"; case "$out" in *"Resource not accessible by integration"*) ok "gh runs as an App (never the user)";; *) fail "gh api user: $(echo "$out" | head -1) (cwd-dependent: the shim routes by repository, so run doctor from your workspace)";; esac
-# `gh auth status` is answered by shims/gh, which reports the App routing instead of a user
-# login; a bare gh with no login says "not logged into any GitHub hosts". Either answer is
-# this check passing - what it refuses is a user login inside the box.
-gs="$(gh auth status 2>&1)"; case "$gs" in *"own login is not used"*|*"not logged"*) ok "gh auth: no user login";; *) fail "gh auth status shows a login: $(head -1 <<<"$gs")";; esac
+# `gh auth status` in a box reads the agent config directory (scripts/gh-agent-config), whose only
+# login is a placeholder GitHub refuses; a bare gh with no login says "not logged into any GitHub
+# hosts". Either answer is this check passing - what it refuses is a user login inside the box.
+gs="$(gh auth status 2>&1)"; case "$gs" in *"no-user-login-in-agent-sessions"*|*"not logged"*) ok "gh auth: no user login";; *) fail "gh auth status shows a login: $(head -1 <<<"$gs")";; esac
 # The public-text leak check `shims/gh` demands before `gh pr edit|create|comment`. A box that
 # cannot reach it refuses every public text write, which is a box no lead can work in; it needs
 # BOTH the writable config pointer and the script it names, on shared host storage.

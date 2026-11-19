@@ -422,8 +422,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         for name, word in CACHE.items():
             (self.cache / name).write_text(word, encoding="utf-8")
         # shims/gh, which scripts/github-repo-visibility runs by path, in an agent session: its agent config directory,
-        # no knives, no read cache and no call log, and a token that is not one, so it hands the call straight to the
-        # fake gh.
+        # no knives, and a token that is not one, so it hands the call straight to the fake gh.
         gh_config = self.home / ".config" / "gh-agent"
         gh_config.mkdir(parents=True)
         (gh_config / "hosts.yml").touch()
@@ -447,8 +446,6 @@ class JjPushLeakGateTest(unittest.TestCase):
             "GIT_ALLOW_PROTOCOL": "sink",
             "GIT_SSH_COMMAND": "false",
             "DOTFILES_DIR": str(SHIMS.parent),
-            "GH_READ_CACHE": "0",
-            "GH_READ_CACHE_LOG": "0",
             "KNIVES_GH_BYPASS": "1",
             "GH_TOKEN": "fixture-not-a-secret",
         }

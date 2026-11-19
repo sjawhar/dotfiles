@@ -45,7 +45,7 @@ class HostToken(unittest.TestCase):
         self.env = {
             "HOME": str(self.home), "LANG": "C.UTF-8", "TMPDIR": str(self.tmp),
             "PATH": os.pathsep.join([str(stubs), str(SHIMS), str(real), "/usr/bin", "/bin"]),
-            "KNIVES_GH_BYPASS": "1", "GH_READ_CACHE": "0", "GH_READ_CACHE_LOG": "0",
+            "KNIVES_GH_BYPASS": "1",
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
         }
 
@@ -124,7 +124,7 @@ class HostToken(unittest.TestCase):
     # INFRA-1538, and its review: a command over SSH with no terminal in its session is an
     # agent's, and a host profile is NOT an exception to that. The host token below is for a
     # person's own shell and for the machine's own units; an agent's call takes the agent route,
-    # with every agent safeguard (test_gh_unrouted.py), and mints no owner-wide host token here.
+    # with every agent safeguard (test_gh_ssh_agent_context.py), and mints no owner-wide host token here.
     def test_a_call_over_ssh_takes_the_agent_route_and_mints_no_host_token(self):
         self.machine_config()
         result = run_without_tty(["gh", "api", "repos/theorem-labs/x"],

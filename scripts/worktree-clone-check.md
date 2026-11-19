@@ -144,5 +144,5 @@ through a hardlink is not counted as duplicated bytes and that a `--no-hardlinks
 `scripts/`, not `devbox/`. `devbox/` holds the box's systemd units and the files `install.sh`
 links into `~/.config/systemd/user`; this has no unit, no timer and no state. `scripts/` is on
 `PATH` (`.bashrc`), so the check runs by name in any session, by hand or in a gate, the way
-`scripts/pr-gate` and `scripts/docs-pr-gate` do. Tests:
+`scripts/pr-gate` does. Tests:
 `scripts/tests/test_worktree_clone_check.py`.
