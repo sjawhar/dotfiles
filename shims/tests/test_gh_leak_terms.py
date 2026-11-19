@@ -612,6 +612,51 @@ class GhLeakTerms(unittest.TestCase):
         self.setUp_calls()
         self.assert_sent(self.run_gh(commit(PRIVATE)), commit(PRIVATE))
 
+    def test_the_repository_a_graphql_mutation_names_is_not_read_as_its_text(self) -> None:
+        # Given the knives ygo-fork list and theorem-labs/ygo public: createCommitOnBranch names the repository it
+        # commits to by name, as a gh field, a GraphQL argument or a JSON variable. That name is where the commit goes,
+        # as -R's value is; until 2026-11-19 it was read as text and refused (dispatch://INFRA-3365).
+        env = self.ygo_fork()
+        self.answer(YGO, "public")
+
+        def field(headline: str, branch: str = "main") -> list[str]:
+            query = ('query=mutation($b: CommittableBranch!) { createCommitOnBranch(input: {branch: $b, '
+                     f'expectedHeadOid: "x", message: {{headline: "{headline}"}}}}) {{ commit {{ oid }} }} }}')
+            return ["api", "graphql", "-f", query, "-F", f"b[repositoryNameWithOwner]={YGO}", "-F",
+                    f"b[branchName]={branch}"]
+
+        def argument(headline: str) -> list[str]:
+            return ["api", "graphql", "-f",
+                    "query=mutation { createCommitOnBranch(input: {branch: {repositoryNameWithOwner: "
+                    f'"{YGO}", branchName: "main"}}, expectedHeadOid: "x", message: {{headline: "{headline}"}}}}) '
+                    "{ commit { oid } } }"]
+
+        def variable(path: str) -> list[str]:
+            payload = json.dumps({
+                "query": "mutation($b: CommittableBranch!, $f: FileChanges!) { createCommitOnBranch(input: {"
+                         'branch: $b, expectedHeadOid: "x", message: {headline: "m"}, fileChanges: $f}) '
+                         "{ commit { oid } } }",
+                "variables": {"b": {"repositoryNameWithOwner": YGO, "branchName": "main"},
+                              "f": {"additions": [{"path": path, "contents": "aGk="}]}}})
+            return ["api", "graphql", "--input", self.file("commit.json", payload)]
+
+        for name, argv in (("gh field", field("m")), ("GraphQL argument", argument("m")),
+                           ("JSON variable", variable("notes.md"))):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=env), argv)
+        # Control: a term of the list anywhere else in the commit is refused, by the field that holds it, and so is the
+        # repository's name in a field that does not name the repository.
+        for name, argv, refused_field, matched in (
+                ("gh field, headline", field("Fixes INFRA-1"), "--raw-field query string 2", "INFRA-"),
+                ("GraphQL argument, headline", argument("Fixes INFRA-1"), "--raw-field query string 4", "INFRA-"),
+                ("JSON variable, file path", variable("dispatch://notes.md"),
+                 "--input commit.json .variables.f.additions[0].path", "dispatch://"),
+                ("gh field, branch", field("m", YGO), "--field b[branchName]", "theorem-labs")):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(argv, env=env), refused_field, matched, YGO_LIST, line=1)
+
     def test_a_gh_alias_under_a_command_is_read_as_the_command_it_expands_to(self) -> None:
         config = self.tmp / "config" / "gh"
         config.mkdir()

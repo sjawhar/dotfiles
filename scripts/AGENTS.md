@@ -65,9 +65,9 @@ Executables covering several areas:
     gh call would send (arguments and option values, but not the part that names where the call
     goes: `--repo`, `--branch-repo`, the `repos/O/R` that starts a `gh api` endpoint, the
     `https://github.com/O/R` that starts the URL of a pull request, issue or discussion a `pr`,
-    `issue` or `discussion` command acts on, and the repository argument of `gh repo edit` and
-    `gh repo fork`; a URL in any other argument is text; and the files and stdin gh reads), each
-    value on its
+    `issue` or `discussion` command acts on, the repository argument of `gh repo edit` and
+    `gh repo fork`, and the `owner/name` a GraphQL mutation gives as `repositoryNameWithOwner`; a
+    URL in any other argument is text; and the files and stdin gh reads), each value on its
     own as GitHub stores it (a JSON body's strings by their JSON path, a GraphQL document's strings,
     decoded), and refuses one that holds a listed term (with the tag message `--notes-from-tag` and
     the commit messages `--fill` take from git) when the call can reach a repository not confirmed

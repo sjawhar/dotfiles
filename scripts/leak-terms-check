@@ -3262,6 +3262,38 @@ GH_NODES_QUERY = (
 )
 
 
+def gh_reach_text(piece: GhText, text: str) -> str:
+    """What gh_reach reads of PIECE, which holds TEXT: a field's key and value as one `key=value`, as gh writes it,
+    since a GraphQL field names its repository so (`-F branch[repositoryNameWithOwner]=o/r`); any other text as it
+    is."""
+    return f"{piece.key}={text}" if piece.key is not None else text
+
+
+def gh_graphql_names(text: str) -> list[re.Match[str]]:
+    """Each repository TEXT names by name for a GraphQL mutation (GH_GRAPHQL_NAMED_VALUE), its `owner/name` the match's
+    group 1: in a field (`-F b[repositoryNameWithOwner]=o/r`, read as gh_reach_text), a GraphQL argument
+    (`repositoryNameWithOwner: "o/r"`) or a JSON variable. gh_reach reads each as a target, and gh_unnamed leaves that
+    group out of the text the check reads, so both read the same part."""
+    return list(GH_GRAPHQL_NAMED_VALUE.finditer(text))
+
+
+def gh_unnamed(piece: GhText, text: str) -> str:
+    """TEXT, which PIECE holds, without the `owner/name` of each repository gh_graphql_names finds in it as gh_reach
+    reads it (gh_reach_text). A match inside a field's key leaves the key whole, and gh_reach's second reading, with
+    JSON escapes decoded, takes nothing out: a name spelled with an escape is read."""
+    whole = gh_reach_text(piece, text)
+    offset = len(whole) - len(text)
+    kept: list[str] = []
+    last = 0
+    for match in gh_graphql_names(whole):
+        start, end = match.start(1) - offset, match.end(1) - offset
+        if start >= 0:
+            kept.append(text[last:start])
+            last = end
+    kept.append(text[last:])
+    return "".join(kept)
+
+
 def gh_node_repositories(texts: Sequence[str]) -> list[str] | None:
     """The repository (`owner/name`) of each GitHub node id in TEXTS, read with one GraphQL query through this
     checkout's shims/gh; None when there is no id, when the read fails, or when any id has no repository it can read."""
@@ -3337,7 +3369,7 @@ def gh_reach(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
             views = [view for text in texts for view in dict.fromkeys((text, escapes_decoded(text)))]
             if any(GH_GRAPHQL_NEW_REPOSITORY.search(view) for view in views):
                 return [GhTarget("a GraphQL mutation that makes a repository, read as public", "", True)]
-            named = [match[1].lower() for view in views for match in GH_GRAPHQL_NAMED_VALUE.finditer(view)]
+            named = [match[1].lower() for view in views for match in gh_graphql_names(view)]
             resolved = gh_node_repositories(views) if any(GH_NODE_ID.search(view) for view in views) else []
             if (resolved is None or sum(len(GH_GRAPHQL_NAMED.findall(view)) for view in views) != len(named)
                     or not (resolved or named)):
@@ -3410,6 +3442,14 @@ def gh_check(arguments: Sequence[str]) -> int:
         if endpoint == "graphql" and not any(GH_GRAPHQL_MUTATION.search(view) for _, text in contents
                                              for view in (text, escapes_decoded(text))):
             return 0
+    # Where the text goes is read from the call as gh sends it (gh_reach_text).
+    reach_texts = [gh_reach_text(piece, text) for piece, text in contents if piece.part != "key"]
+    if endpoint == "graphql":
+        # The repository a mutation names by name (createCommitOnBranch's repositoryNameWithOwner), which gh_reach
+        # reads as a target, is where it goes, not text it sends, as the value of -R is (gh_texts); the rest of the
+        # field, document or body is read. Until 2026-11-19 it was read, and a commit to theorem-labs/ygo that named
+        # it so was refused for that repository's own name (dispatch://INFRA-3365).
+        contents = [(piece, text if piece.part == "key" else gh_unnamed(piece, text)) for piece, text in contents]
 
     def graphql(piece: GhText) -> bool:
         """Whether PIECE is a GraphQL call's document (its `query` field) or carries one (its JSON body's `.query`)."""
@@ -3429,10 +3469,6 @@ def gh_check(arguments: Sequence[str]) -> int:
             findings = gh_findings(contents, graphql, matcher)
     if not findings and list_problem is None and not unreadable:
         return 0
-    # Where the text goes is read from the call as gh sends it: a field's key and value as one `key=value`, as gh
-    # writes it, since a GraphQL field names its repository so (`-F branch[repositoryNameWithOwner]=o/r`).
-    reach_texts = [f"{piece.key}={text}" if piece.key is not None else text for piece, text in contents
-                   if piece.part != "key"]
     reached = gh_reach(group, sub, read, environment, reach_texts)
     open_targets = [target.repository for target in reached if target.open]
     if not open_targets:
