@@ -3756,11 +3756,11 @@ def gh_reach(call: GhCall, bases: Callable[[], Sequence[GhBase]]) -> list[GhTarg
             # A new repository is public unless the call says otherwise, and a template's is not as visible as the
             # template: until 2026-11-19 `repos/O/R/generate` was judged by the template O/R.
             return [GhTarget("a new repository the call makes, read as public", "", True)]
-        if not GH_API_REPOSITORY.match(call.shape):
+        given = GH_API_REPOSITORY.match(call.shape)
+        if given is None:
             return [GhTarget("no repository, read as public", "", True)]
         if "base" not in gh_placeholders(call.endpoint):
             # With no base name to fill in, the shape is the endpoint as gh sends it.
-            given = GH_API_REPOSITORY.match(call.shape)
             add(f"{given[1]}/{given[2]}", "github.com", f"https://github.com/{given[1]}/{given[2]}")
         for base, filled in call.fillings:
             found = GH_API_REPOSITORY.match(filled) if base.repository else None
