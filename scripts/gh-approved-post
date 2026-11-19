@@ -511,7 +511,7 @@ def main() -> int:
                 f"reviewer's verdict: a Dispatch comment by a session that did not write the text (not a "
                 f"subagent of this session, which writes as this session), whose first line is `VERDICT: "
                 f"APPROVE at sha256:<SHA-256 of the body as posted>`, with a `Title: <title>` line for an "
-                f"issue or a pull request, named in GH_SHIM_VERDICT (shims/AGENTS.md). A text that "
+                f"issue or a pull request, named in GH_SHIM_VERDICT (shims/gh). A text that "
                 f"changes goes back to a reviewer, not to him in a new ask"
             )
         else:
@@ -519,7 +519,7 @@ def main() -> int:
                 f"A post as Sami cites a Dispatch ask he answered with its approving option, whose "
                 f"document (or question) holds the exact text between two `---` lines, with a "
                 f"`Title: <title>` line before them for an issue or a pull request, and a pull request "
-                f"opens from one of {APPROVER_LOGIN}'s own forks (shims/AGENTS.md). If the text must "
+                f"opens from one of {APPROVER_LOGIN}'s own forks (shims/gh). If the text must "
                 f"change, show him the new text in a new ask"
             )
         print(

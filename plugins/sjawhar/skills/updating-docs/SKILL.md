@@ -5,41 +5,61 @@ description: "Use when creating or updating documentation, READMEs, AGENTS.md fi
 
 # Updating Docs
 
-## Write what is true now
+A skill's own limits, structure and tests are in `writing-agent-skills`; this skill covers what any doc line may say.
 
-- Describe current behavior, in code comments too: readers act on the doc. Git log is the changelog.
-- Delete on sight: PR or issue breadcrumbs ("as of #1234"), migration trails ("previously X, now Y"), "NEW:" or "UPDATED:" markers, dated notes.
-- When the old way is gone, delete the warnings against it and describe the correct way; a warning keeps the dead option alive.
+## The test for every line
+
+Keep a line only if all three hold:
+
+1. A competent engineer new to the repository would get the task wrong, or lose real time, without it.
+2. They cannot find it in the code, `--help`, a test, or a docs page the doc links.
+3. It is true at main today. Check each path, command, flag and name against the checkout; correct or drop a false line.
+
+Remove always:
+
+- History: dates, incidents, measurements of past events, who decided what, issue keys, links to decisions, pull request numbers as provenance, migration trails ("previously X, now Y"), "NEW:" markers. They go in the commit message or PR body; git keeps the removed text.
+- Restatements of what code, a test or a linter enforces.
+- Long explanations of why. Keep one clause where a rule would otherwise look arbitrary.
+- Emphasis as force: NEVER or MUST in capitals, "critical", bold. A rule that needs force is a hook or a check.
+- Duplicates: a fact lives in one doc, and others link to it.
+
+Move a fact to a README or `docs/` page only when that page is where an engineer would look and no page holds it yet; otherwise delete it.
+
+## An agent guide (AGENTS.md, CLAUDE.md)
+
+- Root guide: at most 150 lines and 10 KB (10,240 bytes). Package guide (`<dir>/AGENTS.md`): at most 80 lines and 6 KB (6,144 bytes). Check with `wc -l -c`. Shorter is better: a package with nothing non-obvious gets a five-line guide or none.
+- Shape: one to three lines on what the package is and who uses it; the exact commands to build, test (one test too), lint and run, each checked; the non-obvious conventions and traps; links to docs pages for depth. Plain lists and short lines; no table of every file, no API reference, no release history.
+- The root guide holds repository-wide facts and links each package guide; it does not restate a package's details.
+- Before you rename a heading or a guide, `git grep` for it: code comments cite guide headings and paths by name.
 
 ## Write a rule
 
 - State what the rule requires and what it does not cover, or agents apply it past its edge.
-- Keep provenance (who, when, the incident) in the commit message or PR body. The rule text gets at most a one-line citation (a link, `file:line`), never a dated story, tally or justifying quote: agents read the story as the rule.
 - Delete a committed policy (gating file, threshold, process doc) when no commit message or PR body records what Sami said to create it, and when.
 - Write "always" or "never" only for a rule with no exception. State the exception, or an agent that meets it drops the whole rule.
-- Before you add a sentence, correct the existing one that is wrong, incomplete or ambiguous. Delete or narrow the sentence that caused the failure; a correction appended beside it leaves both readings.
+- Before you add a sentence, correct the existing one that is wrong, incomplete or ambiguous. A correction appended beside it leaves both readings.
 
 ## Correct an overturned belief
 
+- When the old way is gone, delete the warnings against it and describe the correct way; a warning keeps the dead option alive.
 - Correct every copy in place (headings, titles, flags, acceptance rows, downstream steps): a correction under a heading that still asserts the old model has not landed.
 - Grep misses a copy that shares no words with the claim, so also list and check each file, flag, test or step that assumed the old state.
-- Apply the corrected rule to the case that prompted it; don't only restate it.
-- Record what changed in the commit message, not in a note beside the corrected text, which readers take as current.
-- Mark each claim you didn't observe as inferred: a correction's overreach spreads faster than the original error.
+- Apply the corrected rule to the case that prompted it; do not only restate it.
+- Mark each claim you did not observe as inferred: a correction's overreach spreads faster than the original error.
 - When a decision says what code may accept, make the code refuse the rest in the same change; a spec alone changes nothing it accepts.
 
 ## On a cutover, sweep the changed directory
 
-- List files with a tree walk (`git ls-files <dir>`), never a hand-written glob, which misses nested paths. Check every file type: scripts and configs record what runs.
+- List files with a tree walk (`git ls-files <dir>`), not a hand-written glob, which misses nested paths. Check every file type: scripts and configs record what runs.
 - Before you sweep, write down the questions each file must answer (stale claim? resolved?); without them you check only what you happen to notice.
-- When the claim matters, have a second agent (`task` with `scout`) sweep from the claim itself, not your search terms, and merge the hits: one searcher's grep misses in its own way.
+- When the claim matters, have a second agent (`task` with `scout`) sweep from the claim itself, not your search terms, and merge the hits.
 
 ## Read the whole artifact back
 
-- After an edit, read the whole document, not a grep for what you added: check that every part of the edit landed where you meant it, since an insert can take the wrong anchor, and that untouched neighbors survived.
-- Before you trust a read-back, make it find a string you know is there, so a broken reader can't report success.
-- A change to a string invalidates offsets computed on it. Apply `(start, end, text)` edits back to front, or replace the region in one slice; check the result.
-- Chain a publish command to its guard with `&&`, not on the next line, or start the script with `set -euo pipefail`: a newline is not a guard.
+- After an edit, read the whole document, not a grep for what you added: an insert can take the wrong anchor, and an untouched neighbor can be lost.
+- Before you trust a read-back, make it find a string you know is there, so a broken reader cannot report success.
+- A change to a string invalidates offsets computed on it. Apply `(start, end, text)` edits back to front, or replace the region in one slice, and check the result.
+- Chain a publish command to its guard with `&&`, or start the script with `set -euo pipefail`: a newline is not a guard.
 
 ## Claims in prose
 
@@ -47,20 +67,19 @@ description: "Use when creating or updating documentation, READMEs, AGENTS.md fi
 - Paraphrase a result from the run's own summary line, with every count it prints; a claim about one test needs that test's own record.
 - Before you describe a format, print one instance verbatim.
 - Prose owns only what its own diff makes true. When another PR, branch or system it describes changes, correct the text in place.
-- Sweep docstrings of tests and witnesses (code that demonstrates a claim) too: each states only what its assertion checks.
+- Docstrings of tests and witnesses (code that demonstrates a claim) state only what their assertions check.
 
 ## Integrate, don't accrete
 
 - Before you add a section, look for one on the topic. If it mostly covers it, rewrite it; patched-in sentences are how two sections come to disagree.
 - Merge per-case sections (per provider, per version) that repeat each other into one that names the differences.
-- A consolidation leaves the doc shorter. One doc per audience or purpose: merge duplicate files, and state in the PR body why no existing file can hold a new one's content.
-- A doc that grows on every edit, even simplifying ones, is accreting: rewrite it.
+- A consolidation leaves the doc shorter, and a doc that grows on every edit, even simplifying ones, is accreting: rewrite it. Keep one doc per audience or purpose: merge duplicate files, and state in the PR body why no existing file can hold a new one's content.
 
 ## A rule agents know but keep forgetting
 
-- Stop rewording it; build a refusal or an automatic step at the point of action: rewording already failed.
-- A mechanism binds only callers that go through it. Measure who it reaches: a cached binary or an unmigrated caller escapes it.
+- Stop rewording it; build a refusal or an automatic step at the point of action.
+- A mechanism binds only callers that go through it. Check who it reaches: a cached binary or an unmigrated caller escapes it.
 
 ## Markdown tables
 
-Before you edit one, read `references/markdown-tables.md`: GitHub splits rows on any unescaped `|`.
+Escape every `|` in a table cell, even inside backticks (`` head \| wc ``): GitHub splits the row before it parses code spans. Check a table in GitHub's rendered view, and compare each row's field count with the header's: `sed 's/\\|//g' FILE | awk -F'|' '{print NR": "NF}'`.

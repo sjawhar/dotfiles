@@ -1,27 +1,30 @@
 ---
 name: using-transcript-store
-description: "Use before you read, grep, jq or script over agent session transcripts: ~/.omp/agent/sessions/**/*.jsonl, subagent .jsonl files and session artifacts. Triggers: where agents spent time, tool-call time or duration, slowest commands, which sessions used the most time, what an agent or a user said and when, find a phrase in past sessions, what an agent did after a message, speed coach, weekly review, librarian, session forensics, tq."
+description: "Use when you are about to read, grep or script over agent session transcripts (`~/.omp/agent/sessions/**/*.jsonl`, subagent transcripts, session artifacts): where agents spent time, what a person or an agent said and when, what a session did after a message, `tq`."
 ---
 
 # Using the transcript store
 
-Every omp session, subagent transcript and session artifact on sami-rocqperf and sami-leanperf is in one ClickHouse store, about 10 minutes behind the live files, **and so are the Claude Code and Codex logs copied from seven of Nickolai's hosts** (`machcsl-gcp-1` to `-3`, `share1014-desktop`, `share1014-vm1` to `-vm3`), merged into the same `transcripts` database on 2026-10-30 and readable with the default reader (agent-infra#996, on dispatch://LINUX-31/ask/ecd0eab6: "it's just one big pool of data"). **So `tq time` and `tq top` with no `--host` count his sessions beside ours**; pass `--host` when you mean one machine. `tq` answers in under a second what a hand-written script answers in minutes over 25 GB, so query `tq` first. Open a raw file only at the `FILE:LINE` that `tq` gives you.
+Session transcripts from many hosts load into one ClickHouse store, read with `tq`. It answers in about a second what a script over the raw files takes minutes for, so query `tq` first and open a raw file only at the `FILE:LINE` it gives. `tq --help` and `tq <command> --help` give every option, how search splits text into words, and which rows `--human` keeps: read them before you write a query.
 
 | Question | Command | Default window |
 |---|---|---|
-| Tool time by command class, per session | `tq time` (`--by host`, `--from 2026-10-14 --to 2026-10-21`) | 14 days |
+| Tool time by command class, per session | `tq time` (`--by host`) | 14 days |
 | Sessions with the most tool time | `tq top --limit 20` | 14 days |
-| Who said a phrase, and when | `tq search "can't reach 10x"` (`--human`, `--kind user`) | all time |
+| Who said a phrase, and when | `tq search "<phrase>"` (`--human`, `--kind user`) | all time |
 | Every message a person sent a session | `tq search --human --session <id> --from <time>` | all time |
-| A phrase in commands or tool arguments | `tq search --commands "lake build"` | all time |
-| What the agent did after a message | `tq next rewrite -n 5` (`--human`) | all time |
-| Anything else | `tq sql "SELECT ... FROM calls ..."` (read-only) | — |
+| A phrase in commands or tool arguments | `tq search --commands "<phrase>"` | all time |
+| What a session did after a message | `tq next "<phrase>" -n 5` | all time |
+| Anything else | `tq sql "SELECT ... FROM calls ..."` (read-only) | none |
 
-Set the same window on every command you compare (`--days N` or `--from`/`--to`): the defaults differ, as the last column shows. `tq <command> --help` gives every option, how search splits text into words, and which rows `--human` keeps; read it before you write a query. `tq sql "DESCRIBE TABLE messages"` names the columns. Output is TSV. `--format JSONEachRow` gives JSON lines.
+- Set the same window on every command you compare (`--days N`, or `--from` and `--to`): the defaults differ.
+- Without `--host`, `tq time` and `tq top` count every host in the store. List the hosts with `tq sql "SELECT host, count() FROM sessions_latest GROUP BY host"`.
+- `tq sql "DESCRIBE TABLE messages"` names the columns.
+- `tq` not found: install it as `transcript-store/README.md` in theorem-labs/agent-infra says. That README also has the tables and operations.
 
 ## Read the numbers correctly
 
-- **Waiting is tool time.** `tool:wait`, `tool:task` and async `bash` calls hold the clock while subagents or jobs run, so a session that waited reads as a slow one. Before you call a session slow, read the class column, or run the time without waiting:
+- Waiting is tool time. `tool:wait`, `tool:task` and async `bash` calls hold the clock while subagents or jobs run, so a session that waited reads as slow. Read the class column, or leave the waits out:
 
   ```bash
   tq sql "SELECT session_id, round(sum(duration_s)) AS s FROM calls
@@ -30,24 +33,31 @@ Set the same window on every command you compare (`--days N` or `--from`/`--to`)
           GROUP BY session_id ORDER BY s DESC LIMIT 10"
   ```
 
-- **One call can dominate.** A hung command can run for hours. Run `ORDER BY duration_s DESC` on `calls` and read the top rows before you rank sessions.
-- **Parallel calls overlap.** A session's tool time can be more than its wall time, so never divide tool time by wall time for a utilisation figure.
-- **Revisions.** In `tq sql`, read `tool_calls` and `sessions` through the views `calls` and `sessions_latest`. The raw tables hold one row for each revision of a call, so a sum over them comes out too high.
-- **Most user-role text is from agents.** Parent briefs and IRC relays have `role = 'user:agent'`. `--human` drops them, and keeps both ways a person reaches a session: what they typed (`role = 'user'`), and what they wrote in Dispatch — an ask answer, a comment or reply, a document verdict, an Agents-page message or a broadcast. Dispatch delivers those over Envoy, so they are `role = 'custom:envoy-message'` rows, not `kind = 'user'`: one session had 1 typed row and 50 from Dispatch, so a count of `kind = 'user'` rows can miss nearly everything a person sent. An Envoy delivery whose envelope names an actor that is not a person — another agent, or Dispatch itself — is not human. Use `--human`: a hand-written actor filter in `tq sql` must handle every case above, and `--human` already does.
-- **An event with no words of the person matches no phrase.** A `--human` hit matches, and shows, what the person wrote, not the envelope around it. An approval with no reason therefore matches no phrase: list it with `tq search --human` and no phrase, which shows it as its type, `[artifact.approved]`.
-- **Words.** Search matches whole words in order. `_ - . ' /` split words, and `’` does not: `can't` matches `can t`, but `can’t` is a different word. Search both forms when the text may hold a curly apostrophe.
-- **Files.** `kind = 'file'` rows hold artifacts: full tool outputs, `*.shake.log` originals of pruned results, `local/` files. Their `role` names the file type.
-- **A subagent's brief.** Its first `kind = 'user'` row is its brief. The shared context of the `task` call that started it is its `role = 'task_context'` row. `parent_session` links it to the session that started it.
+- One hung call can run for hours. Read the top rows of `ORDER BY duration_s DESC` on `calls` before you rank sessions.
+- Count what a person sent with `--human`, not with `kind = 'user'` rows: briefs and relays from agents are `role = 'user:agent'`, and what a person writes in Dispatch arrives as `custom:envoy-message` rows.
+- A `--human` hit matches what the person wrote, not the envelope, so an event with no words (an approval with no reason) matches no phrase. List it with `tq search --human` and no phrase: it shows as its type, such as `[ask.resolved]`.
+- `kind = 'file'` rows hold artifacts: full tool outputs, `*.shake.log` originals of pruned results, `local/` files. Their `role` names the file type.
+- A subagent's first `kind = 'user'` row is its brief, and its `role = 'task_context'` row is the shared context of the `task` call that started it. `parent_session` in `sessions_latest` links it to its parent.
 
 ## Audit one session for a person's instructions
 
-To list every instruction a person gave one session since a time, and what the session did next, follow `references/auditing-a-session.md`.
+1. List what the person sent, newest first: `tq search --human --session <full session id> --from '<start>' --limit 500`.
+2. Count the rows (`| wc -l`). A session a person worked with for a day has tens of them; one or two means the window or the session id is wrong.
+3. For each row, take three or four of its words and read what the session did next: `tq next '<words>' --human --session <id> -n 8`.
+4. `--human` leaves out a person's words that an agent relayed. Read those with:
+
+   ```bash
+   tq sql "SELECT ts, role, raw_file, raw_line, substring(replaceRegexpAll(text, '\s+', ' '), 1, 300) AS text
+           FROM messages
+           WHERE session_id = '<id>' AND ts >= '<start>'
+             AND role IN ('user:agent', 'custom:envoy-message')
+             AND positionCaseInsensitive(text, '<their name or email>') > 0
+           ORDER BY ts"
+   ```
+
+5. Read the session's `.jsonl` after the time of the newest row `tq` returned, since the store trails the live files.
 
 ## When the store does not have it
 
-- **Not in the store:** the last ~10 minutes, and any machine outside the list above. sami-leanperf lags more while a timed benchmark runs there, and a copied host loads on its own 30-minute timer. `tq` warns on stderr when a host's last load is over 30 minutes old.
-- **`history://<id>` is a condensed view:** `read` and `grep` on it see only the dialogue still in the agent's context: turns a compaction removed are a one-line summary, peer messages and job results are one-line previews or labels, each tool call is one line without its output, and thinking is left out. A miss there does not mean something never happened; for data from the last ~10 minutes, grep the agent's session `.jsonl` file (a subagent's is `<id>.jsonl`).
-- **`tq` not found:** the host is not a store client. Run the query on sami-rocqperf or sami-leanperf.
-- Read raw files by hand only for data the store does not have (the first bullet), and never scan the whole sessions tree on sami-rocqperf: other work shares its CPU and disk.
-
-Setup, tables and operations: `transcript-store/README.md` in theorem-labs/agent-infra.
+- The store trails the live files, by about ten minutes when loads run. `tq` warns on stderr when a host's last load is over 30 minutes old; that host's newer lines are only in its raw files.
+- Read raw files by hand only for what the store lacks, and never scan a whole sessions tree: other sessions share the machine's CPU and disk.

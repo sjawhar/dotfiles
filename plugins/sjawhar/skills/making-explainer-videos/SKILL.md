@@ -1,6 +1,6 @@
 ---
 name: making-explainer-videos
-description: Use when making an explainer video, a narrated video that explains what a work stream shipped, how a design or system works, a concept, or a question someone asked; when writing or reviewing an explainer's script; when choosing its voice; or when asked to remake one.
+description: Use when making an explainer video (a narrated video on what a work stream shipped, how a design or system works, a concept, or a question someone asked), when writing or reviewing an explainer's script, when choosing its voice, or when asked to remake one.
 ---
 
 # Making explainer videos
@@ -9,21 +9,19 @@ An explainer teaches the viewer what a dashboard cannot: how a thing works and w
 
 ## What the video is
 
-1. **The answer, in the first 10 seconds.** For a question: the answer in one sentence. For a stream update: what changed and the number it moved, before and after.
-2. **The mechanism, shown.** How the thing works: the diff or code that changed, the system running (a screen recording), a diagram that builds as the narration explains it, an example worked through. A recitation of state ("five task types", "17 spec versions", "jobs running") explains nothing; say what the work does and why that gives the result.
-3. **The evidence for each claim.** Every number carries its unit, its date and its source, on screen. A claim with no evidence is cut. Every comparison names what it is compared with: "the same verdict as the unmodified program", never "the same verdict".
-4. **What it changes, and what comes next.** In the viewer's terms: what it makes possible, the next target and its date. Speed is wall-clock time, never CPU time.
+1. The answer, in the first 10 seconds. For a question: the answer in one sentence. For a stream update: what changed and the number it moved, before and after.
+2. The mechanism, shown: the diff or code that changed, the system running (a screen recording), a diagram that builds as the narration explains it, an example worked through. A recitation of state ("five task types", "17 spec versions", "jobs running") explains nothing; say what the work does and why that gives the result.
+3. The evidence for each claim. Every number carries its unit, its date and its source, on screen. Cut a claim with no evidence. Every comparison names what it is compared with: "the same verdict as the unmodified program", not "the same verdict".
+4. What it changes, and what comes next, in the viewer's terms: what it makes possible, the next target and its date. Speed is wall-clock time, not CPU time.
 
-A stream update covers what merged since that stream's last video, items 2 to 4 for each change. A video about a question answers the question as it was asked. If the work cannot answer it yet, say what is missing and what will settle it.
+A stream update covers what merged since that stream's last video, items 2 to 4 for each change. A video about a question answers the question as it was asked; if the work cannot answer it yet, say what is missing and what will settle it.
 
-## What the viewer already knows
-
-Leave it out: their priorities and targets, which streams and leads exist, the rules they set, and anything the last video said.
+Leave out what the viewer already knows: their priorities and targets, which streams and leads exist, the rules they set, and anything the last video said.
 
 ## Words
 
 - Each term is plain English, or defined in one plain sentence where it first appears. A label from inside the work (a lane code, a run name, an internal tool) comes after that sentence, or not at all.
-- A rule or requirement attributed to the viewer is checked against their own words at the source (transcript, Slack, Dispatch) and quoted, never restated more strictly.
+- Check a rule or requirement attributed to the viewer against their own words at the source (transcript, Slack, Dispatch) and quote it; do not restate it more strictly.
 
 ## Form
 
@@ -31,14 +29,26 @@ Leave it out: their priorities and targets, which streams and leads exist, the r
 - At most 5 minutes.
 - Voice: ElevenLabs "Max" (voice id `Gfpl8Yo74Is0W6cPUWWT`) on `eleven_v4`, at about 210 words a minute, unless the viewer chose another.
 
+## Tools
+
+- Animation: [Revideo](https://re.video) (TypeScript scenes rendered to MP4 by headless Chrome and ffmpeg). Copy an earlier explainer's Revideo project into your own directory and change the copy: its `<subject>.src/README.md` names the project and its rebuild command. Pick one that has what you need (charts drawn from data, diagrams that build node by node, terminal clips timed to the narration, voice timing).
+- Screen recordings: browser pages with the `browser` tool's recording, or Playwright; terminals with asciinema and `agg`. Record the real system, cut hard to the action, and keep each clip's wall-clock and file duration for the review.
+- Render on a cloud VM you create for it, not on a shared box; delete the VM when the video ships.
+- Voice: `eleven_v4` has no speed setting. Put the tag `[very fast, rapid-fire delivery]` before each line, which gives Max about 183 words a minute, then speed the audio with ffmpeg `atempo` to about 210. Measure each line's words a minute from the audio. `.strip()` the API key (`secrets ELEVENLABS_API_KEY -- ...`), and do not print request headers.
+
 ## Order of work
 
 1. Write the script: per section, the facts with their sources, then the narration.
-2. A fresh agent red-teams the script against this skill: claims without evidence; steps skipped or terms unexplained; anything from "What the viewer already knows"; drift from what was asked; rules the viewer never set. Fix every finding.
+2. A fresh agent red-teams the script against this skill: claims without evidence; steps skipped or terms unexplained; anything the viewer already knows; drift from what was asked; rules the viewer never set. Fix every finding.
 3. Run the product-demos skill's narration checks on the fixed script: lint to 0 hard violations, then the teach-back.
-4. Build, review and deliver as [production.md](references/production.md) says.
-5. One video per subject. A correction replaces the video under the same name.
+4. Build the video under the product-demos skill's "Production rules" (pad the audio, not the video).
+5. Review the finished MP4 as the product-demos skill's "Review before it ships" section says.
+6. Deliver:
+   - Upload the video to the stream's Dispatch issue as an artifact named `explainer-<subject>.mp4` (`<subject>` in lowercase letters, digits and dashes), and its script as `explainer-<subject>-script.md` with front matter `title: <the title the viewer sees>`. The streams dashboard (`chief-dashboard/`) plays the latest version of every such artifact on a stream issue under that title.
+   - One video per subject: a correction is a new version of the same artifact, not a second name.
+   - Before you report it, play it on the dashboard's front page, from the video dropdown beside its stream.
+   - Keep `<subject>.src/` next to the project: script, narration audio, clips, and the exact rebuild command.
 
-At most 3 rounds of any check here (red team, teach-back, video review). Each round re-reads only what changed and may not raise a finding an earlier round raised. After the third, ship it and write what is still weak in the video's `.src/README.md`. Reason: agent checking agent does not converge on its own. One pull request at Anthropic ran 50+ review rounds; a 3-round cap with change-only re-review took one-round passes from 65% to 78% (claude.dev, 2026-10-15). The first video made with this skill ran 36 teach-back rounds and 3 review rounds in one night.
+Run at most 3 rounds of any check here (red team, teach-back, video review), because agent checking agent does not converge on its own. Each round re-reads only what changed and may not raise a finding an earlier round raised. After the third, ship it and write what is still weak in the video's `.src/README.md`.
 
-The person who owns the subject makes the video, or has a subagent make it. It never waits on a question to the viewer, and never takes time from the work it describes.
+The person who owns the subject makes the video, or has a subagent make it. It does not wait on a question to the viewer, and does not take time from the work it describes.

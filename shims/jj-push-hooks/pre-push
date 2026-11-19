@@ -4,7 +4,7 @@
 # configured remotes. jj runs git with --no-verify, so the checkout's own pre-push
 # hook, which runs the shared public leak check, never runs for a jj push; a
 # repository's own hooks path overrides the global hooks dispatcher. shims/git
-# drops every --no-verify and points core.hooksPath here (shims/AGENTS.md).
+# drops every --no-verify and points core.hooksPath here (shims/git, its push gate).
 # First, when the URL git pushes to is a public or unreadable GitHub repository,
 # it runs the encrypted term check as
 # `leak-terms-check push --remote <remote> --url <url>` with git's own update

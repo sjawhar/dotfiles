@@ -1,55 +1,70 @@
 ---
 name: outside-message
-description: "Use before any text reaches a person outside Theorem: a GitHub issue or pull-request comment on a repository we do not own, an email, a Slack message to another company, a release note, an enrollment reply, a bug report, a disclosure. Also use before you open an ask that asks Sami to approve such text. Not for messages to Sami, to other agents, or inside theorem-labs."
+description: "Use when text will reach a person outside Theorem: a comment on a repository we do not own, an email, a Slack message to another company, a release note, an enrollment reply, a bug report, a disclosure. Also before an ask for Sami's approval of such text. Not for messages to Sami or agents."
 ---
 
 # A message to someone outside Theorem
 
-Sami approves every outside message by default ([OSSV-142 ask 9a66d8e5](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/9a66d8e5-92ad-429b-8568-1af4d7ad5a53), 2026-10-27). The lockdown is on because outside messages were low quality, and it loosens as each routine is captured in a skill or template and a party's reaction is gauged ([OSSV-271 ask c75d17dd](https://dispatch.tail12ec1c.ts.net/issues/OSSV-271/asks/c75d17dd-bb18-4cb3-be3c-957da82655be), 2026-11-01). The test is not who the reader is but whether the message is a vetted routine or novel contact.
+Sami approves every outside message by default. A kind of message stops needing his approval once a skill or template guides it and he has seen how the reader's project reacts: what decides is whether the message is a vetted routine or novel contact, not who the reader is.
 
-**An outside message is one a person outside Theorem reads, not one that is publicly visible.** A reply in a bot-opened thread on a pull request Theorem authors is public writing, which the public leak check (`check-public-text`) covers, but no outside person reads it; the same thread on a contributor's pull request is read by that contributor, so it is an outside message.
+An outside message is one a person outside Theorem reads, not one that is only public. A reply in a bot-opened thread on a pull request Theorem authors is public, so the public leak check covers it (`public-leak-check.sh check-public-text <file>`), but no outside person reads it. The same thread on a contributor's pull request is read by that contributor, so it is an outside message.
+
+A narrower decision of his, where one exists, is recorded in the project's AGENTS.md or goals document with the ask that made it; do not assume one without that record. `opening-a-pr` covers upstream pull requests.
+
+## Oh My Pi
+
+Messages to Oh My Pi (`can1357/oh-my-pi`), on our pull requests and on contributors', need no approval ask and no audience research. The public leak check still runs, since these comments are public. In an agent session `gh` posts one only when the call cites his standing answer in `GH_SHIM_APPROVAL` (the Oh My Pi entry of `KIND_APPROVALS` in `scripts/gh-approved-post`) and a fresh reviewer's verdict in `GH_SHIM_VERDICT`, so step 2 below still runs. The verdict must come from another session, not your subagent, which writes to Dispatch as you; `shims/AGENTS.md` has the verdict's form.
+
+The pi-envoy plugin's own `outside-message` skill states this exception only generically ("a project the operator has excluded by name"); the project name lives here on purpose.
 
 ## Goes without his approval
 
-**Oh My Pi (`can1357/oh-my-pi`) is a standing exception: messages to it need neither his approval nor the steps below.** His words: "except for messages to Oh My Pie; those can go out, or I guess those are the only ones. Otherwise, every outside message needs to go through a three-step process" ([OSSV-142 ask 9a66d8e5](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/9a66d8e5-92ad-429b-8568-1af4d7ad5a53), 2026-10-27); the "otherwise" puts the process on the other messages only. This covers both kinds of thread above, on our pull requests and on contributors'. **In an agent session `gh` refuses the post without a cited ask**: can1357 has no GitHub App installation, so `shims/gh` sends a write there only with `GH_SHIM_APPROVAL` naming an answered ask that holds the exact text. Two things still hold:
-
-- **The public leak check still runs** (`check-public-text`). It is the standing rule for anything published, not part of his process, and these comments are public.
-- **A fresh cut is recommended, not required**: a session that did not write the text removes what a reader does not need. Do not make it a gate.
-
-The packaged sibling, `pi-envoy/outside-message`, states this rule generically for any operator ("a project the operator has excluded by name"); the project name lives here on purpose, not by drift.
-
 For any other project, all three hold:
 
-- **A routine with a skill or template behind it** (`references/approval.md` lists the ones there are). A formulaic message with nothing guiding it is not yet a routine, and waits.
-- **The process below ran** — the scales passed and a fresh reviewer cut the exact text that goes out; "followed the process" means those happened, not that someone read it.
-- **It sits in a flow we control** — an enrollee who came to us, a project already enrolled — not contact we open into a space we do not run.
+- It is a captured routine: a skill or template guides it, and the message is that template sent largely unchanged. The template is approved once; an unchanged send to the same class of reader needs no new ask. The captured routines:
+  - a pull request and its maintainer comments to an already-enrolled project (`upstream-bugfix-patch` holds the form and timing of a finding or patch to such a project);
+  - the enrollment thank-you and the first "we will start reviewing your PR" note to a new enrollee.
+- The two steps below ran: the writing skills passed over the text, and a fresh reviewer cut the exact text that goes out.
+- It sits in a flow we control: an enrollee who came to us, or a project already enrolled; not contact we open into a space we do not run. A new enrollee counts with no prior rapport: the control is the template and the flow.
 
-A new enrollee counts even with no prior rapport: the control is the template and the flow, not standing with the party.
+Enrolled means the enrolling project's own record, and its stream's brief says where that record is. Do not decide it from a message's tone or from a maintainer having replied before.
 
 ## Waits for him
 
-Any one, except for Oh My Pi (above):
+Any one of these, except for Oh My Pi:
 
-- **Novel contact into a space we do not run** — a first contact, or the early contributions, to a project that has not enrolled. Do not send 13 pull requests into a cold repository before he has gauged how its maintainers react.
-- **No skill or template yet**, or a message that is not that template sent largely unchanged.
-- **It commits him or represents his position** — a promise, a deadline, a disclosure, a claim he would have to stand behind.
-- Between the two it waits, and the ask says which way it leaned and why. A new project moves from "approve each" to "no approval" only when Sami says so (`references/approval.md`).
+- Novel contact into a space we do not run: a first contact, or the early contributions, to a project that has not enrolled. Send no batch of pull requests into a cold repository before he has seen how its maintainers react.
+- No skill or template yet, or a send that departs from its template.
+- It commits him or represents his position: a promise, a deadline, a disclosure, a claim he would have to stand behind.
+- A program that will post to people outside the company (a CI review comment, a merge reply, a bot answer): he reviews what it can post before it posts, its fixed text and the prompt behind any text a model writes. Check both first for a promise nobody decided to make, such as a promise to publish proofs.
+- A case between the two lists waits, and the ask says which way it leaned and why.
+
+A project we do not run starts at "approve each". It moves to "no approval" for the captured routines only when Sami says so, once per project; record his call where the project's stream keeps its enrollment record, so no agent promotes a project on its own judgement.
 
 ## The two steps
 
-1. **Research the audience, and write in their conventions** — their template, their terms, their level of detail, their thread (`references/research.md`). Run `skill://asd-ste100`, `skill://ce-noslop` and `skill://plain-words` over the text. **Avoid "we" in text to an outside reader**: name Theorem or the tool, or write the sentence with no actor (`references/research.md` for his reason).
-2. **A fresh reviewer reads it and cuts.** Astra, or Opus where Astra is not available, reads the message in a session that did not write it and removes everything a reader does not need. A reviewer that reads only to approve has not done this step. **Write in the ask what it removed**, in three lines or fewer, or "the reviewer removed nothing": the list is what shows the step ran (`references/research.md`).
+1. Research the reader, then write in their conventions.
+   - On a repository, read its contributing guide, issue and pull-request templates and code of conduct; its last ten issues or pull requests and how the maintainers write there; and what was already discussed about your subject. Use their pull-request template for a pull request and their issue template for an issue, and match the thread for a reply.
+   - Off a repository (an email, a Slack message to another company, a release note, a disclosure), read every earlier message between Theorem and this reader; the page where they say how to contact them (a security policy, `SECURITY.md`, a contact page, disclosure rules); and how they write (release notes, blog, their messages in the thread). An email answers the email it replies to; a first contact says in one line who is writing and why.
+   - Where the stream that owns the relationship keeps form rules (in its project's `AGENTS.md`, `.claude/skills/` or brief), those rules decide how the message reads, over the writing skills below. Send a change to the form there, not into this skill.
+   - Run `asd-ste100`, `ce-noslop` and `plain-words` over the text. Avoid "we" (Sami's preference): name Theorem or the tool, or write the sentence with no actor.
+2. A fresh reviewer cuts it. A session that did not write the message (the `astra` agent, or an Opus model where it is unavailable) gets the draft, the recipient's last message and, for text in Sami's name, the "Never write" list of `speaking-as-sami`, and nothing else. It removes everything the reader does not need and rewrites each "Never write" form. Use its version. A reviewer that reads only to approve has not done this step.
 
-**The text he approves is the text the reviewer cut, byte for byte.** Any edit after the cut, even one line of fact, sends the text back through step 1 and a new fresh review. On 2026-11-02 two sentences added after the cut reached his ask, and a second cut removed one as inaccurate ([INFRA-263 comment 400ad213](https://dispatch.tail12ec1c.ts.net/issues/INFRA-263/comments/400ad213-e015-49b6-a726-aa5444a3100c)).
+The text he approves, or that goes out, is the text the reviewer cut, byte for byte. Any edit after the cut, even one line of fact, goes back through step 1 and a new review.
 
 ## Then the ask
 
-**Put the full message text in the ask itself.** Not a link to a document holding it, not a summary, not "the draft is at …": Sami cannot judge a message he has to open another document to read.
+Put the full message text in the ask itself, not a link, a summary or "the draft is at ...": Sami cannot judge a message he has to open another document to read. In this order:
 
-An ask for an outside message has, in this order: who the reader is, and one line on what they already know; the message, in full, as it would be sent; what the reviewer removed; what changes if he says no. Link the research, not the message.
+1. Who the reader is, with one line on what they already know; the channel and the sending account.
+2. The message, in full, as it would be sent.
+3. What the reviewer removed, in three lines or fewer, or "the reviewer removed nothing": the list shows the step ran.
+4. What changes if he says no.
+
+Link the research, not the message. Send only the text he approved.
 
 ## What this skill does not cover
 
-- How the text reads: `skill://plain-words` for empty verb phrases, `skill://speaking-as-sami` for text in Sami's own name.
+- How the text reads: `plain-words` for empty verb phrases, `speaking-as-sami` for text in Sami's name.
 - A message to another agent or to Sami: write it plainly and send it; no approval step.
-- Sami's personal admin (sellers, vendors, couriers, taskers, family) in the omp `personal` profile: `skill://contacting` holds its identity and approval rules.
+- Sami's personal admin (sellers, vendors, couriers, taskers, family) in the omp `personal` profile: `contacting` holds its identity and approval rules.

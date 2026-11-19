@@ -172,7 +172,7 @@ class FallbackWriteGate(unittest.TestCase):
         never matched. It also shows the bar: a process that marks itself a later pass and computes
         the digest gets past the gate, as one that sets GH_TOKEN does. The shim guards against
         accidents (a marker copied into the next command, inherited by another call), not against a
-        caller that forges the shim's own markers (shims/AGENTS.md)."""
+        caller that forges the shim's own markers (shims/gh)."""
         self.source("fallback-personal-token")
         for later in self.LATER_PASSES:
             with self.subTest(later=later):

@@ -51,7 +51,7 @@ log_file="${BOX_CLEANUP_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/box-cleanup/l
 # from this config answered 200 on /healthz from a user unit. So every alert this script tried to
 # send went nowhere, including "A CLEANER HAS STOPPED WORKING: docker-cap (7 runs, last exit 124)"
 # -- a real fault, found only because a person asked why the unit kept failing. A notifier that
-# cannot notify is the box-exit-watch shape in scripts/AGENTS.md; this one at least says
+# cannot notify looks healthy until it is made to fire once (scripts/AGENTS.md); this one at least says
 # COULD NOT SEND on stderr, which is how it was caught.
 _envoy_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json"
 envoy_url="${BOX_CLEANUP_ENVOY_URL:-$([[ -r "$_envoy_cfg" ]] && python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("envoy",{}).get("url",""))' "$_envoy_cfg" 2>/dev/null)}"

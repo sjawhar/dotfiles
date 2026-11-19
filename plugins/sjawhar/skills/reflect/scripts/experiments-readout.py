@@ -197,7 +197,7 @@ async def label_turns(turns, cache_path, jev_labels_path=None, model="default", 
     """Jev-first, strong-model-escalated: jev_labels_path (jev-turn-label.py's --out,
     confidence>=0.5 only -- see its module docstring for the measured agreement) supplies
     a label directly; every other turn still goes to completion() exactly as before. This
-    is the confidence-routing step documented in reflect's SKILL.md step 4 -- never a
+    is the confidence-routing step documented in reflect's references/experiments.md step 2 -- never a
     silent fallback, since completion() runs on precisely the turns Jev left out."""
     jev_labels = {}
     if jev_labels_path is not None:
