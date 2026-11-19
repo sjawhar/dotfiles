@@ -2335,8 +2335,9 @@ GH_REPOSITORY_OPTIONS = ("--repo", "--branch-repo")
 # The commands whose first argument is the repository the call goes to, as the usage of gh 2.98.0 names it
 # (`gh repo edit [<repository>]`, `gh repo fork [<repository>]`), by OWNER/REPO or by its URL; read so by
 # gh_argument_repository for gh_reach and gh_texts both. Not `repo create [<name>]`, whose name a public create
-# publishes, nor `repo rename [<new-name>]`. shims/tests/test_gh_leak_terms.py compares it with the usage the gh on
-# PATH prints.
+# publishes, nor `repo rename [<new-name>]`; and `repo edit --visibility public` publishes the name of the repository
+# it edits, which gh_check then reads (gh_made_public). shims/tests/test_gh_leak_terms.py compares it with the usage
+# the gh on PATH prints.
 GH_REPOSITORY_ARGUMENT = frozenset((("repo", "edit"), ("repo", "fork")))
 # The commands whose arguments the usage of gh 2.98.0 names by URL (`<url>`, `<urls>`, `<discussion-url>`,
 # `<comment-url>`, as in `gh pr comment [<number> | <url> | <branch>]` and `gh issue edit {<numbers> | <urls>}`): an
@@ -2351,6 +2352,11 @@ GH_URL_ARGUMENT = frozenset((
     ("issue", "develop"), ("discussion", "edit"), ("discussion", "comment"), ("gist", "edit"), ("gist", "rename"),
 ))
 GH_API_REPOSITORY = re.compile(r"^/?repos/([^/?#{}]+)/([^/?#{}]+)")
+# What may follow the `repos/O/R` of an endpoint that is the repository's own, which a PATCH edits: a `/`, a query.
+GH_API_REPOSITORY_END = re.compile(r"/?(?:[?#].*)?", re.DOTALL)
+# A field or JSON member of a repository's own endpoint that makes the repository public, its value in lower case as
+# gh sends it from -f or -F (JSON's `false` read as `false`).
+GH_PUBLISHING_FIELDS = frozenset((("visibility", "public"), ("private", "false")))
 GH_GRAPHQL_MUTATION = re.compile(r"\bmutation\b")
 JSON_ESCAPE = re.compile(r'\\(?:u([0-9A-Fa-f]{4})|(["\\/bfnrt]))')
 JSON_SIMPLE_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
@@ -2362,7 +2368,9 @@ class GhText:
     caller's own name for it (a path, a field's key) and PART which part of it this is (`key`, a field's key). The text
     is TEXT, or what the file PATH holds (`-`: standard input); an OPTIONAL file is read only when it can be. KEY is a
     field's key, which a GraphQL call's `query` field makes a document (gh_values); JSON_BODY says GitHub reads the text
-    as JSON (an --input body, `workflow run --json`)."""
+    as JSON (an --input body, `workflow run --json`). REST, for an argument that names the repository the call goes to
+    (gh_argument_repository), is what follows that name in it: gh_check reads only REST unless the call makes that
+    repository public (gh_made_public)."""
 
     option: str
     detail: str = ""
@@ -2372,6 +2380,7 @@ class GhText:
     key: str | None = None
     part: str = ""
     json_body: bool = False
+    rest: str | None = None
 
     def shown(self) -> str:
         detail = f" {c_escape(self.detail)}" if self.detail else ""
@@ -2550,9 +2559,10 @@ def gh_argument_repository(group: str, sub: str, number: int, value: str, endpoi
     the call goes to: by the `repos/O/R` that starts a `gh api` endpoint, read in ENDPOINT as gh_api_endpoint reads it;
     by the `https://github.com/O/R` that starts a URL, its user and port included (GH_REPOSITORY_URL), in an argument of
     a GH_URL_ARGUMENT command or in the repository argument of a GH_REPOSITORY_ARGUMENT one; or as that repository
-    argument written OWNER/REPO, with no rest. gh_reach reads that repository as a target and gh_argument_texts reads
-    only the rest, so both read the same part. None for any other argument, a URL in one included, and for each
-    argument of a gist, which has no repository (the later arguments of `gist rename` are the file names it sends)."""
+    argument written OWNER/REPO, with no rest. gh_reach reads that repository as a target, and gh_check reads only the
+    rest (GhText.rest) unless the call makes the repository public (gh_made_public). None for any other argument, a URL
+    in one included, and for each argument of a gist, which has no repository (the later arguments of `gist rename`
+    are the file names it sends)."""
     if group == "gist":
         return None
     if group == "api" and number == 1:
@@ -2569,9 +2579,9 @@ def gh_argument_repository(group: str, sub: str, number: int, value: str, endpoi
 
 
 def gh_argument_texts(group: str, sub: str, number: int, value: str, endpoint: str) -> list[GhText]:
-    """The text gh sends for its positional argument NUMBER: the word itself, but for one that names the repository the
-    call goes to only what follows that part (gh_argument_repository; ENDPOINT is a `gh api` call's endpoint), and for a
-    file, its name and what it holds."""
+    """The text gh sends for its positional argument NUMBER: the word itself, with what follows the part that names the
+    repository the call goes to as its rest when it names one (gh_argument_repository; ENDPOINT is a `gh api` call's
+    endpoint), and for a file, its name and what it holds."""
     option = f"argument {number}"
     if (group, sub) == ("gist", "create"):
         if value == "-":
@@ -2587,22 +2597,14 @@ def gh_argument_texts(group: str, sub: str, number: int, value: str, endpoint: s
         path, _, label = value.partition("#")
         return [GhText(f"{option} name", text=os.path.basename(path)), GhText(f"{option} label", text=label)]
     named = gh_argument_repository(group, sub, number, value, endpoint)
-    if named is not None:
-        # The part that names the repository the call goes to is its address, not text sent there, as the value of -R
-        # is (gh_texts), and the check refuses only for a repository read as public, whose name is then public already.
-        # The rest is read, such as the path of the file a PUT to `repos/O/R/contents/…` makes. Until 2026-11-19 the
-        # whole argument was read, and a comment on a pull request of theorem-labs/ygo named by its URL was refused for
-        # that repository's own name (dispatch://INFRA-3365).
-        _, _, rest = named
-        return [GhText(option, text=rest)] if rest else []
-    return [GhText(option, text=value)]
+    return [GhText(option, text=value, rest=None if named is None else named[2])]
 
 
 def gh_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | None]], endpoint: str) -> list[GhText]:
     """Every text the call sends: each argument and option value but those gh keeps to itself (GH_LOCAL_OPTIONS) and
-    the repository the call goes to (GH_REPOSITORY_OPTIONS, and the part of an argument gh_argument_repository reads;
-    ENDPOINT is a `gh api` call's endpoint), and for a file gh reads, what the file holds; a field's key and its value
-    are two texts, as GitHub stores them."""
+    the repository the call goes to (GH_REPOSITORY_OPTIONS; an argument that names it is given whole, with the rest
+    gh_check reads, GhText.rest; ENDPOINT is a `gh api` call's endpoint), and for a file gh reads, what the file holds;
+    a field's key and its value are two texts, as GitHub stores them."""
     long = gh_long_names(GH_TEXT_COMMANDS[(group, sub)])
     texts: list[GhText] = []
     number = 0
@@ -2879,6 +2881,18 @@ def json_strings(value: object, path: str = "") -> Iterator[tuple[str, str]]:
             yield from json_strings(item, f"{path}[{index}]")
 
 
+def json_members(value: object, path: str = "") -> Iterator[tuple[str, str, object]]:
+    """(JSON path, name, value) for each member of each object of the decoded JSON VALUE, at any depth and in order, by
+    the paths json_strings gives."""
+    if isinstance(value, JsonObject):
+        for name, member in value:
+            yield path + json_member(name), name, member
+            yield from json_members(member, path + json_member(name))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from json_members(item, f"{path}[{index}]")
+
+
 # An escape in a GraphQL string: `\u{…}` (any code point), `\uXXXX`, or one of JSON's simple escapes.
 GRAPHQL_ESCAPE = re.compile(r'\\(?:u\{([0-9A-Fa-f]{1,8})\}|u([0-9A-Fa-f]{4})|(["\\/bfnrt]))')
 
@@ -3123,13 +3137,57 @@ def graphql_strings(document: str) -> list[str] | None:
     return [text for kind, text in tokens if kind == "string"]
 
 
+def graphql_string_path(path: str, number: int) -> str:
+    """The path gh_values gives string NUMBER of the GraphQL document at PATH: `.query string 2`, or `string 2`."""
+    return f"{path} string {number}".lstrip()
+
+
 def graphql_values(path: str, document: str) -> list[tuple[str, str, bool]]:
     """gh_values of the GraphQL DOCUMENT at PATH: each string by its number (`.query string 2`), or, when the document
     does not parse (graphql_strings), the document read both ways."""
     strings = graphql_strings(document)
     if strings is None:
         return [(path, document, True)]
-    return [(f"{path} string {number}".lstrip(), value, False) for number, value in enumerate(strings, start=1)]
+    return [(graphql_string_path(path, number), value, False) for number, value in enumerate(strings, start=1)]
+
+
+# The input field by which a GraphQL mutation names the repository it goes to by name, not by node id
+# (createCommitOnBranch's branch, a CommittableBranch), and an `owner/name` as GitHub reads one there.
+GRAPHQL_NAMED = "repositoryNameWithOwner"
+GH_OWNER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+")
+
+
+def graphql_named(document: str) -> tuple[dict[int, str], set[str], set[str], bool] | None:
+    """Where the GraphQL DOCUMENT gives the input field GRAPHQL_NAMED its value: the token after that name and a `:`,
+    outside any string, where the name is not a variable's (`$repositoryNameWithOwner: String!` defines one). Returns
+    the value of each such field that is a string, by its number among the document's strings (graphql_string_path);
+    each variable such a field takes (`$v`); each variable used anywhere else; and whether such a field takes anything
+    else (an enum, a list, an object, null). None when the document does not parse (graphql_strings)."""
+    tokens = graphql_tokens(document)
+    if tokens is None or not graphql_parses(tokens):
+        return None
+
+    def at_field(index: int) -> bool:
+        return (index >= 2 and tokens[index - 2:index] == [("name", GRAPHQL_NAMED), ("punct", ":")]
+                and tokens[index - 3:index - 2] != [("punct", "$")])
+
+    strings: dict[int, str] = {}
+    given: set[str] = set()
+    used: set[str] = set()
+    other = False
+    number = 0
+    for index, (kind, text) in enumerate(tokens):
+        if kind == "string":
+            number += 1
+            if at_field(index):
+                strings[number] = text
+        elif (kind, text) == ("punct", "$"):
+            # A variable, its name after the `$` (graphql_parses saw it): defined where a `:` follows, else used.
+            if tokens[index + 2:index + 3] != [("punct", ":")]:
+                (given if at_field(index) else used).add(tokens[index + 1][1])
+        elif at_field(index):
+            other = True
+    return strings, given, used, other
 
 
 def gh_values(piece: GhText, text: str, graphql: bool) -> list[tuple[str, str, bool]]:
@@ -3154,11 +3212,12 @@ def gh_values(piece: GhText, text: str, graphql: bool) -> list[tuple[str, str, b
     return values
 
 
-def gh_findings(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText], bool],
-                matcher: TermMatcher) -> list[tuple[Finding, Span]]:
+def gh_findings(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText], bool], matcher: TermMatcher,
+                addresses: frozenset[tuple[int, str, str]]) -> list[tuple[Finding, Span]]:
     """A Finding, with its match, for each listed term in each value of each text (gh_values, GRAPHQL saying which text
     is a GraphQL document or carries one), at the text's field or file, the value's path in it and the line in the
-    value.
+    value; but no value ADDRESSES names by (its text's index in CONTENTS, its path, the value), each the address of the
+    repository a GraphQL mutation goes to (gh_graphql_named).
 
     A value is read as GitHub renders it, a paragraph at a time (paragraph_view): a line break inside a paragraph shows
     as a space, so a term of several words that a wrapped line (or a no-break space) splits is the term on the page.
@@ -3168,8 +3227,10 @@ def gh_findings(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhTex
     be dropped there while the second's count. A match of the decoded view is left out only when one of the first view
     has its term, list and allowed tokens, since gh_check judges the two alike."""
     found: list[tuple[Finding, Span]] = []
-    for piece, text in contents:
+    for index, (piece, text) in enumerate(contents):
         for path, value, both in gh_values(piece, text, graphql(piece)):
+            if (index, path, value) in addresses:
+                continue
             label = piece.shown() + (f" {path}" if path else "")
             views = [("", value)]
             if both and "\\" in value:
@@ -3249,12 +3310,7 @@ class GhTarget:
 
 
 GH_NODE_ID = re.compile(r"\b(?:[A-Z][A-Za-z]{0,7}_[A-Za-z0-9_-]{6,}|MD[A-Za-z0-9+/]{8,}={0,2})(?![A-Za-z0-9_-])")
-# A mutation that names its repository by name, not by node id: createCommitOnBranch's `repositoryNameWithOwner`, as a
-# GraphQL argument, a JSON variable or a gh field (`-F branch[repositoryNameWithOwner]=o/r`); and one that makes a
-# repository.
-GH_GRAPHQL_NAMED = re.compile(r"\brepositoryNameWithOwner\b")
-GH_GRAPHQL_NAMED_VALUE = re.compile(
-    r'\brepositoryNameWithOwner\]?"?\s*[:=]\s*"?([A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+)')
+# A mutation that makes a repository.
 GH_GRAPHQL_NEW_REPOSITORY = re.compile(r"\b(?:createRepository|cloneTemplateRepository)\b")
 GH_NODES_QUERY = (
     "query($ids: [ID!]!) { nodes(ids: $ids) { ... on RepositoryNode { repository { nameWithOwner } } "
@@ -3262,36 +3318,133 @@ GH_NODES_QUERY = (
 )
 
 
-def gh_reach_text(piece: GhText, text: str) -> str:
-    """What gh_reach reads of PIECE, which holds TEXT: a field's key and value as one `key=value`, as gh writes it,
-    since a GraphQL field names its repository so (`-F branch[repositoryNameWithOwner]=o/r`); any other text as it
-    is."""
-    return f"{piece.key}={text}" if piece.key is not None else text
+@dataclass(frozen=True)
+class GhNamed:
+    """Where a GraphQL call's mutation names the repository it goes to by name (gh_graphql_named): VALUES, each value
+    that names it and is not read, as (its text's index in the call's contents, its path there as gh_values gives it,
+    the value); REPOSITORIES, the `owner/name` of each place that names one, which gh_reach reads as targets; UNREAD,
+    whether a place names one the check cannot read, which leaves the call's target unknown."""
+
+    values: frozenset[tuple[int, str, str]] = frozenset()
+    repositories: tuple[str, ...] = ()
+    unread: bool = False
 
 
-def gh_graphql_names(text: str) -> list[re.Match[str]]:
-    """Each repository TEXT names by name for a GraphQL mutation (GH_GRAPHQL_NAMED_VALUE), its `owner/name` the match's
-    group 1: in a field (`-F b[repositoryNameWithOwner]=o/r`, read as gh_reach_text), a GraphQL argument
-    (`repositoryNameWithOwner: "o/r"`) or a JSON variable. gh_reach reads each as a target, and gh_unnamed leaves that
-    group out of the text the check reads, so both read the same part."""
-    return list(GH_GRAPHQL_NAMED_VALUE.finditer(text))
+def gh_graphql_named(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText], bool]) -> GhNamed:
+    """Each value by which the GraphQL call whose texts are CONTENTS (GRAPHQL saying which text is a document or
+    carries one) names the repository its mutation goes to: the value of the input field GRAPHQL_NAMED, which
+    createCommitOnBranch's branch has, and no other value. That is a string the document gives the field
+    (graphql_named); the value of a variable the document gives the field and uses nowhere else, as a gh field of the
+    variable's name (`-F v=o/r`) or a member of an --input body's `variables`; and the value of a member of the field's
+    name in an object, as a gh field whose key ends in `[repositoryNameWithOwner]` (gh nests
+    `-F b[repositoryNameWithOwner]=o/r` into the variable `b`) or such a member of an --input body, at any depth.
+    GitHub reads each as the repository's address, not as text it stores, as it reads the value of -R (gh_texts):
+    gh_reach reads each as a target, and gh_findings leaves each unread, so both read the same values.
+
+    The target is unknown, and the value read, where the check cannot tie a value to that field alone: a value that is
+    not an `owner/name` (an escape GitHub does not decode, a file's text with its line break), a field given anything
+    else, a variable the field takes that the call does not give or uses elsewhere too, and a document or a body that
+    does not parse while it holds the field's name. Two members of one name share a path (JsonObject), so a value is
+    left unread only when every value of its text at its path is one the field takes.
+
+    Until 2026-11-19 a regular expression over all the call's text took every `repositoryNameWithOwner` with the
+    `owner/name` after it, inside a commit's headline too: such a headline went to public theorem-labs/ygo with a term
+    of the knives ygo-fork list unread (dispatch://INFRA-3365, tester round 2)."""
+    places: list[tuple[int, str, str]] = []
+    variables: dict[str, list[tuple[int, str, str]]] = {}
+    documents: list[tuple[int, str, str]] = []
+    unread = False
+    for index, (piece, text) in enumerate(contents):
+        if piece.part == "key":
+            continue
+        if piece.json_body:
+            try:
+                decoded = json.loads(text, object_pairs_hook=JsonObject)
+            except (ValueError, RecursionError):
+                unread |= GRAPHQL_NAMED in text or GRAPHQL_NAMED in escapes_decoded(text)
+                continue
+            for path, name, value in json_members(decoded):
+                if path == ".query" and isinstance(value, str):
+                    documents.append((index, path, value))
+                elif path == f".variables{json_member(name)}":
+                    if isinstance(value, str):
+                        variables.setdefault(name, []).append((index, path, value))
+                elif name == GRAPHQL_NAMED:
+                    if isinstance(value, str):
+                        places.append((index, path, value))
+                    else:
+                        unread = True
+        elif graphql(piece):
+            documents.append((index, "", text))
+        elif piece.key is not None and piece.key != "operationName":
+            # gh sends each field but `query` and `operationName` as a variable, a key `b[k]` as the member k of `b`.
+            if piece.key.endswith(f"[{GRAPHQL_NAMED}]"):
+                places.append((index, "", text))
+            elif "[" not in piece.key:
+                variables.setdefault(piece.key, []).append((index, "", text))
+    given: set[str] = set()
+    used: set[str] = set()
+    for index, path, document in documents:
+        found = graphql_named(document)
+        if found is None:
+            unread |= GRAPHQL_NAMED in document or GRAPHQL_NAMED in escapes_decoded(document)
+            continue
+        strings, document_given, document_used, other = found
+        places += [(index, graphql_string_path(path, number), value) for number, value in strings.items()]
+        given |= document_given
+        used |= document_used
+        unread |= other
+    for variable in given:
+        if variable in used or variable not in variables:
+            unread = True
+        else:
+            places += variables[variable]
+    readable = [place for place in places if GH_OWNER_NAME.fullmatch(place[2])]
+    unread |= len(readable) != len(places)
+    values: set[tuple[int, str, str]] = set()
+    for index in {place[0] for place in readable}:
+        piece, text = contents[index]
+        occurrences = [(index, path, value) for path, value, _ in gh_values(piece, text, graphql(piece))]
+        values |= {place for place in readable
+                   if place[0] == index and occurrences.count(place) == readable.count(place)}
+    return GhNamed(frozenset(values), tuple(dict.fromkeys(place[2].lower() for place in readable)), unread)
 
 
-def gh_unnamed(piece: GhText, text: str) -> str:
-    """TEXT, which PIECE holds, without the `owner/name` of each repository gh_graphql_names finds in it as gh_reach
-    reads it (gh_reach_text). A match inside a field's key leaves the key whole, and gh_reach's second reading, with
-    JSON escapes decoded, takes nothing out: a name spelled with an escape is read."""
-    whole = gh_reach_text(piece, text)
-    offset = len(whole) - len(text)
-    kept: list[str] = []
-    last = 0
-    for match in gh_graphql_names(whole):
-        start, end = match.start(1) - offset, match.end(1) - offset
-        if start >= 0:
-            kept.append(text[last:start])
-            last = end
-    kept.append(text[last:])
-    return "".join(kept)
+def gh_made_public(group: str, sub: str, read: Sequence[tuple[str | None, str | None]], endpoint: str,
+                   contents: Sequence[tuple[GhText, str]]) -> bool:
+    """Whether the call makes the repository it goes to public, or may: `repo create` but with --private or
+    --internal; `repo edit` with `--visibility public`; and a `gh api` call to a repository's own endpoint
+    (`repos/O/R`, where GitHub's REST API edits it; ENDPOINT as gh_api_endpoint reads it) whose field or --input body
+    member (CONTENTS) sets `visibility` to public or `private` to false (GH_PUBLISHING_FIELDS), or whose --input body
+    cannot be read. gh_reach reads such a repository as public, and gh_check reads the name an argument gives it
+    (gh_argument_repository) as text: the repository is not public yet, so the call publishes its name. The one reading
+    serves both, so the two cannot differ."""
+    long = gh_long_names(GH_TEXT_COMMANDS[(group, sub)])
+    if (group, sub) == ("repo", "create"):
+        return not (gh_flag(read, long, "--private") or gh_flag(read, long, "--internal"))
+    if (group, sub) == ("repo", "edit"):
+        # gh takes the last --visibility; any one that says public counts, which errs toward reading the name.
+        return any(option and long.get(option, option) == "--visibility" and (value or "").lower() == "public"
+                   for option, value in read)
+    named = GH_API_REPOSITORY.match(endpoint) if group == "api" else None
+    if named is None or not GH_API_REPOSITORY_END.fullmatch(endpoint, named.end()):
+        return False
+    bodies = [text for piece, text in contents if piece.json_body]
+    if not bodies and any(option and long.get(option, option) == "--input" for option, _ in read):
+        return True
+    if any(piece.key is not None and piece.part != "key" and (piece.key, text.lower()) in GH_PUBLISHING_FIELDS
+           for piece, text in contents):
+        return True
+    for text in bodies:
+        try:
+            decoded = json.loads(text, object_pairs_hook=JsonObject)
+        except (ValueError, RecursionError):
+            continue
+        for name, value in decoded if isinstance(decoded, JsonObject) else ():
+            spelled = "false" if value is False else value.lower() if isinstance(value, str) else ""
+            if (name, spelled) in GH_PUBLISHING_FIELDS:
+                return True
+    return False
 
 
 def gh_node_repositories(texts: Sequence[str]) -> list[str] | None:
@@ -3316,12 +3469,13 @@ def gh_node_repositories(texts: Sequence[str]) -> list[str] | None:
     return sorted({repository.lower() for repository in repositories})
 
 
-def gh_reach(group: str, sub: str, read: Sequence[tuple[str | None, str | None]],
-             environment: Mapping[str, str], texts: Sequence[str] = ()) -> list[GhTarget]:
+def gh_reach(group: str, sub: str, read: Sequence[tuple[str | None, str | None]], environment: Mapping[str, str],
+             made_public: bool, texts: Sequence[str], named: GhNamed) -> list[GhTarget]:
     """Every target the call can reach: the repositories it names, else GH_REPO, else this directory's remotes; for a
-    GraphQL mutation, the repositories of the nodes it names. A visibility that cannot be read is open, and so is a
-    target with no repository: a gist (anyone with its address reads it), a project, another host, a GraphQL mutation
-    whose nodes cannot all be read."""
+    GraphQL mutation, the repositories of the nodes its TEXTS name and those it names by name (NAMED,
+    gh_graphql_named). A repository the call makes public (MADE_PUBLIC, gh_made_public) is open, and so is one whose
+    visibility cannot be read, and a target with no repository: a gist (anyone with its address reads it), a project,
+    another host, a GraphQL mutation whose nodes cannot all be read."""
     long = gh_long_names(GH_TEXT_COMMANDS[(group, sub)])
     host, endpoint = (environment.get("GH_HOST") or "github.com").lower(), ""
     if group == "api":
@@ -3340,11 +3494,9 @@ def gh_reach(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
         else:
             values.setdefault(long.get(option, option), []).append(value)
     if (group, sub) == ("repo", "create"):
-        private = any(values.get(name) and (values[name][-1] is None or values[name][-1].lower() in ("1", "t", "true"))
-                      for name in ("--private", "--internal"))
         name = positionals[0] if positionals else "a new repository"
-        shown = f"{name} ({'private' if private else 'not made private, so read as public'})"
-        return [GhTarget(shown, name.lower() if name.count("/") == 1 else "", not private)]
+        shown = f"{name} ({'not made private, so read as public' if made_public else 'private'})"
+        return [GhTarget(shown, name.lower() if name.count("/") == 1 else "", made_public)]
     targets: list[tuple[str, str, bool]] = []
     for name in GH_REPOSITORY_OPTIONS:
         for value in values.get(name, []):
@@ -3353,29 +3505,27 @@ def gh_reach(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
     # Each argument that names a repository (gh_argument_repository). A fork is as visible as the repository it forks,
     # so its new name (--fork-name) goes where that one is.
     for number, value in enumerate(positionals, 1):
-        named = gh_argument_repository(group, sub, number, value, endpoint)
-        if named is not None:
-            repository, url, _ = named
+        argument = gh_argument_repository(group, sub, number, value, endpoint)
+        if argument is not None:
+            repository, url, _ = argument
             targets.append((repository, url, True))
     base = True
     if group == "api":
         if endpoint == "graphql" and not targets:
             # A mutation names what it changes by node id, and each id gh can read gives its repository; it can also
-            # name a repository by name (createCommitOnBranch), or make one. Every such repository is a target: until
-            # 2026-11-17 only the node ids were, so a commit to a public repository by name went out when the text
-            # also held an id of a private one. An id gh cannot read, a name given only through a variable the check
-            # cannot see, a new repository, or no repository at all leaves the target unknown. Each text is read as
+            # name a repository by name (createCommitOnBranch, gh_graphql_named), or make one. Every such repository
+            # is a target: until 2026-11-17 only the node ids were, so a commit to a public repository by name went out
+            # when the text also held an id of a private one. An id gh cannot read, a name the check cannot read, a
+            # new repository, or no repository at all leaves the target unknown. Each text is read for node ids as
             # written and with its JSON escapes decoded, as gh_findings reads it.
             views = [view for text in texts for view in dict.fromkeys((text, escapes_decoded(text)))]
             if any(GH_GRAPHQL_NEW_REPOSITORY.search(view) for view in views):
                 return [GhTarget("a GraphQL mutation that makes a repository, read as public", "", True)]
-            named = [match[1].lower() for view in views for match in gh_graphql_names(view)]
             resolved = gh_node_repositories(views) if any(GH_NODE_ID.search(view) for view in views) else []
-            if (resolved is None or sum(len(GH_GRAPHQL_NAMED.findall(view)) for view in views) != len(named)
-                    or not (resolved or named)):
+            if resolved is None or named.unread or not (resolved or named.repositories):
                 return [GhTarget("a GraphQL mutation whose repository could not be read, read as public", "", True)]
             targets += [(repository, f"https://github.com/{repository}", True)
-                        for repository in dict.fromkeys([*named, *resolved])]
+                        for repository in dict.fromkeys([*named.repositories, *resolved])]
         base = "{owner}" in endpoint or "{repo}" in endpoint
         if not targets and not base:
             return [GhTarget("no repository, read as public", "", True)]
@@ -3384,8 +3534,6 @@ def gh_reach(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
             targets.append((environment["GH_REPO"], gh_repository_url(environment["GH_REPO"]), True))
         else:
             targets = [(f"remote {name}", url, False) for name, url in gh_remotes()]
-    made_public = (group, sub) == ("repo", "edit") and any(
-        (v or "").lower() == "public" for v in values.get("--visibility", []))
     reached: list[GhTarget] = []
     for name, url, named_by_call in targets:
         visibility = gh_visibility(url)
@@ -3442,18 +3590,24 @@ def gh_check(arguments: Sequence[str]) -> int:
         if endpoint == "graphql" and not any(GH_GRAPHQL_MUTATION.search(view) for _, text in contents
                                              for view in (text, escapes_decoded(text))):
             return 0
-    # Where the text goes is read from the call as gh sends it (gh_reach_text).
-    reach_texts = [gh_reach_text(piece, text) for piece, text in contents if piece.part != "key"]
-    if endpoint == "graphql":
-        # The repository a mutation names by name (createCommitOnBranch's repositoryNameWithOwner), which gh_reach
-        # reads as a target, is where it goes, not text it sends, as the value of -R is (gh_texts); the rest of the
-        # field, document or body is read. Until 2026-11-19 it was read, and a commit to theorem-labs/ygo that named
-        # it so was refused for that repository's own name (dispatch://INFRA-3365).
-        contents = [(piece, text if piece.part == "key" else gh_unnamed(piece, text)) for piece, text in contents]
+    made_public = gh_made_public(group, sub, read, endpoint, contents)
+    if not made_public:
+        # The part of an argument that names the repository the call goes to (gh_argument_repository) is its address,
+        # not text sent there, as the value of -R is (gh_texts), and the check refuses only for a repository read as
+        # public, whose name is then public already; the rest is read, such as the path of the file a PUT to
+        # `repos/O/R/contents/…` makes. Until 2026-11-19 the whole argument was read, and a comment on a pull request of
+        # theorem-labs/ygo named by its URL was refused for that repository's own name (dispatch://INFRA-3365). A
+        # repository the call makes public is not public yet, so the call publishes its name and the whole argument is
+        # read: the first change of 2026-11-19 left it out too, and `repo edit o/<name> --visibility public` published a
+        # private name holding a listed term (dispatch://INFRA-3365, tester round 2).
+        contents = [(piece, text if piece.rest is None else piece.rest) for piece, text in contents]
 
     def graphql(piece: GhText) -> bool:
         """Whether PIECE is a GraphQL call's document (its `query` field) or carries one (its JSON body's `.query`)."""
         return endpoint == "graphql" and (piece.json_body or piece.key == "query")
+
+    # Where a GraphQL mutation names the repository it goes to by name, which is its address and not read.
+    named = gh_graphql_named(contents, graphql) if endpoint == "graphql" else GhNamed()
 
     matcher: TermMatcher | None = None
     list_problem: str | None = None
@@ -3466,10 +3620,11 @@ def gh_check(arguments: Sequence[str]) -> int:
         except ListError as error:
             list_problem = str(error)
         else:
-            findings = gh_findings(contents, graphql, matcher)
+            findings = gh_findings(contents, graphql, matcher, named.values)
     if not findings and list_problem is None and not unreadable:
         return 0
-    reached = gh_reach(group, sub, read, environment, reach_texts)
+    reached = gh_reach(group, sub, read, environment, made_public,
+                       [text for piece, text in contents if piece.part != "key"], named)
     open_targets = [target.repository for target in reached if target.open]
     if not open_targets:
         return 0

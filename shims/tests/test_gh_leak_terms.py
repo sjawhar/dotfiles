@@ -482,6 +482,31 @@ class GhLeakTerms(unittest.TestCase):
         self.setUp_calls()
         self.assert_sent(self.run_gh(argv), argv)
 
+    def test_a_gh_api_call_that_makes_a_repository_public_reads_its_name(self) -> None:
+        # Given a private repository whose name holds a listed term: a call to the repository's own endpoint that sets
+        # its visibility to public, or private to false, publishes the name as `repo edit --visibility public` does, so
+        # the endpoint is read whole and the repository is read as public (dispatch://INFRA-3365, tester round 2).
+        repo = f"o/notes-{CANARY}"
+        self.answer(repo, "private")
+        for name, argv in (
+                ("-f visibility=public", ["api", "-X", "PATCH", f"repos/{repo}", "-f", "visibility=public"]),
+                ("-F private=false", ["api", "--method", "PATCH", f"/repos/{repo}", "-F", "private=false"]),
+                ("--input", ["api", "-X", "PATCH", f"repos/{repo}", "--input",
+                             self.file("p.json", json.dumps({"private": False}))]),
+                ("address", ["api", "-X", "PATCH", f"https://api.github.com/repos/{repo}", "-f", "visibility=public"])):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                refused = self.run_gh(argv)
+                self.assert_refused(refused, "argument 1", CANARY, line=1)
+                self.assertIn("(made public by the call)", refused.stderr.decode())
+        # Controls: a call that keeps the repository private, and an edit of it once public, go out.
+        for visibility, argv in (("private", ["api", "-X", "PATCH", f"repos/{repo}", "-f", "visibility=private"]),
+                                 ("public", ["api", "-X", "PATCH", f"repos/{repo}", "-f", "description=notes"])):
+            with self.subTest(control=visibility):
+                self.answer(repo, visibility)
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+
     def test_a_graphql_mutation_is_judged_by_the_repositories_of_its_nodes(self) -> None:
         term = REGISTRY_TEST_TERMS["oh-my-pi"][0]
         self.answer("cybermonklabs/oh-my-pi", "public")
@@ -679,6 +704,69 @@ class GhLeakTerms(unittest.TestCase):
             with self.subTest(form=name):
                 self.setUp_calls()
                 self.assert_refused(self.run_gh(argv, env=env), refused_field, matched, YGO_LIST, line=1)
+
+    def test_an_owner_name_a_graphql_mutation_holds_elsewhere_is_read(self) -> None:
+        # Given the knives ygo-fork list and theorem-labs/ygo public: only the value of the input field
+        # repositoryNameWithOwner is the address a commit goes to. An owner/name anywhere else, after that field's own
+        # name too, is text the commit stores, and is read (dispatch://INFRA-3365, tester round 2).
+        env = self.ygo_fork()
+        self.answer(YGO, "public")
+        smuggled = "repositoryNameWithOwner=theorem-labs/INFRA-1 leaked"
+        to_branch = ('mutation($b: CommittableBranch!) { createCommitOnBranch(input: {branch: $b, expectedHeadOid: "x", '
+                     f'message: {{headline: "{smuggled}"}}}}) {{ commit {{ oid }} }} }}')
+        with_message = ("mutation($b: CommittableBranch!, $m: CommitMessage!) { createCommitOnBranch(input: {branch: $b, "
+                        'expectedHeadOid: "x", message: $m}) { commit { oid } } }')
+        branch = {"repositoryNameWithOwner": YGO, "branchName": "main"}
+        by_variable = ("query=mutation($repositoryNameWithOwner: String!) { createCommitOnBranch(input: {branch: "
+                       f'{{repositoryNameWithOwner: "{YGO}", branchName: "main"}}, expectedHeadOid: "x", '
+                       "message: {headline: $repositoryNameWithOwner}}) { commit { oid } } }")
+        # Two `query` members: the one GitHub keeps names theorem-labs/ygo, and its headline holds what the other
+        # gives the field at the same path.
+        first = ("mutation { createCommitOnBranch(input: {branch: {repositoryNameWithOwner: \"theorem-labs/INFRA-1\", "
+                 'branchName: "main"}, expectedHeadOid: "x", message: {headline: "m"}}) { commit { oid } } }')
+        second = ('mutation { createCommitOnBranch(input: {message: {headline: "theorem-labs/INFRA-1"}, branch: '
+                  f'{{repositoryNameWithOwner: "{YGO}", branchName: "main"}}, expectedHeadOid: "x"}}) '
+                  "{ commit { oid } } }")
+        for name, argv, field in (
+                ("gh field, headline in the document",
+                 ["api", "graphql", "-F", f"b[repositoryNameWithOwner]={YGO}", "-f", f"query={to_branch}"],
+                 "--raw-field query string 2"),
+                ("--input, headline in the document",
+                 ["api", "graphql", "--input", self.file("d.json", json.dumps({"query": to_branch,
+                                                                               "variables": {"b": branch}}))],
+                 "--input d.json .query string 2"),
+                ("--input, headline in a variable",
+                 ["api", "graphql", "--input", self.file("v.json", json.dumps({
+                     "query": with_message, "variables": {"b": branch, "m": {"headline": smuggled}}}))],
+                 "--input v.json .variables.m.headline"),
+                ("a variable named for the field, used as the headline",
+                 ["api", "graphql", "-f", by_variable, "-F", "repositoryNameWithOwner=theorem-labs/INFRA-1"],
+                 "--field repositoryNameWithOwner"),
+                ("two query members",
+                 ["api", "graphql", "--input",
+                  self.file("t.json", '{"query": %s, "query": %s}' % (json.dumps(first), json.dumps(second)))],
+                 "--input t.json .query string 1")):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                refused = self.run_gh(argv, env=env)
+                self.assert_refused(refused, field, "INFRA-", YGO_LIST, line=1)
+                self.assertIn(f"{YGO} (public)", refused.stderr.decode())
+        # A variable the field takes and the headline uses too is read, and leaves where the commit goes unknown.
+        both = ('query=mutation($r: String!) { createCommitOnBranch(input: {branch: {repositoryNameWithOwner: $r, '
+                'branchName: "main"}, expectedHeadOid: "x", message: {headline: $r}}) { commit { oid } } }')
+        self.setUp_calls()
+        refused = self.run_gh(["api", "graphql", "-f", both, "-F", f"r={YGO}"], env=env)
+        self.assert_refused(refused, "--field r", "theorem-labs", YGO_LIST, line=1)
+        self.assertIn("could not be read, read as public", refused.stderr.decode())
+        # Controls: a variable the document gives the field alone names where the commit goes, by any name.
+        for variable in ("repositoryNameWithOwner", "r"):
+            with self.subTest(control=variable):
+                query = (f"query=mutation(${variable}: String!) {{ createCommitOnBranch(input: {{branch: "
+                         f'{{repositoryNameWithOwner: ${variable}, branchName: "main"}}, expectedHeadOid: "x", '
+                         'message: {headline: "m"}}) { commit { oid } } }')
+                argv = ["api", "graphql", "-f", query, "-F", f"{variable}={YGO}"]
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=env), argv)
 
     def test_a_gh_alias_under_a_command_is_read_as_the_command_it_expands_to(self) -> None:
         config = self.tmp / "config" / "gh"

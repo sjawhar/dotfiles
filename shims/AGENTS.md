@@ -170,18 +170,28 @@ behavior before handing the call to the real one. One file is data: `person-name
   `repos/O/R` at the start of a `gh api` endpoint, the `https://github.com/O/R` at the start of the
   URL of a pull request, issue or discussion that a `pr`, `issue` or `discussion` command acts on,
   and the repository argument of `gh repo edit` and `gh repo fork`, by name or URL, and the
-  `owner/name` a GraphQL mutation gives as `repositoryNameWithOwner` (createCommitOnBranch's
-  branch, as a gh field `-F b[repositoryNameWithOwner]=O/R`, an argument in the document or a
-  JSON variable of an `--input` body), found as the check finds the mutation's target, and not
-  one spelled with a JSON escape; never the name `gh repo create` gives), and for a file gh reads
+  `owner/name` a GraphQL mutation gives as the value of the input field `repositoryNameWithOwner`
+  (createCommitOnBranch's branch), only where it is that field's own value: a string the document
+  gives the field, a variable the document gives it and uses nowhere else (`-F v=O/R`, or the
+  `--input` body's `variables`), a gh field whose key ends in `[repositoryNameWithOwner]`
+  (`-F b[repositoryNameWithOwner]=O/R`), or a member of that name in an `--input` body; never the
+  name `gh repo create` gives), and for a file gh reads
   (`--body-file`, `--notes-file`, `--from-file`, `--recover`, `--input`, `-F key=@file`, a gist's
   files) what the file holds, never its path. The repository is the call's address, not text sent
   to it, and the check refuses only for one read as public, whose name is then public already;
   the rest of an endpoint or a URL is read, such as the path of the file a PUT to
-  `repos/O/R/contents/…` makes, and so is every other character of a mutation's field, document
-  or body. Until 2026-11-19 the repository was read, and every write to a public repository whose
-  own name holds a listed term was refused (theorem-labs/ygo under the knives ygo-fork list,
-  dispatch://INFRA-3365). Which arguments name the repository comes from each command's usage in
+  `repos/O/R/contents/…` makes, and so is every other value of a mutation's fields, document or
+  body, such as a headline that holds `repositoryNameWithOwner=O/R`. A value the check cannot tie
+  to that field alone (one that is not a plain `owner/name`, a variable used elsewhere too) is read,
+  and leaves the mutation's target unknown. A repository the call makes public is not public yet,
+  so the call publishes its name, which is read whole: `repo edit --visibility public`, and a
+  `gh api` call to `repos/O/R` whose field or `--input` body sets `visibility` to public or
+  `private` to false, or whose `--input` cannot be read; each is read as public. Until 2026-11-19
+  the repository was read, and every write to a public repository whose own name holds a listed
+  term was refused (theorem-labs/ygo under the knives ygo-fork list, dispatch://INFRA-3365); the
+  same day's second test round found a private name that `repo edit --visibility public`
+  published unread, and a headline holding `repositoryNameWithOwner=O/R` that went to
+  theorem-labs/ygo unread. Which arguments name the repository comes from each command's usage in
   `gh <command> --help`
   (`GH_REPOSITORY_ARGUMENT`, `GH_URL_ARGUMENT`; the same test fails when they differ). A URL in any
   other argument, such as the description `gh agent-task create` sends, is text read whole, and
@@ -237,14 +247,14 @@ behavior before handing the call to the real one. One file is data: `person-name
   forks, whose visibility a fork takes), else
   `GH_REPO`, else each GitHub remote of the directory (the one `gh repo set-default` chose, else
   all), and for a GraphQL mutation the repository of each node id it names (one `nodes(ids:)` read
-  through this shim) and each it names by name (createCommitOnBranch's `repositoryNameWithOwner`),
-  both read as written and with JSON escapes decoded, through `scripts/github-repo-visibility` (the
+  through this shim, its text read as written and with JSON escapes decoded) and each it names by
+  name (the `repositoryNameWithOwner` values above), through `scripts/github-repo-visibility` (the
   leak check's per-repository
   cache, else one gh read, whose answer it caches). A term of the list every repository has is
   refused when any target is not confirmed private or internal; a term of a scoped list or of
   the registry only when such a target is one its scope names. A visibility it cannot read, a
   gist, a project, another host (`GH_HOST`, `gh api --hostname`, or a `gh api` address on any host
-  but those two), a GraphQL mutation whose nodes cannot all be read or that makes a
+  but those two), a GraphQL mutation whose nodes or names cannot all be read or that makes a
   repository, and any other
   endpoint count as public and as any repository. Not checked, because the shim runs before the
   text exists or nothing new is typed: text
