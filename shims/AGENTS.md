@@ -86,10 +86,12 @@ behavior before handing the call to the real one. One file is data: `person-name
   reply that holds an answer block cannot stand in for his answer. The shim copies a cited post's
   body file (`-F`/`--body-file`, or a reply's `-F body=@<file>`) once, before the check, into a
   private file under the read cache root's `bodies/` (directory 0700, file 0600), and the gate
-  checks that copy and gh posts it, so a file changed after the check is not what goes out. A file
-  that is not readable when the shim copies it is passed on as it is and not copied, so a file that
-  becomes readable between that copy and the check is checked and posted in place. The copy goes
-  when the call ends; one left by
+  checks that copy and gh posts it, so a file changed after the check is not what goes out. The
+  copy fails closed: a body file the shim cannot read or copy refuses the call before the check,
+  naming the file (`gh shim: REFUSED: cannot read the body file <path>`, or `cannot copy the body
+  file <path> into …`; an empty name shows as `''`), and gh never gets the original path, so a file
+  that becomes readable after the failed copy is not checked or posted in place. The copy
+  goes when the call ends; one left by
   a pass that ran gh in place goes at the next cited post an hour on. In an agent session a write
   to an owner without the App, which would go out on his upstream token, is refused without such a
   citation (dispatch://INFRA-2006, `shims/tests/test_gh_fallback_write_gate.py`). The citation

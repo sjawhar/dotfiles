@@ -222,24 +222,28 @@ gh_shim_call_digest() {
 }
 # gh_shim_private_body DIR ARGV…: a cited post's body file (-F/--body-file, or a `gh api` reply's
 # -F body=@<file>), copied once into a private file in a new directory under DIR; _posted is ARGV
-# with the copy in the file's place, and _body_copy that directory (empty when ARGV names no
-# readable file). The gate checks the copy and gh posts it, so a file changed after the check is not
-# what goes out (dispatch://INFRA-3412). The flags that take a value are the gate's own (for `gh api`,
-# -X, -F and -f), so a value that reads like a flag stays a value. A directory over an hour old is
-# one that a pass running gh in place left, and goes.
+# with the copy in the file's place, and _body_copy that directory (empty when ARGV names no body
+# file). The gate checks the copy and gh posts it, so a file changed after the check is not what
+# goes out (dispatch://INFRA-3412). It fails closed: for a body file it cannot read or copy it
+# returns 1 with _body_file naming the file and _body_failed saying which (`read`, `copy`), so the
+# call is refused and gh never gets the original path, which a file that became readable after the
+# failed copy would otherwise reach unchecked. `-` (stdin) is passed on, and the gate refuses it.
+# The flags that take a value are the gate's own (for `gh api`, -X, -F and -f), so a value that
+# reads like a flag stays a value. A directory over an hour old is one that a pass running gh in
+# place left, and goes.
 gh_shim_private_body() {
-    local dir="$1" flag="" arg file prefix copy api=0
+    local dir="$1" flag="" arg file prefix copy api=0 body
     shift
-    _posted=() _body_copy=""
+    _posted=() _body_copy="" _body_file="" _body_failed=""
     [[ "${1:-}" != api ]] || api=1
     find "$dir" -mindepth 1 -maxdepth 1 -mmin +60 -exec rm -rf -- {} + 2> /dev/null || true
     for arg in "$@"; do
-        file="" prefix=""
+        body=0 file="" prefix=""
         if [[ -n "$flag" ]]; then
             if ((api)); then
-                [[ "$flag" == -F && "$arg" == body=@* ]] && prefix="body=@" file="${arg#body=@}"
+                [[ "$flag" == -F && "$arg" == body=@* ]] && body=1 prefix="body=@" file="${arg#body=@}"
             else
-                [[ "$flag" == -F || "$flag" == --body-file ]] && file="$arg"
+                [[ "$flag" == -F || "$flag" == --body-file ]] && body=1 file="$arg"
             fi
             flag=""
         elif ((api)); then
@@ -247,17 +251,21 @@ gh_shim_private_body() {
         else
             case "$arg" in
                 -R | --repo | -t | --title | -b | --body | -F | --body-file | --head | -B | --base) flag="$arg" ;;
-                --body-file=*) prefix="--body-file=" file="${arg#--body-file=}" ;;
+                --body-file=*) body=1 prefix="--body-file=" file="${arg#--body-file=}" ;;
             esac
         fi
-        if [[ -n "$file" && "$file" != - && -r "$file" && ! -d "$file" ]]; then
-            [[ -n "$_body_copy" ]] || _body_copy="$(mktemp -d "$dir/post.XXXXXX")" || return 1
-            copy="$_body_copy/body.${#_posted[@]}"
-            (umask 077 && cat -- "$file" > "$copy") || return 1
-            _posted+=("$prefix$copy")
-        else
+        if ((!body)) || [[ "$file" == - ]]; then
             _posted+=("$arg")
+            continue
         fi
+        _body_file="$file" _body_failed=read
+        [[ -r "$file" && ! -d "$file" ]] || return 1
+        _body_failed=copy
+        [[ -n "$_body_copy" ]] || _body_copy="$(mktemp -d "$dir/post.XXXXXX")" || return 1
+        copy="$_body_copy/body.${#_posted[@]}"
+        (umask 077 && cat -- "$file" > "$copy") || return 1
+        _body_failed=""
+        _posted+=("$prefix$copy")
     done
 }
 # gh_shim_is_write ARGV…: true when this call changes something on GitHub. `gh api` counts when
@@ -705,7 +713,13 @@ if agent_context; then
             # The gate checks, and gh posts, one private copy of the body file.
             if ! gh_shim_private_body "$_approved_root/bodies" "$@"; then
                 [[ -z "$_body_copy" ]] || rm -rf -- "$_body_copy"
-                echo "gh shim: REFUSED: cannot copy the body file into $_approved_root/bodies, where the check reads it and gh posts it." >&2
+                # %q shows an empty name as '' and quotes a character a shell would split on.
+                printf -v _body_shown '%q' "$_body_file"
+                if [[ "$_body_failed" == read ]]; then
+                    echo "gh shim: REFUSED: cannot read the body file $_body_shown, so the shim cannot make the private copy that the check reads and gh posts; nothing was sent. Pass a body file this session can read." >&2
+                else
+                    echo "gh shim: REFUSED: cannot copy the body file $_body_shown into $_approved_root/bodies, where the check reads it and gh posts it; nothing was sent." >&2
+                fi
                 exit 1
             fi
             set -- "${_posted[@]}"

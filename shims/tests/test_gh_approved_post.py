@@ -477,6 +477,34 @@ class CitedPost(ShimHarness):
                 self.run_gh(self.issue(), cite=cite, _body_copy=str(keep))
                 self.assertTrue(keep.is_dir())
 
+    def test_a_body_file_the_shim_cannot_copy_is_refused_naming_it(self):
+        # The private copy fails closed: a body file the shim cannot read is refused before the
+        # check, and gh never gets its path.
+        missing, folder, locked = self.tmp / "missing.md", self.tmp / "folder", self.tmp / "locked.md"
+        folder.mkdir()
+        locked.write_text(BODY + "\n")
+        locked.chmod(0)
+        for path in (missing, folder, locked):
+            with self.subTest(path=path.name):
+                result = self.run_gh(self.issue(body_file=path))
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(f"gh shim: REFUSED: cannot read the body file {path}", result.stderr)
+                self.assertEqual(self.routed(), [], "a body file the shim could not copy must not reach GitHub")
+        # An empty name is named as `''`.
+        result = self.run_gh(["issue", "create", "-R", "o/upstream", "--title", TITLE, "--body-file="])
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("gh shim: REFUSED: cannot read the body file '',", result.stderr)
+        self.assertEqual(self.routed(), [])
+
+    def test_a_copy_the_shim_cannot_make_is_refused_naming_the_body_file(self):
+        # A readable body file whose private directory cannot be made (a full cache disk, say): this
+        # mktemp fails for the shim's body copies only.
+        executable(self.front / "mktemp", 'case "$*" in */bodies/post.*) exit 1 ;; esac\nexec /usr/bin/mktemp "$@"')
+        result = self.run_gh(self.issue())
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(f"gh shim: REFUSED: cannot copy the body file {self.body_file} into", result.stderr)
+        self.assertEqual(self.routed(), [], "a body file the shim could not copy must not reach GitHub")
+
     def test_without_a_citation_nothing_changes(self):
         result = self.run_gh(self.issue(), cite=False)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1478,6 +1506,44 @@ class OhMyPi(ShimHarness):
                 self.assert_refused(self.post(argv, ask=OTHER_ASK),
                                     "goes out only under an ask KIND_APPROVALS lists with it",
                                     call=" ".join(argv[:3]), ask=OTHER_ASK)
+
+    # The private copy fails closed, for every post: a body file the shim cannot read refuses the
+    # call before the check, naming the file, and gh never gets its path.
+
+    def lock_the_body(self):
+        # tearDown's rmtree removes a mode-0 file: that needs write access to its directory only.
+        self.omp_body.chmod(0)
+
+    def assert_not_copied(self, result):
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(f"gh shim: REFUSED: cannot read the body file {self.omp_body}", result.stderr)
+        self.assertEqual(self.routed(), [], "a body file the shim could not copy must not reach GitHub")
+
+    def test_an_unreadable_body_file_is_refused_for_each_post(self):
+        self.lock_the_body()
+        for argv in self.posts():
+            with self.subTest(verb=argv[:2]):
+                self.assert_not_copied(self.post(argv))
+
+    def test_a_body_file_that_becomes_readable_after_a_failed_copy_is_still_refused(self):
+        # The gate runs under the python3 PATH finds; this one makes the body file readable first,
+        # which is the moment between the shim's copy and the gate's read. Until the copy failed
+        # closed, the gate then read the original file and gh posted it from its own path.
+        executable(self.front / "python3", f'chmod 644 {self.omp_body}\nexec /usr/bin/python3 "$@"')
+        for argv in self.posts():
+            with self.subTest(verb=argv[:2]):
+                self.lock_the_body()
+                self.assert_not_copied(self.post(argv))
+
+    def test_an_empty_body_file_name_is_refused_for_a_reply_and_an_edit(self):
+        for argv in (["api", "-X", "POST", "repos/can1357/oh-my-pi/pulls/19682/comments/4616490897/replies",
+                      "-F", "body=@"],
+                     ["pr", "edit", "19682", "-R", "can1357/oh-my-pi", "--body-file="]):
+            with self.subTest(verb=argv[:2]):
+                result = self.post(argv)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("gh shim: REFUSED: cannot read the body file '',", result.stderr)
+                self.assertEqual(self.routed(), [])
 
 
 class OhMyPiOnTheUpstreamToken(OhMyPi):
