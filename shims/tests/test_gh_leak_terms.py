@@ -547,10 +547,11 @@ class GhLeakTerms(unittest.TestCase):
                 self.setUp_calls()
                 self.assert_refused(self.run_gh(argv, env=env), field, matched, YGO_LIST, line=1)
 
-    def test_the_repository_an_endpoint_or_a_url_names_is_not_read_as_its_text(self) -> None:
+    def test_a_term_inside_the_public_destination_s_name_counts_for_nothing_however_the_call_names_it(self) -> None:
         # Given the knives ygo-fork list and theorem-labs/ygo public: a write that names the repository by its API
         # endpoint, by a pull request or issue URL, or as the repository `repo edit` changes goes there as the -R
-        # forms do. Its name is the call's address, not text it sends (dispatch://INFRA-3365, tester round 1).
+        # forms do. `theorem-labs` lies inside the destination's own name, which is public already, so it counts for
+        # nothing there (gh_own_name; dispatch://INFRA-3365, tester round 1).
         env = self.ygo_fork()
         self.answer(YGO, "public")
         url = f"https://github.com/{YGO}"
