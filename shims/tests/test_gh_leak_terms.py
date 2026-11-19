@@ -59,13 +59,6 @@ if [[ "${1:-}" == api && "${2:-}" == repos/* && "${3:-}" == --jq && "${4:-}" == 
     cat -- "$answer"
     exit 0
 fi
-# The repository of each node of a GraphQL `nodes(ids:)` read: $NODES/<id> holds it; an id with no file has none.
-if [[ "${1:-}" == api && "${2:-}" == graphql && "$*" == *"nodes(ids:"* ]]; then
-    for a in "$@"; do
-        case "$a" in ids\[\]=*) id="${a#ids\[\]=}"; if [[ -f "$NODES/$id" ]]; then cat "$NODES/$id"; else echo; fi ;; esac
-    done
-    exit 0
-fi
 n=$(find "$CALLS" -name '*.args' | wc -l)
 printf '%s\0' "$@" > "$CALLS/$n.args"
 stat -L -c %F /dev/stdin > "$CALLS/$n.kind"
@@ -73,28 +66,6 @@ stat -L -c %F /dev/stdin > "$CALLS/$n.kind"
 prev=""; for a in "$@"; do [[ "$prev" == --body-file && "$a" != - ]] && cat -- "$a" > "$CALLS/$n.body"; prev="$a"; done
 cat > "$CALLS/$n.stdin"
 exit 0
-"""
-
-# A gh before FAKE_GH (GhLeakTerms.nodes_of_types) that answers a `nodes(ids:)` read as GitHub does: the repository in
-# $NODES/<id> only when the query selects one under a name in $NODES/<id>.on, the node's type or an interface it has
-# (`... on Label {`), else none, so that a node of a type the query does not read gives no repository. Every other
-# call goes to FAKE_GH.
-NODES_GH = r"""#!/bin/bash
-if [[ "${1:-}" == api && "${2:-}" == graphql && "$*" == *"nodes(ids:"* ]]; then
-    for a in "$@"; do
-        case "$a" in ids\[\]=*)
-            id="${a#ids\[\]=}"; repository=""
-            if [[ -f "$NODES/$id.on" ]]; then
-                for name in $(cat "$NODES/$id.on"); do
-                    [[ "$*" == *"... on $name {"* ]] && repository=$(cat "$NODES/$id")
-                done
-            fi
-            printf '%s\n' "$repository" ;;
-        esac
-    done
-    exit 0
-fi
-exec "$NODES_FAKE_GH" "$@"
 """
 
 
@@ -117,8 +88,6 @@ class GhLeakTerms(unittest.TestCase):
         self.vis.mkdir()
         self.vis_log = self.tmp / "visibility.log"
         self.vis_log.touch()
-        self.nodes = self.tmp / "nodes"
-        self.nodes.mkdir()
         self.work = self.tmp / "work"
         self.work.mkdir()
         for name in ("home", "config", "cache", "t"):
@@ -151,7 +120,6 @@ class GhLeakTerms(unittest.TestCase):
             "CALLS": str(self.calls),
             "VIS_DIR": str(self.vis),
             "VIS_LOG": str(self.vis_log),
-            "NODES": str(self.nodes),
         }
 
     def tearDown(self) -> None:
@@ -365,7 +333,7 @@ class GhLeakTerms(unittest.TestCase):
                 self.setUp_calls()
                 argv = ["pr", "comment", "11", "-R", repo, "--body", text]
                 self.assert_sent(self.run_gh(argv), argv)
-        # A call that names no repository (a GraphQL mutation by node id) may reach the scope, so it is refused.
+        # A raw GraphQL mutation is read as public and as any repository, so it may reach the scope: it is refused.
         mutation = 'mutation { addComment(input: {subjectId: "PR_1", body: "%s"}) { clientMutationId } }' % text.strip()
         self.setUp_calls()
         unnamed = self.run_gh(["api", "graphql", "-f", f"query={mutation}"])
@@ -846,18 +814,10 @@ class GhLeakTerms(unittest.TestCase):
             self.assert_sent(self.run_gh(argv), argv)
 
     def test_a_gh_api_call_that_makes_a_repository_is_read_as_public(self) -> None:
-        # REST's `user/repos`, `orgs/O/repos` and a template's `repos/O/R/generate`, and GraphQL's
-        # startRepositoryMigration, make a repository that is public unless the call says otherwise, whatever the
-        # visibility of the checkout's repository or of the template.
-        (self.nodes / "PR_kwDOpriv5678").write_text(f"{PRIVATE}\n", encoding="utf-8")
+        # REST's `user/repos`, `orgs/O/repos` and a template's `repos/O/R/generate` make a repository that is public
+        # unless the call says otherwise, whatever the visibility of the checkout's repository or of the template.
         self.remotes(("origin", PRIVATE))
         name = f"name=notes-{CANARY}"
-
-        def migration(owner: str) -> str:
-            return ('query=mutation{startRepositoryMigration(input:{sourceId:"x", ownerId:"%s", repositoryName:"%s", '
-                    'sourceRepositoryUrl:"https://example.com/r", continueOnError:true, targetRepoVisibility:"public"})'
-                    '{clientMutationId}}' % (owner, f"notes-{CANARY}"))
-
         for form, argv, field in (
                 ("orgs/{owner}/repos", ["api", "orgs/{owner}/repos", "-f", name, "-f", "visibility=public"],
                  "--raw-field name"),
@@ -867,10 +827,7 @@ class GhLeakTerms(unittest.TestCase):
                 ("a private template's generate", ["api", f"repos/{PRIVATE}/generate", "-f", "owner=o", "-f", name],
                  "--raw-field name"),
                 ("{owner}/{repo}/generate", ["api", "repos/{owner}/{repo}/generate", "-f", "owner=o", "-f", name],
-                 "--raw-field name"),
-                ("startRepositoryMigration", ["api", "graphql", "-f", migration("y")], "--raw-field query string 3"),
-                ("startRepositoryMigration, a private node", ["api", "graphql", "-f", migration("PR_kwDOpriv5678")],
-                 "--raw-field query string 3")):
+                 "--raw-field name")):
             with self.subTest(form=form):
                 self.setUp_calls()
                 refused = self.run_gh(argv)
@@ -1027,12 +984,10 @@ class GhLeakTerms(unittest.TestCase):
             self.assert_refused(self.run_gh(["api", f"repos/{PUBLIC}/issues", "-f", "title=t", "-f", f"body={TEXT}"]),
                                 "--raw-field body")
 
-    def test_a_graphql_mutation_is_judged_by_the_repositories_of_its_nodes(self) -> None:
+    def test_a_graphql_mutation_is_read_as_public_and_as_any_repository_whatever_node_it_names(self) -> None:
+        # The check reads no node: a raw GraphQL mutation is one target, read as public and as any repository, so the
+        # knives registry's oh-my-pi list counts for it, whichever pull request its subjectId names.
         term = REGISTRY_TEST_TERMS["oh-my-pi"][0]
-        self.answer("cybermonklabs/oh-my-pi", "public")
-        (self.nodes / "PR_kwDOfork1234").write_text("cybermonklabs/oh-my-pi\n", encoding="utf-8")
-        (self.nodes / "PR_kwDOpriv5678").write_text(f"{PRIVATE}\n", encoding="utf-8")
-        (self.nodes / "PR_kwDOpub09876").write_text(f"{PUBLIC}\n", encoding="utf-8")
 
         def mutation(node: str) -> list[str]:
             body = f"Reply: see {term}."
@@ -1043,14 +998,14 @@ class GhLeakTerms(unittest.TestCase):
         self.assertEqual(refused.returncode, 2, refused.stderr.decode())
         self.assertIn(f"to {MUTATION}:", refused.stderr.decode())
         self.assertEqual(self.gh_calls(), [])
-        # A node of a private repository, and one of a public repository the registry entry does not name: refused
-        # too, read as public.
+        # A node id of a private repository's pull request, and one of a public repository the registry entry does not
+        # name, change nothing: the mutation is refused, read as public.
         for node in ("PR_kwDOpriv5678", "PR_kwDOpub09876"):
             with self.subTest(node=node):
                 self.setUp_calls()
                 self.assert_refused(self.run_gh(mutation(node)), "--raw-field query string 2", term,
                                     "the knives oh-my-pi list", line=1)
-        # A node whose repository cannot be read is any repository's.
+        # And so is one whose id names no node.
         self.setUp_calls()
         unread = self.run_gh(mutation("PR_kwDOunknown1"))
         self.assertEqual(unread.returncode, 2, unread.stderr.decode())
@@ -1152,9 +1107,9 @@ class GhLeakTerms(unittest.TestCase):
                     self.assertEqual(self.gh_calls(), [])
                     self.assertIn(": a pipe or a device, which the check cannot read", stderr)
 
-    def test_a_graphql_mutation_that_names_its_repository_is_judged_by_that_repository_too(self) -> None:
-        # createCommitOnBranch names its repository by name; the private node id in its message is not its only target.
-        (self.nodes / "PR_kwDOpriv5678").write_text(f"{PRIVATE}\n", encoding="utf-8")
+    def test_a_graphql_mutation_is_read_as_public_whatever_repository_it_names(self) -> None:
+        # createCommitOnBranch names its repository by name, in its document or in a variable, and a message may hold
+        # a node id: the check reads neither, and the mutation is read as public.
 
         def commit(repository: str) -> list[str]:
             return ["api", "graphql", "-f", "query=mutation { createCommitOnBranch(input: {branch: {repositoryNameWithOwner: "
@@ -1171,7 +1126,7 @@ class GhLeakTerms(unittest.TestCase):
         self.setUp_calls()
         self.assert_refused(self.run_gh(["api", "graphql", "--input", self.file("v.json", payload)]),
                             "--input v.json .query string 1")
-        # A mutation that makes a repository goes to one nobody can name yet, read as public.
+        # A mutation that makes a repository is read as public too.
         self.setUp_calls()
         made = self.run_gh(["api", "graphql", "-f", "query=mutation { createRepository(input: {name: \"x\", "
                                                       f'visibility: PUBLIC, description: "{TEXT.strip()} PR_kwDOpriv5678"}}) '
@@ -1209,11 +1164,6 @@ class GhLeakTerms(unittest.TestCase):
             argv = commit(PRIVATE, CLEAN.strip())
             self.setUp_calls()
             self.assert_sent(self.run_gh(argv), argv)
-        with self.subTest(row="a query with a term"):
-            argv = ["api", "graphql", "-f",
-                    'query=query { search(query: "%s", type: ISSUE, first: 1) { issueCount } }' % CANARY]
-            self.setUp_calls()
-            self.assert_sent(self.run_gh(argv), argv)
         with self.subTest(row="a thread reply and a comment"):
             document = ("query=mutation { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: "
                         '"PRRT_kwDOpriv5678", body: "%s"}) { comment { id } } addComment(input: {subjectId: '
@@ -1241,15 +1191,98 @@ class GhLeakTerms(unittest.TestCase):
             for advice in (contents, remove):
                 self.assertIn(advice, refused.stderr.decode())
 
-    def nodes_of_types(self, nodes: dict[str, tuple[str, str]]) -> None:
-        """Answer each `nodes(ids:)` read as GitHub does from now on (NODES_GH): NODES gives each node id its repository
-        and the names a query can select it under, its type and the interfaces it has (`Issue RepositoryNode`)."""
-        write_executable(self.tmp / "fake-gh", FAKE_GH)
-        write_executable(self.bin / "gh", NODES_GH)
-        self.env["NODES_FAKE_GH"] = str(self.tmp / "fake-gh")
-        for node, (repository, names) in nodes.items():
-            (self.nodes / node).write_text(f"{repository}\n", encoding="utf-8")
-            (self.nodes / f"{node}.on").write_text(f"{names}\n", encoding="utf-8")
+    def test_a_call_gh_sends_to_github_s_graphql_api_is_graphql_however_its_endpoint_is_spelled(self) -> None:
+        # gh 2.98.0 resolves a `gh api` endpoint into an address (pkg/cmd/api/http.go): one holding `://` is the address
+        # itself, and any other a path on api.github.com with one leading `/` dropped. GitHub ran each spelling below as
+        # GraphQL, its path `/graphql` once the query string and the fragment are left out (measured 2026-11-19 with
+        # `query { viewer { login } }`, GH_GRAPHQL_PATH), so a mutation there is read as public, with a GraphQL
+        # string's `\u` escape read as the letter GitHub decodes, and a query is a read. Until review round 6 of
+        # dispatch://INFRA-3365 only `graphql` was GraphQL, and a mutation to any other spelling was read as a REST
+        # body, as written, so a term spelled with an escape went out.
+        escaped = "\\u%04x%s" % (ord(CANARY[0]), CANARY[1:])
+        mutation = ('query=mutation { addComment(input: {subjectId: "I_1", body: "see %s"}) { clientMutationId } }'
+                    % escaped)
+        query = 'query=query { search(query: "see %s", type: ISSUE, first: 1) { issueCount } }' % CANARY
+        for spelling in (["graphql"], ["/graphql"], ["graphql?"], ["graphql?x=1"], ["graphql#x"], ["/graphql?x=1#y"],
+                         ["https://api.github.com/graphql?x=1"], ["https://api.github.com/graphql#x"],
+                         ["https://API.GITHUB.COM/graphql"], ["HTTPS://api.github.com/graphql"],
+                         ["GRAPHQL"], ["Graphql"],
+                         ["--hostname", "github.com", "graphql"]):
+            with self.subTest(endpoint=" ".join(spelling), document="a mutation"):
+                self.setUp_calls()
+                refused = self.run_gh(["api", *spelling, "-f", mutation])
+                self.assert_refused(refused, "--raw-field query string 2", CANARY, line=1)
+                self.assertIn(f"to {MUTATION}:", refused.stderr.decode())
+            with self.subTest(endpoint=" ".join(spelling), document="a query"):
+                argv = ["api", *spelling, "-f", query]
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+        # GitHub answered 502 to `GRAPHQL` and `Graphql`, which are read as GraphQL all the same, erring toward refusing.
+        # Controls: GitHub answered 404 to `graphql/` and `//graphql` and 400 to
+        # `https://uploads.github.com/graphql`, so none is GraphQL: a query there is read as a REST body, as written,
+        # and its term is refused, for an endpoint that names no repository. Until review round 6 the address on
+        # uploads.github.com was read as GraphQL, as `graphql` on github.com.
+        for spelling in ("graphql/", "//graphql", "https://uploads.github.com/graphql"):
+            with self.subTest(endpoint=spelling, control="not GraphQL"):
+                self.setUp_calls()
+                refused = self.run_gh(["api", spelling, "-f", query])
+                self.assert_refused(refused, "--raw-field query", CANARY, line=1)
+                self.assertIn("to no repository, read as public:", refused.stderr.decode())
+
+    def test_a_graphql_refusal_advises_a_route_for_each_mutation_its_document_names(self) -> None:
+        # A raw GraphQL mutation's refusal for a term names the route for each mutation a name token of its document
+        # names, and says that gh fills in only `{owner}`, `{repo}` and `{branch}`. A name inside a string or a comment
+        # gives none. A call one of whose texts cannot be read is not known to be a mutation: it has a target of its
+        # own, and no mutation's advice, which a refusal with no term gets none of either (dispatch://INFRA-3365,
+        # review round 6).
+        placeholders = "gh fills in only {owner}, {repo} and {branch}: write every other {…} by hand"
+        for name, document, route in (
+                ("a review comment", 'addPullRequestReviewComment(input: {pullRequestId: "PR_1", body: "%s"}) '
+                 "{ comment { id } }", "for addPullRequestReviewComment use gh api "
+                 "repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies -f body=… to reply to a comment, or "
+                 "for a new review comment gh api repos/{owner}/{repo}/pulls/{number}/comments -f body=… "
+                 "-f commit_id=… -f path=…"),
+                ("a review", 'addPullRequestReview(input: {pullRequestId: "PR_1", body: "%s"}) { clientMutationId }',
+                 "for addPullRequestReview use gh pr review, or for inline comments gh api "
+                 "repos/{owner}/{repo}/pulls/{number}/reviews"),
+                ("a review submitted", 'submitPullRequestReview(input: {pullRequestReviewId: "PRR_1", event: COMMENT, '
+                 'body: "%s"}) { clientMutationId }', "for submitPullRequestReview use gh api "
+                 "repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}/events -f event=…")):
+            with self.subTest(mutation=name):
+                self.setUp_calls()
+                refused = self.run_gh(["api", "graphql", "-f", "query=mutation { %s }" % (document % TEXT.strip())])
+                self.assert_refused(refused, "--raw-field query string 2", line=1)
+                for advice in (route, placeholders):
+                    self.assertIn(advice, refused.stderr.decode())
+        with self.subTest(row="a route's name inside a string and a comment"):
+            self.setUp_calls()
+            refused = self.run_gh(["api", "graphql", "-f", 'query=mutation { # createIssue\n changeUserStatus(input: '
+                                                            '{message: "addComment: %s"}) { status { message } } }'
+                                                            % TEXT.strip()])
+            self.assert_refused(refused, "--raw-field query string 1", line=1)
+            self.assertIn("a gh subcommand or the REST API is judged by its repository", refused.stderr.decode())
+            for advice in ("for addComment use", "for createIssue use"):
+                self.assertNotIn(advice, refused.stderr.decode())
+        with self.subTest(row="a query with a text that cannot be read"):
+            self.setUp_calls()
+            refused = self.run_gh(["api", "graphql", "-f", "query=query { viewer { login } }", "-F", "x=@missing.txt"])
+            stderr = refused.stderr.decode()
+            self.assertEqual(refused.returncode, 2, stderr)
+            self.assertEqual(self.gh_calls(), [])
+            self.assertIn("to a GraphQL call whose text could not be read, read as public: cannot read "
+                          "--field x=@missing.txt", stderr)
+            self.assertNotIn(MUTATION, stderr)
+            self.assertNotIn("whatever it names", stderr)
+        with self.subTest(row="a mutation with a text that cannot be read, and no term"):
+            self.setUp_calls()
+            refused = self.run_gh(["api", "graphql", "-f", 'query=mutation { addComment(input: {subjectId: "I_1", '
+                                                            'body: "ok"}) { clientMutationId } }',
+                                   "-F", "x=@missing.txt"])
+            stderr = refused.stderr.decode()
+            self.assertEqual(refused.returncode, 2, stderr)
+            self.assertEqual(self.gh_calls(), [])
+            self.assertIn(f"to {MUTATION}: cannot read --field x=@missing.txt", stderr)
+            self.assertNotIn("whatever it names", stderr)
 
     def test_a_node_id_github_reads_past_trailing_whitespace_or_padding_is_a_target(self) -> None:
         # GitHub resolves a node id with trailing whitespace (a space, a tab, a line feed) or with `==` appended to the
@@ -1258,10 +1291,6 @@ class GhLeakTerms(unittest.TestCase):
         # last line ends in a line feed, as `echo "$id" > file` writes it. inReplyTo is the one ID-typed input field
         # beside a text whose name does not end in Id, so until then such a value there was no target and the reply
         # to a public comment went out with a listed term, judged by the private pull request alone.
-        self.nodes_of_types({
-            "PR_kwDOpriv20003": (PRIVATE, "PullRequest RepositoryNode"),
-            "PRRC_kwDOpub10004": (PUBLIC, "PullRequestReviewComment RepositoryNode"),
-            "PRRC_kwDOpriv20004": (PRIVATE, "PullRequestReviewComment RepositoryNode")})
         body = f"see {CANARY}"
 
         def reply(comment: str) -> str:
@@ -1300,16 +1329,16 @@ class GhLeakTerms(unittest.TestCase):
         self.setUp_calls()
         self.assert_sent(self.run_gh(argv), argv)
 
-    def test_a_graphql_node_id_spelled_with_json_escapes_is_read(self) -> None:
-        (self.nodes / "PR_kwDOpub09876").write_text(f"{PUBLIC}\n", encoding="utf-8")
-        (self.nodes / "PR_kwDOpriv5678").write_text(f"{PRIVATE}\n", encoding="utf-8")
+    def test_a_graphql_mutation_is_read_as_public_however_its_node_id_is_spelled(self) -> None:
+        # The check reads no node id, so one spelled with a JSON escape (`\u0050R_…`) changes nothing: the mutation is
+        # refused, read as public.
         mutation = ('mutation { addComment(input: {subjectId: "NODE", body: "%s after PR_kwDOpriv5678"}) '
                     "{ clientMutationId } }" % TEXT.strip())
         payload = json.dumps({"query": mutation}).replace("NODE", "\\u0050R_kwDOpub09876")
         refused = self.run_gh(["api", "graphql", "--input", self.file("n.json", payload)])
         self.assert_refused(refused, "--input n.json .query string 2")
         self.assertIn(f"to {MUTATION}:", refused.stderr.decode())
-        # The same payload whose node is the private repository's is refused too, read as public.
+        # The same payload with a private repository's node id, written plainly, is refused too, read as public.
         argv = ["api", "graphql", "--input", self.file("p.json", json.dumps({"query": mutation.replace(
             "NODE", "PR_kwDOpriv5678")}))]
         self.setUp_calls()
@@ -1498,7 +1527,6 @@ class GhLeakTerms(unittest.TestCase):
                 self.assertIn(f"to {PUBLIC} (public)", refused.stderr.decode())
         # A GraphQL address is GraphQL: a mutation, on a private repository's node too, is read as public, and a
         # query is a read.
-        (self.nodes / "PR_kwDOpriv5678").write_text(f"{PRIVATE}\n", encoding="utf-8")
         for query in ('mutation { addComment(input: {subjectId: "PR_kwDOpriv5678", body: "%s"}) '
                       "{ clientMutationId } }" % TEXT.strip(),
                       'query { search(query: "%s", type: ISSUE, first: 1) { issueCount } }' % CANARY):

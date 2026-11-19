@@ -248,13 +248,21 @@ behavior before handing the call to the real one. One file is data: `person-name
   sent the scoped term inside it. A body that parses as JSON (`--input`, `workflow run --json`) is
   read as each string and member name, decoded, by its JSON path (`--input body.json
   .comments[0].body line 3`); a field's key is read apart from its value; and a GraphQL document
-  that parses (the `query` field of `gh api graphql`, or a JSON body's `.query`, read by the spec's
-  grammar of an executable document: operations, fragments, selections, arguments, values and
-  directives, every string closed and no control character) is read as each of its strings, decoded
-  by GraphQL's rules, block strings included
+  that parses (the `query` field, or a JSON body's `.query`, of a call to GitHub's GraphQL API, read
+  by the spec's grammar of an executable document: operations, fragments, selections, arguments,
+  values and directives, every string closed and no control character) is read as each of its
+  strings, decoded by GraphQL's rules, block strings included
   (`--raw-field query string 2`), so a `\u` escape in a GraphQL string inside JSON is the letter
-  GitHub stores (dispatch://BET-727), while a comment, which nobody stores, is not read. Every other
-  text is read as written: a body's `\u0041` is those six characters on the page. A body that does
+  GitHub stores (dispatch://BET-727), while a comment, which nobody stores, is not read. A `gh api`
+  call goes to GitHub's GraphQL API when gh resolves its endpoint (`pkg/cmd/api/http.go`) to the
+  path `/graphql` on api.github.com, in any letter case, with any query string or fragment:
+  `graphql`, `/graphql`, `graphql?x=1`, `graphql#x` and `https://api.github.com/graphql?x=1`, each
+  of which GitHub ran as GraphQL (measured 2026-11-19, while `graphql/` and `//graphql` answered
+  404; `GRAPHQL` answered 502 and is read as GraphQL all the same, erring toward refusing; the
+  comment on `GH_GRAPHQL_PATH` in `scripts/leak-terms-check` lists every spelling tried). Until
+  review round 6 of 2026-11-19 only `graphql` was GraphQL, so a mutation to `/graphql` was read as
+  written, and a term spelled with a GraphQL `\u` escape went out. Every other text is read as
+  written: a body's `\u0041` is those six characters on the page. A body that does
   not parse as JSON, and a document that does not parse, are read both ways, as written and, when
   they hold a backslash, with their JSON escapes decoded: the check cannot tell what GitHub stores
   there, and a refusal across two values beats a miss. An allowed token ("Leak-term list" below)
@@ -288,8 +296,9 @@ behavior before handing the call to the real one. One file is data: `person-name
   `DOTFILES_LEAK_TERMS_GH_STDIN=/dev/fd/N` (cleared first, like the gate's) after the check's exit
   7 asks for it, so both checks read the same bytes gh then gets. A `gh api` call counts when it
   sends a body (a method other than GET or HEAD, or gh's default POST for a field or `--input`), and
-  a GraphQL one only when its text holds `mutation` (in an `--input` payload, also as a JSON escape
-  spells it). `pr create --dry-run` sends nothing and is not read. Only a found term (or a list it cannot
+  a call to GitHub's GraphQL API only when a text holds `mutation` (in an `--input` payload, also as
+  a JSON escape spells it) or cannot be read. `pr create --dry-run` sends nothing and is not read.
+  Only a found term (or a list it cannot
   decrypt, or a file it cannot read) makes the check read where the text goes: every repository
   the call names (`-R`, a pull-request or issue URL on a host gh sends to github.com, a user or a
   port in it included,
@@ -305,30 +314,25 @@ behavior before handing the call to the real one. One file is data: `person-name
   the base repository), which is always a target, since the issue's page shows the branch by R's
   name. Until review round 3 of 2026-11-19 R was read as the call's repository, so with no `-R`
   the issue's repository was no target, and a term in `--name` went to a public issue, judged by a
-  private R alone. A raw GraphQL mutation (`gh api graphql` whose text holds `mutation`) is read
-  whole, as one target, `a raw GraphQL mutation, which is read as public`, whatever repository or
-  node it names: the check does not read where a mutation goes, and the mutation's text is judged
-  with no own-name exemption. The cost: a raw GraphQL mutation whose text holds a listed term is
+  private R alone. A raw GraphQL mutation (a call to GitHub's GraphQL API whose text holds
+  `mutation`) is read whole, as one target, `a raw GraphQL mutation, which is read as public`,
+  whatever repository or node it names: the check does not read where a mutation goes, and the
+  mutation's text is judged with no own-name exemption. A GraphQL call one of whose texts cannot be
+  read may be a mutation, so its one target is `a GraphQL call whose text could not be read, read
+  as public`. The cost: a raw GraphQL mutation whose text holds a listed term is
   refused even to a private repository, and so is one that names a public repository whose own name
   holds a term (createCommitOnBranch's `repositoryNameWithOwner: "theorem-labs/ygo"` under the
   knives ygo-fork list). Its one target counts as any repository, so every scoped list and every
   knives list counts too: on a machine with the knives registry copy, a mutation that names any
   theorem-labs repository (createCommitOnBranch to `theorem-labs/agent-infra` with a clean
-  headline, measured 2026-11-19) is refused for `theorem-labs`. Its refusal names what to use
-  instead, each judged by its repository, for each mutation the document names
-  (`GH_GRAPHQL_ROUTES`): for a thread reply
-  (`addPullRequestReviewThreadReply`, `addPullRequestReviewComment`) `gh api
-  repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies -f body=…`; for `addComment`
-  `gh issue comment` or `gh pr comment`; for `createIssue`, `updateIssue`, `createPullRequest` and
-  `updatePullRequest` `gh issue create`, `gh issue edit`, `gh pr create` and `gh pr edit`; for
-  `addPullRequestReview` and `submitPullRequestReview` `gh pr review`; for
-  `updatePullRequestReviewComment` `gh api -X PATCH repos/{owner}/{repo}/pulls/comments/{id}`; for
-  `updateIssueComment` `gh api -X PATCH repos/{owner}/{repo}/issues/comments/{id}`; and for
-  `createCommitOnBranch` `gh api -X PUT repos/{owner}/{repo}/contents/{path}` or `git push`. For a
-  document that names none of these, it says that a gh subcommand or the REST API is judged by its
-  repository. Until review round 5 of 2026-11-19 the check read each top-level field of a mutation,
-  its node ids (with one `nodes(ids:)` read through this shim) and the repositories it named, to
-  find its targets, and each test round found one more way that reading and GitHub's differed
+  headline, measured 2026-11-19) is refused for `theorem-labs`. A refusal for a term names the gh
+  subcommand or REST route to use instead, judged by its repository, from `GH_GRAPHQL_ROUTES` in
+  `scripts/leak-terms-check` for each mutation its document names (for a thread reply, `gh api
+  repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies -f body=…`), and for a document
+  that names none, that a gh subcommand or the REST API is. Until review round 5 of 2026-11-19 the
+  check read each top-level field of a mutation, its node ids (with one `nodes(ids:)` read through
+  this shim) and the repositories it named, to find its targets, and each test round found one
+  more way that reading and GitHub's differed
   (dispatch://INFRA-3365). Each target's visibility is read through
   `scripts/github-repo-visibility` (the
   leak check's per-repository
@@ -337,14 +341,14 @@ behavior before handing the call to the real one. One file is data: `person-name
   depend on none; the value of `-R` for the repository it names, as that repository's address; the
   value of `--branch-repo` for its own repository and the issue's; any other text for every target;
   and every text for the one target of a call that can reach no other (a gist, a project, another
-  host, a new repository, a raw GraphQL mutation). Until review round 2 of 2026-11-19 every text
+  host, a new repository, a GraphQL call). Until review round 2 of 2026-11-19 every text
   counted for every target, so in a ygo checkout a reply to `repos/{owner}/{repo}/…` was refused
   for the theorem-labs/ygo remote's filling judged against sjawhar/ygo. A term of the list every
   repository has is refused when any target its text goes to is not confirmed private or internal;
   a term of a scoped list or of the registry only when such a target is one its scope names. A
   visibility it cannot read, a gist, a project, another host (`GH_HOST`, `gh api --hostname`, a
-  `gh api` address on any host but those two, or a URL or repository argument on one), a raw
-  GraphQL mutation, a `gh api` call that makes a repository (`user/repos`, `orgs/O/repos`, or a
+  `gh api` address on any host but those two, or a URL or repository argument on one), a
+  GraphQL call, a `gh api` call that makes a repository (`user/repos`, `orgs/O/repos`, or a
   template's `repos/O/R/generate`,
   whatever the template's visibility), a base repository whose name it cannot read, and any other
   endpoint count as public and as any repository. Not checked, because the shim runs before the

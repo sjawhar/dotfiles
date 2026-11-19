@@ -2855,6 +2855,50 @@ def gh_api_endpoint(read: Sequence[tuple[str | None, str | None]], environment: 
     return gh_host(hostnames[-1] if hostnames else environment.get("GH_HOST") or "github.com"), endpoint
 
 
+# The path of GitHub's GraphQL API on api.github.com (gh_api_graphql). Measured 2026-11-19 through gh 2.98.0, each call
+# sending `-f query='query { viewer { login } }'` (dispatch://INFRA-3365, review round 6): GitHub answered with the
+# query's `data` for the endpoints `graphql`, `/graphql`, `graphql?`, `graphql?x=1`, `graphql#x`, `/graphql?x=1#y`,
+# `https://api.github.com/graphql?x=1`, `https://api.github.com/graphql#x`, `https://API.GITHUB.COM/graphql` and
+# `HTTPS://api.github.com/graphql`, and for `--hostname github.com graphql`: gh sends each to the path `/graphql`, with
+# its query string, and keeps a fragment to itself. It answered 404 for `graphql/`, `//graphql`, `./graphql`,
+# `x/../graphql`, `api/graphql`, `graphql.json`, `graphql;x=1`, `graphql%3Fx`, `graphql%20`, `graphql%2F`,
+# `%67raphql`, `/%67raphql`, `graphq%6c`, `https://api.github.com//graphql`, `https://api.github.com/./graphql`,
+# `https://api.github.com/graphql/` and `https://api.github.com/%67raphql`; 502 for `GRAPHQL` and `Graphql`, which
+# are read as GraphQL all the same (the path in any letter case), since a 502 does not say GitHub ran nothing; and 400,
+# "Multipart form data required", for `https://uploads.github.com/graphql`. `-X GET graphql`, and
+# `http://api.github.com/graphql`, which GitHub redirects to https and gh follows as a GET, were answered with the
+# schema, not the query; a GET sends no body (gh_api_sends), and http is read as GraphQL all the same.
+# `https://api.github.com:443/graphql` went out with no token, since gh sends none to a host written with a port, and
+# GitHub refused it for the rate limit of a call with no token; it is read as GraphQL too.
+GH_GRAPHQL_PATH = "/graphql"
+
+
+def gh_api_graphql(read: Sequence[tuple[str | None, str | None]], host: str) -> bool:
+    """Whether a `gh api` call goes to GitHub's GraphQL API, its endpoint resolved into an address as gh 2.98.0 resolves
+    it (pkg/cmd/api/http.go httpRequest): an endpoint holding `://` is the address itself; `graphql` is the GraphQL
+    endpoint of HOST, where gh sends the call (gh_api_endpoint); any other is a path under HOST's REST prefix with one
+    leading `/` dropped, so on github.com `/graphql`, `graphql?x=1` and `graphql#x` are
+    `https://api.github.com/graphql` with a query string or a fragment. The address is GitHub's GraphQL API when it is
+    http or https on api.github.com (HOST github.com, for an endpoint that is no address) and its path, without the
+    query string and the fragment, is GH_GRAPHQL_PATH in any letter case, as measured (a mixed case erring toward
+    reading the call as GraphQL). gh_check reads this one value for the target
+    (gh_reach), the pass for a query, the documents it reads by GraphQL's grammar and the refusal's advice. Until review
+    round 6 of dispatch://INFRA-3365 only the endpoint `graphql` was GraphQL, so a mutation to `/graphql` was read as a
+    REST body, as written, and a term spelled with a GraphQL `\\u` escape, which GitHub decodes, went out."""
+    endpoint = next((value or "" for option, value in read if option is None), "")
+    if "://" not in endpoint:
+        if host != "github.com":
+            return False
+        endpoint = "https://api.github.com/" + endpoint.removeprefix("/")
+    try:
+        address = urllib.parse.urlsplit(endpoint)
+        hostname = address.hostname
+    except ValueError:
+        return False
+    return (address.scheme.lower() in ("http", "https") and hostname == "api.github.com"
+            and address.path.lower() == GH_GRAPHQL_PATH)
+
+
 # The path of a release's assets, where GitHub stores the request's body as an asset's bytes.
 GH_UPLOAD_PATH = re.compile(r"^/?repos/[^/]+/[^/]+/releases/[0-9]+/assets(?:[/?#]|$)")
 
@@ -3576,45 +3620,75 @@ def gh_own_name(target: GhTarget, view: str, span: Span) -> bool:
     return any(found.start() <= span.start and span.end <= found.end() for found in own.finditer(view))
 
 
-# The one target of a raw `gh api graphql` mutation (gh_reach). The check does not read where a mutation goes: each one
-# is read whole, as public, whatever repository or node it names, so one whose text holds a listed term is refused
-# even to a private repository, and its text is judged with no own-name exemption (gh_own_name). A query is a read,
-# which gh_check passes before it reads any text (GH_GRAPHQL_MUTATION). Until review round 5 of dispatch://INFRA-3365
-# the check read a mutation's fields, node ids and named repositories to find its targets, and each round of tests
-# found one more way that reading and GitHub's differed.
+# The one target of a raw GraphQL mutation, a call to GitHub's GraphQL API (gh_api_graphql) whose text holds `mutation`
+# (GH_GRAPHQL_MUTATION; gh_reach). The check does not read where a mutation goes: each one is read whole, as public,
+# whatever repository or node it names, so one whose text holds a listed term is refused even to a private repository,
+# and its text is judged with no own-name exemption (gh_own_name). A query, a call none of whose texts holds
+# `mutation`, is a read: gh_check passes it once it has read every text, before it looks for a listed term. A call
+# one of whose texts cannot be read (`-F query=@missing`) is not known to be a query or a mutation, so it is not passed
+# and its one target is GH_GRAPHQL_UNREAD_TARGET, which earns no mutation's advice. Until review round 5 of
+# dispatch://INFRA-3365 the check read a mutation's fields, node ids and named repositories to find its targets, and
+# each round of tests found one more way that reading and GitHub's differed.
 GH_GRAPHQL_TARGET = "a raw GraphQL mutation, which is read as public"
+GH_GRAPHQL_UNREAD_TARGET = "a GraphQL call whose text could not be read, read as public"
 # The gh subcommand or REST route that does what a GraphQL mutation does, judged by its repository: the refusal of a
-# mutation names the one for each of these its document names (gh_graphql_advice).
+# mutation names the one for each of these its document names (gh_graphql_advice). gh fills in only `{owner}`, `{repo}`
+# and `{branch}` (GH_PLACEHOLDERS); the caller writes every other `{…}`.
 GH_THREAD_REPLY = "gh api repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies -f body=…"
 GH_GRAPHQL_ROUTES = {
     "addPullRequestReviewThreadReply": GH_THREAD_REPLY,
-    "addPullRequestReviewComment": GH_THREAD_REPLY,
+    "addPullRequestReviewComment": GH_THREAD_REPLY + " to reply to a comment, or for a new review comment gh api "
+                                   "repos/{owner}/{repo}/pulls/{number}/comments -f body=… -f commit_id=… -f path=…",
     "addComment": "gh issue comment or gh pr comment",
     "createIssue": "gh issue create",
     "updateIssue": "gh issue edit",
     "createPullRequest": "gh pr create",
     "updatePullRequest": "gh pr edit",
-    "addPullRequestReview": "gh pr review",
-    "submitPullRequestReview": "gh pr review",
+    "addPullRequestReview": "gh pr review, or for inline comments gh api repos/{owner}/{repo}/pulls/{number}/reviews",
+    "submitPullRequestReview": "gh api repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}/events -f event=…",
     "updatePullRequestReviewComment": "gh api -X PATCH repos/{owner}/{repo}/pulls/comments/{id}",
     "updateIssueComment": "gh api -X PATCH repos/{owner}/{repo}/issues/comments/{id}",
     "createCommitOnBranch": "gh api -X PUT repos/{owner}/{repo}/contents/{path}, or git push",
 }
-GH_GRAPHQL_ROUTE_NAME = re.compile(rf"\b({'|'.join(GH_GRAPHQL_ROUTES)})\b")
+
+
+def gh_graphql_documents(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText], bool]) -> list[str]:
+    """Each GraphQL document of CONTENTS (GRAPHQL saying which text is one or carries one, as gh_findings reads them):
+    the text of a `query` field, and each `.query` string of a JSON body that parses, decoded."""
+    documents: list[str] = []
+    for piece, text in contents:
+        if not graphql(piece):
+            continue
+        if not piece.json_body:
+            documents.append(text)
+            continue
+        try:
+            decoded = json.loads(text, object_pairs_hook=JsonObject)
+        except (ValueError, RecursionError):
+            continue
+        documents += [value for path, value in json_strings(decoded) if path == ".query"]
+    return documents
 
 
 def gh_graphql_advice(documents: Sequence[str]) -> str:
-    """What the refusal of a raw GraphQL mutation advises: for each mutation of GH_GRAPHQL_ROUTES that DOCUMENTS name,
-    as written or with their JSON escapes decoded, the gh subcommand or REST route to use instead, which is judged by
-    its repository; for a document that names none, that a gh subcommand or the REST API is."""
-    named = dict.fromkeys(found[1] for document in documents
-                          for view in dict.fromkeys((document, escapes_decoded(document)))
-                          for found in GH_GRAPHQL_ROUTE_NAME.finditer(view))
-    read = "a raw GraphQL mutation is read as public, whatever it names"
+    """What the refusal of a raw GraphQL mutation advises: for each mutation of GH_GRAPHQL_ROUTES that a name token of
+    DOCUMENTS names (graphql_tokens), the gh subcommand or REST route to use instead, which is judged by its
+    repository, and, for a route with a placeholder, that gh fills in only `{owner}`, `{repo}` and `{branch}`; when a
+    document does not tokenize, or none names such a mutation, that a gh subcommand or the REST API is judged by its
+    repository. A name inside a string or a comment is no name token, so it gives no advice: until review round 6 of
+    dispatch://INFRA-3365 a name anywhere in the text did."""
+    tokenized = [graphql_tokens(document) for document in documents]
+    named: dict[str, None] = {}
+    if all(tokens is not None for tokens in tokenized):
+        named = dict.fromkeys(text for tokens in tokenized for kind, text in tokens or ()
+                              if kind == "name" and text in GH_GRAPHQL_ROUTES)
+    read = "A raw GraphQL mutation is read as public, whatever it names"
     if not named:
         return f"{read}; a gh subcommand or the REST API is judged by its repository"
     routes = "; ".join(f"for {name} use {GH_GRAPHQL_ROUTES[name]}" for name in named)
-    return f"{read}. Instead, {routes}. Each of these is judged by its repository"
+    filled = (", and gh fills in only {owner}, {repo} and {branch}: write every other {…} by hand"
+              if any("{" in GH_GRAPHQL_ROUTES[name] for name in named) else "")
+    return f"{read}. Instead, {routes}. Each of these is judged by its repository{filled}"
 
 
 def gh_made_public(group: str, sub: str, read: Sequence[tuple[str | None, str | None]], shape: str,
@@ -3667,7 +3741,9 @@ class GhCall:
     arguments as gh reads them (gh_walk); HOST, where gh sends it (gh_host); for a `gh api` call, ENDPOINT, its endpoint
     as a path on that host's API (gh_api_endpoint), SHAPE, the endpoint filled in with any base name (gh_made_public),
     and FILLINGS, the endpoint as gh fills it from each base repository it may take, when it holds a base placeholder
-    (gh_fill); and MADE_PUBLIC, whether the call makes the repository it goes to public (gh_made_public)."""
+    (gh_fill); MADE_PUBLIC, whether the call makes the repository it goes to public (gh_made_public); GRAPHQL, whether
+    it goes to GitHub's GraphQL API (gh_api_graphql); and MUTATION, whether a text of such a call holds `mutation`
+    (GH_GRAPHQL_MUTATION)."""
 
     group: str
     sub: str
@@ -3677,6 +3753,8 @@ class GhCall:
     shape: str
     fillings: tuple[tuple[GhBase, str], ...]
     made_public: bool
+    graphql: bool
+    mutation: bool
 
 
 @dataclass(frozen=True)
@@ -3702,11 +3780,12 @@ def gh_reach(call: GhCall, bases: Callable[[], Sequence[GhBase]]) -> list[GhTarg
     -R/--repo, else this directory's remotes, which gh_check reads at most once for every reading that takes them),
     and the repository `issue develop --branch-repo` names; for a `gh api` call, the repository the `repos/O/R` of its
     endpoint names once gh has filled its placeholders from each base repository (GhCall.fillings), or a new
-    repository (GH_API_NEW_REPOSITORY; GhCall.shape says which endpoint it is). A `gh api graphql` call, which gh_check
-    passes before here unless it is a mutation or holds a text the check cannot read, is one target read as public
-    (GH_GRAPHQL_TARGET). A repository the call makes public (GhCall.made_public) is open, and so is one whose
-    visibility cannot be read, and a target with no repository: a gist (anyone with its address reads it), a project, a
-    repository on another host, a new repository, a base repository the check cannot read, a raw GraphQL mutation. A
+    repository (GH_API_NEW_REPOSITORY; GhCall.shape says which endpoint it is). A call to GitHub's GraphQL API
+    (GhCall.graphql), which gh_check passes before here unless a text holds `mutation` or cannot be read, is one target
+    read as public: GH_GRAPHQL_TARGET for a mutation (GhCall.mutation), else GH_GRAPHQL_UNREAD_TARGET, since the text
+    that cannot be read may be the mutation. A repository the call makes public (GhCall.made_public) is open, and so is
+    one whose visibility cannot be read, and a target with no repository: a gist (anyone with its address reads it), a
+    project, a repository on another host, a new repository, a base repository the check cannot read, a GraphQL call. A
     repository whose visibility is read as public is public (GhTarget.public). Each target says which texts go to it
     (GhTie, gh_goes_to); every text goes to a target returned alone (GH_EVERY_TEXT, GhTarget's default tie)."""
     group, sub = call.group, call.sub
@@ -3717,8 +3796,8 @@ def gh_reach(call: GhCall, bases: Callable[[], Sequence[GhBase]]) -> list[GhTarg
         return [GhTarget("a gist, which anyone with its address can read", "", True)]
     if group == "project":
         return [GhTarget("a project, read as public", "", True)]
-    if group == "api" and call.endpoint == "graphql":
-        return [GhTarget(GH_GRAPHQL_TARGET, "", True)]
+    if group == "api" and call.graphql:
+        return [GhTarget(GH_GRAPHQL_TARGET if call.mutation else GH_GRAPHQL_UNREAD_TARGET, "", True)]
     values: dict[str, list[str | None]] = {}
     positionals: list[str] = []
     for option, value in call.read:
@@ -3825,6 +3904,9 @@ def gh_check(arguments: Sequence[str]) -> int:
     # Where gh sends the call, and a `gh api` call's endpoint as a path on that host's API.
     host, endpoint = (gh_api_endpoint(read, environment) if group == "api"
                       else (gh_host(environment.get("GH_HOST") or "github.com"), ""))
+    # Whether the call goes to GitHub's GraphQL API, its endpoint read as gh resolves it (gh_api_graphql): the one value
+    # that the target (gh_reach), the pass for a query, the reading of a document (graphql, below) and the advice take.
+    graphql_call = group == "api" and gh_api_graphql(read, host)
     texts = [replace(piece, path="-" if piece.path not in (None, "-") and gh_is_stdin(piece.path) else piece.path,
                      json_body=piece.json_body and not upload)
              for piece in gh_texts(group, sub, read)]
@@ -3880,11 +3962,13 @@ def gh_check(arguments: Sequence[str]) -> int:
     local_contents, local_unreadable = gh_local_texts(group, sub, read)
     contents += local_contents
     unreadable += local_unreadable
-    if group == "api" and read and not unreadable:
-        # GitHub reads an --input payload as JSON, so `\u006dutation` there is the keyword too: the decoded view counts.
-        if endpoint == "graphql" and not any(GH_GRAPHQL_MUTATION.search(view) for _, text in contents
-                                             for view in (text, escapes_decoded(text))):
-            return 0
+    # A GraphQL call is a mutation when a text holds `mutation`. GitHub reads an --input payload as JSON, so
+    # `\u006dutation` there is the keyword too: the decoded view counts.
+    mutation = graphql_call and any(GH_GRAPHQL_MUTATION.search(view) for _, text in contents
+                                    for view in (text, escapes_decoded(text)))
+    if graphql_call and not mutation and not unreadable:
+        # A query, every text read and none holding `mutation`, is a read (GH_GRAPHQL_TARGET).
+        return 0
     made_public = gh_made_public(group, sub, read, shape, contents)
     if made_public:
         # The name of a repository the call makes public that no text of the call gives whole (gh_published_names).
@@ -3894,7 +3978,7 @@ def gh_check(arguments: Sequence[str]) -> int:
 
     def graphql(piece: GhText) -> bool:
         """Whether PIECE is a GraphQL call's document (its `query` field) or carries one (its JSON body's `.query`)."""
-        return endpoint == "graphql" and (piece.json_body or piece.key == "query")
+        return graphql_call and (piece.json_body or piece.key == "query")
 
     matcher: TermMatcher | None = None
     list_problem: str | None = None
@@ -3910,7 +3994,8 @@ def gh_check(arguments: Sequence[str]) -> int:
             findings = gh_findings(contents, graphql, matcher)
     if not findings and list_problem is None and not unreadable:
         return 0
-    reached = gh_reach(GhCall(group, sub, tuple(read), host, endpoint, shape, fillings, made_public), bases)
+    reached = gh_reach(GhCall(group, sub, tuple(read), host, endpoint, shape, fillings, made_public, graphql_call,
+                              mutation), bases)
     open_targets = [target for target in reached if target.open]
     if not open_targets:
         return 0
@@ -3941,11 +4026,11 @@ def gh_check(arguments: Sequence[str]) -> int:
     if list_problem:
         print(list_problem, file=sys.stderr)
         print(f"leak terms: {name} to {target}: its text cannot be checked without the list", file=sys.stderr)
-    if group == "api" and endpoint == "graphql" and host == "github.com":
-        # The refusal of a raw GraphQL mutation (GH_GRAPHQL_TARGET) names what to use instead (gh_graphql_advice).
-        print(f"leak terms: {name}: {gh_graphql_advice([text for piece, text in contents if graphql(piece)])}.",
-              file=sys.stderr)
     advice = f" To send it, {REMOVE_ADVICE}." if findings else ""
+    if findings and any(item.shown == GH_GRAPHQL_TARGET for item in reached):
+        # The refusal of a raw GraphQL mutation names what to use instead (gh_graphql_advice); a GraphQL call that is
+        # not known to be a mutation (GH_GRAPHQL_UNREAD_TARGET), and a refusal with no term, get none.
+        advice += f" {gh_graphql_advice(gh_graphql_documents(contents, graphql))}."
     print(f"leak terms: {name}: refused before gh ran, so nothing was sent.{advice}", file=sys.stderr)
     return FOUND_EXIT if findings else LIST_EXIT if list_problem else TEXT_EXIT
 

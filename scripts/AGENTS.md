@@ -80,10 +80,12 @@ Executables covering several areas:
     already. A text gh fills from one base repository goes only to the targets the call reaches with
     that base, a `-R` value only to the repository it names, and a `--branch-repo` value to its own
     repository and to the issue's, which `issue develop` always reaches (`-R`, else the issue's URL,
-    else the base repository); every other text goes to every target. A raw GraphQL mutation is one
-    target, read as public, whatever it names (`shims/AGENTS.md` has the rule). A URL's host is read
-    as gh reads it, so `https://foo.github.com/O/R/pull/1` names github.com's O/R, a remote on an ssh
-    alias of github.com is github.com's, and a repository on another host is read as public. The base
+    else the base repository); every other text goes to every target. A call to GitHub's GraphQL
+    API, its endpoint read as gh resolves it (`/graphql` and `graphql?x=1` are GraphQL too), is one
+    target, read as public, whatever it names, when its text holds `mutation` or cannot be read
+    (`shims/AGENTS.md` has the rule). A URL's host is read as gh reads it, so
+    `https://foo.github.com/O/R/pull/1` names github.com's O/R, a remote on an ssh alias of
+    github.com is github.com's, and a repository on another host is read as public. The base
     repositories are read from git only when a reading needs them. It exits 7 to ask `shims/gh`
     for the call's stdin. Every mode's refusal names, for each match, the field or file
     and the line, the text that matched as written, the list that holds the term and the line it is
