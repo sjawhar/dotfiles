@@ -164,27 +164,23 @@ behavior before handing the call to the real one. One file is data: `person-name
   read never starts it. The check reads gh's
   arguments as gh does, with each command's options from `gh <command> --help` at the pinned gh
   (`GH_TEXT_COMMANDS`; `shims/tests/test_gh_leak_terms.py` fails when the installed gh's options
-  differ), and scans every argument and option value but those gh keeps to itself (the `--jq`,
-  `--template` and `--cache` of `gh api`, the `--jq`, `--template` and `--format` of `gh project`)
-  and the part that names the repository the call goes to (`-R`/`--repo`, `--branch-repo`, the
-  `repos/O/R` at the start of a `gh api` endpoint, the `https://github.com/O/R` at the start of the
-  URL of a pull request, issue or discussion that a `pr`, `issue` or `discussion` command acts on,
-  and the repository argument of `gh repo edit` and `gh repo fork`, by name or URL, and the
-  `owner/name` a GraphQL mutation gives as the value of the input field `repositoryNameWithOwner`
-  (createCommitOnBranch's branch), only where it is that field's own value: a string the document
-  gives the field, a variable the document gives it and uses nowhere else (`-F v=O/R`, or the
-  `--input` body's `variables`), a gh field whose key ends in `[repositoryNameWithOwner]`
-  (`-F b[repositoryNameWithOwner]=O/R`), or a member of that name in an `--input` body; never the
-  name `gh repo create` gives), and for a file gh reads
-  (`--body-file`, `--notes-file`, `--from-file`, `--recover`, `--input`, `-F key=@file`, a gist's
-  files) what the file holds, never its path. The repository is the call's address, not text sent
-  to it, and the check refuses only for one read as public, whose name is then public already;
-  the rest of an endpoint or a URL is read, such as the path of the file a PUT to
-  `repos/O/R/contents/…` makes, and so is every other value of a mutation's fields, document or
-  body, such as a headline that holds `repositoryNameWithOwner=O/R`. A value the check cannot tie
-  to that field alone (one that is not a plain `owner/name`, a variable used elsewhere too) is read,
-  and leaves the mutation's target unknown. A repository the call makes public is not public yet,
-  so the call publishes its name, which is read whole: `repo edit --visibility public`, `repo
+  differ), and scans every argument and option value whole, but those gh keeps to itself (the
+  `--jq`, `--template` and `--cache` of `gh api`, the `--jq`, `--template` and `--format` of `gh
+  project`), and for a file gh reads (`--body-file`, `--notes-file`, `--from-file`, `--recover`,
+  `--input`, `-F key=@file`, a gist's files) what the file holds, never its path. The repository a
+  call names (`-R`, a URL, a `gh api` endpoint, a GraphQL mutation's `repositoryNameWithOwner`) is
+  text too, under one rule: a match does not count for a target whose visibility was read as
+  public when it lies wholly inside an occurrence, in the same value, of that repository's own
+  name, its `owner/name` or its owner alone, in any letter case and as a whole word by GitHub's
+  login characters (no letter, digit, `_` or `-` on either side, and after `owner/name` no `.`
+  either, but a `.git`). That name is public already, so a term inside it sends nothing new; a
+  term anywhere else (`INFRA-1`, `dispatch://`, `theorem-labs-internal`) is still refused, and so
+  is one for a target whose visibility cannot be read. Until 2026-11-19 every write to a public
+  repository whose own name holds a listed term was refused (theorem-labs/ygo under the knives
+  ygo-fork list, dispatch://INFRA-3365); that day's first fix left the name out of each spelling
+  the check knew, and five test rounds and a review each found one more. A repository the call
+  makes public is not public yet, so the call publishes its name, which is read with no such
+  exception: `repo edit --visibility public`, `repo
   create` but with `--private` or `--internal` (given no name, gh names the repository after the
   directory `--source` names, which is read as `--source name`), and a `gh api` call to a
   repository's own endpoint `repos/O/R` whose field or `--input` body sets `visibility` to public
@@ -192,13 +188,11 @@ behavior before handing the call to the real one. One file is data: `person-name
   the line break `-F visibility=@file` sends), or whose `--input` cannot be read; each is read as
   public. A name that no text of the call gives whole is read as a text of its own, `the name of
   the repository the call makes public (remote origin)` or `(GH_REPO)`: the checkout's repository
-  that a `repo edit` with no repository argument edits, and the repository gh fills a placeholder
-  endpoint (`repos/{owner}/{repo}`, `repos/:owner/R`, `repos/O/{repo}`) in to. Until 2026-11-19
-  the repository was read, and every write to a public repository whose own name holds a listed
-  term was refused (theorem-labs/ygo under the knives ygo-fork list, dispatch://INFRA-3365); the
-  same day's second test round found a private name that `repo edit --visibility public`
-  published unread, and a headline holding `repositoryNameWithOwner=O/R` that went to
-  theorem-labs/ygo unread; and its third found the same name published by a PATCH of
+  that a `repo edit` with no repository argument edits. A placeholder endpoint
+  (`repos/{owner}/{repo}`, `repos/:owner/R`, `repos/O/{repo}`) gives the name whole once filled as
+  gh fills it (below), and one gh fills from a base repository whose name the check cannot read is
+  refused as unreadable. The second test round of 2026-11-19 found a private name that `repo edit
+  --visibility public` published unread, and its third the same name published by a PATCH of
   `repos/{owner}/{repo}`. gh fills the placeholders `gh api --help` lists, `{owner}`, `{repo}` and
   `{branch}`, each also as `:owner`, `:repo` and `:branch` (its own pattern, `pkg/cmd/api/api.go`),
   in a `gh api` endpoint and in each `-F` value but a file's (`@path`): the owner and the name from
@@ -218,9 +212,16 @@ behavior before handing the call to the real one. One file is data: `person-name
   Which arguments name the repository comes from each command's usage in
   `gh <command> --help`
   (`GH_REPOSITORY_ARGUMENT`, `GH_URL_ARGUMENT`; the same test fails when they differ). A URL in any
-  other argument, such as the description `gh agent-task create` sends, is text read whole, and
-  names no repository: until 2026-11-19 it was read as where the call goes, so a description that
-  began with a private repository's URL went to a public checkout's repository unread.
+  other argument, such as the description `gh agent-task create` sends, names no repository: until
+  2026-11-19 it was read as where the call goes, so a description that began with a private
+  repository's URL went to a public checkout's repository unread. A URL's host is read as gh
+  2.98.0 reads it: gh sends the call to github.com for each host go-gh's `auth.NormalizeHostname`
+  makes github.com, the host in any letter case and any host ending in `.github.com` but
+  `garage.github.com`, so `https://foo.github.com/O/R/pull/1` names github.com's O/R; a URL on any
+  other host names a repository there, read as public. `GH_HOST` and `gh api --hostname` are read
+  the same way. Until 2026-11-19 only github.com and www.github.com named a repository, so a
+  comment on such a URL of a public repository was judged by a private checkout's remote and went
+  out unread (dispatch://INFRA-3365, review finding 1).
   Each body is read as its endpoint stores it, and each value on its own,
   so two values never make one match (dispatch://INFRA-4383). A release asset's body (`gh release
   upload`, or `gh api` to a `repos/O/R/releases/N/assets` path or to an address on
@@ -265,7 +266,8 @@ behavior before handing the call to the real one. One file is data: `person-name
   a GraphQL one only when its text holds `mutation` (in an `--input` payload, also as a JSON escape
   spells it). `pr create --dry-run` sends nothing and is not read. Only a found term (or a list it cannot
   decrypt, or a file it cannot read) makes the check read where the text goes: every repository
-  the call names (`-R`, a pull-request or issue URL, a user or a port in it included,
+  the call names (`-R`, a pull-request or issue URL on a host gh sends to github.com, a user or a
+  port in it included,
   `repos/OWNER/REPO/…` as a path, its placeholders filled as gh fills them (above), or as an
   address on `api.github.com` or `uploads.github.com`,
   where gh sends a `gh api` endpoint holding `://`, `--branch-repo`, the repository `repo fork`
@@ -275,14 +277,19 @@ behavior before handing the call to the real one. One file is data: `person-name
   GitHub remote of the directory (the one `gh repo set-default` chose, else
   all), and for a GraphQL mutation the repository of each node id it names (one `nodes(ids:)` read
   through this shim, its text read as written and with JSON escapes decoded) and each it names by
-  name (the `repositoryNameWithOwner` values above), through `scripts/github-repo-visibility` (the
+  name (the value of createCommitOnBranch's input field `repositoryNameWithOwner`: a string the
+  document gives it, a variable the document gives it and uses nowhere else, a gh field whose key
+  ends in `[repositoryNameWithOwner]`, or a member of that name in an `--input` body; a value the
+  check cannot tie to that field alone leaves the target unknown), through
+  `scripts/github-repo-visibility` (the
   leak check's per-repository
   cache, else one gh read, whose answer it caches). A term of the list every repository has is
   refused when any target is not confirmed private or internal; a term of a scoped list or of
   the registry only when such a target is one its scope names. A visibility it cannot read, a
-  gist, a project, another host (`GH_HOST`, `gh api --hostname`, or a `gh api` address on any host
-  but those two), a GraphQL mutation whose nodes or names cannot all be read or that makes a
-  repository (`createRepository`, `cloneTemplateRepository`, `startRepositoryMigration`), a `gh
+  gist, a project, another host (`GH_HOST`, `gh api --hostname`, a `gh api` address on any host
+  but those two, or a URL argument on one), a GraphQL mutation whose nodes or names cannot all be
+  read or that makes a repository (`createRepository`, `cloneTemplateRepository`,
+  `startRepositoryMigration`), a `gh
   api` call that makes one (`user/repos`, `orgs/O/repos`, or a template's `repos/O/R/generate`,
   whatever the template's visibility), a base repository whose name it cannot read, and any other
   endpoint count as public and as any repository. Not checked, because the shim runs before the

@@ -62,23 +62,21 @@ Executables covering several areas:
     prints the `ui.editor=` setting that runs the wrapper, then the editor's JSON value, or exits 5
     when it cannot read the configuration and 6 when the editor is the wrapper itself; and
     `jj-editor` returns a nonzero failure to jj after it rejects an edit. `gh` reads every text a
-    gh call would send (arguments and option values, but not the part that names where the call
-    goes: `--repo`, `--branch-repo`, the `repos/O/R` that starts a `gh api` endpoint, the
-    `https://github.com/O/R` that starts the URL of a pull request, issue or discussion a `pr`,
-    `issue` or `discussion` command acts on, the repository argument of `gh repo edit` and
-    `gh repo fork`, and the `owner/name` a GraphQL mutation gives only where it is the value of its
-    input field `repositoryNameWithOwner`; a repository the call makes public, such as by
-    `repo edit --visibility public` or a PATCH of `repos/{owner}/{repo}`, is read by its name, the
-    name gh takes from `GH_REPO` or the checkout's remote included; the `gh api` placeholders that
+    gh call would send (each argument and option value whole, the repository the call names
+    included; a repository the call makes public, such as by `repo edit --visibility public` or a
+    PATCH of `repos/{owner}/{repo}`, is read by its name, the name gh takes from `GH_REPO` or the
+    checkout's remote included; the `gh api` placeholders that
     `gh api --help` lists (`{owner}`, `{repo}`, `{branch}`, and `:owner`, `:repo`, `:branch`) in the
     endpoint and in `-F` values are read as gh fills them, the branch with the current branch, and
     a call whose branch gh cannot fill (`GH_REPO` set, a detached HEAD, no git repository) passes,
-    since gh refuses it and sends nothing; a URL in any
-    other argument is text; and the files and stdin gh reads), each value on its
+    since gh refuses it and sends nothing; and the files and stdin gh reads), each value on its
     own as GitHub stores it (a JSON body's strings by their JSON path, a GraphQL document's strings,
     decoded), and refuses one that holds a listed term (with the tag message `--notes-from-tag` and
     the commit messages `--fill` take from git) when the call can reach a repository not confirmed
-    private (for a scoped list or a knives registry list, one its scope names); it exits 7 to ask
+    private (for a scoped list or a knives registry list, one its scope names), but for a match
+    that lies inside the own name (`owner/name`, or the owner as a whole word) of a target whose
+    visibility was read as public, since that name is public already; a URL's host is read as gh
+    reads it, so `https://foo.github.com/O/R/pull/1` names github.com's O/R; it exits 7 to ask
     `shims/gh` for the call's stdin. Every mode's refusal names, for each match, the field or file
     and the line, the text that matched as written, the list that holds the term and the line it is
     on. `push` reads the list's scoped blocks whose pattern matches its destination; commits read

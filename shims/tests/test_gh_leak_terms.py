@@ -377,7 +377,7 @@ class GhLeakTerms(unittest.TestCase):
                     argv = ["pr", "edit", "12", "-R", repo, "--body", body]
                     self.assert_sent(self.run_gh(argv), argv)
 
-    # --- the repository a call goes to is its address, not its text (dispatch://INFRA-3365) ---------------------------
+    # --- a term inside the own name of a public destination sends nothing new (dispatch://INFRA-3365) -----------------
 
     def ygo_fork(self) -> dict[str, str]:
         """The environment with a knives registry holding only the real ygo-fork entry: its forbidden list holds
@@ -408,8 +408,9 @@ class GhLeakTerms(unittest.TestCase):
             with self.subTest(form=name):
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv, env=env), argv)
-        # No term was found in what the calls send, so no visibility was read.
-        self.assertEqual(self.visibility_reads(), [])
+        # Each call's text names the repository, whose name holds a term of the list, so its visibility is read, and no
+        # other: the match lies inside the own name of a repository read as public, and counts for nothing.
+        self.assertEqual(set(self.visibility_reads()), {f"repos/{YGO}"})
         # Control: a term of the list in the text the call sends there is refused, and the refusal names that text's
         # field, never the repository.
         for name, argv, field, matched in (
@@ -434,6 +435,82 @@ class GhLeakTerms(unittest.TestCase):
             with self.subTest(form=name):
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv, env=env), argv)
+
+    def test_an_option_naming_the_destination_sends_nothing_new(self) -> None:
+        # Given the knives ygo-fork list and theorem-labs/ygo public: each option whose value gh 2.98.0's help gives as
+        # an issue number or URL, or a branch, can name the destination itself, here by its URL or as `owner:branch`.
+        # That name is public already, so the term of the list it holds sends nothing new, and the call goes out. The
+        # exemptions the rule replaced left the name out of each spelling the check knew, and each of these options
+        # was one more (dispatch://INFRA-3365, review finding 2).
+        env = self.ygo_fork()
+        self.answer(YGO, "public")
+        create = ["issue", "create", "-R", YGO, "--title", "t", "--body", "b"]
+        edit = ["issue", "edit", "1", "-R", YGO]
+        rows = [*((f"issue create {option}", [*create, option]) for option in ("--parent", "--blocked-by", "--blocking")),
+                *((f"issue edit {option}", [*edit, option])
+                  for option in ("--parent", "--add-blocked-by", "--remove-blocked-by", "--add-blocking",
+                                 "--remove-blocking", "--add-sub-issue", "--remove-sub-issue")),
+                ("issue close --duplicate-of", ["issue", "close", "1", "-R", YGO, "--duplicate-of"])]
+        for name, argv in rows:
+            with self.subTest(form=name):
+                self.setUp_calls()
+                sent = [*argv, f"https://github.com/{YGO}/issues/5"]
+                self.assert_sent(self.run_gh(sent, env=env), sent)
+        with self.subTest(form="pr create --head"):
+            argv = ["pr", "create", "-R", YGO, "--title", "t", "--body", "b", "--head", "theorem-labs:x"]
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(argv, env=env), argv)
+        # Controls: the same option naming another repository, whose name holds a term of the list, is refused on that
+        # option; and so is a body holding one.
+        for name, argv in rows:
+            with self.subTest(control=name):
+                self.setUp_calls()
+                refused = self.run_gh([*argv, "https://github.com/sjawhar/INFRA-notes/issues/5"], env=env)
+                self.assert_refused(refused, argv[-1], "INFRA-", YGO_LIST, line=1)
+        with self.subTest(control="--body INFRA-1"):
+            self.setUp_calls()
+            refused = self.run_gh([*create[:-1], "Fixes INFRA-1"], env=env)
+            self.assert_refused(refused, "--body", "INFRA-", YGO_LIST, line=1)
+
+    def test_the_owner_alone_is_the_destination_s_name_only_as_a_whole_word(self) -> None:
+        # Given the knives ygo-fork list and theorem-labs/ygo public: the owner alone is the destination's own name only
+        # as a whole word by GitHub's login characters, so `theorem-labs/other` goes out, and `theorem-labs-internal`,
+        # in which the term begins another word, is refused.
+        env = self.ygo_fork()
+        self.answer(YGO, "public")
+        with self.subTest(form="theorem-labs-internal"):
+            refused = self.run_gh(["pr", "comment", "1", "-R", YGO, "--body", "see theorem-labs-internal"], env=env)
+            self.assert_refused(refused, "--body", "theorem-labs", YGO_LIST, line=1)
+        with self.subTest(form="theorem-labs/other"):
+            argv = ["pr", "comment", "1", "-R", YGO, "--body", "see theorem-labs/other"]
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(argv, env=env), argv)
+
+    def test_the_destination_s_own_name_counts_unless_it_is_public_already(self) -> None:
+        # A term inside the destination's own name counts for nothing only where that name is public already, its
+        # visibility read as public: a visibility that cannot be read, and a repository the call makes public, leave the
+        # name as any text. Each row reads the visibility afresh, past the cache of the row before.
+        env = self.ygo_fork()
+        cached = self.tmp / "cache" / "public-leak-check" / YGO.replace("/", "_")
+        body = ["pr", "comment", "1", "-R", YGO, "--body", "see theorem-labs"]
+        with self.subTest(form="visibility unread"):
+            refused = self.run_gh(body, env=env)
+            self.assert_refused(refused, "--body", "theorem-labs", YGO_LIST, line=1)
+            self.assertIn(f"{YGO} (visibility unread, so read as public)", refused.stderr.decode())
+        with self.subTest(form="gh api PATCH visibility=public"):
+            self.answer(YGO, "private")
+            cached.unlink(missing_ok=True)
+            self.setUp_calls()
+            refused = self.run_gh(["api", "-X", "PATCH", f"repos/{YGO}", "-f", "visibility=public"], env=env)
+            self.assert_refused(refused, "argument 1", "theorem-labs", YGO_LIST, line=1)
+            self.assertIn(f"{YGO} (made public by the call)", refused.stderr.decode())
+        # Control: the same body to the repository read as public goes out.
+        with self.subTest(control="public"):
+            self.answer(YGO, "public")
+            cached.unlink(missing_ok=True)
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(body, env=env), body)
+            self.assertEqual(cached.read_text(encoding="utf-8"), "public")
 
     def test_the_repository_an_endpoint_or_a_url_names_is_not_read_as_its_text(self) -> None:
         # Given the knives ygo-fork list and theorem-labs/ygo public: a write that names the repository by its API
@@ -499,13 +576,18 @@ class GhLeakTerms(unittest.TestCase):
                 refused = self.run_gh(argv)
                 self.assert_refused(refused, "argument 1", CANARY, line=1)
                 self.assertIn("(made public by the call)", refused.stderr.decode())
-        # Controls: a call that keeps the repository private, and an edit of it once public, go out.
+        # Controls: a call that keeps the repository private, and an edit of it once public, go out. Each reads the
+        # visibility afresh, past the answer the rows above cached, so the public control is judged as public: the
+        # name in its endpoint is the repository's own, public already (gh_own_name).
+        cached = self.tmp / "cache" / "public-leak-check" / repo.replace("/", "_")
         for visibility, argv in (("private", ["api", "-X", "PATCH", f"repos/{repo}", "-f", "visibility=private"]),
                                  ("public", ["api", "-X", "PATCH", f"repos/{repo}", "-f", "description=notes"])):
             with self.subTest(control=visibility):
                 self.answer(repo, visibility)
+                cached.unlink(missing_ok=True)
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv), argv)
+                self.assertEqual(cached.read_text(encoding="utf-8"), visibility)
 
     def test_a_gh_api_call_that_makes_the_checkout_s_repository_public_reads_its_text(self) -> None:
         # Given a checkout whose one remote is a private repository: `repos/{owner}/{repo}` is that repository's own
@@ -617,32 +699,32 @@ class GhLeakTerms(unittest.TestCase):
     def test_a_gh_api_call_makes_a_repository_public_by_every_way_gh_names_it(self) -> None:
         # A PATCH of a repository's own endpoint that sets its visibility to public, or private to false, publishes the
         # repository, however the endpoint names it: as written, or with placeholders gh fills from GH_REPO, else from
-        # the checkout's remote (the one `gh repo set-default` chose, when it chose one).
+        # the checkout's remote (the one `gh repo set-default` chose, when it chose one). The endpoint is read as gh
+        # fills it, so it gives the name whole.
         self.answer(self.NOTES, "private")
         patch = ["api", "-X", "PATCH"]
         visibility = self.file("visibility.txt", "public\n")
-        published = self.PUBLISHED
         for name, remotes, base, gh_repo, argv, fields in (
                 ("-F visibility=@file", [], "", "", [*patch, f"repos/{self.NOTES}", "-F", f"visibility=@{visibility}"],
                  ["argument 1"]),
                 ("{owner}/{repo}, remote", [("origin", self.NOTES)], "", "",
-                 [*patch, "repos/{owner}/{repo}", "-f", "visibility=public"], [f"{published} (remote origin)"]),
+                 [*patch, "repos/{owner}/{repo}", "-f", "visibility=public"], ["argument 1"]),
                 ("{owner}/{repo}, GH_REPO", [], "", PRIVATE,
                  [*patch, "repos/{owner}/{repo}", "-f", "visibility=public", "-f", f"description={TEXT}"],
                  ["--raw-field description"]),
                 ("{owner}/{repo}, GH_REPO's name", [], "", self.NOTES,
                  [*patch, "repos/{owner}/{repo}", "-f", "visibility=public", "-f", "description=notes"],
-                 [f"{published} (GH_REPO)"]),
+                 ["argument 1"]),
                 (":owner/:repo", [("origin", PRIVATE)], "", "",
                  [*patch, "repos/:owner/:repo", "-f", "visibility=public", "-f", f"description={TEXT}"],
                  ["--raw-field description"]),
                 ("O/{repo}", [("origin", self.NOTES)], "", "", [*patch, "repos/o/{repo}", "-f", "private=false"],
-                 [f"{published} (remote origin)"]),
+                 ["argument 1"]),
                 ("{owner}/R", [("origin", PRIVATE)], "", "",
                  [*patch, f"repos/{{owner}}/notes-{CANARY}", "-f", "visibility=public"],
-                 ["argument 1", f"{published} (remote origin)"]),
+                 ["argument 1"]),
                 ("gh repo set-default", [("origin", PUBLIC), ("upstream", self.NOTES)], "upstream", "",
-                 [*patch, "repos/{owner}/{repo}", "-f", "visibility=public"], [f"{published} (remote upstream)"])):
+                 [*patch, "repos/{owner}/{repo}", "-f", "visibility=public"], ["argument 1"])):
             with self.subTest(form=name):
                 self.remotes(*remotes, base=base)
                 self.setUp_calls()
@@ -994,8 +1076,9 @@ class GhLeakTerms(unittest.TestCase):
 
     def test_the_repository_a_graphql_mutation_names_is_not_read_as_its_text(self) -> None:
         # Given the knives ygo-fork list and theorem-labs/ygo public: createCommitOnBranch names the repository it
-        # commits to by name, as a gh field, a GraphQL argument or a JSON variable. That name is where the commit goes,
-        # as -R's value is; until 2026-11-19 it was read as text and refused (dispatch://INFRA-3365).
+        # commits to by name, as a gh field, a GraphQL argument or a JSON variable. That name is public already, so the
+        # term it holds sends nothing new, wherever the commit gives it; until 2026-11-19 it was refused
+        # (dispatch://INFRA-3365).
         env = self.ygo_fork()
         self.answer(YGO, "public")
 
@@ -1021,18 +1104,18 @@ class GhLeakTerms(unittest.TestCase):
             return ["api", "graphql", "--input", self.file("commit.json", payload)]
 
         for name, argv in (("gh field", field("m")), ("GraphQL argument", argument("m")),
-                           ("JSON variable", variable("notes.md"))):
+                           ("JSON variable", variable("notes.md")),
+                           ("gh field, the name as the branch", field("m", YGO))):
             with self.subTest(form=name):
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv, env=env), argv)
-        # Control: a term of the list anywhere else in the commit is refused, by the field that holds it, and so is the
-        # repository's name in a field that does not name the repository.
+        # Control: a term of the list anywhere else in the commit is refused, by the field that holds it.
         for name, argv, refused_field, matched in (
                 ("gh field, headline", field("Fixes INFRA-1"), "--raw-field query string 2", "INFRA-"),
                 ("GraphQL argument, headline", argument("Fixes INFRA-1"), "--raw-field query string 4", "INFRA-"),
                 ("JSON variable, file path", variable("dispatch://notes.md"),
                  "--input commit.json .variables.f.additions[0].path", "dispatch://"),
-                ("gh field, branch", field("m", YGO), "--field b[branchName]", "theorem-labs")):
+                ("gh field, branch", field("m", "INFRA-1"), "--field b[branchName]", "INFRA-")):
             with self.subTest(form=name):
                 self.setUp_calls()
                 self.assert_refused(self.run_gh(argv, env=env), refused_field, matched, YGO_LIST, line=1)
@@ -1138,6 +1221,43 @@ class GhLeakTerms(unittest.TestCase):
         argv = ["pr", "comment", f"https://x@github.com:443/{PRIVATE}/pull/11", "--body", TEXT]
         self.setUp_calls()
         self.assert_sent(self.run_gh(argv), argv)
+
+    def test_a_url_on_a_host_gh_sends_to_github_com_names_its_repository(self) -> None:
+        # gh 2.98.0 takes a URL argument's host as written (internal/ghrepo FromURL) and sends the call to github.com for
+        # any host go-gh's auth.NormalizeHostname makes github.com: the host in lower case, and any host ending in
+        # `.github.com`. Until 2026-11-19 only github.com and www.github.com named a repository, so such a URL of a
+        # public repository from a checkout whose remote is private was judged by that remote, and the text went out
+        # (dispatch://INFRA-3365, review finding 1).
+        self.remotes(("origin", PRIVATE))
+        for name, argv in (("foo.github.com", ["pr", "comment", f"https://foo.github.com/{PUBLIC}/pull/1"]),
+                           ("GitHub.COM", ["pr", "comment", f"https://GitHub.COM/{PUBLIC}/pull/1"]),
+                           ("WWW.GITHUB.COM", ["issue", "comment", f"https://WWW.GITHUB.COM/{PUBLIC}/issues/1"])):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                refused = self.run_gh([*argv, "--body", TEXT])
+                self.assert_refused(refused, "--body")
+                self.assertIn(f"to {PUBLIC} (public)", refused.stderr.decode())
+            with self.subTest(form=name, control="clean body"):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh([*argv, "--body", CLEAN]), [*argv, "--body", CLEAN])
+        # A URL on any other host names a repository there, read as public, as `gh api --hostname` does.
+        with self.subTest(form="ghe.example.com"):
+            self.setUp_calls()
+            refused = self.run_gh(["pr", "comment", "https://ghe.example.com/o/r/pull/1", "--body", TEXT])
+            self.assert_refused(refused, "--body")
+            self.assertIn("to a repository on ghe.example.com, read as public", refused.stderr.decode())
+        # gh reads --hostname so too: FOO.GITHUB.COM is github.com, where the repository is private; and the control,
+        # the same call to a public repository there, is refused.
+        for repo in (PRIVATE, PUBLIC):
+            with self.subTest(form="--hostname FOO.GITHUB.COM", repo=repo):
+                argv = ["api", "--hostname", "FOO.GITHUB.COM", "-X", "POST", f"repos/{repo}/issues", "-f", f"title={TEXT}"]
+                self.setUp_calls()
+                if repo == PRIVATE:
+                    self.assert_sent(self.run_gh(argv), argv)
+                else:
+                    refused = self.run_gh(argv)
+                    self.assert_refused(refused, "--raw-field title")
+                    self.assertIn(f"to {PUBLIC} (public)", refused.stderr.decode())
 
     def test_a_url_in_an_argument_that_is_text_names_no_repository(self) -> None:
         # `agent-task create` sends a task's description to the checkout's repository, here a public one, however the
