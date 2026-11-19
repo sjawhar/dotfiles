@@ -553,11 +553,16 @@ class GhLeakTerms(unittest.TestCase):
                                        "--accept-visibility-change-consequences"])
                 self.assert_refused(refused, "argument 1", CANARY, line=1)
         # Control: the same repository, public already, edited with a clean description: its name is public, and the
-        # call goes out.
+        # call goes out (gh_own_name). The rows above cached the private answer for 60 s, so the visibility is read
+        # afresh, and the cache shows the control was judged public: until 2026-11-19 it read the cached private
+        # answer and went out whatever the rule did (dispatch://INFRA-3365, tester round 6).
+        cached = self.tmp / "cache" / "public-leak-check" / repo.replace("/", "_")
         self.answer(repo, "public")
+        cached.unlink(missing_ok=True)
         argv = ["repo", "edit", repo, "--description", "notes"]
         self.setUp_calls()
         self.assert_sent(self.run_gh(argv), argv)
+        self.assertEqual(cached.read_text(encoding="utf-8"), "public")
 
     def test_a_gh_api_call_that_makes_a_repository_public_reads_its_name(self) -> None:
         # Given a private repository whose name holds a listed term: a call to the repository's own endpoint that sets
