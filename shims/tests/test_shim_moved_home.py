@@ -161,10 +161,11 @@ class GhInATestPane(MovedHome):
     """shims/gh in an agent session under a moved HOME runs its agent route from the checkout it is in: until
     2026-11-17 it looked for scripts/gh-agent-config under $HOME/.dotfiles and gave no answer at all."""
 
-    def test_auth_status_answers_for_the_agent_route(self) -> None:
+    def test_auth_status_names_the_placeholder_login_of_the_agent_config(self) -> None:
+        # The real gh reads the agent config directory, whose only login is the placeholder (scripts/gh-agent-config).
+        # GitHub refuses that placeholder, so the exit is not 0; a gh that never got the directory names no login.
         result = self.launch(["gh", "auth", "status"], cwd=self.root, env=self.pane(SHIMS / "gh", "gh", LEGION_ROLE="worker"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(result.stdout.startswith("gh shim: agent session."), result.stdout + result.stderr)
+        self.assertIn("no-user-login-in-agent-sessions", f"{result.stdout}{result.stderr}")
 
 
 

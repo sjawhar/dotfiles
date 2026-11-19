@@ -2,10 +2,11 @@
 
 The extension (omp/extensions/experiments) draws every feature on or off per root session
 and records the draw as a `customType: "experiments"` entry in the session file. This joins
-each root session's draw to three outcomes, counted from that session's first experiments
+each root session's draw to three outcomes, counted from that session's own first experiments
 entry onward:
 
-- corrections: share of Sami's turns in the session that correct the agent. Each turn is
+- corrections: share of Sami's turns in the session that correct the agent. His turns are the
+  rows of the window's `enumerate-messages.py --out` file (see below). Each turn is
   labelled by Jev (TypeSafe's System One model) first; only turns Jev answers below
   confidence 0.5 (measured 8.4%) escalate to the strong model through the omp eval
   kernel's `completion()` -- an explicit routing step, never a silent fallback. See
@@ -26,27 +27,33 @@ Load it in an eval Python cell, run the Jev pre-pass between two cells (see
     %load ~/.dotfiles/plugins/sjawhar/skills/reflect/scripts/experiments-readout.py
     dump_turns_for_jev(
         session_dirs=["~/.omp/agent/sessions", "<scratch>/.omp/agent/sessions"],
-        prompts=["prompts.jsonl", "<other-box>-prompts.jsonl"],
+        messages=["messages.jsonl"],
         out_path="turns-for-jev.jsonl",
     )
     # run jev-turn-label.py here, then:
     await main(
         session_dirs=["~/.omp/agent/sessions", "<scratch>/.omp/agent/sessions"],
-        prompts=["prompts.jsonl", "<other-box>-prompts.jsonl"],
+        messages=["messages.jsonl"],
         turn_labels_path="turn-labels.jsonl",
         jev_labels_path="jev-labels.jsonl",
         out_path="experiments-readout.md",
     )
 
-`prompts` are `extract-user-messages.py --out` files; their suppressed repeats (`dup_at`) are
-counted in the session they were sent to.
+`messages` are the files `enumerate-messages.py --out` writes in reflect's step 1, which hold
+every host the transcript store reads. A turn is a row with no `excluded` reason, at or after
+the session's own first draw. A typed row counts in its own session only: its `also_in` lists
+the restart copies that hold it, which were not sent it. A Dispatch row counts in its session
+and in each session of its `also_in`, because the same event reached each of them; the row keeps
+only its first delivery's time, so each of those sessions is compared with that time.
 """
 import asyncio
 import gzip
+import hashlib
 import json
 import random
 import re
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 MARKER = '"customType":"experiments"'
@@ -92,25 +99,34 @@ def root_files(session_dir: Path):
     """Yield root session files (one level below the sessions dir) carrying a draw."""
     for proj in sorted(p for p in session_dir.iterdir() if p.is_dir()):
         for f in proj.glob("*.jsonl"):
-            if f.stat().st_mtime < SHIPPED:
+            if not f.is_file() or f.stat().st_mtime < SHIPPED:
                 continue
             with f.open() as fh:
                 if any(MARKER in line for line in fh):
                     yield proj.name, f
 
 
-def first_draw(path: Path):
-    """Timestamp and on/off of every randomized feature in the session's first draw."""
+def first_draw(path: Path, sid: str):
+    """Timestamp and on/off of every randomized feature in the session's own first draw. A restart
+    copies the old session's entries, its draw included, ahead of the new session's first one."""
     with path.open() as fh:
         for line in fh:
             if MARKER in line:
                 e = json.loads(line)
-                if e.get("type") == "custom" and e.get("customType") == "experiments":
+                if (e.get("type") == "custom" and e.get("customType") == "experiments"
+                        and e["data"].get("rootSessionId") == sid):
                     feats = e["data"]["features"]
                     return e["timestamp"], {
                         k: v["on"] for k, v in feats.items() if v.get("gate") == "random"
                     }
     return None, None
+
+
+def utc(ts: str) -> datetime:
+    """A session file writes ISO time with a Z, the transcript store naive UTC with a space
+    ('2026-11-06 15:01:00.698'); as strings, a turn later the same day sorts before the draw."""
+    t = datetime.fromisoformat(ts)
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
 def session_cost(root: Path, since: str) -> float:
@@ -145,7 +161,7 @@ def load_sessions(session_dirs, exclude):
                 best[sid] = (proj, f)
     sessions = {}
     for sid, (proj, f) in best.items():
-        since, arms = first_draw(f)
+        since, arms = first_draw(f, sid)
         if since is None:
             continue
         sessions[sid] = {"project": proj, "file": f, "since": since, "arms": arms}
@@ -163,28 +179,36 @@ def load_dataset(url_or_path):
     return json.loads(raw)
 
 
-def load_turns(prompt_paths, sessions):
-    """Sami-channel turns per session at or after its first draw, repeats included."""
+def load_turns(message_paths, sessions):
+    """Sami's turns per drawn session at or after its own first draw, from enumerate-messages.py
+    rows; the module docstring says which sessions a row counts in."""
     turns = []
-    for p in prompt_paths:
+    for p in message_paths:
         for line in Path(p).expanduser().open():
+            if not line.strip():
+                continue
             r = json.loads(line)
-            sends = [(r["session"], r["ts"])] + [tuple(x) for x in r.get("dup_at") or []]
-            for sess, ts in sends:
-                m = UUID_RE.search(sess)
-                sid = m.group(1) if m else None
-                if sid in sessions and ts >= sessions[sid]["since"]:
-                    turns.append({"id": f"{sid}|{ts}", "sid": sid, "text": r["text"][:1500]})
+            if r.get("excluded"):
+                continue
+            at = utc(r["ts"])
+            sids = [r["session_id"]]
+            if r["kind"] == "dispatch":
+                sids += r.get("also_in") or []
+            for sid in sids:
+                if sid in sessions and at >= utc(sessions[sid]["since"]):
+                    # Two rows of one session at one time are two turns: the id carries the text.
+                    digest = hashlib.sha256(r["text"].encode()).hexdigest()[:12]
+                    turns.append({"id": f"{sid}|{r['ts']}|{digest}", "sid": sid, "text": r["text"][:1500]})
     return list({t["id"]: t for t in turns}.values())
 
 
-def dump_turns_for_jev(session_dirs, prompts, out_path, exclude=EXCLUDE_DEFAULT):
+def dump_turns_for_jev(session_dirs, messages, out_path, exclude=EXCLUDE_DEFAULT):
     """Write every turn `label_turns` would otherwise send to the strong model as
     {"id", "text"} lines, for jev-turn-label.py's external pre-pass to classify. Run
     this, then jev-turn-label.py, before calling `main(..., jev_labels_path=...)` --
     see this module's docstring for the exact commands."""
     sessions = load_sessions(session_dirs, exclude)
-    turns = load_turns(prompts, sessions)
+    turns = load_turns(messages, sessions)
     with Path(out_path).expanduser().open("w") as f:
         for t in turns:
             f.write(json.dumps({"id": t["id"], "text": t["text"]}) + "\n")
@@ -197,7 +221,7 @@ async def label_turns(turns, cache_path, jev_labels_path=None, model="default", 
     """Jev-first, strong-model-escalated: jev_labels_path (jev-turn-label.py's --out,
     confidence>=0.5 only -- see its module docstring for the measured agreement) supplies
     a label directly; every other turn still goes to completion() exactly as before. This
-    is the confidence-routing step documented in reflect's SKILL.md step 4 -- never a
+    is the confidence-routing step documented in reflect's references/experiments.md step 2 -- never a
     silent fallback, since completion() runs on precisely the turns Jev left out."""
     jev_labels = {}
     if jev_labels_path is not None:
@@ -331,12 +355,12 @@ def render(rows, unlabelled, dataset_at, n_turns):
     return "\n".join(lines) + "\n"
 
 
-async def main(session_dirs, prompts, turn_labels_path, out_path,
+async def main(session_dirs, messages, turn_labels_path, out_path,
                dataset="http://127.0.0.1:4317/api/dataset", exclude=EXCLUDE_DEFAULT,
                model="default", jev_labels_path=None):
     sessions = load_sessions(session_dirs, exclude)
     data = load_dataset(dataset)
-    turns = load_turns(prompts, sessions)
+    turns = load_turns(messages, sessions)
     labels = await label_turns(turns, turn_labels_path, jev_labels_path=jev_labels_path,
                                 model=model)
     rows, unlabelled = outcomes(sessions, data, turns, labels)

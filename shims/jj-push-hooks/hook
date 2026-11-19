@@ -1,7 +1,7 @@
 #!/bin/bash
 # jj-push-gate-hook: every hook name in jj-push-hooks/ but pre-push is a link to this file. For the `git push` jj
 # runs in a checkout the hook sweeper guards, shims/git puts a last `-c core.hooksPath=<this directory>` on git's
-# command line, so that git runs the gate's pre-push (shims/AGENTS.md). git appends that -c to GIT_CONFIG_PARAMETERS,
+# command line, so that git runs the gate's pre-push (shims/git). git appends that -c to GIT_CONFIG_PARAMETERS,
 # where every earlier -c, --config-env and the caller's own GIT_CONFIG_PARAMETERS already sit, and it reaches every
 # hook git runs. So that it changes which pre-push runs and nothing else, this takes that one entry back out (the
 # last one equal to it: a git run inside a hook appends its own after it), asks git which hooks directory it would

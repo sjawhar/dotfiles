@@ -7,23 +7,27 @@ description: "Use when a PR merged: the user says 'merged' or 'PR is merged', or
 
 Do every step now, until nothing is left over: a step left as a suggestion gets done by nobody.
 
-1. **Verify the merge.** Check that the PR is merged and target-branch CI is green. If CI still runs, start a background watcher and keep working.
+1. **Verify the merge.** Read the merge state from GitHub, not from a command's exit or an armed auto-merge: `gh api repos/<owner>/<repo>/pulls/<N> --jq '{merged, merge_commit_sha}'`. Check that target-branch CI is green; if it still runs, start a background watcher and keep working.
+   - A deleted branch or a missing pre-squash sha does not show whether work merged: read the destination's content (`jj file show -r <destination> <path>`) before you redo work. The GitHub PR-head ref can keep the PR's commits reachable; check it before you rely on it.
+   - Read the merged message (`gh api repos/<owner>/<repo>/commits/<merge-sha> --jq .commit.message`): squash defaults can join old subjects, retracted claims too. Do not rewrite merged history.
 2. **Clean up your own local state.**
    - Run `git fetch` and check that the tracking branch is gone.
-   - Delete each clone or worktree you created for this work, by name. A bare `git worktree prune` on a shared store deletes other sessions' worktrees (`skill://disk-hygiene`).
-3. **Deploy and verify live.** If the repo's AGENTS.md gives a deployment step, run it. Traps: [verifying-live.md](references/verifying-live.md).
-   - Live means observed on the NEW version: the proof must postdate the deploy. A scheduled run started after the deploy's `completedAt`, a node or pod created after the apply began, or the service reporting the deployed image digest or squash sha.
-   - Key a watcher to the named apply job succeeding (for example `deploy / deploy`), matched exactly: a substring match hits gate jobs that succeed before the apply.
-   - Never key it to a run that completes (a run can finish with the apply skipped), to a manual `workflow_dispatch` run of the same workflow, or to the PR's head sha, which a squash merge replaces.
-   - The newest run of the deploy workflow carries your merge. A cancelled pending run is the queue working, not a failure: never report it, block on it, or call it the reason the change is not live.
-   - Report only a failed deploy run that carries your merge, and fix it.
-   - A merged skill, plugin or dotfiles change is live only in the checkout that sessions load, such as `~/.dotfiles`; no deploy step tells you it is behind. Advance it: in `~/.dotfiles`, `scripts/dotfiles-sync local`, which keeps uncommitted edits and refuses a conflict before any file on disk changes (a bare `jj rebase` there writes conflict markers into the tree every session reads); in another jj checkout, `jj git fetch && jj rebase -r @ -d main@origin` (stop on a conflict); in a plain git checkout, `git pull --rebase`. Then read the file back.
+   - Remove each clone, worktree or jj workspace you created for this work, by name. `disk-hygiene` has the shared-store rules.
+3. **Deploy and verify live.** If the repo's guide gives a deployment step, run it.
+   - Live means observed on the new version, so the proof must postdate the deploy: a scheduled run started after the deploy's `completedAt` (one in flight during the apply can finish on the old definition), a node or pod created after the apply began, or the service reporting the deployed image digest or squash sha. For installed software, check the version the consumer runs by a head-specific artifact or behavior, not a guessed string in a minified bundle; an install the change needs is part of the work.
+   - Then run the changed path in production the way a user reaches it (same URL, CLI or API, same credentials), and record the deployed version and result on the PR. To tell versions apart without writing anything, send an atomic batch whose first step the new version rejects and whose second step always fails on the old one; check the ordering and predicted errors first.
+   - Find the deploy run that carries your merge by ancestry: after you fetch both objects, `jj log -r '<merge-sha> & ::<run-head>'` returns the merge. Pin that run for the wait.
+   - Key a watcher to the named apply job succeeding (for example `deploy / deploy`), matched exactly. A reusable workflow prefixes each child job with its own name, so a substring match hits gate jobs (`production-apply / wait-for-apply-images`) that succeed before the apply.
+   - Do not key it to a run that completes (a run can finish with the apply skipped), to a manual `workflow_dispatch` run of the same workflow, or to the PR's head sha, which a squash merge replaces.
+   - A deploy workflow with a concurrency group holds one running and one pending run, and a newer merge replaces the pending one. A cancelled pending run deployed nothing and its merges ride the newest run: re-resolve by ancestry, and do not report it, block on it, or call it the reason the change is not live.
+   - Report only a failed deploy run that carries your merge: diagnose it at the named job and step, and fix it.
+   - A merged skill, plugin or dotfiles change is live only in the checkout that sessions load, and no deploy step says it is behind. Advance it: in `~/.dotfiles`, `scripts/dotfiles-sync local`; in another jj checkout, `jj git fetch && jj rebase -r @ -d main@origin` (stop on a conflict); in a plain git checkout, `git pull --rebase`. Then read the served file back.
 4. **Update tracking state.**
-   - Move the Dispatch issue to `done` only once the change is live, with a reason naming the merge and the live proof. Until then it stays `testing`: `done` tells readers it is running.
+   - Move the Dispatch issue to `done` only once the change is live, with a reason naming the merge and the live proof. Until then it stays `testing`.
    - Close or update each linked GitHub issue, tracking doc and roadmap item. Put plan and spec content in the issue body: a file path is unreadable off this machine.
    - If production is frozen, `testing` cannot tell "not merged" from "merged, waiting on the freeze": post one message on the issue with the merge sha, the time, and where the change is and is not deployed (main, staging, production). Read what is deployed from merged PRs and artifacts, not statuses.
 5. **Announce if the merge changes how others work.**
    - Name who it affects: people who write to a changed convention, and users of a changed page, CLI or doc. Read the merged PR text for consumers outside the repo, which a grep cannot find.
-   - Tell them in their channel during this sweep, not later. Use `speaking-as-sami`, and the repo's own announcement skill if it has one. For an outside-the-company audience, draft it for Sami, do not send (CLAUDE.md).
+   - Tell them in their channel during this sweep. Use `speaking-as-sami`, and the repo's own announcement skill if it has one. For an audience outside the company, draft it for Sami; do not send it.
    - If nobody else writes or uses what changed, record "no one" in step 6.
 6. **Report.** List what you did, or write "nothing left". State each remaining follow-up in full sentences with context, not a bare issue number.

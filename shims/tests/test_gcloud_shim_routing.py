@@ -744,12 +744,15 @@ class GcloudRouting(unittest.TestCase):
         The probe is the application-default refusal because it depends only on the
         command path, so it holds for the flags that select an identity
         (`--configuration`) or carry opaque flags (`--flags-file`) as much as for the
-        rest."""
+        rest. `--help` and `-h` are left out: with either, the call only prints help and
+        reaches gcloud on purpose (test_agent_session_passes_a_help_call_every_guard_would_refuse)."""
         self.write_external_account_adc()
         self.stub_gcloud_that_must_not_run()
         protected = ["auth", "application-default", "login"]
 
         for flag, count in SDK_FLAGS["flags"].items():
+            if flag in ("--help", "-h"):
+                continue
             forms = [[flag, *["VALUE"] * count]]
             if count:
                 forms.append([f"{flag}=VALUE"])
@@ -1162,6 +1165,38 @@ class GcloudRouting(unittest.TestCase):
                                    args=["compute", "instances", "create", "vm-1"])
             self.assertEqual(result.returncode, 1)
 
+    def test_agent_session_passes_a_help_call_every_guard_would_refuse(self):
+        """`--help`, `-h` and the `help` command print the SDK's text and run no command, so a help call reaches
+        gcloud unchanged even where the same command would be refused."""
+        self.write_identity_configs()
+        self.write_user_adc()
+        flags_file = self.stub_dir / "flags.yaml"
+        flags_file.write_text("--project: p\n", encoding="utf-8")
+        for args in (["compute", "instances", "create", "--help"],
+                     ["compute", "instances", "create", "vm-1", "-h"],
+                     ["beta", "compute", "instances", "bulk", "create", "--help"],
+                     ["help", "compute", "instances", "create"],
+                     ["auth", "application-default", "login", "--help"],
+                     ["--account", self.USER, "projects", "list", "--help"],
+                     ["config", "list", "--flags-file", str(flags_file), "--help"]):
+            with self.subTest(args=args):
+                result = self.run_shim(self.AGENT_MARKERS[0], args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(stub_argv(result), args)
+
+    def test_a_help_word_that_is_no_help_call_is_still_refused(self):
+        """An instance named `help`, `--help` after `--`, and `--help` as a global flag's separate value
+        (gcloud reads `--flags-file --help` as a file of that name and runs the command) are not help calls."""
+        self.stub_gcloud_that_must_not_run()
+        for args in (["compute", "instances", "create", "help"],
+                     ["compute", "instances", "create", "vm-1", "--", "--help"],
+                     ["config", "set", "core/disable_usage_reporting", "true", "--flags-file", "--help"],
+                     ["--project", "--help", "compute", "instances", "create", "vm-1"]):
+            with self.subTest(args=args):
+                result = self.run_shim(self.AGENT_MARKERS[0], args=args)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("gcloud shim: REFUSED in an agent session", result.stderr)
+
     def test_users_own_session_keeps_its_adc_login(self):
         """Outside an agent session the user's explicit login with --update-adc reaches gcloud as he
         typed it, and a bare one under box is still routed with --update-adc dropped."""
@@ -1221,7 +1256,8 @@ class GcloudRouting(unittest.TestCase):
                     self.assert_agent_refusal(result)
                     self.assertIn(f"Identity: {self.USER}, a person's own Google login, named by {source}.",
                                   result.stderr)
-                    self.assertIn("dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec", result.stderr)
+                    self.assertIn("under Sami's standing permission", result.stderr)
+                    self.assertIn("Post no note of the use: Cloud audit logs record each use.", result.stderr)
 
     # The same login reached through a CONFIGURATION is the same act: only an explicit
     # --configuration in argv is the standing route above. An exported CLOUDSDK_ACTIVE_CONFIG_NAME, or
@@ -1260,7 +1296,8 @@ class GcloudRouting(unittest.TestCase):
                                   f"theorem, chosen by {source}.", result.stderr)
                     self.assertIn(f"unset {source}", result.stderr)
                     self.assertIn(self.HOLDER_ROUTE, result.stderr)
-                    self.assertIn("dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec", result.stderr)
+                    self.assertIn("under Sami's standing permission", result.stderr)
+                    self.assertIn("Post no note of the use: Cloud audit logs record each use.", result.stderr)
 
     def test_a_session_copy_of_another_configuration_directory_is_not_this_callers(self):
         """The session's copy of gcloud's configuration directory (scripts/gcloud-session-config) is shared by whatever

@@ -1,15 +1,12 @@
 # Streams dashboard
 
-Sami's page for the work streams (dispatch://INFRA-202): each stream's main numbers against their targets, whether
+Sami's page for the work streams: each stream's main numbers against their targets, whether
 each stream's loop is working, what changed since he last looked, a link into the live conversation of the session
 each stream names in Dispatch with that stream's explainer videos playing beside it, and a panel to talk to the
 chief of staff and read what it has
-ready for him. His decisions stay in his Dispatch Inbox (https://dispatch.tail12ec1c.ts.net/):
+ready for him. His decisions stay in his Dispatch Inbox:
 the page links there and counts, per stream, the open asks that wait on him. The design, element by element, is in
 [DESIGN.md](DESIGN.md).
-
-Live, tailnet only: **https://sami-devbox.tail12ec1c.ts.net:8446/** (sami-devbox serves it; the sami-rocqperf address
-only forwarded here and goes when that machine is shut down).
 
 ## Your stream's row is yours
 
@@ -24,7 +21,7 @@ Nobody edits the dashboard for you. Your stream appears, and changes, when you c
    `"headline"`: one sentence, at most 160 characters, overwritten at each update: the one thing Sami should know
    today. The page shows it on your row.
 3. **Plans name Dispatch issues.** Each item of `today.items` and of the new `week` list (`{"start": "<Monday,
-   Pacific>", "items": [...]}`) names the issue it delivers (`"issue": "OSSV-150"`). The page shows each item's issue,
+   Pacific>", "items": [...]}`) names the issue it delivers (`"issue": "<issue key>"`). The page shows each item's issue,
    priority, status and owner (claim, else route holder, else assignee), linked to the owner's live conversation in
    Dispatch. The full contract: `/mnt/nvme/sami/chief/design/scoreboard-week-contract.md`.
 
@@ -73,7 +70,7 @@ reloads.
   `__omp_worker_*` helper), from `/proc`, `tmux list-panes -a` and `docker ps`. A session counts in its pane's
   window of the `agents` tmux session; one inside an agent box has no pane, so it counts in the window of its host
   `docker run --name <box>` (container from its cgroup). `WINDOW_STREAMS` there maps each window to its stream issue
-  (dispatch://INFRA-202/spec, "Windows on sami-rocqperf"): a new window is one line. Any other window, a pane in
+  (the stream issue's spec, its section on the windows): a new window is one line. Any other window, a pane in
   another tmux session, or no pane at all is "outside a stream window". `chief-dashboard sessions` prints what the
   page counts; `--record FILE` writes the reading as a test fixture, cut to flags and ids. In an agent box nothing is
   measured (its /proc holds only the box's processes).
@@ -128,10 +125,10 @@ Python; only `chief-dashboard sami-messages` needs PyYAML (in `pyproject.toml`; 
 
 ## Run
 
-The code lives in the dotfiles at `~/.dotfiles/chief-dashboard`, which every machine has a copy of
-(dispatch://INFRA-906). It runs as commands, not as a service: `chief-dashboard dispatch-check` and
+The code lives in the dotfiles at `~/.dotfiles/chief-dashboard`, which every machine has a copy of.
+It runs as commands, not as a service: `chief-dashboard dispatch-check` and
 `chief-dashboard lead-times` from the chief of staff's own tick. The page's service and its tailnet route were
-shut down on 2026-11-08, since nobody authorized them (dispatch://INFRA-2022/ask/b5ddab54), and the unit file is
+shut down on 2026-11-08, since nobody authorized them, and the unit file is
 deleted; serve the page by hand (`chief-dashboard serve --socket <path>`) while prototyping, and nothing starts
 it on its own.
 

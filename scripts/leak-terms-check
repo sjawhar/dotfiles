@@ -2127,7 +2127,7 @@ def scan_push(text: str, remote: str, url: str) -> list[Finding]:
 
 
 # The text a gh call sends to GitHub, read before gh runs. shims/gh hands this check every call that can carry text, as
-# `gh -- ARGV…`, on the pass that runs gh (shims/AGENTS.md). Until 2026-11-17 nothing read that text, and an agent's
+# `gh -- ARGV…`, on the pass that runs gh (shims/gh). Until 2026-11-17 nothing read that text, and an agent's
 # `gh pr edit` put a listed term into a public pull request's body, where GitHub keeps it in the body's edit history,
 # which only an admin can delete (dispatch://INFRA-4102).
 

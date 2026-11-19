@@ -220,7 +220,7 @@ if [ -n "$last" ] && [[ "$head" != "$last"* ]]; then
   base=$(jq -r .base <<<"$pr"); w=$(mktemp -d)
   api "repos/$repo/compare/$base...$last" --jq '.files[]|"\(.filename)\t\(.additions)\t\(.deletions)\t\(.patch // "" | split("\n") | map(select(test("^[+-]"))) | sort | join("\n") | @json)"' | sort > "$w/last.tsv" || true
   api "repos/$repo/compare/$base...$head" --jq '.files[]|"\(.filename)\t\(.additions)\t\(.deletions)\t\(.patch // "" | split("\n") | map(select(test("^[+-]"))) | sort | join("\n") | @json)"' | sort > "$w/head.tsv" || true
-  # Per file: the SORTED +/- lines, as running-the-merge-queue's verdict row specifies. Raw patch text
+  # Per file: the SORTED +/- lines, so a clean rebase compares equal. Raw patch text
   # carries @@ offsets and context lines, and git re-aligns a hunk when main moves beside it, so a clean
   # rebase read CHANGED with no content difference (#20149, 2026-09-25).
   # The compare API silently caps .files at 300 (the gh pr view --json files 100-cap's bigger sibling,

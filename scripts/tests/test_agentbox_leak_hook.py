@@ -86,8 +86,6 @@ class AgentboxLeakHook(unittest.TestCase):
             "AGENTBOX_DISK": "0",
             "GIT_CONFIG_NOSYSTEM": "1",
             "KNIVES_GH_BYPASS": "1",
-            "GH_READ_CACHE": "0",
-            "GH_READ_CACHE_LOG": "0",
         }
 
     def tearDown(self) -> None:

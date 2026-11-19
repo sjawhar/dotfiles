@@ -2,25 +2,25 @@
 
 The lead pastes this file whole into every reader's task, followed by one line: your batch (the record files, in order) and your output file. Do not change it per reader.
 
-You read records of Sami's messages to coding agents. Sami runs a fleet of agents; each record is one of his messages with the agent's work before it (since his previous message) and after it (to the agent's next yield). Your job is to find where the agent failed him, with evidence a checker can verify, and to write one row per record.
+You read records of Sami's messages to coding agents. Each record is one of his messages with the agent's work before it (since his previous message) and after it (to the agent's next yield). Find where the agent failed him, with evidence a checker can verify, and write one row per record.
 
 ## How to read
 
-1. Open each record file with `read` and read all of it, top to bottom, before you write its row. Use the `:raw` selector so no line is cut (`read <file>:raw`), and page with `:raw:N-M` if the result says it was cut.
-2. Write the record's row to your output file as soon as you finish the record, then open the next one. Append one JSON line per record, from a Python cell or your editor, because the shell blocks `cat`. Never write all rows at the end: a summary written from memory names the wrong causes.
-3. Do not search for evidence with grep, `tq` or keywords. The record holds every turn you need. Open the transcript only at the lines the record lists under "left out" (`read <raw_file>:<a>-<b>`), and only when the decisive step may be there. A Legion session's file is on its legion-* host, not this one; read the same lines from the transcript store, which is a read, not a search: `tq sql "SELECT raw_line, role, kind, text FROM messages WHERE raw_file = '<raw_file>' AND raw_line BETWEEN <a> AND <b> ORDER BY raw_line, seq"`.
+1. Open each record with `read <file>:raw` and read all of it before you write its row; page with `:raw:N-M` if the result says it was cut.
+2. Append the record's row (one JSON line) to your output file as soon as you finish the record, from a Python cell or your editor, then open the next one. Rows written at the end are written from memory and name the wrong causes.
+3. Do not search for evidence with grep, `tq` or keywords: the record holds every turn you need. Open the transcript only at the lines the record lists under "left out" (`read <raw_file>:<a>-<b>`), and only when the decisive step may be there. A Legion session's file is on its legion-* host, not this one; read the same lines from the transcript store: `tq sql "SELECT raw_line, role, kind, text FROM messages WHERE raw_file = '<raw_file>' AND raw_line BETWEEN <a> AND <b> ORDER BY raw_line, seq"`.
 4. Look upstream. The visible reaction is Sami's message; the decisive mistake is usually several steps earlier: a premise the agent acted on without checking, an instruction from his previous message it dropped, a claim it relayed from another agent. Name the skill or instruction file the record shows the agent had loaded there.
 5. Read the records of one session in order: a later record often shows what an earlier one led to.
 
 ## What a finding is
 
-A finding is one agent failure. It needs these quotes, each copied verbatim (whitespace may differ; use `...` to skip words inside a long quote):
+A finding is one agent failure. It needs these quotes, each copied verbatim (whitespace may differ; `...` skips words inside a long quote):
 
-- `instruction`: what the agent should have followed. Usually Sami's words (this message, his previous message, or an earlier record of the same session); otherwise a rule file, with `instruction_source` set to a path that exists on this box, e.g. `~/.dotfiles/.claude/CLAUDE.md` (`~/.claude/CLAUDE.md` does not). Use `record` when the quote is in the record.
+- `instruction`: what the agent should have followed. Usually Sami's words (this message, his previous one, or an earlier record of the same session); otherwise a rule file, with `instruction_source` set to a path that exists on this box, such as `~/.dotfiles/.claude/CLAUDE.md` (`~/.claude/CLAUDE.md` does not). Use `record` when the quote is in the record.
 - `action`: the agent's words or tool call that broke it, from the record.
 - `pushback`: Sami's words that object to it, from one of his messages in the record. If he did not push back, set `pushback` to `null` and still record the finding.
 
-Every quote comes from the record you are reading. A sibling record of the same session is not your evidence, however clearly it shows the mistake: name it by its record id in `summary` and quote only what is in front of you. The checker rejects a quote it cannot find in your record, and that one cause was a sixth of the 2026-11-07 run's rejections.
+Every quote comes from the record you are reading. A sibling record of the same session is not your evidence: name it by its record id in `summary`. The checker rejects a quote it cannot find in your record.
 
 Do not record as a finding:
 
@@ -54,9 +54,8 @@ These are observations for Sami to judge, not rules.
  "sami_patterns": [{"kind": "wording", "quote": "...", "note": "..."}]}
 ```
 
-Name the `code` in your own words, specific to what happened ("relayed a peer's approval claim without checking it"), never a generic label ("communication issue").
-
-`decisive_line` is the `L<n>` the record prints beside the agent step that caused the failure; those numbers are the lines of the session's raw transcript file.
+- Name the `code` in your own words, specific to what happened ("relayed a peer's approval claim without checking it"), not a generic label ("communication issue").
+- `decisive_line` is the `L<n>` the record prints beside the agent step that caused the failure: a line of the session's raw transcript file.
 
 ## When you finish
 

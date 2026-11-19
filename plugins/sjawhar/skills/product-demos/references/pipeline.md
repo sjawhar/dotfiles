@@ -4,7 +4,8 @@
 
 ```bash
 cargo install --git https://github.com/asciinema/agg   # not `cargo install agg`: that is a different crate
-uv venv /tmp/demo/venv && source /tmp/demo/venv/bin/activate
+demo=$(mktemp -d)   # scratch: venv, gifs, thumbnails; casts and MP3s go in <video>.src/
+uv venv "$demo/venv" && source "$demo/venv/bin/activate"
 uv pip install elevenlabs
 which agg ffmpeg ffprobe
 ```
@@ -17,7 +18,7 @@ which agg ffmpeg ffprobe
 ## Record, convert, trim
 
 ```bash
-asciinema rec --cols 120 --rows 35 /tmp/demo/recordings/<section>.cast
+asciinema rec --window-size 120x35 <video>.src/<section>.cast   # asciinema 3.x; 2.x took --cols/--rows
 agg --font-size 24 --theme monokai in.cast out.gif
 # -crf 15 (not 18/23): terminal text needs near-lossless. stillimage: static content. scale: even sizes for h264.
 ffmpeg -y -i out.gif -movflags faststart -pix_fmt yuv420p \
@@ -59,7 +60,7 @@ audio = client.text_to_speech.convert(
 save(audio, output_path)
 ```
 
-Sample voices: Roger `CwhRBWXzGAHq8TQ4Fs17`, Chris `iP95p4xoKVk53GoZ742B`, Eric `cjVigY5qzO86Huf0OWal`, Daniel `onwK4e9ZLuTAKqWW03F9`, on a representative 2-3 sentence text. Label each for the A/B video:
+ElevenLabs premade narration voices to sample: Roger `CwhRBWXzGAHq8TQ4Fs17`, Chris `iP95p4xoKVk53GoZ742B`, Eric `cjVigY5qzO86Huf0OWal`, Daniel `onwK4e9ZLuTAKqWW03F9`. Sample each on a representative 2-3 sentence text, and label each for the A/B video:
 
 ```bash
 ffmpeg -y -f lavfi -i "color=c=0x1a1a2e:size=1280x720:duration=${dur}:rate=24" -i sample.mp3 \
