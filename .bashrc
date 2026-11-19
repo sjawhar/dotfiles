@@ -302,10 +302,6 @@ alias ucheck='uv run ruff format && uv run ruff check --fix && uv run basedpyrig
 alias tm='tmux attach -t main || tmux new -s main'
 alias s='secrets'
 
-# Proxy toggle (for Tailscale userspace networking)
-alias proxy-on='. "${DOTFILES_DIR}/devpod/proxy.sh"'
-alias proxy-off='unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy && echo "Proxy disabled"'
-
 # ------------------------------------------------------------------------------
 # AWS profile management
 # ------------------------------------------------------------------------------

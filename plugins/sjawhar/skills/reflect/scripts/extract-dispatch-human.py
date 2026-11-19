@@ -4,9 +4,9 @@
 Ask answers carry free text and spec comments are where design corrections happen; the
 transcript extractor never sees either. Reads every issue of every project, keeps issues
 updated at or after --since, pages each one's events, and keeps events by the actor whose id
-starts with --actor. Writes JSONL (one event per line, the input of classify-sami-events.py)
-and a readable transcript in time order with the ask question beside each answer. D<n> in the
-transcript is the event's 1-based position in created_at order, the classifier's DN.
+starts with --actor. Writes JSONL (one event per line; reflect's SKILL.md adds these events to the
+week's messages) and a readable transcript in time order with the ask question beside each answer.
+D<n> in the transcript is the event's 1-based position in created_at order.
 
 Dispatch's URL and token come from the envoy.json a command reads, resolved as Legion's
 envoy-client resolves them for a script (envoyConfigPath("command"), dispatchSettings): the file

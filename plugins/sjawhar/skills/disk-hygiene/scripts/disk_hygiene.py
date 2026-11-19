@@ -2094,7 +2094,8 @@ def main() -> None:
     p.add_argument("--trunk", default="trunk()")
     p.add_argument("--max-depth", type=int, default=WALK_DEPTH)
     p.add_argument("--box-dir", default="auto",
-                   help="where absence can be judged: auto (inside an agentbox, its own ~/boxes/<host> dir; "
+                   help="where absence can be judged: auto (inside an agentbox, its own tree: "
+                        "<AGENTBOX_BOXES, else /mnt/nvme/<user>/agentbox/boxes, else ~/boxes>/<host>; "
                         "on the host, everywhere), none (host semantics), or a directory")
     p = sub.add_parser("plan")
     p.add_argument("--inventory")

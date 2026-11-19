@@ -38,8 +38,10 @@ Load it in an eval Python cell, run the Jev pre-pass between two cells (see
         out_path="experiments-readout.md",
     )
 
-`prompts` are `extract-user-messages.py --out` files; their suppressed repeats (`dup_at`) are
-counted in the session they were sent to.
+`prompts` are JSONL rows of `session`, `ts` and `text`, with an optional `dup_at` list of
+[session, ts] repeats, each counted in the session it was sent to. The script that wrote them,
+extract-user-messages.py, is gone: enumerate-messages.py's rows name the session `session_id` and
+carry no `dup_at`, so convert them first.
 """
 import asyncio
 import gzip
