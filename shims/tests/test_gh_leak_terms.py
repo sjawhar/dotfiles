@@ -40,6 +40,9 @@ CLEAN = "Reviewed at abc123; nothing to add.\n"
 PUBLIC = "o/pub"
 PRIVATE = "o/priv"
 UNREAD = "o/unread"
+# The release repository of knives's ygo-fork entry, whose own name holds `theorem-labs`, a term of that entry's list.
+YGO = "theorem-labs/ygo"
+YGO_LIST = "the knives ygo-fork list"
 # The variables that make a shim read its caller as an agent (shims/AGENTS.md, "Who is an agent").
 AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION", "CLAUDECODE",
                  "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "SSH_CONNECTION", "SSH_TTY")
@@ -369,6 +372,64 @@ class GhLeakTerms(unittest.TestCase):
                     self.setUp_calls()
                     argv = ["pr", "edit", "12", "-R", repo, "--body", body]
                     self.assert_sent(self.run_gh(argv), argv)
+
+    # --- the repository a call goes to is its address, not its text (dispatch://INFRA-3365) ---------------------------
+
+    def ygo_fork(self) -> dict[str, str]:
+        """The environment with a knives registry holding only the real ygo-fork entry: its forbidden list holds
+        `theorem-labs`, which the name of the entry's release repository, theorem-labs/ygo, holds too."""
+        knives = self.tmp / "knives"
+        knives.mkdir()
+        (knives / "repos.toml").write_text(
+            '[repos.ygo-fork]\nupstream = "https://github.com/reearth/ygo.git"\n'
+            'origin = "https://github.com/sjawhar/ygo.git"\nrelease = "https://github.com/theorem-labs/ygo.git"\n'
+            'forbidden = ["dispatch://", "INFRA-", "theorem-labs"]\n', encoding="utf-8")
+        return {**self.env, "DOTFILES_LEAK_TERMS_KNIVES_DIR": str(knives)}
+
+    def ygo_writes(self) -> list[tuple[str, list[str]]]:
+        """(name, argv) of each write that names YGO as where it goes, in each spelling, and sends no listed term."""
+        return [
+            ("pr comment -R", ["pr", "comment", "1", "-R", YGO, "--body", "hello"]),
+            ("release create -R", ["release", "create", "v1.55.1-theorem.9", "-R", YGO, "--notes", "cut"]),
+            ("pr create -R", ["pr", "create", "-R", YGO, "--title", "t", "--body", "b", "--head", "x"]),
+            ("pr comment --repo=", ["pr", "comment", "1", f"--repo={YGO}", "--body", "hello"]),
+        ]
+
+    def test_the_repository_a_call_goes_to_is_not_read_as_its_text(self) -> None:
+        # Given the knives ygo-fork list and its public release repository theorem-labs/ygo, whose name holds a term of
+        # that list: until 2026-11-19 the value of -R was read as a text, and every write there was refused for it.
+        env = self.ygo_fork()
+        self.answer(YGO, "public")
+        for name, argv in self.ygo_writes():
+            with self.subTest(form=name):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=env), argv)
+        # No term was found in what the calls send, so no visibility was read.
+        self.assertEqual(self.visibility_reads(), [])
+        # Control: a term of the list in the text the call sends there is refused, and the refusal names that text's
+        # field, never the repository.
+        for name, argv, field, matched in (
+                ("--title", ["pr", "create", "-R", YGO, "--head", "x", "--title", "Fixes INFRA-1", "--body", "b"],
+                 "--title", "INFRA-"),
+                ("--body", ["pr", "comment", "1", "-R", YGO, "--body", "Fixes INFRA-1"], "--body", "INFRA-"),
+                ("--body dispatch://", ["pr", "comment", "1", "-R", YGO, "--body", "See dispatch://x"], "--body",
+                 "dispatch://")):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                refused = self.run_gh(argv, env=env)
+                self.assert_refused(refused, field, matched, YGO_LIST, line=1)
+                self.assertNotIn("--repo line", refused.stderr.decode())
+
+    def test_a_write_to_a_private_repository_named_with_a_listed_term_goes_out(self) -> None:
+        # Given the same list and theorem-labs/ygo private: no target is public, so the calls go out, a term of the
+        # list in a body too.
+        env = self.ygo_fork()
+        self.answer(YGO, "private")
+        termed = ["pr", "comment", "1", "-R", YGO, "--body", "Fixes INFRA-1"]
+        for name, argv in (*self.ygo_writes(), ("--body INFRA-1", termed)):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=env), argv)
 
     def test_a_graphql_mutation_is_judged_by_the_repositories_of_its_nodes(self) -> None:
         term = REGISTRY_TEST_TERMS["oh-my-pi"][0]

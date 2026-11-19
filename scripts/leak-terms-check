@@ -2329,6 +2329,9 @@ GH_REPOSITORY_URL = re.compile(r"^https?://(?:[^/@\s]*@)?(?:www\.)?github\.com(?
 # Options whose value gh keeps to itself: a jq filter, a Go template or a format for its own output, a cache time.
 GH_LOCAL_OPTIONS = frozenset((("api", "--jq"), ("api", "--template"), ("api", "--cache"), ("project", "--jq"),
                               ("project", "--template"), ("project", "--format")))
+# Options that name the repository a call goes to, which gh_reach reads as its targets: the call's address, and no text
+# it sends there (gh_texts).
+GH_REPOSITORY_OPTIONS = ("--repo", "--branch-repo")
 GH_API_REPOSITORY = re.compile(r"^/?repos/([^/?#{}]+)/([^/?#{}]+)")
 GH_GRAPHQL_MUTATION = re.compile(r"\bmutation\b")
 JSON_ESCAPE = re.compile(r'\\(?:u([0-9A-Fa-f]{4})|(["\\/bfnrt]))')
@@ -2544,8 +2547,9 @@ def gh_argument_texts(group: str, sub: str, number: int, value: str) -> list[GhT
 
 
 def gh_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]) -> list[GhText]:
-    """Every text the call sends: each argument and option value, but for a file gh reads, what the file holds; a
-    field's key and its value are two texts, as GitHub stores them."""
+    """Every text the call sends: each argument and option value but those gh keeps to itself (GH_LOCAL_OPTIONS) and
+    the repository the call goes to (GH_REPOSITORY_OPTIONS), and for a file gh reads, what the file holds; a field's
+    key and its value are two texts, as GitHub stores them."""
     long = gh_long_names(GH_TEXT_COMMANDS[(group, sub)])
     texts: list[GhText] = []
     number = 0
@@ -2556,6 +2560,12 @@ def gh_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
             continue
         name = long.get(option, option)
         if (group, name) in GH_LOCAL_OPTIONS:
+            continue
+        if name in GH_REPOSITORY_OPTIONS:
+            # The repository the call goes to is its address, not text sent to it, and the check refuses only for a
+            # repository read as public, whose name is then public already. Until 2026-11-19 it was read as a text, so
+            # every write to a public repository whose own name holds a listed term was refused, such as
+            # theorem-labs/ygo under the knives ygo-fork list (dispatch://INFRA-3365).
             continue
         if value is None:
             if (group, sub, name) == ("workflow", "run", "--json"):
@@ -3251,9 +3261,10 @@ def gh_reach(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
         shown = f"{name} ({'private' if private else 'not made private, so read as public'})"
         return [GhTarget(shown, name.lower() if name.count("/") == 1 else "", not private)]
     targets: list[tuple[str, str, bool]] = []
-    for value in [*values.get("--repo", []), *values.get("--branch-repo", [])]:
-        if value:
-            targets.append((value, gh_repository_url(value), True))
+    for name in GH_REPOSITORY_OPTIONS:
+        for value in values.get(name, []):
+            if value:
+                targets.append((value, gh_repository_url(value), True))
     for value in positionals:
         named = GH_REPOSITORY_URL.match(value)
         if named:

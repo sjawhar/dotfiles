@@ -165,10 +165,14 @@ behavior before handing the call to the real one. One file is data: `person-name
   arguments as gh does, with each command's options from `gh <command> --help` at the pinned gh
   (`GH_TEXT_COMMANDS`; `shims/tests/test_gh_leak_terms.py` fails when the installed gh's options
   differ), and scans every argument and option value but those gh keeps to itself (the `--jq`,
-  `--template` and `--cache` of `gh api`, the `--jq`, `--template` and `--format` of `gh project`),
-  and for a file gh reads (`--body-file`,
-  `--notes-file`, `--from-file`, `--recover`, `--input`, `-F key=@file`, a gist's files) what the
-  file holds, never its path. Each body is read as its endpoint stores it, and each value on its own,
+  `--template` and `--cache` of `gh api`, the `--jq`, `--template` and `--format` of `gh project`)
+  and the repository the call goes to (`-R`/`--repo`, `--branch-repo`), and for a file gh reads
+  (`--body-file`, `--notes-file`, `--from-file`, `--recover`, `--input`, `-F key=@file`, a gist's
+  files) what the file holds, never its path. The repository is the call's address, not text sent
+  to it, and the check refuses only for one read as public, whose name is then public already;
+  until 2026-11-19 it was read, and every write to a public repository whose own name holds a
+  listed term was refused (theorem-labs/ygo under the knives ygo-fork list, dispatch://INFRA-3365).
+  Each body is read as its endpoint stores it, and each value on its own,
   so two values never make one match (dispatch://INFRA-4383). A release asset's body (`gh release
   upload`, or `gh api` to a `repos/O/R/releases/N/assets` path or to an address on
   uploads.github.com) is its bytes, read as written and never as JSON, since GitHub stores them so:

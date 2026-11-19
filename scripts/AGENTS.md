@@ -62,7 +62,8 @@ Executables covering several areas:
     prints the `ui.editor=` setting that runs the wrapper, then the editor's JSON value, or exits 5
     when it cannot read the configuration and 6 when the editor is the wrapper itself; and
     `jj-editor` returns a nonzero failure to jj after it rejects an edit. `gh` reads every text a
-    gh call would send (arguments, option values, the files and stdin gh reads), each value on its
+    gh call would send (arguments, option values but the `--repo` and `--branch-repo` that name
+    where it goes, the files and stdin gh reads), each value on its
     own as GitHub stores it (a JSON body's strings by their JSON path, a GraphQL document's strings,
     decoded), and refuses one that holds a listed term (with the tag message `--notes-from-tag` and
     the commit messages `--fill` take from git) when the call can reach a repository not confirmed
