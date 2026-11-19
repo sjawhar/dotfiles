@@ -5,19 +5,24 @@ A move can bring a new mise pin, so it must install the checkout's tools before 
 The step uses the checkout .bashrc environment, serializes mise install with the shared lock,
 and reports failures or limits without undoing the move. These tests use recording stand-ins to
 check the local, remote, publish, refusal, lock, and timeout paths without installing tools.
+KnivesRegistry checks the step's first command, the real scripts/knives-registry-render.
 """
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
+import hashlib
 import importlib.machinery
 import importlib.util
 import os
+import shutil
 import signal
 import subprocess
 import threading
 import time
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -31,7 +36,10 @@ _SYNC_LOADER.exec_module(_sync_fixture)
 DotfilesCheckout = _sync_fixture.DotfilesCheckout
 
 
-class DotfilesTools(DotfilesCheckout):
+class ToolsStep(DotfilesCheckout):
+    """The fixture and helpers of every tools-step case. It holds no case itself, so a class with
+    another fixture does not run every case again."""
+
     def setUp(self) -> None:
         super().setUp()
         self.root = Path(self.temp_dir.name)
@@ -167,6 +175,10 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self._write_standin("mise", checkout / "bin" / "mise")
         return checkout, env
 
+
+class DotfilesTools(ToolsStep):
+    """The step's cases in checkouts that hold no scripts/knives-registry-render."""
+
     def test_case_01_local_sync_uses_bashrc_environment_and_lock(self) -> None:
         result = self.sync("local")
 
@@ -201,10 +213,11 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assert_tools_ran()
         self.assertEqual(self.calls("mise")[0].split("|")[-1], "fakehost")
 
-    def test_case_03b_remote_ssh_limit_covers_the_move_the_lock_wait_and_both_commands(self) -> None:
+    def test_case_03b_remote_ssh_limit_covers_the_move_the_lock_wait_and_the_three_commands(self) -> None:
         # The ssh limit is the remote host's whole budget: 180 s move, 300 s sync-lock wait, and
-        # each tools command's limit plus its 10 s kill grace. Left at the move's 180 s, a remote
-        # install longer than that is killed mid-download.
+        # for each of the three tools commands (the registry render, `mise install`, the Bun
+        # install) its limit plus its 10 s kill grace. Left at the move's 180 s, a remote install
+        # longer than that is killed mid-download.
         self._install_ssh()
         ssh = self.root / "bin" / "ssh"
         ssh.rename(self.root / "bin" / "ssh-step")
@@ -213,7 +226,7 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
             'echo >> "$SSH_RECORD.parent"\nexec "$(dirname "$0")/ssh-step" "$@"\n'
         )
         ssh.chmod(0o755)
-        for limit, outer in ((None, 1700), ("5", 510)):
+        for limit, outer in ((None, 2310), ("5", 525)):
             with self.subTest(DOTFILES_TOOLS_TIMEOUT=limit):
                 Path(f"{self.ssh_record}.parent").write_text("")
                 env = dict(self.env)
@@ -899,6 +912,227 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_tools_ran()
         self.assertEqual(self.calls("mise")[0].split("|")[1], str(self.checkout), self.records())
+
+    def test_case_32_a_checkout_without_the_registry_render_runs_mise_and_bun_alone(self) -> None:
+        # A checkout on a main older than scripts/knives-registry-render, as every fixture above
+        # is: the step skips the render, with no line about it, and passes.
+        moved = self.sync("local")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.clear_records()
+        self.assertFalse((self.checkout / "scripts" / "knives-registry-render").exists())
+        result = self._run(SYNC, "--tools", str(self.checkout))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_tools_ran()
+        self.assertNotIn("knives-registry-render", result.stdout + result.stderr)
+        self.assertFalse((self.home / ".config" / "knives").exists())
+
+
+# A small knives registry. The render rewrites the oh-my-pi table's workspaces line to this
+# machine's path and copies every other line as it is, the hawk table's workspaces included.
+OMP_WORKSPACES = 'workspaces = "~/.worktrees/oh-my-pi"'
+REGISTRY_V1 = f"""[repos.hawk]
+upstream = "https://example.com/hawk"
+workspaces = "~/.worktrees/hawk"
+
+[repos.oh-my-pi]
+upstream = "https://example.com/oh-my-pi"
+release_branch = "sami"
+{OMP_WORKSPACES}
+"""
+REGISTRY_V2 = REGISTRY_V1.replace('release_branch = "sami"', 'release_branch = "sami-2"')
+RENDER = "knives-registry-render --if-changed"
+
+
+class KnivesRegistry(ToolsStep):
+    """sami-rocqperf, sami-leanperf and the laptop run no dotfiles-follow timer and move only
+    through dotfiles-sync and dotfiles-publish, so the tools step starts with the real
+    scripts/knives-registry-render --if-changed: the machine's copy of the knives registry,
+    ~/.config/knives/repos.toml, follows the committed knives/repos.toml with no person's command
+    (dispatch://INFRA-3365, R5). The copy the render must leave is worked out here, never by
+    running the render."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # The real render, its executable mode kept (git records it), and the lib.sh it sources.
+        for name in ("scripts/knives-registry-render", "installers/lib.sh"):
+            (self.upstream / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / name, self.upstream / name)
+        self.commit_registry(REGISTRY_V1)
+
+    def commit_registry(self, source: str) -> None:
+        path = self.upstream / "knives" / "repos.toml"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(source)
+        self.commit_upstream("knives registry")
+
+    def copy(self, home: Path | None = None) -> Path:
+        return (home or self.home) / ".config" / "knives" / "repos.toml"
+
+    def source_record(self, home: Path | None = None) -> Path:
+        return (home or self.home) / ".config" / "knives" / "repos.toml.source-sha256"
+
+    @staticmethod
+    def rendered(source: str, home: Path) -> str:
+        """SOURCE with the oh-my-pi workspaces line set to HOME's path: the big disk's directory,
+        named for the home, where there is one, else ~/.worktrees/oh-my-pi in full."""
+        nvme = Path("/mnt/nvme") / home.name
+        where = f"{nvme}/omp-worktrees/branches" if nvme.is_dir() else f"{home}/.worktrees/oh-my-pi"
+        return "".join(
+            f'workspaces = "{where}"\n' if line == OMP_WORKSPACES + "\n" else line
+            for line in source.splitlines(keepends=True)
+        )
+
+    @staticmethod
+    def identity(path: Path) -> tuple[int, int]:
+        """(inode, mtime in ns): a file replaced or rewritten gets another."""
+        st = path.stat()
+        return st.st_ino, st.st_mtime_ns
+
+    def assert_copy_renders(self, source: str, home: Path | None = None) -> None:
+        home = home or self.home
+        self.assertNotIn(OMP_WORKSPACES, self.rendered(source, home))
+        self.assertEqual(self.copy(home).read_text(), self.rendered(source, home))
+        self.assertEqual(self.source_record(home).read_text(), hashlib.sha256(source.encode()).hexdigest() + "\n")
+
+    @staticmethod
+    def render_passed(checkout: Path) -> str:
+        return f"tools: `{RENDER}` passed in {checkout}\n"
+
+    def assert_on_main(self) -> None:
+        self.assertEqual(
+            self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"),
+            self.jj("log", "-r", "main@origin", "--no-graph", "-T", "commit_id"),
+        )
+
+    def assert_render_failed(self, result: subprocess.CompletedProcess[str]) -> None:
+        """The step's report of a render that could not write into a read-only ~/.config/knives."""
+        self.assertIn(f"dotfiles-sync: tools step: `{RENDER}` in {self.checkout} exited 1\nlast lines of its output:\n", result.stderr)
+        # mktemp quotes the template as the locale does ('...' or ‘...’): only the words are checked.
+        failure = next((line for line in result.stderr.splitlines() if "mktemp: failed to create file via template" in line), "")
+        self.assertIn(f"{self.copy()}.XXXXXX", failure)
+        self.assertTrue(failure.endswith(": Permission denied"), result.stderr)
+        self.assertNotIn(self.render_passed(self.checkout), result.stdout)
+        self.assertEqual(self.copy().read_text(), self.rendered(REGISTRY_V1, self.home))
+
+    @contextlib.contextmanager
+    def read_only_copy_directory(self) -> Iterator[None]:
+        knives = self.copy().parent
+        knives.chmod(0o555)
+        try:
+            yield
+        finally:
+            knives.chmod(0o755)
+
+    def test_a_sync_over_a_registry_change_writes_the_copy_before_the_installs(self) -> None:
+        first = self.sync("local")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assert_copy_renders(REGISTRY_V1)
+        before = self.identity(self.copy())
+        self.commit_registry(REGISTRY_V2)
+        self.clear_records()
+
+        result = self.sync("local")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_copy_renders(REGISTRY_V2)
+        self.assertNotEqual(self.identity(self.copy()), before)
+        self.assertIn(self.render_passed(self.checkout), result.stdout)
+        self.assertLess(
+            result.stdout.index(self.render_passed(self.checkout)),
+            result.stdout.index(f"tools: `mise install` passed in {self.checkout}\n"),
+        )
+        self.assert_tools_ran()
+
+    def test_a_second_sync_writes_nothing(self) -> None:
+        first = self.sync("local")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assert_copy_renders(REGISTRY_V1)
+        written = (self.identity(self.copy()), self.identity(self.source_record()))
+        self.clear_records()
+
+        again = self.sync("local")
+
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn(self.render_passed(self.checkout), again.stdout)
+        self.assertEqual((self.identity(self.copy()), self.identity(self.source_record())), written)
+        self.assert_tools_ran()
+
+    def test_tools_mode_after_a_pull_that_changes_the_registry_writes_the_copy(self) -> None:
+        checkout, env = self.plain_checkout("plain")
+        home = Path(env["HOME"])
+        first = self._run(SYNC, "--tools", str(checkout), env=env)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assert_copy_renders(REGISTRY_V1, home)
+        self.commit_registry(REGISTRY_V2)
+        self.run_ok("git", "pull", "-q", "--ff-only", cwd=checkout)
+        self.clear_records()
+
+        result = self._run(SYNC, "--tools", str(checkout), env=env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(self.render_passed(checkout), result.stdout)
+        self.assert_copy_renders(REGISTRY_V2, home)
+        self.assert_tools_ran()
+
+    def test_a_publish_whose_rebase_brings_the_registry_writes_the_copy(self) -> None:
+        # dotfiles-publish runs `dotfiles-sync --tools` after the rebase moved the files.
+        change = self.local_commit()
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(self.render_passed(self.checkout), result.stdout)
+        self.assert_copy_renders(REGISTRY_V1)
+        self.assert_tools_ran()
+
+    def test_here_moves_and_writes_no_copy(self) -> None:
+        # dotfiles-follow renders through its own step after `--here`.
+        result = self.sync("--here", "")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.checkout / "knives" / "repos.toml").read_text(), REGISTRY_V1)
+        self.assertFalse(self.copy().exists())
+        self.assertEqual(self.records(), [])
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes into a read-only directory")
+    def test_a_render_that_cannot_write_keeps_the_move_and_the_installs_and_fails_the_run(self) -> None:
+        first = self.sync("local")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.commit_registry(REGISTRY_V2)
+        self.clear_records()
+
+        with self.read_only_copy_directory():
+            result = self.sync("local")
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assert_on_main()
+            self.assertEqual((self.checkout / "knives" / "repos.toml").read_text(), REGISTRY_V2)
+            self.assert_tools_ran()
+            self.assert_render_failed(result)
+
+            # The step alone returns the render's status once mise and Bun passed.
+            self.clear_records()
+            tools = self._run(SYNC, "--tools", str(self.checkout))
+            self.assertEqual(tools.returncode, 1, tools.stdout + tools.stderr)
+            self.assert_tools_ran()
+            self.assert_render_failed(tools)
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes into a read-only directory")
+    def test_without_a_plugin_manifest_the_step_still_returns_the_render_failure(self) -> None:
+        first = self.sync("local")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (self.upstream / "omp" / "plugins" / "package.json").unlink()
+        self.commit_registry(REGISTRY_V2)
+        self.clear_records()
+
+        with self.read_only_copy_directory():
+            result = self.sync("local")
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assert_on_main()
+            self.assertEqual(len(self.calls("mise")), 1, self.records())
+            self.assertEqual(self.calls("bun"), [], self.records())
+            self.assert_render_failed(result)
 
 
 if __name__ == "__main__":

@@ -7,25 +7,29 @@
 # nor in the old history is kept and named.
 #
 # After the move, each host path runs the tools step on the machine it moved, in the same ssh
-# session for a remote host: `mise install` in the checkout, then `bun install --frozen-lockfile`
-# in omp/plugins when its package.json is there, with the mise binary and MISE_DATA_DIR (and
-# MISE_CACHE_DIR where it sets one) that the checkout's .bashrc gives a shell. It runs after every
-# move that ends on main, also when main brought nothing new, so a later sync installs a pin an
-# earlier step did not. `mise install` holds an exclusive lock on
-# $MISE_DATA_DIR/.dotfiles-install.lock, the one dotfiles-follow and agent-session take for their
-# own installs, so a launch during the install waits for it instead of finding no binary. A failed
+# session for a remote host. It starts with `scripts/knives-registry-render --if-changed` in the
+# checkout, which renders its knives/repos.toml into ~/.config/knives/repos.toml and records the
+# source's sha256 beside it; it writes nothing while the copy is a plain file and the recorded
+# sha256 is the source's, and a checkout without the script skips it. Then `mise install` in the
+# checkout, then `bun install --frozen-lockfile` in omp/plugins when its package.json is there,
+# with the mise binary and MISE_DATA_DIR (and MISE_CACHE_DIR where it sets one) that the
+# checkout's .bashrc gives a shell. It runs after every move that ends on main, also when main
+# brought nothing new, so a later sync installs a pin an earlier step did not. `mise install`
+# holds an exclusive lock on $MISE_DATA_DIR/.dotfiles-install.lock, the one dotfiles-follow and
+# agent-session take for their own installs, so a launch during the install waits for it instead
+# of finding no binary. A failed render stops nothing: mise and Bun still run. A failed
 # `mise install` stops the step before Bun, whose mise shim could install outside that lock. Each
 # command has DOTFILES_TOOLS_TIMEOUT seconds (a whole number 1-600; default 600), the lock wait
 # included; at its limit it gives the command 10 s to exit, then kills every process it left so
 # its lock is free. A failure or a command past its limit prints the command, its status and the
 # last lines of its output, keeps the move, and the run exits non-zero after the other hosts. A
 # remote host's ssh limit is its parts: 180 s for the move, the 300 s default sync-lock wait, and
-# each command's limit plus that 10 s kill grace. The sync lock is released before the step, so an
-# install does not hold off another move.
+# for each of the three commands its limit plus that 10 s kill grace. The sync lock is released
+# before the step, so an install does not hold off another move.
 #
 # Internal modes: --here OLD is the move alone, which dotfiles-follow calls and follows with its
-# own tools step (it reports a failed install as TOOLS NOT INSTALLED, not as a failed move);
-# --here-tools OLD is the move and then the step; --tools DIR is the step alone, which
+# own render and tools steps (it reports a failed install as TOOLS NOT INSTALLED, not as a failed
+# move); --here-tools OLD is the move and then the step; --tools DIR is the step alone, which
 # dotfiles-publish runs after a rebase that moved the files.
 #
 # A jj checkout keeps its working-copy change: it is rebased onto main, and the run refuses a
@@ -172,7 +176,7 @@ tools_run() {
 }
 
 tools_step() (
-  local dir limit lock mise bun
+  local dir limit lock mise bun render_status=0
   # The checkout as an absolute path: mise reads the pins of the directory it runs in, so the
   # install runs there whatever the caller's directory, and DIR/bin/mise must still name it.
   # shellcheck disable=SC1007
@@ -194,6 +198,13 @@ tools_step() (
   # A directory it cannot make is reported below, as flock's failure to open the lock.
   mkdir -p "$MISE_DATA_DIR" 2>/dev/null || true
   limit="$(tools_limit)"
+  # The knives registry copy first. A failed render stops nothing: mise and Bun still run, and the
+  # step returns the render's status when they pass. DOTFILES_DIR names this checkout, never an
+  # inherited value: it is exported above only when the checkout has a .bashrc.
+  if [[ -x "$dir/scripts/knives-registry-render" ]]; then
+    tools_run "knives-registry-render --if-changed" "$dir" "$limit" \
+      env DOTFILES_DIR="$dir" "$dir/scripts/knives-registry-render" --if-changed || render_status=$?
+  fi
   lock="$MISE_DATA_DIR/.dotfiles-install.lock"
   if [[ -x "$dir/bin/mise" ]]; then
     mise="$dir/bin/mise"
@@ -204,13 +215,14 @@ tools_step() (
   [[ "$mise" = /* ]] || mise="$PWD/$mise"
   tools_run "mise install" "$dir" "$limit" flock "$lock" "$mise" install || return $?
 
-  [[ -f "$dir/omp/plugins/package.json" ]] || return 0
+  [[ -f "$dir/omp/plugins/package.json" ]] || return "$render_status"
   if ! bun="$(command -v bun 2>/dev/null)"; then
     tools_error "bun install --frozen-lockfile" "$dir/omp/plugins" 127 "$limit" <(printf 'bun: command not found\n')
     return 127
   fi
   [[ "$bun" = /* ]] || bun="$PWD/$bun"
-  tools_run "bun install --frozen-lockfile" "$dir/omp/plugins" "$limit" "$bun" install --frozen-lockfile
+  tools_run "bun install --frozen-lockfile" "$dir/omp/plugins" "$limit" "$bun" install --frozen-lockfile || return $?
+  return "$render_status"
 )
 
 sync_here() {
@@ -398,7 +410,8 @@ tools_timeout="$(tools_limit)"
 remote_move_timeout=180
 remote_sync_lock_wait=300
 remote_tools_grace="$tools_grace"
-remote_tools_commands=2
+# The render, `mise install` and the Bun install.
+remote_tools_commands=3
 remote_limit=$((remote_move_timeout + remote_sync_lock_wait + remote_tools_commands * (tools_timeout + remote_tools_grace)))
 
 status=0
