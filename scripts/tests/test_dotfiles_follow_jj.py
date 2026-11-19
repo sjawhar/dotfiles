@@ -195,6 +195,30 @@ class JjFollow(JjHarness):
             self.assertFalse(call["has_omp_profile"])
             self.assertFalse(call["has_pi_profile"])
 
+    def test_a_commit_main_holds_as_a_squash_merge_is_dropped_and_the_checkout_lands_on_main(self) -> None:
+        # dotfiles-publish lands a commit by squash-merging its pull request, so main holds its
+        # change under another commit id; when main moved under the pull request, the original stays
+        # under the working copy. Follow's dotfiles-sync abandons it and puts the working copy on
+        # main, and no file moves backwards: the upstream change arrives, the published edit and
+        # the local files stay.
+        (self.repo / "published").write_text("my published edit\n")
+        self.jj("commit", "--quiet", "-m", "mine", "published")
+        original = self.jj("log", "-r", "@-", "--no-graph", "-T", "change_id")
+        squash = self.commit_upstream("mine (#1)", published="my published edit\n")
+        self.assertNotEqual(self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"), squash)
+
+        messages = self.run_follow()
+
+        self.assertEqual(messages, [])
+        self.assertEqual(self.origin_main(), squash)
+        self.assertEqual(self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"), squash)
+        self.assertEqual(self.jj("log", "-r", f"present(change_id({original}))", "--no-graph", "-T", "commit_id"), "")
+        self.assertEqual((self.repo / "published").read_text(), "my published edit\n")
+        self.assertEqual((self.repo / "scripts/tool").read_text(), "v2\n")
+        for path, want in self.local_bytes.items():
+            self.assertEqual(path.read_bytes(), want)
+        self.assertEqual(self.jj("log", "-r", "conflicts()", "--no-graph", "-T", "change_id"), "")
+
     def test_conflicting_working_copy_is_reported_without_tools_or_file_changes(self) -> None:
         local = self.repo / "shared.txt"
         local.write_text("local edit\n")

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # dotfiles-sync [--old SHA] [HOST...]: put each machine's ~/.dotfiles working copy on origin's
 # main. HOST is an ssh destination, or `local` for this machine; with none, every machine in
-# MACHINES below. --old is the tip main had before a history rewrite (scripts/dotfiles-squash
-# prints it and tags it pre-squash-<date>); commits from that old history are dropped, except one
-# that a commit outside it still builds on, while anything a machine holds that is neither on main
-# nor in the old history is kept and named.
+# MACHINES below. --old is the tip main had before a history rewrite, as a commit or a tag on
+# origin (main takes no direct push since every change goes through a pull request, so a rewrite
+# is an admin's act); commits from that old history are dropped, except one that a commit outside
+# it still builds on, while anything a machine holds that is neither on main nor in the old
+# history is kept and named.
 #
 # After the move, each host path runs the tools step on the machine it moved, in the same ssh
 # session for a remote host. It starts with `scripts/knives-registry-render --if-changed` in the
@@ -41,7 +42,8 @@
 # disk back to an older ancestor while live sessions run them. Without --old, a commit under the
 # working copy whose change main lacks refuses the run, naming the commit and its session, since
 # moving the working copy alone would drop that change from disk; one whose change main has (the
-# original dotfiles-publish leaves when it pushes a copy) is abandoned after the move, unless a
+# original dotfiles-publish leaves when it publishes a copy, or when main moved under its pull
+# request and the squash merge landed on the newer main) is abandoned after the move, unless a
 # commit outside that set still builds on it. A plain git checkout moves only when it is clean
 # and holds no commit origin's main lacks, and it lands on its `main` branch, so a session can
 # commit there and `git pull --rebase`.
