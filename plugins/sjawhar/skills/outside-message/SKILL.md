@@ -13,7 +13,7 @@ A narrower decision of his, where one exists, is recorded in the project's AGENT
 
 ## Oh My Pi
 
-Messages to Oh My Pi (`can1357/oh-my-pi`), on our pull requests and on contributors', need no approval ask and no audience research. The public leak check still runs, since these comments are public. In an agent session `gh` posts one only when the call cites his standing answer in `GH_SHIM_APPROVAL` (the Oh My Pi entry of `KIND_APPROVALS` in `scripts/gh-approved-post`) and a fresh reviewer's verdict in `GH_SHIM_VERDICT`, so step 2 below still runs. The verdict must come from another session, not your subagent, which writes to Dispatch as you; `shims/AGENTS.md` has the verdict's form.
+Messages to Oh My Pi (`can1357/oh-my-pi`), on our pull requests and on contributors', need neither his approval nor the two steps below. The public leak check still runs, since these comments are public. A fresh cut by a session that did not write the text is recommended, not a gate.
 
 The pi-envoy plugin's own `outside-message` skill states this exception only generically ("a project the operator has excluded by name"); the project name lives here on purpose.
 

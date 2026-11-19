@@ -70,5 +70,5 @@ Before you declare READY or merge, read [review evidence](references/review-evid
 
 - Use `post-merge`. Name the production check, the log line, metric or output that shows the change working, and who runs it.
 - When the merged PR has stacked children, tell their owners at once, as [sequencing](references/sequencing.md) says.
-- After the production check passes, the owner runs `ce-compound` and puts useful learnings in a new docs-only PR, never in a push to the merged PR, which would restart its gates.
-- After a round with waits, the owner lists each wait on a check or reply it could have started earlier, so the next round starts it sooner. Do the same for your own work.
+- After the production check passes, the owner runs `ce-compound` and puts useful learnings in a new docs-only PR before it starts other work, never in a push to the merged PR, which would restart its gates.
+- After a round with waits, the owner reads its own transcript and lists each wait on a check or reply it could have started earlier, so the next round starts it sooner. Do the same for your own work.

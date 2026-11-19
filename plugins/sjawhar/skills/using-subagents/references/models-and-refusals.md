@@ -2,7 +2,7 @@
 
 ## Check the route, not the name
 
-An agent's name does not fix its model: its `model:` field (`omp/agents/<name>.md`) is a first choice, and `retry.fallbackChains` in `omp/config.yml` moves it when a provider or subscription window is unavailable. Before you claim a model family for a verdict, read the child's first `"type":"model_change"` line (`grep -m1`) in its session `.jsonl` under `~/.omp/agent/sessions/<cwd-slug>/<parent-session>/`: its `model` and `resolvedModelIsFallback` fields say what served it.
+An agent's name does not fix its model: its `model:` field (`omp/agents/<name>.md`) is a first choice, and `retry.fallbackChains` in `omp/config.yml` moves it when a provider or subscription window is unavailable. Within a minute of the spawn, not after the bill, read the child's first `"type":"model_change"` line (`grep -m1`) in its session `.jsonl` under `~/.omp/agent/sessions/<cwd-slug>/<parent-session>/`, and cancel a child whose model starts with `openai/` (per-token) that you did not ask for. Read the same line before you claim a model family for a verdict: its `model` and `resolvedModelIsFallback` fields say what served it.
 
 ## Refusals
 

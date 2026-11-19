@@ -5,11 +5,16 @@ description: "Use when creating or updating documentation, READMEs, AGENTS.md fi
 
 # Updating Docs
 
-A skill's own limits, structure and tests are in `writing-agent-skills`; this skill covers what any doc line may say.
+A skill's own limits, structure and tests are in `writing-agent-skills`.
+
+## Write what is true now
+
+- Describe current behavior, in code comments too: readers act on the doc, and git log is the changelog. Delete on sight PR or issue breadcrumbs ("as of #1234"), migration trails ("previously X, now Y"), "NEW:" or "UPDATED:" markers and dated notes.
+- Keep provenance (who, when, the incident) in the commit message or PR body. Outside agent guides and skills, a rule may carry a one-line citation (a link, `file:line`), never a dated story, tally or justifying quote.
 
 ## The test for every line
 
-Keep a line only if all three hold:
+Keep a line of an `AGENTS.md`, `CLAUDE.md` or skill file only if all three hold:
 
 1. A competent engineer new to the repository would get the task wrong, or lose real time, without it.
 2. They cannot find it in the code, `--help`, a test, or a docs page the doc links.
@@ -17,11 +22,10 @@ Keep a line only if all three hold:
 
 Remove always:
 
-- History: dates, incidents, measurements of past events, who decided what, issue keys, links to decisions, pull request numbers as provenance, migration trails ("previously X, now Y"), "NEW:" markers. They go in the commit message or PR body; git keeps the removed text.
-- Restatements of what code, a test or a linter enforces.
+- History: dates, incidents, measurements of past events, who decided what, issue keys, links to decisions, pull request numbers as provenance. They go in the commit message or PR body; git keeps the removed text.
+- Restatements of what code, a test or a linter enforces, and duplicates: a fact lives in one doc, and others link to it.
 - Long explanations of why. Keep one clause where a rule would otherwise look arbitrary.
 - Emphasis as force: NEVER or MUST in capitals, "critical", bold. A rule that needs force is a hook or a check.
-- Duplicates: a fact lives in one doc, and others link to it.
 
 Move a fact to a README or `docs/` page only when that page is where an engineer would look and no page holds it yet; otherwise delete it.
 

@@ -29,7 +29,7 @@ Read `references/repo-merge-rules.md` before you change an enabled auto-merge, m
 - In a stack, watch only the lowest unmerged PR, one babysitter per stack. Do not restack, reorder, split or rewrite it; ask the stack's owner.
 - Every change to what runs (application, infrastructure, tasks, agents, harnesses, and skills or docs that agents or users execute) needs `opening-a-pr`'s step 4 proof at the current head. Only prose that nothing executes has no scenario.
 
-Read `references/proof-and-claims.md` before you certify proof, claim coverage, a guard's safety, no regression or "cannot happen", prove a change that deploys, or bump a fork pin. Read `references/history-and-pushes.md` before you resolve a conflict, integrate a base, push to a reviewed head, or change a stack.
+Read `references/proof-and-claims.md` before you certify proof, claim coverage, no regression or "cannot happen", prove a change that deploys, or bump a fork pin, and `references/guard-probes.md` before you claim a mutation result or a guard's safety. Read `references/history-and-pushes.md` before you resolve a conflict, integrate a base, push to a reviewed head, or change a stack.
 
 ## 2. Start the babysitter
 
@@ -62,7 +62,7 @@ CI:
 
 ## 4. After every push
 
-A push ends readiness. Rerun the step 4 proof for the affected surfaces at the new head, merge resolutions included, update `## Verification`, and rerun the proof of each earlier fix the new diff no longer touches.
+A push ends readiness. Rerun the step 4 proof for the affected surfaces at the new head, merge resolutions and base interactions included, update `## Verification`, and rerun the proof of each earlier fix the new diff no longer touches. Rerun it also when a base merge or a change to a deployed surface can change its result; never on a schedule.
 
 ## 5. Report readiness
 

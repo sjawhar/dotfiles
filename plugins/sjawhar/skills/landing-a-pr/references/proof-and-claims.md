@@ -14,21 +14,13 @@ A change that deploys is proved on an isolated development stack or a recorded t
 - For a changed credential or externally evaluated config, send one real request through the exact consumer, version and environment. Code, stubbed tests and docs that agree do not show the provider accepts it. Do not print credentials.
 - Raise log verbosity only on your own logger: third-party libraries can print credential responses.
 - Coverage needs a positive record of what executed. Zero covered is a failure, and a nonzero count can come from an error body.
-- A tool's verdict has three outcomes: judged good, judged bad, never judged. Read its verdict vocabulary and scope, not its exit code. Mutants: killed, survived, never ran.
 
-## Mutation and guard probes
+## Controls that can disagree
 
-- Name the test and exact assertion a mutation must violate; otherwise a probe can mutate a neighboring guard.
-- Mutate the decision in a scratch copy, run the real consumer, and require the predicted red. Check from inside the run that the copy loaded (`module.__file__` or a head-unique output): an editable install can load the unchanged tree. A setup crash is not a kill.
-- An assertion behind a branch the examples never enter is vacuous: count the examples that reach it. A large pass count never makes up for a surviving mutant.
-- The oracle must not import, call or reproduce the production decision. A fake that filters like production can answer itself.
-- Build fixtures with the real constructor where the contract compares identity (`is`, the same instance). Use the shared constant for fixture paths the consumer reads.
-- Plant a defect where the guard might not look (nested or new paths, aliases, other scopes), and require a red. A widened guard also needs a probe in the old region. A text pattern over free-form traffic finds some cases, never all.
-- Relaxing a guard: name the newly accepted case, and reproduce it and the still-refused boundary. Tightening: measure the legitimate ordering it now refuses, including a stall shorter than a new timeout.
-- A guard moved earlier needs a probe that reds if it moves back. Pinning source text, a YAML literal or a default is not behavior coverage.
-- Defense in depth: revert each control alone and record what the rest still protects.
-- A second defect from the same test driver (the harness code that feeds inputs to the system under test): audit the whole driver against the contract, and write the invariant that closes the family.
-- When the fix grows larger than the choice that caused it, review that choice.
+- Before a probe, write what the old version, the broken version and a failed instrument would return; the signals must differ. A negative control must fail for the named contract, not a setup error, stale import or timeout.
+- For mutable live state, show fire and no-fire on fixtures first. Without fixtures, run a positive control in the same call, query shape and access path, proven on known-good and known-bad inputs. A control with the measurement's blind spot proves nothing.
+- A tool's verdict has three outcomes: judged good, judged bad, never judged. Read its verdict vocabulary and scope, not its exit code. Mutants: killed, survived, never ran; put a clean control beside each.
+- Before you conclude from a result list, name the other explanation and look for the entry it predicts. Absence decides only when the read is complete and can find that shape. Back a keyword filter with a differently shaped source or the emitter's code, and test exact-match and prefix behavior on a known result.
 
 ## Keep each claim within its evidence
 
@@ -36,6 +28,7 @@ A change that deploys is proved on an isolated development stack or a recorded t
 - Read when something happened from the event record (timeline event, audit log), not from current fields such as `updated_at`.
 - A claim about another branch, deployment or release expires when it changes.
 - Summarize a run from its terminal categories (failed, passed, errors). A pass count does not prove a named test ran; read the per-test artifact.
+- Prove "all failures are X" with the not-X residual, and state the population, window, unit and retrieval limit.
 - Before "X requires Y", look for X without Y in the same evidence.
 - Write "cannot happen by construction" only with the construction: the type, check or code path that prevents it.
 - Put an accepted deviation or verification limit in the PR body. A regression row that passed before the fix is not evidence of the fix.
@@ -43,8 +36,8 @@ A change that deploys is proved on an isolated development stack or a recorded t
 ## Scope and generated artifacts
 
 - Describe scope from the complete file list and diff, measured against workflow path filters and consumer paths, not the body's intent.
-- A census of callers searches callers of the shared helper and code that does the same thing without it. Count again at the ref under judgment.
-- When serialization changes, search for consumers that compare (hashes, signatures, golden files, stored bundles). Run a differing fixture at head, base and main before you regenerate it.
+- A census needs a defined population and an instrument that finds every shape: search callers of the shared helper and code that does the same without it, add a synonym and compare the found sets, prefer an authoritative inventory to prose counts, and count again at the ref under judgment, the merged tree included.
+- When serialization changes, search for consumers that compare (hashes, signatures, golden files, stored bundles). Run a differing fixture at head, base and main before you regenerate it. After an intentional redesign, re-derive an inherited harness expectation; never call its failures expected or delete the evidence.
 - Prove "text-only" by restoring the old text in a scratch copy and comparing raw stdout, stderr, exit status and files.
 - Set an acceptance target from the part of the measured cost the change can affect.
 - A fork-pin bump carries `## Production behavior delta` in the PR body: each behavior change per release member, with concrete values and fork-only policy marked, or `none`.

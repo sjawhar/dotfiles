@@ -20,7 +20,7 @@ Read this in Phase 5, and before you delete a tree in which a container left roo
    - tc-fixture: delete without its ryuk only at `orphan-no-ryuk`. A manual delete of a fixture whose ryuk exists can collide with the ryuk's removal.
    - agentbox: never.
    - other: delete only eval or task sandboxes, never service containers (postgres, nats, registries, envoy, buildx). A sandbox is an orphan when no eval process exists and nothing names it, or when its only holder is a dangling `docker exec -it ... bash`: kill the shell, then `docker compose -p PROJECT down -v`. If a live session can be the owner, ask it first.
-   - A container's bind-mounted output appears in no docker measurement: measure the directory it writes to.
+   - A container's bind-mounted output appears in no docker measurement: measure the directory it writes to, and cap that output from inside the container.
 6. `docker volume prune -f` (dangling only, attached to no container). Always safe.
 
 ## Root-owned files a container left on a bind mount

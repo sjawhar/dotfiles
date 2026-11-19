@@ -40,17 +40,18 @@ The lines each kind of lane needs on top of `SKILL.md`.
 - Count a content pattern in the corpus that produces the data, not in the sample you hold.
 - Carry the denominator beside every count. Do not conclude while the population is implausibly small or still growing. Find which source produced a row labelled UNKNOWN before you treat it as a finding.
 - Include in the case set the case your claim says cannot happen, and name it in the report.
-- Where two implementations of one contract coexist, an end-to-end pass proves only the one it drove: require a parity check against the other.
+- Where two implementations of one contract coexist, an end-to-end pass proves only the one it drove. Make parity a required check: name the other twin and ask for a decision-table comparison.
 - A moving pin (`@main`) resolves at launch: read the resolved commit from the run's own packages.
-- Trace a value to where it is written before anything depends on its name. Read the field that defines membership (the full registry id, the owner table, the population key), not one that describes it.
+- Trace a value to where it is written before anything depends on its name: open the file or function an import or reference points to, and do not infer its behaviour from its name. Read the field that defines membership (the full registry id, the owner table, the population key), not one that describes it.
+- Guard an empty or missing value before the comparison it flows into, and make the guard say the input was missing.
 
 ## Relaying rules and premises
 
 - Hand over a premise with the instruction that would falsify it.
 - A rule you put in a brief is a copy you now own: retracting it means finding every brief that carries it. Check whom the source addressed before you relay it.
-- Point at a skill rather than paraphrasing it. Head any restatement "the skill is the authority; where they differ, the skill wins".
+- Point at a skill rather than paraphrasing it. Head any restatement "the skill is the authority; where they differ, the skill wins". Audit a relayed block against the skill line by line and report the clean lines too, and keep the block in a file, not in a kernel cell rebuilt from memory.
 - Restating a claim more strongly than its source makes the stronger claim yours: mark it unmeasured or do not send it.
 - Re-derive a scout's test matrix from the scout's own predicate before a builder gets it; a builder pins the table as given.
 - "On main" in a brief is a branch name; the worker measures whatever tree its workspace holds.
 - Before you name a contract field's type, run the constructor.
-- A brief about a system the worker will reason about (a fork, an installed package) names the code to read first and asks for a `file:line` citation for every claim about its behaviour. An uncited claim is an assumption.
+- A brief about the evaluation stack (an eval framework or its forks, the platform that runs it, its model proxy) names the code paths to read first, the fork checkout or the installed package under the venv, and asks for a `file:line` citation for every claim about how they behave. An uncited claim is an assumption. Where the repository keeps a known-misreads list, name it as the first read.

@@ -19,7 +19,6 @@ secret-run --register --reason '<what and why>' GITHUB_ADMIN_PAT -- sh -c 'GH_TO
 ```
 
 - Sami approves the broker's grant card once per session. `--register` gives a session with no broker identity one, with no restart.
-- The gh shim's `REFUSED by GitHub` message prints this command for the refused call.
 - The token never skips a check that tests the work.
 
 ## Approvals
@@ -29,9 +28,11 @@ secret-run --register --reason '<what and why>' GITHUB_ADMIN_PAT -- sh -c 'GH_TO
 - You may approve a pull request your own session wrote when the work had cross-family review under `sdd` and Sami authorized the work.
 - An approval counts only at the head it names: a push after approval needs a new review and approval at the new head.
 
-## A check over a shared budget
+## A check over a shared budget or a total
 
 A required check that measures a budget several PRs share (a word or line count, a file or bundle size, a quota) runs on each head, not on the merged result, so each head can pass while their sum fails on the base branch. Before you enable auto-merge, measure your PR together with every open PR that touches the budgeted files, and check whether the guard runs in the merge queue's build. Put the margin in the body ("1,999 of 2,000", not "passes").
+
+A guard that reads a diff cannot see the state: a repository can be clean on every commit and dirty in total. Where the total matters, scan the tree on a schedule as well as the diff on a push.
 
 ## trajectory-labs-pbc/agent-c
 

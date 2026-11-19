@@ -60,4 +60,4 @@ Session transcripts from many hosts load into one ClickHouse store, read with `t
 ## When the store does not have it
 
 - The store trails the live files, by about ten minutes when loads run. `tq` warns on stderr when a host's last load is over 30 minutes old; that host's newer lines are only in its raw files.
-- Read raw files by hand only for what the store lacks, and never scan a whole sessions tree: other sessions share the machine's CPU and disk.
+- Read raw files by hand only for what the store lacks, and never scan the whole sessions tree on sami-rocqperf: other work shares its CPU and disk.

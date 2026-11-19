@@ -26,7 +26,7 @@ The commands are git's. In a jj checkout, jj records conflicts in the commits an
    - Trace renamed or changed interfaces to consumers no compiler sees: string-keyed registries, import loaders, monkeypatch targets.
    - Run focused tests while you fix. Before you publish, run the affected packages' syntax, type, lint and test commands as CI runs them, with the same test layout.
    - Before you name a failure's cause, run the same commands in the same environment on the base: the base's own failure is not yours.
-   - Fix every failure before you publish, the base's own included, or get the user's approval to leave one out.
+   - Fix every failure before you publish, the base's own included, or state the fix it needs and get the user's explicit approval to leave it out. "Pre-existing" is not a resolution.
 5. Done when no conflict is left, every check in step 4 passes, the result is pushed, and `git log <base>..HEAD` has no commit that only undoes or repeats another.
 
 ## Stop and rethink before you

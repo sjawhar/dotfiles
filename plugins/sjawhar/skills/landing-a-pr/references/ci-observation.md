@@ -32,6 +32,7 @@ gh run rerun <run-id> -R <owner>/<repo> --failed
 ```
 
 - Take the run ID from the snapshot's failing-check URL. Annotations and a finished job's log are readable while the run is still pending.
+- A job's log, `gh api repos/<owner>/<repo>/actions/jobs/<id>/logs`, prints nothing unless you pass `--allow-escape-sequences`.
 - Classify by mechanism, not step name, error string or color. Before "all failures are X", read every not-X row.
 - Before the next run, write the predicted failure signature and what refutes it. Keep setup, timeout and assertion failures apart; a crash is not a passing negative control.
 

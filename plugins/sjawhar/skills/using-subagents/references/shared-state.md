@@ -14,6 +14,10 @@
 - Pass a credential to the one command (`env AWS_ACCESS_KEY_ID=… aws …`), and run `aws sts get-caller-identity` before any mutation.
 - For a test-gate line, report the interpreter path from the pytest header, not the command you typed.
 
+## The eval kernel
+
+Each subagent gets its own eval kernel, but a tool you define with `@tool` and pass in `tools` runs in yours: sibling children's calls overlap, share its top-level names and state, and fail together if your kernel is reset. Rebuild state from files on disk before each write, assert that an output's keys equal its input chunk's, serialize calls that must not overlap (an `asyncio.Lock()` in an async tool), or run long work as detached subprocesses.
+
 ## When the harness bash tool breaks
 
 A subagent without an eval tool (`deep` has none) cannot "use eval instead". Define a tool in your own kernel and pass its name: `@tool def shell(command, timeout_seconds)` running `subprocess.run(["bash", "-lc", command])` and returning the exit code with both streams, then dispatch with `tools: ["shell"]` (or `agent(..., tools=["shell"])`). The tool keeps no state between calls.

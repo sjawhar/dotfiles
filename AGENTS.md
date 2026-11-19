@@ -41,15 +41,16 @@ Read the guide of each directory you change:
 ## Conventions
 
 - **Everything committed is portable.** No committed file holds an absolute path: use `$HOME`, `$DOTFILES_DIR` or a relative path. A committed symlink has a relative target inside the repository, never in gitignored `vendor/`. Per-machine links and paths are made by the installers at install time, never committed.
-- Sami's own software installs from GitHub at a pinned tag or SHA (`mise.toml`, `omp/plugins/package.json`). A local path or a symlink to a checkout is for a prototype and never lands. When a consumer needs something from the source repository (an `omp` manifest, an export, a release asset), change that repository; never commit its build output.
+- Sami's own software installs from GitHub at a pinned tag or SHA (`mise.toml`, `omp/plugins/package.json`). A local path or a symlink to a checkout is for a prototype and never lands; the one exception is a `file://` plugin entry for a script in this repository. When a consumer needs something from the source repository (an `omp` manifest, an export, a release asset), change that repository; never commit its build output.
 - Placement: `shims/` holds wrappers and one data file, `shims/person-names`; `scripts/` holds commands (no `.sh` on a command run by name); `installers/` setup; `bin/` binaries only; a configuration directory holds configuration only. Third-party code is cloned into `vendor/` by `ensure_vendor` and never edited there. Read a directory's sibling files before you add one.
 - `shims/omp` and `scripts/cld` (`cld [--profile NAME]`, Claude Code) exec the agent through `scripts/agent-session`, the session environment every launcher shares; its header lists each part. `session_env()` in `scripts/agentbox` builds a box's. A change every session needs goes in both: a launcher without it makes its sessions act as Sami on GitHub or Google Cloud.
 
 ## The live checkout
 
 - `~/.dotfiles` is production: every session and systemd user unit on the machine reads its files, so an edit is live when it is saved, before any commit. Test a change to a shim or a script from a copy outside the checkout, and save it here only when it is ready.
-- Write a shim or a script atomically: a temporary file in the same directory, then `mv` over the path. A file truncated in place is, for a moment, an empty executable that exits 0 and does nothing.
-- The checkout always holds other sessions' uncommitted work. Do not stash, reset, check out or move it aside; commit only your own paths.
+- Write a shim atomically: a temporary file in the same directory, then `mv` over the path. A shim truncated in place is, for a moment, an empty executable that exits 0 and does nothing.
+- A tool that copies a script to its own path checks the copy against its intended source (`cmp`) afterwards: a complete copy of the wrong file passes every other check. A file byte-identical to another tracked file is that corruption; restore it from `git show HEAD:<path>`, not by hand. A file that only differs from `HEAD` is someone's edit.
+- The checkout always holds other sessions' uncommitted work. Do not stash, reset, check out or move it aside, or make a separate worktree to get around it; commit only your own paths.
 - When you change something Sami uses (his skills, omp, the shims), tell him what the change will do, then what it did.
 
 ## Publishing a change
@@ -57,7 +58,7 @@ Read the guide of each directory you change:
 Every change reaches `main` through a pull request. In `~/.dotfiles`, a colocated jj checkout whose git HEAD is detached by design:
 
 1. Read `jj status`, and leave out every path that is not yours.
-2. `jj commit <your paths> -m '<what and why>'`: one described commit per topic.
+2. `jj commit <your paths> -m '<what and why>'`: one described commit per topic, so a session lands as one or two commits, never one per step or file.
 3. `scripts/dotfiles-publish <commit>`. It tries the rebase onto origin's main on a duplicate first and refuses a conflict with every file left as it was, then pushes `dotfiles-publish/<change id>`, opens the pull request and squash-merges it.
 4. Exit 3: the commit changes a file `.github/CODEOWNERS` gives an owner (every `AGENTS.md`, `CLAUDE.md`, `SKILL.md` and `skills/` file), so the pull request waits for Sami's review. Run the same command again after he approves.
 
@@ -67,7 +68,7 @@ Through the shims, a commit, a push or a gh call whose text holds a listed leak 
 
 ## Tests and lint
 
-- Python, installers included: `uvx pytest scripts/tests shims/tests`. One file: `uvx pytest scripts/tests/test_ensure_link.py`.
+- Python, installers included, from the repository root: `PYTHONPATH=. uvx pytest scripts/tests shims/tests` (some tests import `scripts.tests`). One file: `uvx pytest scripts/tests/test_ensure_link.py`.
 - omp extensions: `bun test omp/extensions/__tests__/`. CI runs it on each change under `omp/extensions/`.
 - Envoy, in `envoy/`: `npm ci && npx tsc --noEmit`. CI runs it on each change under `envoy/`.
 - A skill's script tests sit in its `scripts/` directory (`plugins/AGENTS.md`).
@@ -76,6 +77,7 @@ Through the shims, a commit, a push or a gh call whose text holds a listed leak 
 ## Environment Facts
 
 - Personal vs. company boundary: company infrastructure repositories must not reference `~/.dotfiles`, and the dotfiles install is not part of company machine provisioning.
+- Envoy tools exist only in Sami's own sessions: do not tell anyone else to use them.
 - systemd user lingering must stay enabled (`loginctl enable-linger <user>`): without it the user's services die with the last login session. Cleanup of "lingering processes" is unrelated; do not disable linger.
 - To show Sami a file on a dev box, send the URL `forward url <path>` prints. A `file://` link or a hand-written `localhost:12802` link opens the path on the wrong machine. `forward port <port>…` makes a port on a dev box, or in an agent box, reach his laptop's `localhost`.
 - A dev box reaches the laptop's YubiKey through forward's pcsc channel (`forward doctor` shows it). On the laptop, polkit refuses PC/SC to SSH-session processes and permits systemd `--user` ones: test with `systemd-run --user`, never a raw SSH shell.

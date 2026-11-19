@@ -13,7 +13,7 @@ All of Theorem's spend is in the BigQuery dataset `theorem-agent-infra.agent_spe
 bq query --project_id=theorem-agent-infra --use_legacy_sql=false --maximum_bytes_billed=5000000000 '<SQL>'
 ```
 
-- Always pass `--maximum_bytes_billed`: nothing else stops a large query, and a full scan of `otel_raw` reads many GB.
+- Always pass `--maximum_bytes_billed=5000000000` (5 GB): nothing else stops a large query, and a full scan of `otel_raw` reads many GB.
 - On a table you have not queried before, run with `--dry_run` first: it prints the bytes it would read and bills nothing.
 - Refused `bigquery.jobs.create` in `theorem-agent-infra`: run the same query with `--project_id=autoformalization` or `--project_id=theorem-research`. If no project lets you run it, or the table itself says "Access Denied", report it on Dispatch (`dispatch search --query 'agent_spend access'`) instead of looking for another way in.
 

@@ -1,6 +1,6 @@
 # omp
 
-Configuration for oh-my-pi (omp), the agent harness. The binary is a fork release pinned in `mise.toml`; this directory holds what it reads. Each extension's header comment is its documentation. A bare path below is relative to `omp/`; one starting `scripts/`, `shims/`, `installers/` or `plugins/sjawhar/` is relative to the repository root.
+Configuration for oh-my-pi (omp), the agent harness. The binary is a fork release pinned in `mise.toml`; this directory holds what it reads. Each extension's header comment is its documentation. A bare path below is relative to `omp/`; one starting with another top-level directory is relative to the repository root.
 
 ## How it is wired
 
@@ -51,7 +51,8 @@ Configuration for oh-my-pi (omp), the agent harness. The binary is a fork releas
 ## Plugins, extensions, agents
 
 - Plugin pins (`omp/plugins/package.json`, `bun.lock` and `omp-plugins.lock.json` beside it) change only by a commit; each machine installs them with `bun install --frozen-lockfile`. Do not edit a pin or run a plain `bun install` or `bun add` in a machine's live `~/.dotfiles`.
-- A pin bump must redo each patch in `omp/plugins/patches/` (`bun patch <name>`, then `bun patch --commit node_modules/<name>`): bun skips a patch whose key no longer matches, with no error.
+- A pin bump must redo each patch in `omp/plugins/patches/` (`bun patch <name>`, then `bun patch --commit node_modules/<name>`): bun skips a patch whose key no longer matches, with no error. Drop a patch only once the pinned version carries the fix.
+- Do not `mise prune` or remove an omp version directory while a running omp uses it: sessions re-exec their own binary path (hence `auto_prune = false` in `mise.toml`).
 - `extensions/` holds dotfiles-owned extensions only. Anything else is a plugin pinned from GitHub, never a path or a link to a checkout.
 - A new extension loads only after you add its `ensure_link` line to `installers/omp.sh`. Link the entry file only; its relative imports resolve from the link's real path.
 - `hooks/post/jj-snapshot.ts` is the only jj snapshotter: add no other, and never await or kill a snapshot (its header says why).

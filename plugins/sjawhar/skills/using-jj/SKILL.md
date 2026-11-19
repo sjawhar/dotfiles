@@ -5,14 +5,13 @@ description: "Use when doing version control in a checkout that has a `.jj` dire
 
 # Using jj
 
-In a jj repository use jj, not git: git writes can desync jj. The git commands here are read-only checks or named exceptions. Every jj command first snapshots the working copy into `@`, so there is no staging. Change IDs survive rewrites; commit IDs do not.
+In a jj repository use jj, not git: git writes can desync jj. The git commands here are read-only checks or named exceptions. Every jj command first snapshots the working copy into `@`, so there is no staging. Change IDs survive rewrites; commit IDs do not. Use the identity already configured; a missing one is not permission to invent one or change shared user config without the user's authorization.
 
 All workspaces of a repository share one commit store and one operation log, so an undo or a rewrite you run changes what every other session sees.
 
 Local helpers:
 - `jj-agent-status` (`--deep`, `--json`): where you are, other agents' work and what needs attention. Run it at session start.
-- `jj agent-log [-r <revset>]`: one JSON object per commit (an alias in `.jjconfig.toml`).
-- `jj tug`: moves the closest bookmark below `@` up to `@`.
+- `jj agent-log [-r <revset>]`: one JSON object per commit (an alias in `.jjconfig.toml`). `jj tug` moves the closest bookmark below `@` up to `@`.
 - `JJ_CONFIG= jj ...` ignores this machine's config, for a test repository. `XDG_CONFIG_HOME` does not hide `~/.jjconfig.toml`.
 
 ## 1. Know where `@` is
@@ -36,7 +35,8 @@ Local helpers:
 ## 3. Protect the shared store
 
 - Do not run `jj undo`, `jj op restore` or `jj op revert` in a shared repository, even on your own operation: they rewind state every workspace sees. Repair forward with one new commit, or `jj restore --from <rev> <your paths>`.
-- Every rewrite moves the commits stacked on it: `describe`, amend, `squash`, `abandon`, `absorb`, every `rebase`. Before one, run `jj log -r '<rev>::'` and get the agreement of the owner of every commit and bookmark it lists.
+- Every rewrite moves the commits stacked on it: `describe`, amend, `squash`, `abandon`, `absorb`, every `rebase`. Before one, run `jj log -r '<rev>::'` and get the agreement of the owner of every commit and bookmark it lists. Do not pipe a rewrite, which hides its exit code and first error; check it with `jj log` afterward.
+- Run `jj absorb` only on a merge of several branches at `@`; for one ancestor use `jj squash --into`, or `jj edit <change>` then `jj new`. It leaves new and conflicted files in `@` and records conflicts in destinations: read `jj diff` and `jj log -r ::@` after.
 - Mutate only change IDs you name. A broad set (`mine()`, `empty()`, `divergent()`, `all:`, an open range such as `main@origin..`) matches other sessions' commits.
 - Never run a bare `jj restore` or `jj abandon`: name the source and the paths, `jj restore --from <rev> <paths>`, in your own workspace.
 - After a failure, read the whole error, `jj status` and `jj log -r '@ | @-'`, then make one correction.
@@ -64,7 +64,7 @@ Local helpers:
 
 - Ancestry is a graph query: `jj log -r '<fix> & ::<pin>'` (empty means absent) or `git merge-base --is-ancestor <sha> <ref>`. A PR title, a push time, a log window or an issue's status does not answer it. To find an issue's commit on main: `jj log -r '::main@origin & description(substring:"<KEY>")'`.
 - For what your work changed, diff the commit against its parent: `jj diff -r <rev> --stat`. `git diff trunk..feat` across a moved trunk counts trunk's work as yours.
-- `jj diff` has no `--numstat`, and its diff algorithm is not git's. For figures compared with GitHub's, use `git diff --numstat` or `gh api repos/<o>/<r>/pulls/<n>/files`.
+- `jj diff` has no `--numstat`, and its diff algorithm is not git's. For figures compared with GitHub's, use `gh api repos/<o>/<r>/pulls/<n>/files` or `git diff --numstat` at git's default algorithm (a configured `diff.algorithm` changes counts), and check each row.
 - A long-lived working copy is not main. Test main in its own directory: `git archive origin/main | tar -x -C "$(mktemp -d)"`.
 - `jj file show` prints nothing and exits 0 for a glob that matches nothing. A literal path that matches nothing errors, which `2>/dev/null` or `$(...)` hides. Count bytes (`wc -c`) before you call content absent.
 - If `jj git fetch` exits 0 but the ref did not move, compare `git ls-remote origin <branch>` with `jj log -r '<branch>@origin'`.

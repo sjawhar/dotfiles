@@ -32,7 +32,7 @@ gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<node
   4. The probes or mutants each reviewer reruns at the new head.
   5. What to post: one comment, verdict first, naming the full head in the verdict-line format `pr-gate` parses (read its source for the pattern). Do not write a verdict line in the request itself: the parser can read it as an approval.
 - Decide how deep a re-review goes from what the round changed. A runtime-resource change needs real re-proof, not a textual re-cite.
-- For silent failure modes, several readings of one guard cannot show coverage outside its reach. Use complementary reviewers, and have the tester plant the defect where the guard does not look (`proof-and-claims.md`, "Mutation and guard probes").
+- For silent failure modes, several readings of one guard cannot show coverage outside its reach. Use complementary reviewers, and have the tester plant the defect where the guard does not look (`guard-probes.md`).
 
 ## Review gates tied to a head
 

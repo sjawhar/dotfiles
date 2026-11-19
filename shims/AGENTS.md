@@ -12,9 +12,10 @@ shim's header and comments say what it adds; this guide holds the rules that spa
 
 ## Where the header is not enough
 
-- `gh` is not thin: for an agent it routes a call through `knives gh` to the owner's GitHub App
-  and refuses one with no repository (`scripts/gh-routed-only`). Text passes `public-text-gate`
-  and the leak-term check, a cited approval `gh-approved-post`, a read `gh-read-cache` (`scripts/`).
+- `gh`, for an agent, routes a call through `knives gh` to the owner's GitHub App, or to the
+  upstream token `GH_PUBLIC_REPO_PAT` for an owner with no installation, and gives gh the
+  placeholder login of `scripts/gh-agent-config`. Text passes `public-text-gate` and the
+  leak-term check (`scripts/`).
 - `tmux` also marks what an agent starts and refuses its server-stored commands ("Who is an agent").
 - `person-names` is data: names `scripts/person-branch-guard` refuses at the start of a branch name.
 
@@ -73,6 +74,7 @@ A caller can give a shim its own HOME and a bare PATH: a Legion test pane runs w
 - gh text also reads each knives `repos.toml` and `repos.local.toml` entry's `forbidden` list.
 - A term matches anywhere, inside words too, case ignored; a run of spaces matches spaces or tabs.
 - `scripts/leak-terms-check` is the one matcher; a caller treats any nonzero exit as a refusal.
-- A refusal prints the text that matched: never send one to a log, CI or any public place.
+- A refusal prints the text that matched, so none may reach a public place (a post, a public
+  CI job) until it shows each match's kind (`<term>`) in place of the text.
 - Tests get an isolated list from `shims/tests/leak_terms_fixture.py`; a test that builds its
   environment from nothing uses `leak_check_environment(path)`.

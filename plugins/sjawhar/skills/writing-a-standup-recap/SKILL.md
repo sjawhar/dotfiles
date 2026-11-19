@@ -50,7 +50,8 @@ The rules reviewer checks the draft against each rule here, one at a time.
 - Another person's work is theirs: a company total is not evidence that our agents delivered it. Their number may
   appear as a labelled comparison.
 - Each missed goal, with its date and where we are. Use only the targets Sami set: no soft targets, no far-off dates.
-- Under "This week", what actually ships, arranged in advance, not an intention.
+- What actually ships today ("This week" on a weekly page), arranged in advance, not an intention and not redefined
+  at each check-in.
 - Only real blockers. A to-do is not a blocker, and Sami is never the blocker: decisions that need him go in the
   private note.
 - A shared event once, and nothing the reader already knows.

@@ -89,16 +89,7 @@ A `Sami's call: yes` that leads to no ask is silent action where approval was ne
 
 ## Away mode
 
-Only his saying he is away ("going to bed", "not at my laptop") starts away mode; silence does not, because he
-answers from his phone at odd hours.
-
-1. Send the question to this proxy and to a second strong model, such as the `oracle` agent.
-2. Decide and record each part that is not his authority, taste or risk appetite.
-3. Dispatch only the rest. For an act only he can perform, use another route CLAUDE.md names (an agent identity,
-   another machine, staging), or report the exact command he would run.
-4. A step that can be reverted when he is back does not wait for him. A lead answers for him an ask of a kind he
-   has answered before. Ask for the credentials you will need before he goes. A destructive or irreversible act
-   still waits.
+Read `references/away-mode.md` when Sami has said he is away. Silence does not start away mode.
 
 ## Routing to someone else
 
@@ -109,3 +100,7 @@ answers from his phone at odd hours.
 - Before a send to a session id, check that `envoy_sessions` still lists the session. A publish to an unclaimed role
   fails with HTTP 404, but a dead session takes a send silently.
 - When asked what you wait on, audit the holds in your ledger, not only your asks.
+
+## Editing this skill
+
+After an edit, measure again the authority and format failure rates of real asks (baselines 30.3% and 10.5%) with `skill-evals`: without them nobody can tell whether the edit made asks worse.

@@ -73,3 +73,5 @@ wc -l -c <skill dir>/SKILL.md <skill dir>/references/*.md
 ```
 
 The limits are in SKILL.md, "Limits". For a rewrite, pass `--old` with the copy from "Before you start"; `--help` says what it fails on. If meeting its bar would drop a rule, keep the rule and give the byte count and the reason in the commit message.
+
+After the rewrite lands, run the check with `--log ~/.cache/skill-sizes.tsv` (one dated row per skill) daily for a week, and report the growth: rewritten instruction files regrow.

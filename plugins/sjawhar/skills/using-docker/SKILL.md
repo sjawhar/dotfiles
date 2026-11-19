@@ -44,15 +44,17 @@ Docker, depot and registry access work on this machine; before you say one is un
 - `docker stop` returns before `--rm` removal finishes, so a reused `--name` can collide.
 - Start a `docker run` you may interrupt with `--init`: killing the client (`timeout`, Ctrl-C) leaves the container running when PID 1 has no signal handler. Stop yours with `docker rm -f <name>`.
 - Port unreachable: the app must bind `0.0.0.0` inside the container; then compare `docker port <c>` with your `-p`.
-- `-p 8080:8080` publishes on every host address, the public one included, and Docker's rules run before the host firewall, so `ufw deny` does not close it. Publish to `127.0.0.1:8080:8080` and serve our own people and machines over the VPN (`tailscale serve`). Docker Engine before 28.0 lets hosts on the local network reach even a loopback-published port: check `docker version`. Publish publicly only for a named outside caller that cannot join the VPN, and name it in the repo's docs.
+- `-p 8080:8080` publishes on every host address, the public one included, and Docker's rules run before the host firewall, so `ufw deny` does not close it. Publish to `127.0.0.1:8080:8080` and serve our own people and machines over the VPN (`tailscale serve`). Docker Engine before 28.0 lets hosts on the local network reach even a loopback-published port: check `docker version`, and update or filter the port on the host. Publish publicly only for a named outside caller that cannot join the VPN, and name it in the repo's docs.
 - A container fails or answers wrongly: read `docker logs <c>`, then `docker exec <c> sh -c 'ps; curl -s localhost:<port>'` (no `-it`: an agent session has no TTY) before you propose a cause.
 - Copy files out of an image with no CMD: `docker create --name <n> <img> true`, `docker cp <n>:<path> <dest>`, `docker rm <n>`. Without `true`, `docker create` fails with "no command specified".
 
 ## Dockerfiles
 
+- Keep a `.dockerignore` that excludes `.git`, dependency dirs, build artifacts and env or secret files: the build context can leak them into the image.
 - Put secrets in neither `ARG` nor `ENV`: `docker history` keeps both. Use `RUN --mount=type=secret,id=<id>` and read `/run/secrets/<id>`, then check `docker history --no-trunc <img>`.
 - `ARG` exists only at build time; config the running app reads goes in `ENV` or `-e`.
 - Use exec-form `CMD`/`ENTRYPOINT` (`["bin", "arg"]`); in shell form PID 1 gets no signals and `docker stop` waits 10 s, then kills.
+- Run as non-root: a user with explicit UID/GID, `USER` before `CMD`, `COPY --chown`.
 - A `HEALTHCHECK` (needed for compose `depends_on: condition: service_healthy`) must probe with a binary the image has.
 
 ## A `docker rm -f` or `docker inspect` that never returns

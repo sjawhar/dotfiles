@@ -11,9 +11,9 @@ An agent guide (AGENTS.md, CLAUDE.md) follows `updating-docs` instead. Every lin
 
 - `description`: starts "Use when", at most 300 characters, says when to load the skill and never its steps: an agent that reads the steps there follows them and skips the body.
 - Put the trigger words first, with the case where the agent thinks it can do without the skill ("also when the diff is pasted inline"). omp shows the model a hint of about 12 words made from the description, or its first 99 characters until that hint exists.
-- SKILL.md body: at most 150 lines and 8 KB (8,192 bytes). It holds the routing and the rules the model would not follow by default. Required steps and stop rules go first, because a cut keeps only the start.
+- SKILL.md: at most 150 lines and 8,000 bytes, frontmatter included (`check_skill.py` warns above that). It holds the routing and the rules the model would not follow by default. Required steps and stop rules go first, because a cut keeps only the start.
 - References: in `references/`, one level deep, each at most 150 lines and 8 KB. Name each one in SKILL.md at the step that needs it, with the condition: "Read `references/<topic>.md` when ...". Merge a small reference into SKILL.md; delete one nothing names.
-- Keep every other frontmatter key (`name`, `mcp:`) as it is, and never rename a skill or its directory. Code and other skills name skill paths: `git grep -n <file name>` before you move or delete a file, and fix each namer in the same change.
+- Code, prompts and other skills name skills and their paths, and code reads some frontmatter (`mcp:`): `git grep -n <name>` before you rename, move or delete one, and fix each namer in the same change.
 - Check: `python3 ~/.dotfiles/plugins/sjawhar/skills/writing-agent-skills/scripts/check_skill.py <skill dir>...`. Fix each FAIL and each warning. It does not count lines or measure reference files, so also run `wc -l -c` on SKILL.md and each reference.
 
 ## 1. Decide that a rule is needed

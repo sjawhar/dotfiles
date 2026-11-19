@@ -22,7 +22,8 @@ Read when a packet reports no findings, no checks, missing content, an expected 
 
 ## Counts and negative findings
 
-- An absence claim names where it looked, on the current PR head. Content absent only in a stale checkout or on the base branch can be on the head or another recorded branch: search there before anyone writes a replacement.
+- Put the population, revision, paths and pagination limits beside a count. A grep counts matches, not consumers, behaviors or PRs.
+- An absence claim names where it looked, on the current PR head, with callers checked. Content absent only in a stale checkout or on the base branch can be on the head or another recorded branch: search there before anyone writes a replacement.
 - "Flagged, unverified" is an investigation, not a proven defect a fixer must explain.
 - A notice printed before single-line JSON must not make a line filter drop the payload: use structured output.
 - A head-limited search of review text can show only historical blocker tokens and hide the final verdict.
