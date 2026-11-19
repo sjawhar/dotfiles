@@ -431,6 +431,34 @@ class GhLeakTerms(unittest.TestCase):
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv, env=env), argv)
 
+    def test_the_repository_an_endpoint_or_a_url_names_is_not_read_as_its_text(self) -> None:
+        # Given the knives ygo-fork list and theorem-labs/ygo public: a write that names the repository by its API
+        # endpoint, by a pull request or issue URL, or as the repository `repo edit` changes goes there as the -R
+        # forms do. Its name is the call's address, not text it sends (dispatch://INFRA-3365, tester round 1).
+        env = self.ygo_fork()
+        self.answer(YGO, "public")
+        url = f"https://github.com/{YGO}"
+        for name, argv in (
+                ("api comment", ["api", f"repos/{YGO}/issues/1/comments", "-f", "body=hello"]),
+                ("api review reply, leading /", ["api", f"/repos/{YGO}/pulls/5/comments/123/replies", "-f", "body=ok"]),
+                ("api -X POST release", ["api", "-X", "POST", f"repos/{YGO}/releases", "-f", "tag_name=v1.55.1-t.9"]),
+                ("pr comment URL", ["pr", "comment", f"{url}/pull/1", "--body", "hello"]),
+                ("pr review URL", ["pr", "review", f"{url}/pull/1", "--approve", "--body", "ok"]),
+                ("issue comment URL", ["issue", "comment", f"{url}/issues/1", "--body", "hello"]),
+                ("repo edit", ["repo", "edit", YGO, "--description", "a fork"])):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=env), argv)
+        # Control: a term of the list in the rest of what the call sends there is still refused: the part of an
+        # endpoint after the repository (the path of a file a PUT makes), and a body sent to a URL's pull request.
+        for name, argv, field in (
+                ("api PUT contents", ["api", "-X", "PUT", f"repos/{YGO}/contents/notes-INFRA-1.md", "-f", "message=m",
+                                      "-f", "content=aGk="], "argument 1"),
+                ("pr comment URL --body", ["pr", "comment", f"{url}/pull/1", "--body", "Fixes INFRA-1"], "--body")):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(argv, env=env), field, "INFRA-", YGO_LIST, line=1)
+
     def test_a_graphql_mutation_is_judged_by_the_repositories_of_its_nodes(self) -> None:
         term = REGISTRY_TEST_TERMS["oh-my-pi"][0]
         self.answer("cybermonklabs/oh-my-pi", "public")
