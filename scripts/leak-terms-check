@@ -2139,7 +2139,11 @@ GH_STDIN = "DOTFILES_LEAK_TERMS_GH_STDIN"
 # Every gh command that sends text, with its options as `gh <command> <subcommand> --help` lists them at gh 2.98.0, the
 # version mise.toml pins: (the options that take a value, the options that take none), a short and a long spelling
 # joined by `/`. shims/tests/test_gh_leak_terms.py compares the tables with the gh on PATH, so an upgrade that adds an
-# option fails that test until the table has it. `gh api` is ("api", "").
+# option fails that test until the table has it. `gh api` is ("api", ""). `issue transfer` is not here: GitHub moves
+# an issue only within one owner and never from a private to a public repository ("You can only transfer issues between
+# repositories owned by the same user or organization account. A private repository issue cannot be transferred to a
+# public repository", docs.github.com, "Transferring an issue to another repository", read 2026-11-19), so a transfer
+# to a public repository moves text that was public already.
 GH_TEXT_COMMANDS: dict[tuple[str, str], tuple[str, str]] = {
     ("pr", "create"): (
         "-a/--assignee -B/--base -b/--body -F/--body-file -H/--head -l/--label -m/--milestone -p/--project "
@@ -3778,13 +3782,15 @@ def gh_own_name(target: GhTarget, view: str, span: Span) -> bool:
 # The one target of a raw GraphQL mutation, a call read as GraphQL on any host (gh_api_endpoint, GhAddress.graphql)
 # whose text holds `mutation` (GH_GRAPHQL_MUTATION; gh_reach). The check does not read where a mutation goes: each one
 # is read whole, as public, whatever repository or node it names, so one whose text holds a listed term is refused even
-# to a private repository, and its text is judged with no own-name exemption (gh_own_name). A query, a call none of
-# whose texts holds `mutation`, is a read: gh_check passes it once it has read every text, before it looks for a listed
-# term, unless gh may send it to a REST API too (GhAddress.rest), where it is judged as that REST call. A call one of
-# whose texts cannot be read (`-F query=@missing`) is not known to be a query or a mutation, so it is not passed and
-# its one target is GH_GRAPHQL_UNREAD_TARGET, which earns no mutation's advice. Until review round 5 of
-# dispatch://INFRA-3365 the check read a mutation's fields, node ids and named repositories to find its targets, and
-# each round of tests found one more way that reading and GitHub's differed.
+# to a private repository, and its text is judged with no own-name exemption (gh_own_name). Like every target with no
+# repository it counts as any repository, so every scoped and knives list counts for it: on a machine with the knives
+# registry copy, a mutation that names any theorem-labs repository is refused for `theorem-labs`. A query, a call
+# none of whose texts holds `mutation`, is a read: gh_check passes it once it has read every text, before it looks
+# for a listed term, unless gh may send it to a REST API too (GhAddress.rest), where it is judged as that REST call.
+# A call one of whose texts cannot be read (`-F query=@missing`) is not known to be a query or a mutation, so it is
+# not passed and its one target is GH_GRAPHQL_UNREAD_TARGET, which earns no mutation's advice. Until review round 5
+# of dispatch://INFRA-3365 the check read a mutation's fields, node ids and named repositories to find its targets,
+# and each round of tests found one more way that reading and GitHub's differed.
 GH_GRAPHQL_TARGET = "a raw GraphQL mutation, which is read as public"
 GH_GRAPHQL_UNREAD_TARGET = "a GraphQL call whose text could not be read, read as public"
 # The gh subcommand or REST route that does what a GraphQL mutation does, judged by its repository: the refusal of a
@@ -3795,8 +3801,8 @@ GH_THREAD_REPLY = "gh api repos/{owner}/{repo}/pulls/{number}/comments/{comment_
 GH_GRAPHQL_ROUTES = {
     "addPullRequestReviewThreadReply": GH_THREAD_REPLY,
     "addPullRequestReviewComment": GH_THREAD_REPLY + " to reply to a comment, or for a new review comment gh api "
-                                   "repos/{owner}/{repo}/pulls/{number}/comments -f body=… -f commit_id=… -f path=… "
-                                   "-F line=…, or -f subject_type=file for the whole file",
+                                   "repos/{owner}/{repo}/pulls/{number}/comments -f body=… -f commit_id=… "
+                                   "-f path=… -F line=…, or -f subject_type=file for the whole file",
     "addComment": "gh issue comment or gh pr comment",
     "createIssue": "gh issue create",
     "updateIssue": "gh issue edit",
@@ -3834,8 +3840,8 @@ def gh_graphql_advice(documents: Sequence[str]) -> str:
         return f"{read}; a gh subcommand or the REST API is judged by its repository"
     routes = "; ".join(f"for {name} use {GH_GRAPHQL_ROUTES[name]}" for name in named)
     placeholders = [f"{{{word}}}" for word in GH_PLACEHOLDERS]
-    filled = (f", and gh fills in only {', '.join(placeholders[:-1])} and {placeholders[-1]}: write every other {{…}} "
-              "by hand" if any("{" in GH_GRAPHQL_ROUTES[name] for name in named) else "")
+    filled = (f", and gh fills in only {', '.join(placeholders[:-1])} and {placeholders[-1]}: "
+              "write every other {…} by hand" if any("{" in GH_GRAPHQL_ROUTES[name] for name in named) else "")
     return f"{read}. Instead, {routes}. Each of these is judged by its repository{filled}"
 
 

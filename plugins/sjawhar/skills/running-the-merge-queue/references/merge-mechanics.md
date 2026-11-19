@@ -25,7 +25,7 @@ gh pr merge N --repo O/R --squash --match-head-commit <verified-sha> \
 
 - The squash title and message carry the verified head, CI run links, review and acceptance artifacts, justified review reuse, any scoped waiver and the named follow-up destinations. An APPROVE body is not the squash record.
 - A 201 and a valid URL do not prove the body: read it back from the API. Edit a wrong comment in place; do not delete and repost.
-- Reply through the REST reply route (`gh api repos/O/R/pulls/N/comments/<comment_id>/replies -f body=…`) and resolve through `resolveReviewThread`. Check each result, then read back the reply and the thread state.
+- For a batched GraphQL reply-and-resolve, check both mutation results and the resulting reply and thread state.
 - After merge, read the actual message: the intended head merged and the evidence is in it (`gh api repos/O/R/commits/<merged-sha> --jq .commit.message`).
 
 ## Repost another agent's report

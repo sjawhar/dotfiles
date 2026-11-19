@@ -72,24 +72,6 @@ A caller can give a shim its own HOME and a bare PATH: a Legion test pane runs w
   wildcards) to lines, read by a push to or gh text for a matching repository. `allowed`:
   patterns to exact tokens, `#` lines giving the reason; a match wholly inside one is no match.
 - gh text also reads each knives `repos.toml` and `repos.local.toml` entry's `forbidden` list.
-- gh text is judged by where each text goes: a `-R` value only to the repository it names, a
-  `--branch-repo` value to its own repository and the issue's, a text gh fills from one base
-  repository only to the targets reached with it, and any other text to every target.
-- A term wholly inside a public destination's own name (`owner/name`, or the owner as a whole
-  word) counts for nothing there, for gh subcommand and REST writes (`gh_own_name`).
-- A text is read as GitHub renders it, CommonMark's backslash escapes and character references
-  undone, and a GraphQL document's strings as GraphQL decodes them.
-- A `gh api` request is GraphQL when gh, once it fills the placeholders, sends it to a GraphQL API
-  on any host, or when the check cannot fill them for certain. With no text holding `mutation` it
-  is a read, unless gh may also send it as REST. A mutation is one target, read as public and as
-  any repository, so a term anywhere in it is refused, even to a private repository and in its own
-  name. Its refusal names a route from `GH_GRAPHQL_ROUTES` (`scripts/leak-terms-check`), such as
-  `gh api repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies -f body=…` for a
-  reply.
-- `issue transfer` is not read. GitHub's rule: "You can only transfer issues between repositories
-  owned by the same user or organization account. A private repository issue cannot be
-  transferred to a public repository" (docs.github.com, "Transferring an issue to another
-  repository", read 2026-11-19), so a transfer moves text that was public already.
 - A term matches anywhere, inside words too, case ignored; a run of spaces matches spaces or tabs.
 - `scripts/leak-terms-check` is the one matcher; a caller treats any nonzero exit as a refusal.
 - A refusal prints the text that matched, so none may reach a public place (a post, a public

@@ -18,7 +18,7 @@ Read before you verify READY, and again when a new review artifact appears.
 - An outdated artifact can still hold an open finding. Trace each earlier finding to its closure.
 - A head-naming verdict is a review or issue comment on the PR. A packet quote, an owner's claim or a private report is not enough.
 - Do not call a finding harmless from a colored marker, or promote a non-blocking request into a new controller gate. A test-strengthening request can be a non-blocking follow-up; the owner and reviewer decide.
-- A resolved thread with no reply or destination can be a failed reply: the REST reply can fail while its `resolveReviewThread` succeeds. Verify each one.
+- A resolved thread with no reply or destination can be a failed mutation: a batched GraphQL reply can fail while its resolution succeeds. Verify each one.
 - Before merging, find each claimed closure posted on the PR.
 
 ## Disposition of each finding
