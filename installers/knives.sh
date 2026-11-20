@@ -88,10 +88,13 @@ ledgers="$(jq -r '[.repos[].ledger // empty] | unique | .[]' <<<"$repos_json")"
 # into ledger-repositories, as knives itself does. A knives command never
 # sees a half-built directory.
 #
-# Of two renames to one final path at once, only one can succeed. So two
-# installs at once on one machine need no lock here, and knives itself locks
-# migrate and the sweep. When another install or a knives command put its
-# git directory there first, the loop keeps that directory.
+# Of two renames to one final path at once, only one can succeed. Of two
+# writes of knives.machine at once, one can fail, because git does not
+# wait for its config lock. The install whose write fails then reads the
+# value that the other install wrote, shows no git error, and does not
+# stop. So two installs at once on one machine need no lock here, and knives
+# itself locks migrate and the sweep. When another install or a knives
+# command put its git directory there first, the loop keeps that directory.
 #
 # The scratch directory is in ~/.config/knives, beside ledger-repositories,
 # so the rename stays on one filesystem. The EXIT trap deletes it when the
@@ -125,8 +128,16 @@ while IFS= read -r ledger; do
             fi
         )
     fi
-    git --git-dir="$git_dir" config knives.machine >/dev/null ||
-        git --git-dir="$git_dir" config knives.machine "$machine"
+    git --git-dir="$git_dir" config knives.machine >/dev/null || {
+        machine_status=0
+        machine_error="$(git --git-dir="$git_dir" config knives.machine "$machine" 2>&1)" || machine_status=$?
+        # git refuses the write while another install holds the config lock, and that install
+        # writes the key. So git's error is shown, and the install stops, only when no value is there.
+        if [[ $machine_status -ne 0 ]] && ! git --git-dir="$git_dir" config knives.machine >/dev/null; then
+            echo "$machine_error" >&2
+            exit "$machine_status"
+        fi
+    }
 done <<<"$ledgers"
 
 # Move a ledger an older knives wrote to the upstream-named layout, then bring

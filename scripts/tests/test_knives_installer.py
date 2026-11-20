@@ -438,8 +438,8 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         result = self.install()
 
         # Then: it succeeds, and the git directory keeps the origin and the machine name
-        # that knives gave it, and is not bare. No git directory of the installer is inside
-        # it. The installer deleted its scratch directory.
+        # that knives gave it, and is not bare. No entry in it holds a HEAD file, as a git
+        # directory does. The installer deleted its scratch directory.
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
         def config(*key: str) -> list[str]:
@@ -455,8 +455,8 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
             sorted(p.name for p in self.config.glob(".knives-installer-joining-*")), [],
             result.stdout + result.stderr,
         )
-        self.assertFalse(
-            (git_dir / git_dir.name).exists(),
+        self.assertEqual(
+            [p.name for p in git_dir.iterdir() if (p / "HEAD").is_file()], [],
             f"the installer moved its git directory into {git_dir}:\n" + result.stdout + result.stderr,
         )
 
@@ -503,6 +503,63 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
             capture_output=True, text=True, env=self.env, check=False,
         )
         self.assertEqual(origin.stdout.strip(), LEDGER_URL, result.stdout + result.stderr + origin.stderr)
+
+    def test_a_machine_name_that_another_install_writes_at_the_same_time_is_kept(self) -> None:
+        real_git = shutil.which("git", path="/usr/local/bin:/usr/bin:/bin")
+        self.assertIsNotNone(real_git, "needs git in /usr/local/bin, /usr/bin or /bin")
+        git_dir = self.ledger_git_dir()
+        other = f"{HOSTNAME}-0000beef"
+
+        # Given: a new machine whose ledger git directory has an origin and core.bare false,
+        # but no knives.machine, as an earlier install can leave it.
+        (self.config / "state.json").unlink()
+        git_dir.parent.mkdir(parents=True)
+        for args in (
+            ["init", "--quiet", "--bare", str(git_dir)],
+            [f"--git-dir={git_dir}", "config", "core.bare", "false"],
+            [f"--git-dir={git_dir}", "config", "core.worktree", str(self.config / "ledger")],
+            [f"--git-dir={git_dir}", "remote", "add", "origin", LEDGER_URL],
+        ):
+            subprocess.run([real_git, *args], check=True, env=self.env)
+        # A git stub first on PATH stands in for another install that writes knives.machine at
+        # the same time. git does not wait for a config lock that another git holds, so a write
+        # that finds the lock held fails. At the installer's write of knives.machine, the stub
+        # first writes a machine name of its own with the real git. Then it makes config.lock,
+        # as the other install does while it writes, and runs the installer's write. It removes
+        # the lock and exits with the status of that write. For every other call, the stub runs
+        # the real git.
+        lock = git_dir / "config.lock"
+        write_executable(
+            self.root / "bin" / "git",
+            f'if [ "$#" -eq 4 ] && [ "$1" = "--git-dir={git_dir}" ] && [ "$2 $3" = "config knives.machine" ]; then\n'
+            f'    "{real_git}" "$1" config knives.machine "{other}"\n'
+            f'    : >"{lock}"\n'
+            '    status=0\n'
+            f'    "{real_git}" "$@" || status=$?\n'
+            f'    rm -f "{lock}"\n'
+            '    exit "$status"\n'
+            'fi\n'
+            f'exec "{real_git}" "$@"',
+        )
+
+        # When: the installer joins the machine.
+        result = self.install()
+
+        # Then: the write of the installer failed, but the installer reads the name that the
+        # other install wrote and succeeds, with no git error about the lock. The git directory
+        # has that one machine name, and keeps its origin and core.bare false.
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("could not lock config file", result.stderr, result.stdout + result.stderr)
+
+        def config(*key: str) -> list[str]:
+            return subprocess.run(
+                [real_git, "--git-dir", str(git_dir), "config", *key],
+                capture_output=True, text=True, env=self.env, check=False,
+            ).stdout.split()
+
+        self.assertEqual(config("--get-all", "knives.machine"), [other], result.stdout + result.stderr)
+        self.assertEqual(config("--get-all", "remote.origin.url"), [LEDGER_URL], result.stdout + result.stderr)
+        self.assertEqual(config("core.bare"), ["false"], result.stdout + result.stderr)
 
     def test_two_spellings_of_one_ledger_make_one_git_directory(self) -> None:
         # Given: two forks naming the same ledger repository in different case,
