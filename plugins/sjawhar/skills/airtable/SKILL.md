@@ -1,6 +1,6 @@
 ---
 name: airtable
-description: Use when listing, searching, filtering, or updating Airtable records, including applicant or hiring data. Also use for airtable.com URLs, base IDs (app...), and table IDs (tbl...).
+description: Use when listing, searching, filtering, or updating Airtable records. Also use for airtable.com URLs, base IDs (app...), and table IDs (tbl...). Not for candidate or applicant data, which is no longer in Airtable.
 ---
 
 # Airtable
