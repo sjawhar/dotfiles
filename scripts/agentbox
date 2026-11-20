@@ -2441,6 +2441,10 @@ session_env() {
     # ~/.cache/ms-playwright is mounted rw from the host; without this, a box's `playwright
     # install` deletes the browser builds of every checkout it cannot see (agentbox/AGENTS.md).
     e+=(-e PLAYWRIGHT_SKIP_BROWSER_GC=1)
+    # gcloud's file logging off, as scripts/agent-session sets it for a host session: a gcloud run
+    # past shims/gcloud and ~/.gcloud's installation property copies a printed token into a log
+    # file (dispatch://INFRA-4824). The launcher's own value wins, as the shim keeps a caller's.
+    e+=(-e "CLOUDSDK_CORE_DISABLE_FILE_LOGGING=${CLOUDSDK_CORE_DISABLE_FILE_LOGGING:-true}")
     # Machine-local session environment (dispatch://BET-765), the same file scripts/agent-session
     # sources for a host session. A box builds its variables from scratch and never runs
     # agent-session, so without this the file is visible in the box (agentbox/mounts has
