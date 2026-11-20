@@ -50,8 +50,20 @@ LIBRARIAN_INSTALLER = REPO / "installers" / "librarian-harness-host.sh"
 PIN = "9.9.9"
 # Every wait of the test: a failure detector, never what makes two installs meet.
 BOUND = 60.0
-# DOTFILES_KNIVES_INSTALL_TIMEOUT for every process: the shim's own bound on a wait for the pin.
+# DOTFILES_KNIVES_INSTALL_TIMEOUT for every process, the shim's own bound on a wait for the pin,
+# except where a row sets its own (L6, L13, L13b).
 SHIM_WAIT = 20
+# L13 and L13b: DOTFILES_KNIVES_INSTALL_CAP, and the kill grace of the wrapper's `timeout -k 10` in
+# shims/knives (`install_pin`). The shim's mise gets TERM at the cap and KILL at the cap plus the grace.
+INSTALL_CAP = 2
+KILL_GRACE = 10
+# L13 and L13b: DOTFILES_KNIVES_INSTALL_TIMEOUT, far past INSTALL_CAP + KILL_GRACE, so the shim's own
+# wait for the pin cannot end before the cap and the KILL do.
+CAPPED_SHIM_WAIT = 45
+# L13, where mise ignores TERM and ends at the KILL: what the shim adds to INSTALL_CAP + KILL_GRACE.
+# Before its install it tries `mise which` twice, with 1 s of sleep between the tries; after the KILL
+# it sees the wrapper gone at its next 0.5 s poll.
+KILL_SLACK = 5
 LOCK_NAME = ".dotfiles-install.lock"
 MARKER = "DOTFILES_INSTALL_LOCK_HELD"
 WAIT_LINE_PART = "is held by another install; waiting up to"
@@ -749,13 +761,14 @@ class InstallLock(unittest.TestCase):
         """L13: a hung install that ignores TERM is killed at the cap, and the lock is free after."""
         self.flag("gate-shim")
         self.flag("ignore-term-shim")
-        shim = self.start_shim(self.env(DOTFILES_KNIVES_INSTALL_CAP="2"))
+        capped = self.env(DOTFILES_KNIVES_INSTALL_CAP=str(INSTALL_CAP), DOTFILES_KNIVES_INSTALL_TIMEOUT=str(CAPPED_SHIM_WAIT))
+        shim = self.start_shim(capped)
         self.wait_for_file("holding-shim", "the shim's mise install to start and hold")
         pid = self.start_pid("shim")
         self.finish(shim, "shims/knives")
         self.assertEqual(shim.returncode, 127, self.describe())
         self.assertRegex(shim.stderr(), rf"exited \S+ without knives {re.escape(PIN)} in place", self.describe())
-        self.assertLess(shim.elapsed, SHIM_WAIT, self.describe())
+        self.assertLess(shim.elapsed, INSTALL_CAP + KILL_GRACE + KILL_SLACK, self.describe())
         failed = Path(f"{self.lock}.failed")
         self.assertTrue(failed.is_file(), self.describe())
         self.assertEqual(failed.read_text(encoding="utf-8").split()[:1], [PIN], self.describe())
@@ -766,13 +779,15 @@ class InstallLock(unittest.TestCase):
         """L13 (b): a hung install that stops on TERM ends at the cap; timeout's 124 is the
         install's status, not the shim's wait for the pin running out."""
         self.flag("gate-shim")
-        shim = self.start_shim(self.env(DOTFILES_KNIVES_INSTALL_CAP="2"))
+        capped = self.env(DOTFILES_KNIVES_INSTALL_CAP=str(INSTALL_CAP), DOTFILES_KNIVES_INSTALL_TIMEOUT=str(CAPPED_SHIM_WAIT))
+        shim = self.start_shim(capped)
         self.wait_for_file("holding-shim", "the shim's mise install to start and hold")
         pid = self.start_pid("shim")
         self.finish(shim, "shims/knives")
         self.assertEqual(shim.returncode, 127, self.describe())
         self.assertIn(f"exited 124 without knives {PIN} in place", shim.stderr(), self.describe())
-        self.assertLess(shim.elapsed, SHIM_WAIT, self.describe())
+        # mise stops at the TERM, so the unused grace covers the shim's `mise which` tries and poll.
+        self.assertLess(shim.elapsed, INSTALL_CAP + KILL_GRACE, self.describe())
         failed = Path(f"{self.lock}.failed")
         self.assertTrue(failed.is_file(), self.describe())
         self.assertEqual(failed.read_text(encoding="utf-8").split()[:1], [PIN], self.describe())

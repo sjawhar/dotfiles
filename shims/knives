@@ -247,7 +247,7 @@ if [[ -z "$_knives" ]]; then
                     announced=1
                 fi
                 if (( ${EPOCHSECONDS:-$(date +%s)} >= deadline )); then
-                    echo "knives: waited ${wait}s for $lock, which another call holds while it installs knives $_pin" >&2
+                    echo "knives: waited ${wait}s for $lock, which another install holds; knives $_pin is still not in place" >&2
                     rc=1
                     break
                 fi
@@ -264,7 +264,8 @@ if [[ -z "$_knives" ]]; then
                 command -v setsid > /dev/null 2>&1 && detach=(setsid)
                 # The wrapper inherits the lock's fd and holds it until mise exits. mise runs
                 # without it, so nothing mise leaves running holds the lock. The wrapper holds
-                # none of the caller's pipes: its stdin is /dev/null and its output goes to the log.
+                # none of the caller's stdin, stdout or stderr: its stdin is /dev/null and its
+                # output goes to the log. Any other fd the caller passed down reaches it and mise.
                 # shellcheck disable=SC2016  # the inner bash expands $1, $2, $fd, $cap and $@
                 MISE_DATA_DIR="$data" MISE_GLOBAL_CONFIG_FILE="$_config" "${detach[@]}" "$BASH" -c '
                     fd=$1 cap=$2
