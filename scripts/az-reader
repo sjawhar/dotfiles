@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# az-reader: run one Azure read as the Azure identity legion-reader (Reader on the subscription),
+# signed in with an identity token of metadata-reader@theorem-agent-infra, which the secrets broker
+# gives Sami's sessions at once, with no person's login and nobody to approve it
+# (dispatch://INFRA-4748).
+#
+#   AZ_READER_REASON='<key>: <each object read>' az-reader [--] <az args...>   (az-reader vm list -g SAMI -o table)
+#
+# It asks the broker for METADATA_READ, an access token of metadata-reader@ (an hour at most; the
+# broker refuses a request that names no lifetime, so --ttl 1h; --register gives a session the
+# helper never registered a broker identity for this one command). With that token it mints the
+# account's identity token for the audience api://AzureADTokenExchange (iamcredentials'
+# generateIdToken; the account holds roles/iam.serviceAccountOpenIdTokenCreator on itself, agent-infra
+# bootstrap/metadatareader.go). legion-reader trusts that token through its federated credential
+# legion-reader-google-metadata-reader (agent-infra root/azure.go, legionReadGoogleAccounts). It signs
+# in with `az login --service-principal --federated-token @FILE` in a throwaway AZURE_CONFIG_DIR,
+# then runs `az <args>` there. Both tokens stay in 0600 files of a mktemp -d directory removed on
+# exit; the access token reaches curl as a header on its stdin and the identity token reaches az
+# after @, so neither is in an argument list. Before it asks the broker, it reads legion-reader's
+# client id from the legion-reader= line of agent-infra's .github/azure-client-ids on main, with gh.
+#
+# Exit 2 for a usage error, before anything reaches the broker; 1 when gh gives no client id, before
+# anything reaches the broker; secret-run's own status when the broker gives no token (75 pending,
+# 77 denied, 1 refused); 1 when the mint is refused; az's status otherwise.
+set -euo pipefail
+
+reader=metadata-reader@theorem-agent-infra.iam.gserviceaccount.com
+tenant=aaa6ad34-51af-41e7-891f-f16f5c53c396
+usage="usage: AZ_READER_REASON='<key>: <read>' az-reader [--] <az args...>"
+case "${1:-}" in
+  -h|--help) echo "$usage"; exit 0 ;;
+esac
+[ "${1:-}" != -- ] || shift
+[ $# -gt 0 ] || { echo "$usage" >&2; exit 2; }
+
+if [ "${AZ_READER_INNER:-}" != 1 ]; then
+  [ -n "${AZ_READER_REASON:-}" ] || {
+    echo "az-reader: set AZ_READER_REASON to the issue key and each object the command reads ('INFRA-1234: the VMs of resource group SAMI')" >&2
+    exit 2
+  }
+  # The Azure legion-reader's client id is the legion-reader= line of agent-infra's
+  # .github/azure-client-ids, read from main before anything reaches the broker.
+  client=$(gh api 'repos/theorem-labs/agent-infra/contents/.github/azure-client-ids?ref=main' \
+    -H 'Accept: application/vnd.github.raw' | sed -n 's/^legion-reader=//p') || client=
+  [[ $client =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || {
+    echo "az-reader: agent-infra's .github/azure-client-ids gave no legion-reader= client id" >&2
+    exit 1
+  }
+  AZ_READER_INNER=1 AZ_READER_CLIENT=$client exec secret-run --register --ttl 1h --reason "$AZ_READER_REASON" METADATA_READ -- "$0" -- "$@"
+fi
+client=${AZ_READER_CLIENT:-}
+[ -n "$client" ] || { echo "az-reader: no client id reached the inner run" >&2; exit 1; }
+
+token=${METADATA_READ:-}
+[ -n "$token" ] || { echo "az-reader: the broker released no METADATA_READ token" >&2; exit 1; }
+unset METADATA_READ AZ_READER_INNER AZ_READER_REASON AZ_READER_CLIENT
+dir=$(mktemp -d "${TMPDIR:-/tmp}/az-reader.XXXXXX")
+trap 'rm -rf "$dir"' EXIT
+umask 077
+printf 'Authorization: Bearer %s\nContent-Type: application/json\n' "$token" |
+  curl -q -sS -f --max-time 30 -H @- -X POST \
+    --data '{"audience":"api://AzureADTokenExchange","includeEmail":true}' -o "$dir/id.json" \
+    "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/$reader:generateIdToken" ||
+  { echo "az-reader: generateIdToken for $reader was refused" >&2; exit 1; }
+unset token
+jq -er .token <"$dir/id.json" >"$dir/token" || { echo "az-reader: generateIdToken answered no token" >&2; exit 1; }
+rm -f "$dir/id.json"
+mkdir "$dir/config"
+export AZURE_CONFIG_DIR="$dir/config"
+az login --service-principal --username "$client" --tenant "$tenant" --federated-token "@$dir/token" --output none
+az "$@"

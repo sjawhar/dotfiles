@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# gcloud-reader: run one Google read as an agent reader account, through the secrets broker as
+# Sami's session, with no person's login and nobody to approve it (dispatch://INFRA-4748).
+#
+#   GCLOUD_READER_REASON='<key>: <each object read>' gcloud-reader [--as metadata|legion] [--] <command...>
+#
+#   --as metadata  (the default) the broker secret METADATA_READ, a token of
+#                  metadata-reader@theorem-agent-infra: Google metadata, IAM policies, a bucket's
+#                  object list and metric time series in the projects of folder theorem, quotas
+#                  (--billing-project=theorem-agent-root), billing accounts, the job list of
+#                  theorem-agent-infra.
+#   --as legion    the broker secret LEGION_READ, a token of legion-reader@theorem-agent-infra: the
+#                  organization's IAM policy and policies, Admin Activity logs, agent_spend rows,
+#                  insights, Policy Troubleshooter, Support cases.
+#
+# The broker serves both to Sami's sessions alone, at once, for an hour at most, and refuses a
+# request that names no lifetime, so the request asks for --ttl 1h; --register gives a session the
+# helper never registered a broker identity for this one command. The broker releases a bare access
+# token (agent-infra bootstrap/metadataread.go). It goes to a 0600 file of a mktemp -d directory,
+# removed on exit, never to an argument list; the command runs with CLOUDSDK_AUTH_ACCESS_TOKEN_FILE
+# set to that file, a fresh CLOUDSDK_CONFIG and prompts off. A first word that is no command on PATH
+# is gcloud's: `gcloud-reader storage buckets get-iam-policy gs://b` runs gcloud. Give `gcloud`, `bq`
+# or `sh -c '...'` to choose; a REST call reads the header from stdin:
+#   sh -c 'printf "header = \"Authorization: Bearer %s\"\n" "$(cat "$CLOUDSDK_AUTH_ACCESS_TOKEN_FILE")" | curl -sS -f -K - URL'
+#
+# Exit 2 for a usage error, before anything reaches the broker; secret-run's own status when the
+# broker gives no token (75 pending, 77 denied, 1 refused); the command's status otherwise.
+set -euo pipefail
+
+usage="usage: GCLOUD_READER_REASON='<key>: <read>' gcloud-reader [--as metadata|legion] [--] <command...>"
+case "${1:-}" in
+  -h|--help) echo "$usage"; exit 0 ;;
+esac
+
+as=metadata
+if [ "${1:-}" = --as ]; then
+  [ $# -ge 2 ] || { echo "$usage" >&2; exit 2; }
+  as=$2
+  shift 2
+fi
+case $as in
+  metadata) secret=METADATA_READ ;;
+  legion) secret=LEGION_READ ;;
+  *) echo "gcloud-reader: --as takes metadata or legion, not '$as'" >&2; echo "$usage" >&2; exit 2 ;;
+esac
+[ "${1:-}" != -- ] || shift
+[ $# -gt 0 ] || { echo "$usage" >&2; exit 2; }
+
+if [ "${GCLOUD_READER_INNER:-}" != 1 ]; then
+  [ -n "${GCLOUD_READER_REASON:-}" ] || {
+    echo "gcloud-reader: set GCLOUD_READER_REASON to the issue key and each object the command reads ('INFRA-1234: the IAM policy of gs://theorem-build-io')" >&2
+    exit 2
+  }
+  GCLOUD_READER_INNER=1 exec secret-run --register --ttl 1h --reason "$GCLOUD_READER_REASON" "$secret" -- "$0" --as "$as" -- "$@"
+fi
+
+token=${!secret:-}
+[ -n "$token" ] || { echo "gcloud-reader: the broker released no $secret token" >&2; exit 1; }
+dir=$(mktemp -d "${TMPDIR:-/tmp}/gcloud-reader.XXXXXX")
+trap 'rm -rf "$dir"' EXIT
+umask 077
+printf '%s' "$token" >"$dir/token"
+unset "$secret" token GCLOUD_READER_INNER GCLOUD_READER_REASON GCLOUD_ACCOUNT CLOUDSDK_ACTIVE_CONFIG_NAME \
+  CLOUDSDK_CORE_ACCOUNT CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT GOOGLE_APPLICATION_CREDENTIALS
+mkdir "$dir/config"
+command -v -- "$1" >/dev/null 2>&1 || set -- gcloud "$@"
+CLOUDSDK_CONFIG="$dir/config" CLOUDSDK_AUTH_ACCESS_TOKEN_FILE="$dir/token" CLOUDSDK_CORE_DISABLE_PROMPTS=1 "$@"
