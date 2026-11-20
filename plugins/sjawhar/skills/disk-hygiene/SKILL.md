@@ -1,6 +1,6 @@
 ---
 name: disk-hygiene
-description: Use when a shared dev box is low on disk or RAM, `df` exceeds what known work explains, IO pressure or D-state processes hang shells, or sessions leave workspaces, worktrees, docker images, build cache or temp dirs behind, your own included.
+description: Use when a shared dev box is low on disk or RAM, `df` exceeds what known work explains, IO pressure or D-state processes hang shells, a git worktree entry goes missing, the jj op store grows, or sessions leave workspaces, worktrees, docker images, build cache or temp dirs behind, your own included.
 ---
 
 # Disk hygiene
@@ -21,8 +21,8 @@ Set `SKILL=~/.dotfiles/plugins/sjawhar/skills/disk-hygiene` and `S=$SKILL/script
 - A dangling `.git` does not prove abandonment: any session's `git worktree prune` drops live registrations. `[ -e .git ]` tests the file, not a registration.
 - `rm -rf` leaves read-only trees partly deleted, and the rest looks like someone else's files. Run `chmod -R u+w <tree>` first, then check that the path is gone. Use sudo only on the owner's say-so.
 - Run this skill by hand, never on a timer (it needs the check-in), and stop when done.
-- A `.no-offbox` file in a directory, or a match in `~/.config/no-offbox/patterns`, means nothing in or below it may leave this machine. Only the data's owner writes or removes the marker; a move on this machine copies it to the same level above the new path. Before you copy anything off the machine, run `~/.dotfiles/scripts/no-offbox <path>`; a nonzero exit means do not copy.
-- Read `references/box-mounts.md` before you move data onto a mount, put large temp output in an agent box, or delete inside a box's own tree.
+- A `.no-offbox` file in a directory, or a match in `~/.config/no-offbox/patterns`, means nothing in or below it may leave this machine. Only the data's owner writes or removes the marker. A move on this machine keeps it: a marker inside the moved tree moves with it; copy a marker N levels above the tree to the directory N levels above the new path. Before you copy anything off the machine, run `~/.dotfiles/scripts/no-offbox <path>`; a nonzero exit means do not copy.
+- Read `references/box-mounts.md` before you move data onto a mount, count on data on a mount to survive a machine stop, choose where temp output goes in an agent box, or delete inside a box's own tree.
 
 ## Procedure
 
@@ -33,7 +33,7 @@ Set `SKILL=~/.dotfiles/plugins/sjawhar/skills/disk-hygiene` and `S=$SKILL/script
    python3 $S inventory --repo ~/REPO --root ~/.worktrees --root /tmp > inv.json
    python3 $S plan --inventory inv.json --protected protected.json [--releases releases.json] > plan.json
    ```
-4. Apply until the ledger shows 0 errors:
+4. Apply until the ledger shows 0 errors (to undo a forget, read `references/workspaces.md`):
    ```bash
    systemd-run --user --same-dir -E PATH="$PATH" nice -n19 python3 $S apply --plan plan.json --protected protected.json --ledger ledger.jsonl [--releases releases.json]
    ```
@@ -43,7 +43,9 @@ Set `SKILL=~/.dotfiles/plugins/sjawhar/skills/disk-hygiene` and `S=$SKILL/script
 
 Read `references/shared-git-store.md` before you prune, forget a jj workspace, remove a git worktree, repair a worktree entry, delete an orphaned checkout, or run `jj new` in a workspace you did not create.
 
-The space is usually, largest first, in: dangling images, buildkit cache with leaked leases, unused tagged images, orphaned sandboxes, `/tmp` families, workspaces. `~/.dotfiles/devbox/box-cleanup` (its cleaners: `devbox/box-cleanup.md`) and `~/.dotfiles/agentbox/devbox-prune` (its header) already prune dangling Docker objects, idle Go build cache, capped tool caches and stale `/tmp` entries; read them before you add automation. Nothing automatic judges a workspace or a tagged image live.
+The space is usually, largest first, in: dangling images, buildkit cache with leaked leases, unused tagged images, orphaned sandboxes, `/tmp` families, workspaces.
+
+`~/.dotfiles/devbox/box-cleanup` (its cleaners: `devbox/box-cleanup.md`) and `~/.dotfiles/agentbox/devbox-prune` (its header) already prune dangling Docker objects, idle Go build cache, capped tool caches and stale `/tmp` entries; read them before you add automation. In a box, `systemctl --user status devbox-prune.service` shows the host unit's last run, but the box's `journalctl` cannot read its log: read it from a host session, `journalctl --user -u devbox-prune.service`. Nothing automatic judges a workspace or a tagged image live. Do by hand what they leave: unused tagged images, non-default builders, leaked leases, containers, Docker volumes, box directories agentbox did not delete, `~/.local/share/opencode` and a retired jj store.
 
 ## Pacing (every phase)
 
@@ -51,8 +53,7 @@ The space is usually, largest first, in: dangling images, buildkit cache with le
 - Delete only while `/proc/pressure/io` `full avg10` is under 20 (`apply` and `tmp --apply` wait on it: `--io-limit`).
 - Never `lsof +D` or `fuser` a tree per candidate. Before each item, check one `$S procs` for a cwd inside it.
 - Never size a candidate to decide its deletion, and never run one `du` of everything.
-- A free-space guard samples during a batch too: a higher number to start, a lower one to abort what runs.
-- When one lead's agents share a disk, one of them reads free space and refuses for all. Across leads, run `disk-gate reserve <gib> <name>` before work that writes a lot to a shared mount, sized by its measured peak rather than what it keeps, and `disk-gate release <name>` after. The header of `~/.dotfiles/scripts/disk-gate` says what it counts and when to use `attach` or `renew`.
+- Read `references/shared-disk-writes.md` before a step that writes more than 2 GB to a shared mount, or before you write a free-space guard for a batch.
 - Before you promise space back, measure every path that may share inodes in one run: `$S sizes --hardlinks <tree> <cache>` (a workspace and `~/.cache/uv`, a cache and a data directory, `os.link` copies).
 - Read `references/test-leaks.md` when processes a test or harness left behind cause the space or load.
 
@@ -62,7 +63,7 @@ Delete only paths you prove are yours; a name proves nothing.
 
 - Make each work directory that must outlive your `TMPDIR` with `work-dir <name>`: its `OWNER` file tells `devbox/session-scratch-reap` whose it is. Never keep work in `/tmp` on sami-rocqperf: it is the shared root disk and is emptied at every boot.
 - Make a second tree of a repository already on the box with `~/.dotfiles/scripts/agent-workspace --separate-repo` or `git worktree add` from your clone, never a full clone. Remove it when its work ends.
-- In an agent box, your box's tree (minus its bind-mount sources) and `/tmp` are yours or your subagents'. Any other path is yours only if your or your subagents' transcripts (the `session-attribution` skill) show the command that made it; else leave it and report it. In your own box, also run `$S containers` and `$S images`: a `registry` container there is yours.
-- A core file is crash evidence first: identify it (`file core`, `gdb -batch -ex bt core`) before you delete it. In a box, where `dmesg` is unreadable, it can be the only evidence.
+- In an agent box, your box's tree (minus its bind-mount sources) and `/tmp` are yours or your subagents'. Any other path is yours only if your or your subagents' transcripts (the `session-attribution` skill) show the command or write that made it; else leave it and report it. In your own box, also run `$S containers` and `$S images`: a `registry` container there is yours.
+- A core file is crash evidence first: identify it (`file core`, `gdb -batch -ex bt core`) before you delete it. Its backtrace names the tool that crashed; a matching restart time does not. In a box, where `dmesg` is unreadable, it can be the only evidence.
 - Read `references/finding-space.md` before you delete by a glob or with `find`.
-- Run a long delete under `systemd-run --user --wait`, so a tool timeout does not stop it halfway.
+- Run a delete under `systemd-run --user --wait` when you cannot show that it ends inside your tool call's timeout, so the timeout does not stop it halfway.

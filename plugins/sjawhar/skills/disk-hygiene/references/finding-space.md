@@ -15,15 +15,15 @@ Read this before you size, rank or watch disk use, or before you delete by a pat
 
 ## What writes now
 
-- Rank writers: `sudo python3 $S writers --seconds 5 --top 15`. Without `sudo`, other users' processes are unreadable.
+- Rank writers: `sudo python3 $S writers --seconds 5 --top 15`. Each row gives the rate over the sample beside the process's whole-life average; where the two disagree, the sample caught a burst, so run it again. Without `sudo`, other users' processes are unreadable.
 - Name the file a writer grows: `python3 $S fdwrites --seconds 5 --pid <pid>`.
 - What holds the CPU: `python3 $S cpu --seconds 5`, grouped by command name, where a fan-out of one name hides.
 - A write sample says who writes now, not who holds the space. Rank owners by each session's `du -xsm` of its own paths; rank a process by sizing the files it holds open twice, minutes apart.
 - A watcher reports the extreme of its samples, not the extreme. Give the interval with the number ("the lowest of 60 one-minute samples"). For a bound that misses nothing, read a counter that accumulates: `total=` in `/proc/pressure/io`, the `df_used_gb` of each apply ledger line, or an ENOSPC in the kernel log.
-- A shared volume sawtooths as lanes write and delete. A rate needs a window longer than one cycle: take a reading a full cycle later, or show that the floor moves.
+- A shared volume sawtooths as sessions write and delete. A rate needs a window longer than one cycle: take a reading a full cycle later, or show that the floor moves.
 - Write throughput far above any change in free space is write-then-delete churn, not a runaway writer.
 
 ## Deleting by pattern or with `find`
 
 - Give every `find ... -delete` or `-exec rm` a `-mindepth 1`: `find` tests the starting directory too, and has deleted the directory it was told to clean inside.
-- A prefix is not ownership. `base_`, `now_`, `merged_`, `v1`, `emit` and `tmp` are names every session picks. Name each entry you delete, or delete a directory you made. Where a cleanup must use a pattern, `ls` the matches and read them before you remove any: `rm` prints nothing it took.
+- A prefix is not ownership. `base_`, `now_`, `merged_`, `v1`, `emit` and `tmp` are names every session picks. Never delete by a glob in a shared directory (such as `/tmp`) or in a box's own tree, whose bind-mount sources are live (`box-mounts.md`): name each entry you delete, or delete a directory you made. Anywhere else, where a cleanup must use a pattern, `ls` the matches and read them before you remove any: `rm` prints nothing it took.
