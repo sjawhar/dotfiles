@@ -332,8 +332,9 @@ class KnivesShimWithoutMise(ShimFixture):
 
 class KnivesShimInstallsANewPin(ShimFixture):
     """mise.toml pins a knives no install dir holds yet (2026-11-03: 3.2.2 on sami-leanperf,
-    3.2.3 on sami-rocqperf): the shim installs that version under a lock and runs it, so gh
-    keeps working without a person running `mise install`."""
+    3.2.3 on sami-rocqperf): the shim installs that version under the data dir's
+    .dotfiles-install.lock, the lock the tools steps hold around their own `mise install`, and
+    runs it, so gh keeps working without a person running `mise install`."""
 
     PIN = "5.0.0"
 
@@ -433,7 +434,7 @@ class KnivesShimInstallsANewPin(ShimFixture):
     def test_a_knives_call_under_the_install_does_not_install(self) -> None:
         """mise runs its GitHub credential command while it installs; a knives call there must
         not wait on the lock its ancestor holds."""
-        result = self.run_new_pin(DOTFILES_KNIVES_INSTALLING="1")
+        result = self.run_new_pin(DOTFILES_INSTALL_LOCK_HELD="1")
         self.assertEqual(result.returncode, 127, result.stdout)
         self.assertEqual(self.installs(), 0)
 
