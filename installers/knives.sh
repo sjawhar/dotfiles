@@ -86,6 +86,14 @@ ledgers="$(jq -r '[.repos[].ledger // empty] | unique | .[]' <<<"$repos_json")"
 # ledger-repositories.lock, and a second install waits for the first. knives
 # locks migrate and the sweep itself.
 #
+# The lock does not cover knives itself. knives 5.0.0 and later joins a
+# ledger that no git directory here reaches. A knives command makes the same
+# git directory in a scratch directory, and renames it into place. That can
+# occur after the `[[ ! -d ]]` test below. So each step accepts a directory
+# that another process made. `git init` on such a directory sets core.bare
+# to true, and the next line sets it back. The loop sets the origin and
+# knives.machine only when the directory has none.
+#
 # The subshell holds the lock file open on fd 9. So the lock ends with the
 # loop, and the shell that sources this file keeps no extra fd. macOS has no
 # flock by default: where flock is absent, the loop runs with no lock.
@@ -99,7 +107,8 @@ ledgers="$(jq -r '[.repos[].ledger // empty] | unique | .[]' <<<"$repos_json")"
             git init --quiet --bare "$git_dir"
             git --git-dir="$git_dir" config core.bare false
             git --git-dir="$git_dir" config core.worktree "$ledger_root"
-            git --git-dir="$git_dir" remote add origin "https://github.com/$ledger"
+            git --git-dir="$git_dir" remote get-url origin >/dev/null 2>&1 ||
+                git --git-dir="$git_dir" remote add origin "https://github.com/$ledger"
         fi
         git --git-dir="$git_dir" config knives.machine >/dev/null ||
             git --git-dir="$git_dir" config knives.machine "$machine"
@@ -115,9 +124,9 @@ ledgers="$(jq -r '[.repos[].ledger // empty] | unique | .[]' <<<"$repos_json")"
 #
 # A failed migrate stops the install with migrate's own exit status. The
 # installer sends what migrate prints, and the sweep's summary, to stderr,
-# where its own messages go. So in every log each message comes after the
-# lines it points to. When migrate exits 3, the message also says what to
-# run.
+# where its error messages go. So in every log each error message comes
+# after the lines it points to. When migrate exits 3, the message also says
+# what to run.
 #
 # A failed sweep stops the install only when it leaves entries this
 # machine alone holds (`unsent`, per repository; absent when knives could not
