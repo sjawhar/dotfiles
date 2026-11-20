@@ -40,7 +40,7 @@ Another fresh agent reads only the new text and quotes each sentence in one of t
 
 Also report a rule with no reason, a reason that only restates its rule, two rules that contradict, and a sentence a careful engineer would read twice.
 
-Brief the slop agent with the list above and the new text only; ask for quote, class and replacement. Fix each finding or answer it with one line of evidence. A second round checks only the changed lines. Stop after three rounds, and never report a finding twice.
+Brief the slop agent with the list above and the new text only; ask for quote, class and replacement. Fix each finding or answer it with one line of evidence. Fix a finding by replacing words where you can. For a missing reason or definition, add one clause and cut as many bytes of repeats and restated context elsewhere, because a rewrite may grow SKILL.md by 200 bytes at most (step D). A second round checks only the changed lines. Stop after three rounds, and never report a finding twice.
 
 ## Step C: behavior test for the most-loaded skills
 
@@ -62,16 +62,15 @@ Step C checks that the rewrite lost nothing, so it compares old and new text and
 1. Pick three cases from real sessions that loaded the skill, at least one where the agent got it wrong or the user corrected it (`tq search --human '<the skill's subject>'`). Write each as the raw task the session got, with no hint of the expected answer.
 2. Write the pass bar for each case: an action or output a transcript shows.
 3. Run each case three times with the old text and three times with the new, each in a fresh session that is not told it is a test. Interleave the arms so a change in model or load hits both. Commands: `testing.md`.
-4. Give each transcript, under a random ID, to a fresh scorer that does not know the arm (`testing.md`, "Scoring").
+4. Give each transcript, under a random ID and with the pass bar from step 2, to a fresh scorer that does not know the arm (`testing.md`, "Scoring").
 5. Report `old k/n, new k/n` per case. The new text passes when, for every case, new k is at least old k minus 1. If a case fails, restore the dropped rule the failing transcripts show was needed, and re-run that case only.
 
 ## Step D: size and description checks
 
 ```bash
 python3 ~/.dotfiles/plugins/sjawhar/skills/writing-agent-skills/scripts/check_skill.py [--old <scratch>/old] <skill dir>...
-wc -l -c <skill dir>/SKILL.md <skill dir>/references/*.md
 ```
 
-The limits are in SKILL.md, "Limits". For a rewrite, pass `--old` with the copy from "Before you start"; `--help` says what it fails on. If meeting its bar would drop a rule, keep the rule and give the byte count and the reason in the commit message.
+The limits are in SKILL.md, "Limits"; `--help` lists each check. For a rewrite, pass `--old` with the copy from "Before you start": the check then also fails when the new SKILL.md is more than 200 bytes larger than the old one, because a rewrite that grows defeats its purpose. A rule that would not fit moves with its whole block into a reference named at its step, never past the limits.
 
-After the rewrite lands, run the check with `--log ~/.cache/skill-sizes.tsv` (one dated row per skill) daily for a week, and report the growth: rewritten instruction files regrow.
+After the rewrite lands, run the check on each rewritten skill daily for a week, with `--log ~/.cache/skill-sizes.tsv` (one dated row per skill) and with `--old` on the SKILL.md that landed (`--help` shows how to pass it from `git show`), because rewritten instruction files regrow. Post the week's rows on the rewrite's pull request. When `--old` fails, the skill grew more than 200 bytes: shrink it as SKILL.md, "4. Remove rules", says.

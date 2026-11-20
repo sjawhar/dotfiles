@@ -1,20 +1,22 @@
 ---
 name: writing-agent-skills
-description: "Use when you create, edit, shorten, test or delete an agent skill (its SKILL.md, references or description), or decide whether a lesson should become a rule in a skill. Also when a skill seems too long, is ignored, or loads on the wrong tasks. Not for text a person reads."
+description: "Use when you create, edit, rewrite, shorten, test or delete a skill, decide if a correction or lesson becomes a rule in a skill or agent instructions, need evidence a skill, instruction, advisor prompt or harness change helps, or a skill is too long, ignored or loads wrongly. Not for human text."
 ---
 
 # Writing agent skills
 
-An agent guide (AGENTS.md, CLAUDE.md) follows `updating-docs` instead. Every line of a skill also passes that skill's "The test for every line": no history, no restated code, no emphasis as force.
+An agent guide (AGENTS.md, CLAUDE.md) follows `updating-docs` for its shape and size; section 1 below still decides whether a rule goes in it, and section 3 how to test a change to it. Every line of a skill also passes that skill's "The test for every line": no history, no restated code, no emphasis as force. An incident story, a date or a URL goes in the commit message, because the agent reads a story as an instruction and misses its rule.
 
 ## Limits
 
 - `description`: starts "Use when", at most 300 characters, says when to load the skill and never its steps: an agent that reads the steps there follows them and skips the body.
 - Put the trigger words first, with the case where the agent thinks it can do without the skill ("also when the diff is pasted inline"). omp shows the model a hint of about 12 words made from the description, or its first 99 characters until that hint exists.
-- SKILL.md: at most 150 lines and 8,000 bytes, frontmatter included (`check_skill.py` warns above that). It holds the routing and the rules the model would not follow by default. Required steps and stop rules go first, because a cut keeps only the start.
-- References: in `references/`, one level deep, each at most 150 lines and 8 KB. Name each one in SKILL.md at the step that needs it, with the condition: "Read `references/<topic>.md` when ...". Merge a small reference into SKILL.md; delete one nothing names.
+- SKILL.md and every reference: at most 150 lines and 8,000 bytes each, the whole file counted, frontmatter included. These are hard limits: `check_skill.py` fails a file over either.
+- SKILL.md holds the routing and the rules the model would not follow by default. Required steps and stop rules go first, because a cut keeps only the start.
+- References: in `references/`, one level deep. Move each block that only some tasks need into `references/<topic>.md`, and name it in SKILL.md at the step that needs it, with the condition: "Read `references/<topic>.md` when ...". Merge a reference that every task of the skill reads into SKILL.md when the merged file stays within the limits; delete one nothing names.
+- A file the skill tells an agent to copy whole into another place (a brief, a form) goes under `assets/`, where the Agent Skills specification puts templates; `check_skill.py` reads `templates/` the same way. That directory alone makes the file a template, and the limits do not hold a template.
 - Code, prompts and other skills name skills and their paths, and code reads some frontmatter (`mcp:`): `git grep -n <name>` before you rename, move or delete one, and fix each namer in the same change.
-- Check: `python3 ~/.dotfiles/plugins/sjawhar/skills/writing-agent-skills/scripts/check_skill.py <skill dir>...`. Fix each FAIL and each warning. It does not count lines or measure reference files, so also run `wc -l -c` on SKILL.md and each reference.
+- Check: `python3 ~/.dotfiles/plugins/sjawhar/skills/writing-agent-skills/scripts/check_skill.py <skill dir>...`; `--help` lists each check. Fix every FAIL. Over 40 rule lines (each bullet or numbered line of SKILL.md's body) it warns: split the skill, move blocks into references, or delete rules (section 4), because a model obeys fewer of its rules as their number grows.
 
 ## 1. Decide that a rule is needed
 
@@ -38,18 +40,18 @@ An agent guide (AGENTS.md, CLAUDE.md) follows `updating-docs` instead. Every lin
 - State the condition that decides. "Unless it matters" or "where reasonable" makes the rule optional.
 - Keep the words that set a rule's scope ("before every push", "in Rust files"): models apply a rule only as broadly as it says.
 - Check that every path, command and skill you name exists: an agent that follows a dead pointer creates the missing thing.
-- Do not copy into a skill the rule to follow the code over a skill: `.claude/CLAUDE.md` holds it.
+- Do not copy into a skill the rule to follow the code over a skill: `~/.dotfiles/.claude/CLAUDE.md` holds it.
 
 ## 3. Test it
 
-Test every new skill and every edit that changes what an agent does. Read `references/testing.md` before you run a test; it has the arms, the sandbox command and the scoring rules.
+Test every new skill and every edit that changes what an agent does. Read `references/testing.md` before you run a test; it has the arms, the sandbox command and the scoring rules. Read its section "Measuring a harness change" when the change is to the harness (an extension feature, a context line, an advisor prompt) or to a gate or classifier that predicts Sami's decisions, or when you judge text by the fleet's records.
 
 1. Take cases from real sessions where the failure happened; invented cases pass where real ones fail.
-2. Write the pass bar for each case before the first run.
+2. Before any model call, freeze the cases, the arms and the grading (each case's pass bar): results must not steer them.
 3. Run each case in a fresh session that gets the raw task, not your diagnosis, and is not told it is a test.
 4. Run the old text, the new text and a no-guidance control, 3 times each; 3 more when the arms differ by one or two runs.
 5. For a description, also run near-miss prompts that must not load it.
-6. Tune on some cases and report on the others; revert a change that improves only the tuned ones.
+6. Before you tune, set aside 40% of the cases (rounded down, at least one). Tune on the rest and report the held-out ones, because a variant tuned on the cases you report wins only those. Revert a change that improves only the tuned ones.
 7. Stop a review loop after three rounds. Check only what changed, and never repeat a finding.
 
 ## 4. Remove rules

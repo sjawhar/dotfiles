@@ -64,7 +64,7 @@ python3 $S/count-types.py count records findings.jsonl types.jsonl --prior <last
 2. Propose a fix only for a type `count` marks `recurs`: text costs every session that loads it.
 3. Take the first home that would have stopped every finding of the type: delete or rewrite the text that caused it; point to the right text from the skill or tool the agent opens there; a mechanical gate (a refusal, a lint, a default); a rule, with `~/.dotfiles/.claude/CLAUDE.md` last.
 4. Write a rule with its reason in one clause, and no incident, date or quote. Tighten existing text before you add a paragraph (`writing-agent-skills`).
-5. A fix that changes omp's own behavior ships behind a gate in `~/.dotfiles/omp/extensions/experiments/gates.json`; measure it as `skill-evals` says.
+5. A fix that changes omp's own behavior ships behind a gate in `~/.dotfiles/omp/extensions/experiments/gates.json`; measure it as `skill://writing-agent-skills/references/testing.md`, "Measuring a harness change", says.
 
 ## 7. Report
 

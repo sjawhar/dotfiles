@@ -103,4 +103,4 @@ Read `references/away-mode.md` when Sami has said he is away. Silence does not s
 
 ## Editing this skill
 
-After an edit, measure again the authority and format failure rates of real asks (baselines 30.3% and 10.5%) with `skill-evals`: without them nobody can tell whether the edit made asks worse.
+After an edit, measure again the authority and format failure rates of real asks (baselines 30.3% and 10.5%) as `skill://writing-agent-skills/references/testing.md` says: without them nobody can tell whether the edit made asks worse.
