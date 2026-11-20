@@ -59,6 +59,11 @@
 # running, whose newest file is over an hour old and in which no process stands,
 # holds a file open or runs its program.
 #
+# A box ends when its container stops, not when the launcher's attached Docker client does
+# (box_client, dispatch://INFRA-4893). A client that ends while the container runs (a dockerd
+# restart under live-restore, an upgrade) is replaced by `docker attach` in the same pane. A box
+# Docker does not answer about within a few minutes is left as it is, never removed.
+#
 # A session whose work is NOT a checkout — a lane's scratch tree, a directory of
 # worktrees, a coordination root — names it with --dir instead of a repo
 # (dispatch://INFRA-702): 50 of this host's 82 live sessions on 2026-11-01 worked
@@ -952,9 +957,10 @@ enroll_failed() {
 }
 
 # Wait for the container to be Running (docker exec needs that) for as long as the launcher's
-# docker run child lives: a box can take minutes to reach Running when several start at once, and
-# the child's exit is the only sign that it never will. Each pass renews the enrollment.pending
-# marker, so a client that starts with the box finds it fresh however long the start took.
+# Docker client (box_client) lives: a box can take minutes to reach Running when several start at
+# once, and the client's end is the only sign that it never will. Each pass renews the
+# enrollment.pending marker, so the agent-secrets client that starts with the box finds it fresh
+# however long the start took.
 wait_for_running() {
     local box="$1" child="$2"
     while :; do
@@ -1305,8 +1311,8 @@ reenroll_if_not_live() {
     return 0
 }
 
-# box_wait BOX CHILD: the launcher's wait for an enrolled box while CHILD, its `docker run` (a
-# child of this shell), lives. Each pass runs reenroll_if_not_live, then waits for the child or
+# box_wait BOX CHILD: the launcher's wait for an enrolled box while CHILD, its client (box_client,
+# a child of this shell), lives. Each pass runs reenroll_if_not_live, then waits for the child or
 # 10 s, whichever ends first, so a box that ends is closed at once and a renew refused as not
 # live is acted on within 10 s. A trapped HUP, TERM or INT ends the wait with 128+n and its trap
 # acts at once, as in the blocking `wait`; the loop goes on while the child lives. `wait -n` with
@@ -1326,6 +1332,109 @@ box_wait() {
         kill "$sleep_pid" 2>/dev/null || true
         wait "$sleep_pid" || true
     done
+}
+
+# THE BOX'S CLIENT (dispatch://INFRA-4893). The launcher's `docker run` is attached to the box: it
+# carries the pane's keys to the box and the box's output to the pane. It is a client of dockerd
+# and nothing more, and it ends when dockerd stops: `error waiting for container: unexpected EOF`,
+# status 125 (docker-ce 29.9.2, measured on a scratch VM on 2026-11-20). With dockerd's
+# live-restore on, the container runs on through a dockerd restart (an upgrade, a crash). Before
+# this change the launcher took the client's end for the box's end: close_box waited 60 s, found
+# the container still running, and removed it and its disk. box_client is the box's client for the
+# box's whole life instead. Each time a client ends it asks Docker about the container
+# (box_container_state):
+#   - running: it attaches to the same container again in the same pane (`docker attach`, which
+#     takes the tty and stdin settings the container was made with, and the same detach keys from
+#     the Docker config as `docker run`), and waits on that client in the same way;
+#   - stopped: it ends, with the exit code Docker recorded for the container (the client's own
+#     status when Docker has none, as for a container that is gone), and the launcher closes the
+#     box as before;
+#   - unknown (Docker does not answer, or gives a state such as paused): it asks again every
+#     BOX_CLIENT_RETRY s until the window ends, then ends, and the launcher leaves the box as it is.
+# The window is BOX_REATTACH_WAIT s from the end of a client that was attached at least that long.
+# A client that ends sooner spends what is left of its window, so an attach that keeps ending
+# (Docker answers but each attach fails, or a person presses the detach keys again and again) also
+# ends in "left as it is", and never loops without end. The launcher's HUP, TERM and INT traps send
+# it USR1: from then on it attaches no more and ends with its client, and the launcher closes the
+# box as before. Each step is said on stderr (the pane) and in the box's log (box_client_say).
+BOX_REATTACH_WAIT="${AGENTBOX_REATTACH_WAIT:-300}"
+BOX_CLIENT_RETRY=5
+box_client() {
+    local box="$1" rc=0 state code started=$SECONDS deadline=0 asked stop=0
+    shift
+    trap 'stop=1' USR1
+    "$@" || rc=$?
+    while (( ! stop )); do
+        if (( deadline == 0 || SECONDS - started >= BOX_REATTACH_WAIT )); then
+            deadline=$(( SECONDS + BOX_REATTACH_WAIT ))
+        fi
+        asked=0
+        while :; do
+            state="$(box_container_state "$box")"
+            if [[ "$state" != unknown ]] || (( SECONDS >= deadline || stop )); then break; fi
+            if (( ! asked )); then
+                asked=1
+                box_client_say "$box" "its Docker client ended (status $rc), and Docker does not say whether the box still runs; asking again every ${BOX_CLIENT_RETRY}s for up to $(( deadline - SECONDS ))s"
+            fi
+            sleep "$BOX_CLIENT_RETRY"
+        done
+        (( ! stop )) || break
+        case "$state" in
+            stopped)
+                code="$(timeout "$BOX_DOCKER_READ_TIMEOUT" docker inspect -f '{{.State.ExitCode}}' "$box" 2>/dev/null)" || code=""
+                if [[ "$code" =~ ^[0-9]+$ ]]; then rc="$code"; fi
+                break
+                ;;
+            running)
+                if (( SECONDS >= deadline )); then
+                    box_client_say "$box" "the box still runs, but every attach to it ended within ${BOX_REATTACH_WAIT}s; no more attaches"
+                    break
+                fi
+                # An attach that ended at once is not made again at once.
+                (( SECONDS - started >= BOX_CLIENT_RETRY )) || sleep "$BOX_CLIENT_RETRY"
+                box_client_say "$box" "its Docker client ended (status $rc), and the box still runs; attaching to it again"
+                started=$SECONDS
+                rc=0
+                docker attach "$box" || rc=$?
+                ;;
+            *)
+                box_client_say "$box" "Docker did not say within ${BOX_REATTACH_WAIT}s whether the box still runs"
+                break
+                ;;
+        esac
+    done
+    return "$rc"
+}
+
+# box_container_state BOX: Docker's answer about BOX's container, in one word. running; stopped
+# (exited, dead, made but never started, being removed, or no container of that name); unknown
+# (Docker did not answer within BOX_DOCKER_READ_TIMEOUT s, or gave another state, such as paused).
+# A read that fails is unknown, never stopped: only Docker's own answer closes a box. `docker ps`
+# and not `docker inspect`, because inspect fails in the same way for a container that is gone and
+# for a Docker that does not answer.
+BOX_DOCKER_READ_TIMEOUT="${AGENTBOX_DOCKER_READ_TIMEOUT:-20}"
+box_container_state() {
+    local out
+    if ! out="$(timeout "$BOX_DOCKER_READ_TIMEOUT" docker ps -a --filter "name=^$1\$" --format '{{.State}}' 2>/dev/null)"; then
+        echo unknown
+        return 0
+    fi
+    case "$out" in
+        running) echo running ;;
+        "" | exited | dead | created | removing) echo stopped ;;
+        *) echo unknown ;;
+    esac
+}
+
+# box_client_say BOX TEXT: one line about BOX's client on stderr, which is the box's pane, and in
+# the box's log, where agentbox-run.ts writes its own lines (~/.cache/omp/agentbox/<box>.log). A
+# failed write fails nothing: the pane can be gone.
+BOX_LOG_DIR="$HOME/.cache/omp/agentbox"
+box_client_say() {
+    local line
+    line="agentbox $(date -u +%FT%TZ) $1: $2"
+    printf '%s\n' "$line" >&2 2>/dev/null || :
+    { mkdir -p "$BOX_LOG_DIR" && printf '%s\n' "$line" >>"$BOX_LOG_DIR/$1.log"; } 2>/dev/null || :
 }
 
 # Enroll a box from `new` once it is up, then start its renew: for omp once its session file names
@@ -3638,9 +3747,11 @@ cmd_new() {
     # their boxes. Nothing printed from here on has a reader. hung_up tells
     # reenroll_if_not_live to make the HUP trap's redirect again after a call
     # whose own redirect undid it.
+    # Each trap also tells the box's client (box_client, once there is one) to attach no more: the
+    # box is being ended, so a client that ends now is not replaced.
     local interrupted=0 hung_up=0
-    trap 'interrupted=1; hung_up=1; box_reclaim "$box"; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true; exec >/dev/null 2>&1' HUP
-    trap 'interrupted=1; box_reclaim "$box"; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true' TERM INT
+    trap 'interrupted=1; hung_up=1; [[ -z "${child:-}" ]] || kill -USR1 "$child" 2>/dev/null || true; box_reclaim "$box"; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true; exec >/dev/null 2>&1' HUP
+    trap 'interrupted=1; [[ -z "${child:-}" ]] || kill -USR1 "$child" 2>/dev/null || true; box_reclaim "$box"; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true' TERM INT
     # The box's record (box_record_write), beside its image and under the same trap: a launch
     # that fails from here on takes it away with the image. After open_box_disk, since the
     # record lives in the images directory that step makes, and a box with no image gets none.
@@ -3708,7 +3819,10 @@ cmd_new() {
     exec {stdin_fd}<&0
     # --log-driver none: stdout is the omp TUI's redraw stream, gigabytes a day
     # per box that nothing reads (the transcript is in ~/.omp; attach is live).
-    docker run --init --runtime "$RUNTIME" --name "$box" --hostname "$box" --log-driver none \
+    # box_client runs this `docker run`, and attaches to the box again whenever its client ends
+    # while the container still runs (a dockerd restart under live-restore), so the child lives as
+    # long as the box does.
+    box_client "$box" docker run --init --runtime "$RUNTIME" --name "$box" --hostname "$box" --log-driver none \
         --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
         "${RESOURCE_ARGS[@]}" \
         -w "$workdir" "${tty[@]}" ${add_hosts[@]+"${add_hosts[@]}"} \
@@ -3740,6 +3854,15 @@ cmd_new() {
         if wait "$child"; then rc=0; else rc=$?; fi
         kill -0 "$child" 2>/dev/null || break
     done
+    # box_client ends once Docker says the container is not running, once it gave up asking, or
+    # after a HUP, TERM or INT here. The first and the last close the box. A box that Docker does
+    # not say has stopped is left as it is: its container, disk, directory, runtime directory and
+    # relay stay, and the collector keeps a box whose container runs.
+    if (( ! interrupted )) && [[ "$(box_container_state "$box")" != stopped ]]; then
+        trap - EXIT
+        box_client_say "$box" "the box is left as it is, and nothing of it was removed. Attach to it: docker attach $box. End it: docker stop $box (the collector that the next \`agentbox new\` starts then deletes it)"
+        exit "$rc"
+    fi
     # Record the status before anything else: close_box and the exit below are where it would be
     # lost, and a box that aborted is exactly the one whose cleanup is most likely to go wrong.
     record_box_exit "$box" "$sid" "$rc"
