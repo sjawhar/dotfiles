@@ -1,6 +1,6 @@
 ---
 name: writing-agent-skills
-description: "Use when you create, edit, rewrite, shorten, test or delete a skill, decide if a correction or lesson becomes a rule in a skill or agent instructions, need evidence a skill, instruction, advisor prompt or harness change helps, or a skill is too long, ignored or loads wrongly. Not for human text."
+description: "Use when you need evidence a change helps (an advisor, a skill, agent instructions, an AGENTS.md rule, a gate), or delete, create or shorten a skill (removing one breaks the code and skills that name it), decide if a lesson becomes a rule, or a skill is too long. Not for human text."
 ---
 
 # Writing agent skills
