@@ -383,6 +383,32 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         self.assertNotIn("the lines it printed above", result.stderr, result.stdout + result.stderr)
         self.assertEqual(self.statements_left(), 1, result.stdout + result.stderr)
 
+    def test_the_command_the_message_names_runs_from_a_dotfiles_path_with_a_space(self) -> None:
+        # Given: an existing knives user whose dotfiles are at a path with a space in it,
+        # and whose git cannot reach the ledger repository.
+        spaced = self.root / "dot files"
+        self.dotfiles.rename(spaced)
+        self.dotfiles = spaced
+        (self.home / ".gitconfig").write_text(
+            f'[url "{self.root / "unreachable.git"}"]\n\tinsteadOf = {LEDGER_URL}\n', encoding="utf-8"
+        )
+
+        # When: the installer joins the machine and migrates its statements.
+        result = self.install()
+
+        # Then: the installer stops with migrate's status, and its message names a command to run.
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        named = [line.split("then run: ", 1)[1] for line in result.stderr.splitlines() if "then run: " in line]
+        self.assertEqual(len(named), 1, result.stdout + result.stderr)
+
+        # When: git can reach the ledger repository again, and the user runs that command as printed.
+        (self.home / ".gitconfig").write_text(f'[url "{self.remote}"]\n\tinsteadOf = {LEDGER_URL}\n', encoding="utf-8")
+        rerun = subprocess.run(["bash", "-c", named[0]], capture_output=True, text=True, env=self.env, check=False)
+
+        # Then: the command is this installer, it succeeds, and the statement is on the
+        # remote, under this machine's ref.
+        self.assert_install_succeeded(rerun)
+
     def test_two_spellings_of_one_ledger_make_one_git_directory(self) -> None:
         # Given: two forks naming the same ledger repository in different case,
         # one with a .git suffix.
