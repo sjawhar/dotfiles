@@ -102,9 +102,10 @@ done <<<"$ledgers"
 # every install runs them.
 #
 # A failed migrate stops the install with migrate's own exit status. The
-# installer sends what migrate prints to stderr, where its own message goes.
-# So in every log the message comes after the lines it points to. When
-# migrate exits 3, the message also says what to run.
+# installer sends what migrate prints, and the sweep's summary, to stderr,
+# where its own messages go. So in every log each message comes after the
+# lines it points to. When migrate exits 3, the message also says what to
+# run.
 #
 # A failed sweep stops the install only when it leaves entries this
 # machine alone holds (`unsent`, per repository; absent when knives could not

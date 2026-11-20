@@ -2,13 +2,13 @@
 """installers/knives.sh stops when the statements it migrated cannot be pushed.
 
 The tests also read the message the installer prints when `knives ledger migrate`
-fails: one or two tests for each outcome of exit 3, and one for another status.
+fails: a problem before migrate drops the statements, entries it could not send,
+a problem after the drop, an error before its report, and a migrate that dies.
 
-In knives v5.0.0, migrate starts no sweep in the background. It sends the
-ledger entries that it wrote, and then it exits. Before the installer's
-`knives ledger sweep` starts, the `knives` on its PATH (the test shim) takes
-the ledger lock and holds it for HOLD_SECONDS. So that sweep always waits for
-the lock.
+`knives ledger migrate` sends the ledger entries it wrote before it exits. Before
+the installer's `knives ledger sweep` starts, the test shim takes the ledger lock
+for HOLD_SECONDS, as another sweep or a send does. That sweep waits for the lock,
+so what it reports, and its exit, are its own, and a failed push is not hidden.
 
 Runs against the knives in KNIVES_BIN, else the pinned one mise resolves (never the
 shims/knives wrapper), and is skipped when that knives has no `knives ledger`. Two more
@@ -23,7 +23,6 @@ import shutil
 import stat
 import subprocess
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
@@ -130,18 +129,12 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         hook.chmod(0o755)
 
     def install(self) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run(
+        # The shim's lock holder keeps the installer's stdout and stderr open, so this
+        # returns only after the holder exits and lets the ledger lock go.
+        return subprocess.run(
             ["bash", str(self.dotfiles / "installers" / "knives.sh")],
             capture_output=True, text=True, env=self.env, check=False,
         )
-        # Wait until the ledger lock is free before the test counts anything. The shim's
-        # background holder can keep it after the installer exits, when the sweep did not wait.
-        lock = self.config / "ledger.lock"
-        for _ in range(600):
-            if subprocess.run(["flock", "-n", str(lock), "true"], check=False).returncode == 0:
-                break
-            time.sleep(0.1)
-        return result
 
     def refs_on_remote(self) -> list[str]:
         out = subprocess.run(
@@ -186,9 +179,7 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         result = self.install()
 
         # Then: it succeeds, and the statement is on the remote, under this machine's ref.
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
-        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
+        self.assert_install_succeeded(result)
 
     def test_control_an_accepted_push_carries_the_migrated_statements(self) -> None:
         # Given: an existing knives user, and a ledger remote that accepts pushes.
@@ -240,7 +231,6 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         # lib.sh sets DOTFILES_DIR with `cd ... && pwd`, and that keeps each symlink in the path.
         # So the message names self.dotfiles as it is, not its resolved path.
-        dotfiles = self.dotfiles
         lines = result.stderr.splitlines()
         # A failure prints both lists whole, so it shows the message the installer printed.
         self.maxDiff = None
@@ -249,8 +239,8 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
             [
                 "knives: `knives ledger migrate` exited 3.",
                 "knives: the lines it printed above say what went wrong. Fix each problem they name"
-                f" that needs a fix, then run: bash {dotfiles}/installers/knives.sh",
-                f"knives: if a line above asks for a change to repos.toml, make it in {dotfiles}/knives/repos.toml:"
+                f" that needs a fix, then run: bash {self.dotfiles}/installers/knives.sh",
+                f"knives: if a line above asks for a change to repos.toml, make it in {self.dotfiles}/knives/repos.toml:"
                 " at each run this installer replaces ~/.config/knives/repos.toml with a render of that file.",
             ],
             result.stdout + result.stderr,
@@ -259,6 +249,12 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
             any(knives_text in line for line in lines[:-3]),
             f"no line before the installer's message holds {knives_text!r}:\n" + result.stdout + result.stderr,
         )
+
+    def assert_install_succeeded(self, result: subprocess.CompletedProcess[str]) -> None:
+        """The installer exited 0, state.json holds no statement, and the remote holds this machine's ref."""
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
 
     def test_a_migrate_that_cannot_pull_the_ledger_keeps_the_statements_and_says_what_to_run(self) -> None:
         # Given: an existing knives user whose git cannot reach the ledger repository.
@@ -280,9 +276,7 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         result = self.install()
 
         # Then: it succeeds, and the statement is on the remote, under this machine's ref.
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
-        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
+        self.assert_install_succeeded(result)
 
     def test_a_statement_of_a_fork_the_registry_lost_is_fixed_in_the_dotfiles_registry(self) -> None:
         # Given: an existing knives user with a statement of a fork that repos.toml no longer names.
@@ -308,9 +302,7 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         result = self.install()
 
         # Then: it succeeds, and the statement is on the remote, under this machine's ref.
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
-        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
+        self.assert_install_succeeded(result)
 
     def test_a_sightings_file_migrate_cannot_read_stops_the_install_after_the_drop(self) -> None:
         # Given: an existing knives user whose seen.json is not a sightings file.
@@ -330,9 +322,7 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         result = self.install()
 
         # Then: it succeeds, and the statement stays on the remote, under this machine's ref.
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
-        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
+        self.assert_install_succeeded(result)
 
     def test_a_statement_the_ledger_already_states_otherwise_needs_only_a_second_run(self) -> None:
         # Given: a first install puts the statement on the ledger, and then state.json
@@ -354,9 +344,7 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         result = self.install()
 
         # Then: it succeeds, and the ledger's statement stays on the remote, under this machine's ref.
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
-        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
+        self.assert_install_succeeded(result)
 
     def test_a_state_file_migrate_cannot_read_stops_the_install_before_its_report(self) -> None:
         # Given: an existing knives user whose state.json is not valid state.
@@ -377,9 +365,7 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         result = self.install()
 
         # Then: it succeeds, and the statement is on the remote, under this machine's ref.
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
-        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
+        self.assert_install_succeeded(result)
 
     def test_a_migrate_that_dies_without_output_stops_the_install_with_its_status(self) -> None:
         # Given: an existing knives user, and a migrate that crashes before it prints a report.
