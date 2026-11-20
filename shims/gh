@@ -250,23 +250,12 @@ gh_shim_may_send_text() {
 # than a line feed, matched as bytes in any locale (a carriage return, and UTF-8's next line, line
 # separator and paragraph separator): yaml.v3 begins a line at each, so a key after one starts no
 # line the pattern below finds. Until 2026-11-17 `gh pr say 11 --body …` was a read here, and its
-# text went out unchecked; until review round 9 of dispatch://INFRA-3365 so was such a call under a
-# flow alias; until its round 14 so was one whose key follows a line separator. The check reads
-# gh's aliases in the forms gh 2.98.0 was measured to write (a block mapping, the flow mapping, each
-# key form gh leaves unquoted, a key past 128 bytes after `? `, quoted values with their escapes, a
-# `|` block scalar), and judges a call through one as the command it expands to. Refused: a
-# config.yml that holds such a break, which gh writes as itself in a `|` or a single-quoted value
-# whose text holds a line or a paragraph separator, refuses each call that may run an alias, and an
-# alias that shlex cannot split refuses each call that runs it; each refusal names its cause and the
-# line of config.yml to fix. Taking the fallback: the key of a name that starts or ends with a
-# newline, which gh writes as a `? |` block scalar, and each form gh does not write, leave a call
-# that may run one of the aliases read whole, with one target read as public: its arguments, that
-# alias's entry and the entry of each alias it runs, read loosely (a text that only looks like such
-# a key in another alias's value is read too), and each file and stdin they name. A listed term in
-# any of them is refused, and so is a file the check cannot read (a pipe, a device); a directory or
-# a name that is no file is a word. A call with none goes out. A line that only looks like an alias
-# starts the check, which finds no alias and lets the call go. A key under COMMAND past 128 bytes,
-# which gh writes after `? `, is not found here, so a call through it goes to gh unread.
+# text went out unchecked. The check judges a call through an alias as the command it expands to;
+# where it cannot read config.yml exactly, it refuses each call whose alias name stands there
+# before a `:` (scripts/leak-terms-check, gh_aliases). A line that only looks like an alias starts
+# the check, which on a config.yml it reads exactly finds no alias and lets the call go. A key
+# under COMMAND past 128 bytes, which gh writes after `? `, is not found here, so a call through it
+# goes to gh unread.
 gh_shim_has_nested_alias() {
     local config="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/config.yml" text pattern
     local LC_ALL=C
