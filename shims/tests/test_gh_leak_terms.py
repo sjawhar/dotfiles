@@ -224,6 +224,31 @@ class GhLeakTerms(unittest.TestCase):
         self.assertEqual(calls[0][0], argv)
         self.assertEqual(calls[0][1], stdin)
 
+    def check(self, argv: list[str], env: dict[str, str], stdin: bytes | None = None
+              ) -> subprocess.CompletedProcess[bytes]:
+        """scripts/leak-terms-check on the call ARGV as shims/gh runs it, with ENV, for its own exit status (3 for a
+        listed term, 4 for a text it cannot read): STDIN, when given, is the shim's buffer of standard input."""
+        if stdin is not None:
+            buffer = self.tmp / "stdin-buffer"
+            buffer.write_bytes(stdin)
+            env = {**env, "DOTFILES_LEAK_TERMS_GH_STDIN": str(buffer)}
+        return subprocess.run([str(CHECK), "gh", "--", *argv], env=env, cwd=self.work, stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=240, check=False)
+
+    def assert_alias_refused(self, argv: list[str], env: dict[str, str], shown: str, stdin: bytes = b"") -> None:
+        """The call ARGV, which may run a gh alias the check cannot read, is refused before any text is read: the check
+        exits 4, its refusal holding SHOWN and saying nothing was sent; and through shims/gh, given STDIN, which the
+        check never asks for, the call exits 2 and gh never runs."""
+        checked = self.check(argv, env, stdin or None)
+        stderr = checked.stderr.decode("utf-8", "replace")
+        self.assertEqual(checked.returncode, 4, stderr)
+        self.assertIn(shown, stderr)
+        self.assertIn("refused before gh ran, so nothing was sent.", stderr)
+        self.setUp_calls()
+        result = self.run_gh(argv, stdin, env=env)
+        self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
+        self.assertEqual(self.gh_calls(), [])
+
     # --- every input form: refused for a public repository, sent unchanged to a private one ----------------------
 
     def forms(self, repo: str, text: str) -> list[tuple[str, list[str], bytes, str]]:
@@ -2089,21 +2114,18 @@ class GhLeakTerms(unittest.TestCase):
         # The reader reads exactly each form gh 2.98.0 writes an alias in (gh_aliases), as `gh alias set` wrote them in
         # a scratch GH_CONFIG_DIR on 2026-11-20 (dispatch://INFRA-3365, review round 11): a block mapping, or the flow
         # mapping gh writes once `gh alias delete` removed the last alias; a value plain, a value of 200 characters
-        # on one line, 'single-quoted' with `''` (a value with `: `, a `#`, a line separator followed by the next line's
-        # indentation), or "double-quoted" with yaml.v3's escapes (a tab, a control character as `\x01`, a character
-        # outside the BMP as `\U0001F600`, a line break in flow form); a value of several lines as a `|-`, `|` or `|+`
-        # block scalar, `|4-` where it starts with a space; an alias named `aliases` or `hosts` among them. So such an
-        # alias whose expansion sends a listed term to a private repository goes out, and the same alias to a public
-        # one is refused for it, its target named. The escapes decode: the term spelled with `\x`, `\u` and `\U` is
-        # refused. The line separator stays, without the blanks after it: the refusal shows the body as `#TERM\u2028x`,
-        # which with the blanks kept would be a body `#TERM\u2028` and a word `x`.
+        # on one line, 'single-quoted' with `''` (a value with `: ` or a `#`), or "double-quoted" with yaml.v3's escapes
+        # (a tab, a control character as `\x01`, a character outside the BMP as `\U0001F600`, a line break in flow
+        # form); a value of several lines as a `|-`, `|` or `|+` block scalar, `|4-` where it starts with a space; an
+        # alias named `aliases` or `hosts` among them. So such an alias whose expansion sends a listed term to a private
+        # repository goes out, and the same alias to a public one is refused for it, its target named. The escapes
+        # decode: the term spelled with `\x`, `\u` and `\U` is refused. A value gh writes with a line separator in it is
+        # refused whatever it sends (test_a_line_break_other_than_a_line_feed_refuses_each_call_that_may_run_an_alias).
         words = " ".join(["word"] * 40)
         spelled = "\\x%02X\\u%04X\\U%08X%s" % (ord(CANARY[0]), ord(CANARY[1]), ord(CANARY[2]), CANARY[3:])
         rows = (
             ("block, plain, 200 characters", "\n    pc: issue comment 1 -R {repo} --body '{words} {body}'"),
             ("block, single-quoted with ''", "\n    pc: 'issue comment 1 -R {repo} --body ''note: {body}'''"),
-            ("block, single-quoted, a line separator",
-             "\n    pc: 'issue comment 1 -R {repo} --body #{body}\u2028        x'"),
             ("block, double-quoted, a tab", '\n    pc: "issue comment 1 -R {repo} --body \'a\\tb {body}\'"'),
             ("block, double-quoted, \\x, \\u and \\U escapes",
              '\n    pc: "issue comment 1 -R {repo} --body \'a\\x01\\U0001F600 {spelled}\'"'),
@@ -2119,8 +2141,6 @@ class GhLeakTerms(unittest.TestCase):
             ("flow, double-quoted, a line break", ' {pc: "issue create -R {repo} --title x\\n--body {body}"}'),
             ("flow, beside aliases named aliases and hosts",
              " {aliases: pr list, pc: issue comment 1 -R {repo} --body {body}, hosts: auth status}"))
-        # The line each refusal shows, where it tells how the value was read.
-        shown = {"block, single-quoted, a line separator": f"#{CANARY}\u2028x"}
         for number, (row, aliases) in enumerate(rows):
             for repository in (PRIVATE, PUBLIC):
                 text = (aliases.replace("{repo}", repository).replace("{words}", words).replace("{body}", CANARY)
@@ -2132,47 +2152,173 @@ class GhLeakTerms(unittest.TestCase):
                         self.assert_sent(self.run_gh(["pc"], env=env), ["pc"])
                         continue
                     refused = self.run_gh(["pc"], env=env)
-                    line = self.assert_refused(refused, "--body", CANARY)
+                    self.assert_refused(refused, "--body", CANARY)
                     self.assertIn(f"to {PUBLIC} (public):", refused.stderr.decode())
-                    if row in shown:
-                        self.assertEqual(line, shown[row])
 
-    def test_a_line_a_line_separator_begins_is_one_more_line_of_a_block_alias(self) -> None:
-        # yaml.v3 ends a line at each of its line breaks, a line separator (U+2028) among them (GH_YAML_BREAKS), so a
-        # `|` block scalar whose next line begins with one goes on there. The reviewer's case (review round 13 of
-        # dispatch://INFRA-3365), as gh 2.98.0 wrote it on 2026-11-20 in a scratch GH_CONFIG_DIR, under `env -i` with
-        # no token: `gh alias set note -` with `pr comment 1 -R o/pub --body x`, a line feed, a line separator and the
-        # term on standard input, then `gh alias set pp 'issue comment 1 -R o/pub --body …'`. gh writes `note: |-`,
-        # the block's second line beginning with the separator, then `pp`, and `gh alias list` lists both. So `pp` with
-        # a term is refused, judged by the public repository, and so is `note`, whose second line holds the term; `pp`
-        # with none goes out. Beside the `? |` key gh writes for a name that ends with a line feed (`gh alias set
-        # $'trail\n' 'pr view'`), which the reader does not read, the aliases are read as the fallback reads them, past
-        # that line too, and the same holds. Until that round the block, and the aliases with it, ended at that line:
-        # `note` was read without its term, `pp` was no alias, and each went out.
-        unread = "read as public, since the check cannot read gh's aliases exactly"
-        for number, (form, before) in enumerate((("as gh wrote it", ""),
-                                                 ("beside a `? |` key", "\n    ? |\n        trail\n    : pr view"))):
+    def test_a_line_break_other_than_a_line_feed_refuses_each_call_that_may_run_an_alias(self) -> None:
+        # yaml.v3 begins a line at each of its line breaks, and the check reads config.yml's lines at its line feeds
+        # alone, so it reads no config.yml that holds another break: each call that may run an alias, whose first word
+        # or first two words stand in config.yml before a `:`, is refused with exit 4, the refusal naming the break and
+        # its line (review round 14 of dispatch://INFRA-3365). The reviewer's config, as gh 2.98.0 wrote it on
+        # 2026-11-20 in a scratch GH_CONFIG_DIR, under `env -i` with no token: `gh alias set note -` with `pr view 1`, a
+        # line feed and a line separator on standard input, then `gh alias set pp 'issue comment 1 -R o/pub --body …'`.
+        # gh writes `note: |+`, `        pr view 1`, then the separator and `    pp: …` on one line, and `gh alias list`
+        # lists `pp`. `gh pp` is refused with a term and without one, and so it is with a paragraph separator, a next
+        # line or a carriage return there, which gh reads as breaks too, though it writes those two as escapes; a clean
+        # `pr comment` and `pr view 1`, which run no alias, go out. `pp` is refused too after a line that holds only a
+        # separator, and where a separator hides the aliases key itself (`editor: vim<U+2028>aliases:`, under which `gh
+        # alias list` lists `pp`); and so is `sq`, a single-quoted value holding a separator as gh writes it. Until that
+        # round `gh pp` after the `|+` value went to gh unread with any of the four breaks, `pp` after the line of a
+        # separator was read on the fallback, `pp` under the hidden key was no alias, and `sq` went to the private
+        # repository it names.
+        for number, (shown, separator) in enumerate((
+                ("LINE SEPARATOR (U+2028)", "\u2028"), ("PARAGRAPH SEPARATOR (U+2029)", "\u2029"),
+                ("NEXT LINE (U+0085)", "\x85"), ("CARRIAGE RETURN (U+000D)", "\r"))):
             for body in (CANARY, "clean"):
-                env = self.gh_config(f"separator-{number}-{body}", None, gh_config_yml(
-                    f"\n    co: pr checkout{before}\n    note: |-\n        pr comment 1 -R {PUBLIC} --body x\n"
-                    f"\u2028        {CANARY}\n    pp: issue comment 1 -R {PUBLIC} --body {body}"))
-                config = f"{env['GH_CONFIG_DIR']}/config.yml"
-                if body != CANARY:
-                    with self.subTest(form=form, call="pp", term=False):
-                        self.setUp_calls()
-                        self.assert_sent(self.run_gh(["pp"], env=env), ["pp"])
-                    continue
-                for name in ("pp", "note"):
-                    with self.subTest(form=form, call=name, term=True):
-                        self.setUp_calls()
-                        refused = self.run_gh([name], env=env)
-                        stderr = refused.stderr.decode()
-                        if before:
-                            self.assert_refused(refused, f"gh's alias {name} {config}", CANARY)
-                            self.assertIn(f"gh {name} to what the gh alias {name} runs, {unread}", stderr)
-                        else:
-                            self.assert_refused(refused, "--body" if name == "pp" else "argument 2", CANARY, line=1)
-                            self.assertIn(f"to {PUBLIC} (public):", stderr)
+                env = self.gh_config(f"break-{number}-{body}", None, gh_config_yml(
+                    f"\n    co: pr checkout\n    note: |+\n        pr view 1\n"
+                    f"{separator}    pp: issue comment 1 -R {PUBLIC} --body {body}"))
+                with self.subTest(separator=shown, call="pp", term=body == CANARY):
+                    self.assert_alias_refused(["pp"], env, f"leak terms: gh pp: {env['GH_CONFIG_DIR']}/config.yml "
+                                                           f"holds a {shown} on line 11, a line break other than a "
+                                                           "line feed")
+            for argv in (["pr", "comment", "1", "-R", PUBLIC, "--body", "hello"], ["pr", "view", "1"]):
+                with self.subTest(separator=shown, call=" ".join(argv[:2])):
+                    self.setUp_calls()
+                    self.assert_sent(self.run_gh(argv, env=env), argv)
+        pp = f"pp: issue comment 1 -R {PUBLIC} --body {CANARY}"
+        for number, (row, config, name, line) in enumerate((
+                ("after a line that holds only a line separator",
+                 gh_config_yml(f"\n    note: pr view\n\u2028\n    {pp}"), "pp", 9),
+                ("where a line separator hides the aliases key", f"version: 1\neditor: vim\u2028aliases:\n    {pp}\n",
+                 "pp", 2),
+                ("a single-quoted value holding a line separator, as gh writes it",
+                 gh_config_yml(f"\n    co: pr checkout\n    sq: 'issue comment 1 -R {PRIVATE} --body #{CANARY}\u2028"
+                               "        x'"), "sq", 9))):
+            env = self.gh_config(f"break-row-{number}", None, config)
+            with self.subTest(row=row, call=name):
+                self.assert_alias_refused([name], env, f"leak terms: gh {name}: {env['GH_CONFIG_DIR']}/config.yml "
+                                                       f"holds a LINE SEPARATOR (U+2028) on line {line}")
+
+    def test_shims_gh_starts_the_check_for_an_alias_whose_key_follows_a_line_separator(self) -> None:
+        # shims/gh starts the check for a call under a gh command only where gh_shim_has_nested_alias finds that
+        # config.yml may hold an alias under that command, a key at an indented line's start or after a `{` or a `,`.
+        # yaml.v3 begins a line at a line separator too, so `    pr say: pr comment` after one, on the same line, is an
+        # alias gh runs (`gh alias list` lists it, measured 2026-11-20 with gh 2.98.0), at no line start the shim's
+        # pattern finds. The shim starts the check for a config.yml that holds such a break, and the check refuses `gh
+        # pr say`, clean as it is: gh never runs. Control: the same config with no separator, which the check reads,
+        # sends the clean `gh pr say` to gh. Until review round 14 of dispatch://INFRA-3365 the shim took `gh pr say`
+        # behind the separator for a read, and gh ran it unread.
+        aliases = "\n    co: pr checkout\n    note: |+\n        pr view 1\n{separator}    pr say: pr comment"
+        argv = ["pr", "say", "1", "-R", PUBLIC, "--body", CLEAN]
+        env = self.gh_config("say-separator", None, gh_config_yml(aliases.format(separator="\u2028")))
+        with self.subTest(separator=True):
+            result = self.run_gh(argv, env=env)
+            stderr = result.stderr.decode("utf-8", "replace")
+            self.assertEqual(result.returncode, 2, stderr)
+            self.assertEqual(self.gh_calls(), [])
+            self.assertIn(f"leak terms: gh pr say: {env['GH_CONFIG_DIR']}/config.yml holds a LINE SEPARATOR (U+2028) "
+                          "on line 11", stderr)
+        with self.subTest(control="no separator"):
+            env = self.gh_config("say-plain", None, gh_config_yml(aliases.format(separator="")))
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(argv, env=env), argv)
+
+    def test_a_crlf_config_yml_is_read_as_with_line_feeds(self) -> None:
+        # yaml.v3 reads a carriage return and a line feed as one line break (is_crlf), and so does the check
+        # (gh_config_text). With a gh-written config.yml whose lines end in CRLF, as an editor may save it, the aliases
+        # are read exactly: a clean `note` goes out; with a term to a private repository it goes out, judged by that
+        # repository; with a term to a public one it is refused (exit 3) for that repository, and so is the `|-` alias
+        # `nt`. Until review round 14 of dispatch://INFRA-3365 the reader read no CRLF config.yml (`aliases:\r` is no
+        # `aliases:`), so each call through one of its aliases was read whole, as public.
+        aliases = ("\n    co: pr checkout\n    note: pr comment 1 -R {repo} --body {body}\n    nt: |-\n"
+                   "        issue create -R {repo} --title x\n        --body {body}")
+
+        def crlf(name: str, repository: str, body: str) -> dict[str, str]:
+            config = gh_config_yml(aliases.format(repo=repository, body=body))
+            return self.gh_config(name, None, config.replace("\n", "\r\n"))
+
+        for name, env in (("a clean note", crlf("crlf-clean", PUBLIC, "clean")),
+                          ("a term to a private repository", crlf("crlf-private", PRIVATE, CANARY))):
+            with self.subTest(call=name):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(["note"], env=env), ["note"])
+        env = crlf("crlf-public", PUBLIC, CANARY)
+        for name, shown in (("note", "gh pr comment"), ("nt", "gh issue create")):
+            with self.subTest(call=name, term=True):
+                refused = self.check([name], env)
+                stderr = refused.stderr.decode("utf-8", "replace")
+                self.assertEqual(refused.returncode, 3, stderr)
+                self.assertIn(f"leak terms: {shown} to {PUBLIC} (public): --body line ", stderr)
+
+    def test_a_line_break_other_than_a_line_feed_in_config_yml_is_outside_the_plain_case(self) -> None:
+        # gh reads a key after a line separator as a key at the root (measured 2026-11-20 with gh 2.98.0: with
+        # `editor: vim<U+2028>hosts:` and a host below it in config.yml, `gh auth status` lists that host), and the
+        # check reads config.yml's lines at its line feeds alone, so it would not see that `hosts` key. A config.yml
+        # that holds a line break other than a line feed is outside the plain case (gh_config_condition), and the
+        # refusal names the break: a term to a public repository is refused, and so is one to a private repository,
+        # which gh may look for on the host that key lists; the same call with no term goes out. Until review round 14
+        # of dispatch://INFRA-3365 such a config.yml was the plain case, and the term to the private repository went
+        # out.
+        self.checkout(("origin", f"https://github.com/{PRIVATE}.git"))
+        env = self.gh_config("hosts-break", None, 'version: "1"\neditor: vim\u2028hosts:\n    ghe.example.com:\n'
+                                                  "        user: x\n")
+        condition = ("to wherever gh sends it, read as public, since gh's config.yml holds a LINE SEPARATOR (U+2028) "
+                     "on line 2, a line break other than a line feed, which the check does not read")
+        for repository in (PUBLIC, PRIVATE):
+            with self.subTest(repository=repository):
+                self.setUp_calls()
+                refused = self.run_gh(["pr", "comment", "1", "-R", repository, "--body", TEXT], env=env)
+                self.assert_refused(refused, "--body")
+                self.assertIn(condition, refused.stderr.decode())
+        with self.subTest(control="no term"):
+            argv = ["pr", "comment", "1", "-R", PRIVATE, "--body", CLEAN]
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(argv, env=env), argv)
+
+    def test_an_alias_shlex_cannot_split_refuses_each_call_that_runs_it(self) -> None:
+        # The check splits an alias as a shell line with Python's shlex; gh splits it with google/shlex, for which a `#`
+        # begins a comment, so from `pr comment 1 -R o/pub --body-file - # Sami's alias` gh runs `pr comment 1 -R o/pub
+        # --body-file -`, which reads standard input, where Python's shlex refuses the apostrophe. A call that runs an
+        # alias shlex cannot split is refused with exit 4, the refusal naming the alias, the line of its key and shlex's
+        # message (review round 14 of dispatch://INFRA-3365): a folded `>-` alias, on the fallback, with a term on
+        # standard input; the shell alias `sh1` beside the `? |` key gh writes for `gh alias set $'trail\n' 'pr view'`,
+        # both as gh 2.98.0 wrote them on 2026-11-20 (`gh alias set --shell sh1 "gh pr comment … # don't wrap"`), whose
+        # value shlex cannot split once decoded; and a double-quoted alias, which the reader reads. A clean `pr
+        # comment`, which runs no alias, goes out beside each. Control: the folded alias with no apostrophe reads
+        # standard input, and is refused for the term on it (exit 3), and with a clean standard input it goes out. Until
+        # that round the folded alias was read without that splitting, so its `-` was no standard input, and the
+        # double-quoted alias was no alias: each call went to gh, the term on standard input unread.
+        unsplit = ("leak terms: gh {name}: shlex cannot split gh's alias {name}, on line {line} of {config}, as a "
+                   "shell line (No closing quotation)")
+        for number, (row, aliases, name, line) in enumerate((
+                ("a folded alias, on the fallback",
+                 f"\n    co: pr checkout\n    note: >-\n        pr comment 1 -R {PUBLIC} --body-file - # Sami's alias",
+                 "note", 9),
+                ("a shell alias beside the `? |` key gh writes, on the fallback",
+                 f"\n    co: pr checkout\n    ? |\n        trail\n    : pr view\n"
+                 f"    sh1: '!gh pr comment 1 -R {PUBLIC} --body-file - # don''t wrap'", "sh1", 12),
+                ("a double-quoted alias the reader reads",
+                 f"\n    co: pr checkout\n    note: \"pr comment 1 -R {PUBLIC} --body-file - # Sami's alias\"", "note",
+                 9))):
+            env = self.gh_config(f"unsplit-{number}", None, gh_config_yml(aliases))
+            with self.subTest(row=row, call=name):
+                self.assert_alias_refused([name], env, unsplit.format(
+                    name=name, line=line, config=f"{env['GH_CONFIG_DIR']}/config.yml"), TEXT.encode())
+            with self.subTest(row=row, call="pr comment"):
+                argv = ["pr", "comment", "1", "-R", PUBLIC, "--body", "hello"]
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=env), argv)
+        env = self.gh_config("unsplit-control", None, gh_config_yml(
+            f"\n    co: pr checkout\n    note: >-\n        pr comment 1 -R {PUBLIC} --body-file - # Sams alias"))
+        with self.subTest(control="no apostrophe", term=True):
+            refused = self.check(["note"], env, TEXT.encode())
+            stderr = refused.stderr.decode("utf-8", "replace")
+            self.assertEqual(refused.returncode, 3, stderr)
+            self.assertIn(": --body-file - (standard input) line 1: ", stderr)
+        with self.subTest(control="no apostrophe", term=False):
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(["note"], CLEAN.encode(), env), ["note"], CLEAN.encode())
 
     def test_a_call_through_an_alias_is_judged_by_that_alias_alone(self) -> None:
         # Until review round 11 of dispatch://INFRA-3365 one alias that held a listed term refused every call through
@@ -2397,13 +2543,17 @@ class GhLeakTerms(unittest.TestCase):
                 self.assert_sent(self.run_gh([*argv, CLEAN]), [*argv, CLEAN])
 
     def test_a_config_line_outside_the_aliases_changes_nothing(self) -> None:
-        # A line of config.yml outside its aliases changes neither how the aliases are read nor the plain case. These
-        # configs are ones gh 2.98.0 writes (the tester's, review round 10 of dispatch://INFRA-3365, finding 4): one
-        # with `editor: ?x`, one with a pager holding U+2028, and one with the tester's four lines. With the block
-        # aliases `co: pr checkout`, `pv: pr view`, `pc`, an internal comment that sends a listed term to a private
-        # repository, and `pr say`, which makes shims/gh hand every `gh pr …` call to the check, each call goes out:
-        # `pr view 1`, `pr ready 1`, `co 1`, `pv 1`, and `pc`, judged in the plain case by that repository. Until that
-        # round a YAML reader that did not follow such a line refused every call that might run an alias.
+        # A line of config.yml outside its aliases changes neither how the aliases are read nor the plain case, unless
+        # it holds a line break other than a line feed. These configs are ones gh 2.98.0 writes (the tester's, review
+        # round 10 of dispatch://INFRA-3365, finding 4): one with `editor: ?x`, one with a pager holding U+2028, and one
+        # with the tester's four lines. With the block aliases `co: pr checkout`, `pv: pr view`, `pc`, an internal
+        # comment that sends a listed term to a private repository, and `pr say`, which makes shims/gh hand every `gh pr
+        # …` call to the check, each call goes out under `editor: ?x`: `pr view 1`, `pr ready 1`, `co 1`, `pv 1`, and
+        # `pc`, judged in the plain case by that repository. Until that round a YAML reader that did not follow such a
+        # line refused every call that might run an alias. The pager's U+2028 is a line break the check does not read
+        # (test_a_line_break_other_than_a_line_feed_refuses_each_call_that_may_run_an_alias): since review round 14
+        # `pr view 1` and `pr ready 1`, which run no alias, go out beside it, and `co 1`, `pv 1` and `pc` are refused,
+        # the refusal naming the pager's line.
         aliases = (f"\n    co: pr checkout\n    pv: pr view\n    pc: pr comment 1 -R {PRIVATE} --body 'see {CANARY}'"
                    "\n    pr say: pr comment")
         for number, (row, config) in enumerate((
@@ -2414,19 +2564,25 @@ class GhLeakTerms(unittest.TestCase):
             for argv in (["pr", "view", "1"], ["pr", "ready", "1"], ["co", "1"], ["pv", "1"], ["pc"]):
                 with self.subTest(row=row, call=" ".join(argv)):
                     self.setUp_calls()
+                    if "\u2028" in config and argv[0] != "pr":
+                        self.assert_alias_refused(argv, env, f"leak terms: gh {argv[0]}: {env['GH_CONFIG_DIR']}/"
+                                                             "config.yml holds a LINE SEPARATOR (U+2028) on line 6")
+                        continue
                     self.assert_sent(self.run_gh(argv, env=env), argv)
 
     def test_in_an_agent_session_the_agent_config_directory_is_the_plain_case(self) -> None:
         # In an agent's shell shims/gh points GH_CONFIG_DIR at the directory scripts/gh-agent-config makes: its hosts.yml
         # lists `github.com:` alone, with a placeholder login, and its config.yml links to the user's, here one gh wrote
-        # with the tester's four lines and the aliases `co: pr checkout` and `pr say`, which makes shims/gh hand every
-        # `gh pr …` call to the check. That directory is the plain case (the tester's agent rows, review round 10 of
-        # dispatch://INFRA-3365): a comment with a term to a private repository goes out, the same comment to a public
-        # one is refused, and `pr view 1` and `co 1` go out.
+        # with three of the tester's four lines and the aliases `co: pr checkout` and `pr say`, which makes shims/gh
+        # hand every `gh pr …` call to the check. That directory is the plain case (the tester's agent rows, review
+        # round 10 of dispatch://INFRA-3365): a comment with a term to a private repository goes out, the same comment
+        # to a public one is refused, and `pr view 1` and `co 1` go out. The tester's fourth line, a pager holding
+        # U+2028, is left out: since review round 14 such a line break takes config.yml out of the plain case
+        # (test_a_line_break_other_than_a_line_feed_in_config_yml_is_outside_the_plain_case).
         user = self.tmp / "config" / "gh"
         user.mkdir()
-        (user / "config.yml").write_text(gh_tester_config_yml("\n    co: pr checkout\n    pr say: pr comment"),
-                                         encoding="utf-8")
+        (user / "config.yml").write_text(gh_tester_config_yml("\n    co: pr checkout\n    pr say: pr comment").replace(
+            "pager: less\u2028-R\n", "pager:\n"), encoding="utf-8")
         env = self.agent()
         for argv in (["pr", "comment", "1", "-R", PRIVATE, "--body", TEXT], ["pr", "view", "1"], ["co", "1"]):
             with self.subTest(call=" ".join(argv[:2])):
@@ -2875,16 +3031,17 @@ class NestedAliases(unittest.TestCase):
     writes once the last alias was deleted. Matching too much only starts the check, which then finds no alias."""
 
     @staticmethod
-    def has_nested_alias(command: str, config: str) -> bool:
+    def has_nested_alias(command: str, config: str, locale: str = "") -> bool:
         """gh_shim_has_nested_alias COMMAND, lifted out of the shim by text (sourcing shims/gh runs it), with gh's
-        config.yml, in a new GH_CONFIG_DIR, holding CONFIG."""
+        config.yml, in a new GH_CONFIG_DIR, holding CONFIG, in LOCALE (LC_ALL) when given."""
         text = GH.read_text(encoding="utf-8")
         start = text.index("gh_shim_has_nested_alias() {")
         script = text[start:text.index("\n}\n", start) + 3] + f"\ngh_shim_has_nested_alias '{command}'"
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / "config.yml").write_text(config, encoding="utf-8")
-            return subprocess.run(["bash", "-c", script], env={"PATH": os.environ["PATH"], "GH_CONFIG_DIR": directory},
-                                  capture_output=True, timeout=60, check=False).returncode == 0
+            env = {"PATH": os.environ["PATH"], "GH_CONFIG_DIR": directory, **({"LC_ALL": locale} if locale else {})}
+            return subprocess.run(["bash", "-c", script], env=env, capture_output=True, timeout=60,
+                                  check=False).returncode == 0
 
     def test_an_alias_under_a_command_is_found_in_each_form_gh_writes(self) -> None:
         for form, config in (
@@ -2899,6 +3056,23 @@ class NestedAliases(unittest.TestCase):
                              ("block, no key under pr", "aliases:\n    prc: pr comment --body x\n")):
             with self.subTest(control=form):
                 self.assertFalse(self.has_nested_alias("pr", config))
+
+    def test_a_line_break_other_than_a_line_feed_starts_the_check(self) -> None:
+        # yaml.v3 begins a line at a carriage return, a next line, a line separator and a paragraph separator, so a key
+        # after one, on the same line, starts no line the shim's pattern finds. A config.yml that holds one starts the
+        # check, which refuses a call that may run an alias
+        # (GhLeakTerms.test_a_line_break_other_than_a_line_feed_refuses_each_call_that_may_run_an_alias). The bytes are
+        # found in the C locale and in a UTF-8 one. Control: the same config with no break and no key under `pr` does
+        # not start it. Until review round 14 of dispatch://INFRA-3365 no break started it.
+        aliases = "aliases:\n    note: |+\n        pr view 1\n{separator}    {key}: pr comment\n"
+        for name, separator in (("CARRIAGE RETURN", "\r"), ("NEXT LINE", "\x85"), ("LINE SEPARATOR", "\u2028"),
+                                ("PARAGRAPH SEPARATOR", "\u2029")):
+            for locale in ("C", "C.UTF-8"):
+                with self.subTest(separator=name, locale=locale):
+                    self.assertTrue(self.has_nested_alias("pr", aliases.format(separator=separator, key="pr say"),
+                                                          locale))
+        with self.subTest(control="no break, no key under pr"):
+            self.assertFalse(self.has_nested_alias("pr", aliases.format(separator="", key="say")))
 
     def test_an_alias_under_each_command_is_found_in_flow_form(self) -> None:
         # Each command for which gh_shim_may_send_text asks gh_shim_has_nested_alias, as the shim lists them.

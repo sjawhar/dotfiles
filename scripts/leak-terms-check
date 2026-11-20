@@ -7,6 +7,7 @@ import codecs
 import fnmatch
 import glob
 import html
+import io
 import json
 import os
 import pwd
@@ -22,7 +23,7 @@ import urllib.parse
 from functools import lru_cache
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable, Iterator, Mapping, Sequence
+from typing import Callable, Iterator, Mapping, Sequence, cast
 
 
 LIST_EXIT = 2
@@ -940,9 +941,10 @@ def jj_sections(text: str, mode: str, expected_ids: Sequence[str]) -> list[tuple
                 raise ValueError("cannot read jj editor descriptions")
             if current is not None and current_id is not None:
                 sections.append((current_id, current))
-            current_id = matched.group(1)
+            commit_id: str = matched.group(1)
+            current_id = commit_id
             current = []
-            seen.add(current_id)
+            seen.add(commit_id)
         elif current is None:
             if line and not line.startswith("JJ:"):
                 raise ValueError("cannot read jj editor descriptions")
@@ -1331,28 +1333,29 @@ def git_chunks(arguments: Sequence[str], standard_input: bytes) -> Iterator[byte
         raise TextError("could not run git while reading outgoing commits") from error
     assert process.stdin is not None
     assert process.stdout is not None
+    stdin, stdout = process.stdin, cast(io.BufferedReader, process.stdout)
     write_errors: list[OSError] = []
 
     def write_input() -> None:
         try:
-            process.stdin.write(standard_input)
+            stdin.write(standard_input)
         except BrokenPipeError:
             pass
         except OSError as error:
             write_errors.append(error)
         finally:
             try:
-                process.stdin.close()
+                stdin.close()
             except OSError as error:
                 write_errors.append(error)
 
     writer = threading.Thread(target=write_input)
     writer.start()
     try:
-        while chunk := process.stdout.read1(65536):
+        while chunk := stdout.read1(65536):
             yield chunk
     finally:
-        process.stdout.close()
+        stdout.close()
         writer.join()
         status = process.wait()
     if write_errors or status:
@@ -2469,16 +2472,32 @@ def gh_root_keys(lines: Sequence[str], name: str) -> list[int]:
 GH_YAML_ESCAPES = {"0": "\0", "a": "\a", "b": "\b", "t": "\t", "n": "\n", "v": "\v", "f": "\f", "r": "\r",
                    "e": "\x1b", '"': '"', "\\": "\\", "N": "\x85", "_": "\xa0", "L": "\u2028", "P": "\u2029"}
 GH_YAML_HEX = {"x": 2, "u": 4, "U": 8}
-# yaml.v3's line breaks (is_break in yamlprivateh.go, at each of which its scanner, scannerc.go, ends a line), each
-# with what yaml.v3 reads it as inside a scalar (read_line): a carriage return followed by a line feed, which is one
-# break (is_crlf), a line feed, a carriage return and a next line as a line feed; a line separator or a paragraph
-# separator as itself. yaml.v3 writes a line or paragraph separator in a single-quoted scalar and in a `|` block scalar
-# as itself, then the indentation of a new line (measured 2026-11-20 with gh 2.98.0), and a carriage return or a next
-# line only as an escape. The readers here take config.yml's lines split at the line feed alone (newline_lines), so a
-# line they read may hold any other break.
-GH_YAML_BREAKS = {"\r\n": "\n", "\n": "\n", "\r": "\n", "\x85": "\n", "\u2028": "\u2028", "\u2029": "\u2029"}
-# One break of GH_YAML_BREAKS, captured so that re.split keeps it, a carriage return and a line feed as one.
-GH_YAML_BREAK = re.compile(f"({'|'.join(map(re.escape, GH_YAML_BREAKS))})")
+# yaml.v3's line breaks other than a line feed (is_break in yamlprivateh.go), by their Unicode names. yaml.v3 ends a
+# line at each of them, but the readers here split config.yml at its line feeds alone (newline_lines), so they read no
+# config.yml that holds one (gh_config_break): it refuses each call that may run an alias (gh_aliases), and it is
+# outside the plain case (gh_config_condition). A carriage return before a line feed is none: yaml.v3 reads the pair
+# as one break (is_crlf), and gh_config_text makes it one line feed. gh 2.98.0 writes a line or a paragraph separator
+# as itself in a `|` block scalar and in a single-quoted scalar, and a next line and a carriage return only as an
+# escape, `\N` and `\r` (measured 2026-11-20 with `gh alias set` and `gh config set`).
+GH_YAML_OTHER_BREAKS = {"\r": "CARRIAGE RETURN", "\x85": "NEXT LINE", "\u2028": "LINE SEPARATOR",
+                        "\u2029": "PARAGRAPH SEPARATOR"}
+
+
+def gh_config_text(text: str) -> str:
+    """TEXT, a gh config file's, with its line breaks as yaml.v3 reads them: without a byte order mark, and each CRLF
+    one line feed (is_crlf)."""
+    return text.removeprefix("\ufeff").replace("\r\n", "\n")
+
+
+def gh_config_break(text: str) -> str | None:
+    """The first line break other than a line feed (GH_YAML_OTHER_BREAKS) in TEXT, a gh config file's (gh_config_text),
+    by its Unicode name and the 1-based line it is on: `a LINE SEPARATOR (U+2028) on line 12`. None where it holds
+    none."""
+    found = re.search(f"[{''.join(GH_YAML_OTHER_BREAKS)}]", text)
+    if found is None:
+        return None
+    line = text.count("\n", 0, found.start()) + 1
+    return f"a {GH_YAML_OTHER_BREAKS[found[0]]} (U+{ord(found[0]):04X}) on line {line}"
 
 
 def gh_blanks_end(line: str, start: int) -> int:
@@ -2488,11 +2507,11 @@ def gh_blanks_end(line: str, start: int) -> int:
 
 def gh_yaml_quoted(line: str, start: int) -> tuple[str, int] | None:
     """The scalar quoted from LINE[START], `'` or `"`, as yaml.v3 reads it, and the index after its closing quote, when
-    it ends on its line: in single quotes `''` is `'`, and a line or paragraph separator (GH_YAML_BREAKS) is itself
-    without the blanks around it; in double quotes each escape yaml.v3 writes (GH_YAML_ESCAPES, GH_YAML_HEX) is the
-    character it stands for. None for any other: one that does not end on its line, another escape or one of no
-    character, a break yaml.v3 reads as a line feed (GH_YAML_BREAKS: a carriage return or a next line), which it folds,
-    and in double quotes a separator, which yaml.v3 writes as an escape."""
+    it ends on its line: in single quotes `''` is `'`; in double quotes each escape yaml.v3 writes (GH_YAML_ESCAPES,
+    GH_YAML_HEX) is the character it stands for. None for any other: one that does not end on its line, and another
+    escape or one of no character. LINE holds no line break: it is a line of a gh config file that holds no break but
+    the line feeds it is split at (gh_config_break; hosts.yml split by str.splitlines), or the lines of an alias's
+    entry joined by blanks, as YAML folds them (gh_alias_words)."""
     quote, index, value = line[start], start + 1, []
     while index < len(line):
         character = line[index]
@@ -2500,13 +2519,7 @@ def gh_yaml_quoted(line: str, start: int) -> tuple[str, int] | None:
             value.append("'")
             index += 2
         elif character == quote:
-            text = "".join(value)
-            if quote == "'":
-                breaks = "".join(GH_YAML_BREAKS)
-                text = re.sub(rf"[ \t]*([{breaks}][{breaks} \t]*)", lambda found: re.sub(r"[ \t]", "", found[1]), text)
-            return text, index + 1
-        elif character in GH_YAML_BREAKS and (quote == '"' or GH_YAML_BREAKS[character] != character):
-            return None
+            return "".join(value), index + 1
         elif quote == '"' and character == "\\":
             code = line[index + 1:index + 2]
             width = GH_YAML_HEX.get(code, 0)
@@ -2547,12 +2560,10 @@ def gh_yaml_plain(line: str, start: int, flow: bool = False) -> tuple[str, int] 
     It ends at a `:` before a blank or the line's end, at a `#` after a blank, which begins a comment, in a flow mapping
     at any of `,?[]{}`, or at the line's end, the blanks before its end not its own. So `gh alias set` writes the keys
     `pr:mine`, `?mine`, `-x`, `:x`, `a::b`, `x:y:z`, `x]` and `a#b` unquoted in block form, and `-x` in flow form
-    (measured 2026-11-20 with gh 2.98.0). None for one that does not begin so, and for one that a line break
-    (GH_YAML_BREAKS) continues on another line."""
-    breaks = "".join(GH_YAML_BREAKS)
+    (measured 2026-11-20 with gh 2.98.0). None for one that does not begin so."""
     first, following = line[start:start + 1], line[start + 1:start + 2]
-    if not first or first in f" \t{breaks}" or first in GH_YAML_INDICATORS and (
-            following in f" \t{breaks}" or first not in ("-" if flow else "-?:")):
+    if not first or first in " \t" or first in GH_YAML_INDICATORS and (
+            following in " \t" or first not in ("-" if flow else "-?:")):
         return None
     index = end = start
     while index < len(line):
@@ -2562,9 +2573,7 @@ def gh_yaml_plain(line: str, start: int, flow: bool = False) -> tuple[str, int] 
             if index == len(line) or line[index] == "#":
                 break
             continue
-        if character in breaks:
-            return None
-        if character == ":" and line[index + 1:index + 2] in ("", " ", "\t", *breaks) or flow and character in ",?[]{}":
+        if character == ":" and line[index + 1:index + 2] in ("", " ", "\t") or flow and character in ",?[]{}":
             break
         index = end = index + 1
     return line[start:end], end
@@ -2581,56 +2590,50 @@ def gh_yaml_value(line: str, start: int) -> str | None:
     return found[0] if found and re.fullmatch(r"(?:[ \t]+#.*)?[ \t]*", line[found[1]:]) else None
 
 
-def gh_yaml_literal(lines: Sequence[str], number: int, header: str, column: int) -> tuple[str, int] | None:
+def gh_yaml_literal(lines: Sequence[str], number: int, header: str, column: int,
+                    ended: bool) -> tuple[str, int] | None:
     """The literal block scalar whose header HEADER (`|`, then an indentation indicator and a chomping indicator in
-    either order, as `|4-`) ends line NUMBER of LINES, the value of a key at COLUMN, as yaml.v3 reads it
-    (yaml_parser_scan_block_scalar and yaml_parser_scan_block_scalar_breaks), and the number of the line after it. The
-    lines that follow are yaml.v3's, each ended by one of its line breaks (GH_YAML_BREAKS), so a line that a line
-    separator begins, as `gh alias set` writes a value with one after a line feed, is one more line of the value. Its
-    content is indented by COLUMN and the indicator, else by the spaces of its first line that holds more, or of a
-    wider line before it, and by at least COLUMN and one. A line that holds no more than those spaces is empty; the
-    first line less indented that holds more ends it. Each line is read without that indentation, followed by the
-    break that ends it as yaml.v3 reads that break, a line feed or a separator, and chomped: `-` keeps no final break,
-    no indicator the last one, and `+` it and the breaks of the empty lines after it. None for any other: a break in
-    the header, a tab in an indentation, which yaml.v3 refuses, no content, and a value whose end is at a line that no
-    line feed begins, such as one after a line separator, since the aliases go on from that line (gh_aliases)."""
-    breaks = "".join(GH_YAML_BREAKS)
-    found = re.fullmatch(rf"\|([1-9][-+]?|[-+][1-9]?)?(?:[ \t]+#[^{breaks}]*)?", header)
+    either order, as `|4-`) ends line NUMBER of LINES, config.yml's lines, the value of a key at COLUMN, as yaml.v3
+    reads it (yaml_parser_scan_block_scalar and yaml_parser_scan_block_scalar_breaks), and the number of the line after
+    it. Its content is indented by COLUMN and the indicator, else by the spaces of its first line that holds more, or
+    of a wider line before it, and by at least COLUMN and one. A line that holds no more than those spaces is empty;
+    the first line less indented that holds more ends it. Each line is read without that indentation, followed by its
+    line feed, and chomped: `-` keeps no final line feed, no indicator the last one, and `+` it and those of the empty
+    lines after it. None for any other: a tab in an indentation, which yaml.v3 refuses, no content, and a value that
+    runs to the end of a file whose last line ends in no line feed (ENDED false), which yaml.v3 reads with no final
+    break."""
+    found = re.fullmatch(r"\|([1-9][-+]?|[-+][1-9]?)?(?:[ \t]+#.*)?", header)
     if found is None:
         return None
     indicators = found[1] or ""
     digit = indicators.strip("-+")
     indent = column + int(digit) if digit else 0
-    # yaml.v3's lines from the next one, each followed by the break that ends it; the last one is empty.
-    pieces = GH_YAML_BREAK.split("".join(f"{line}\n" for line in lines[number + 1:]))
-    texts, ends = pieces[0::2], pieces[1::2]
     value: list[str] = []
-    # yaml.v3's leading_break, the break after the last line read, and trailing_breaks, those of the empty lines after
-    # it; and the widest indentation of the empty lines before the first line read.
-    leading, widest, row = "", 0, 0
-    trailing: list[str] = []
-    for row, text in enumerate(texts):
-        spaces = len(text) - len(text.lstrip(" "))
+    # yaml.v3's leading_break, the line feed after the last line read, and trailing_breaks, those of the empty lines
+    # after it; and the widest indentation of the empty lines before the first line read.
+    leading, trailing, widest = "", "", 0
+    row = number + 1
+    while row < len(lines):
+        spaces = len(lines[row]) - len(lines[row].lstrip(" "))
         eaten = min(spaces, indent) if indent else spaces
-        rest = text[eaten:]
+        rest = lines[row][eaten:]
         if rest.startswith("\t") and (not indent or eaten < indent):
             return None
-        if row == len(ends):
-            break
-        if not rest:
+        if rest:
+            indent = indent or max(widest, eaten, column + 1)
+            if eaten < indent:
+                break
+            value += [leading, trailing, rest]
+            leading, trailing = "\n", ""
+        else:
             widest = max(widest, eaten)
-            trailing.append(GH_YAML_BREAKS[ends[row]])
-            continue
-        indent = indent or max(widest, eaten, column + 1)
-        if eaten < indent:
-            break
-        value += [leading, *trailing, rest]
-        leading, trailing = GH_YAML_BREAKS[ends[row]], []
-    if not value or ends[row - 1] not in ("\n", "\r\n"):
+            trailing += "\n"
+        row += 1
+    if not value or row == len(lines) and not ended:
         return None
     chomping = indicators.strip("123456789")
-    final = "" if chomping == "-" else leading + "".join(trailing) if chomping == "+" else leading
-    return "".join(value) + final, number + 1 + sum(end.endswith("\n") for end in ends[:row])
+    final = "" if chomping == "-" else leading + trailing if chomping == "+" else leading
+    return "".join(value) + final, row
 
 
 def gh_yaml_flow(line: str, start: int) -> tuple[dict[str, str], int] | None:
@@ -2695,34 +2698,47 @@ def gh_flow_end(text: str, start: int) -> int:
 
 @dataclass(frozen=True)
 class GhAliases:
-    """gh's aliases in config.yml at PATH, as gh_aliases reads them: EXPANSIONS, the expansion of each alias; or None
-    where config.yml is not one gh writes and the reader does not read it, PROBLEM saying why, LINES being config.yml's
-    lines and KEYS the numbers of those that hold an aliases key at the root (gh_root_keys), from which `entry` reads
-    the raw text of one alias."""
+    """gh's aliases in config.yml at PATH, as gh_aliases reads them: EXPANSIONS, the expansion of each alias with the
+    1-based line of config.yml its key is on.
+
+    Refused: a config.yml that holds a line break other than a line feed, which gh writes as itself in a `|` or a
+    single-quoted value whose text holds a line or a paragraph separator (U+2028, U+2029). BROKEN then says which break
+    and on what line, EXPANSIONS is None and LINES are config.yml's lines, and each call that may run an alias is
+    refused (gh_alias_command). An alias that shlex cannot split refuses each call that runs it, its refusal naming the
+    alias and the line of its key (gh_alias_command, gh_unread_alias_check).
+
+    Taking the fallback: the `? |` key gh writes for a name that starts or ends with a line feed, and the forms gh does
+    not write (gh_aliases). EXPANSIONS is then None, PROBLEM says why, LINES are config.yml's lines and KEYS the numbers
+    of those that hold an aliases key at the root (gh_root_keys), from which `entry` reads the raw text of one alias,
+    and a call that may run one is read whole (gh_unread_alias_check).
+
+    Until review round 14 of dispatch://INFRA-3365 a config.yml that holds such a break was read with its lines split at
+    each break yaml.v3 reads, or took the fallback, and a call through an alias that shlex could not split went to gh
+    unread on a readable config, and on the fallback was read without that splitting."""
 
     path: Path
-    expansions: dict[str, str] | None
+    expansions: dict[str, tuple[str, int]] | None
     problem: str = ""
     lines: tuple[str, ...] = ()
     keys: tuple[int, ...] = ()
+    broken: str = ""
 
-    def entry(self, name: str) -> str | None:
-        """The raw text of the alias NAME, a call's first word or first two words, in config.yml's aliases: from each
-        key NAME there, read loosely (gh_loose_key), to the next key of the aliases mapping, which for a key that starts
-        a line is the next line indented no deeper that is neither blank, a comment, nor begun by a line break
-        (GH_YAML_BREAKS), which yaml.v3 reads as one more line of what came before, and for one after a `{` or a `,`
-        the next `,`, `}` or `]` outside quotes and brackets (gh_flow_end); None when NAME is no key there. The aliases
-        are what follows each aliases key (KEYS), up to the next line at column 0 that is none of those either, past it
-        while a `{` or a `[` is still open. Loose, since a call it takes for an alias is only read whole: a text that
-        only looks like NAME's key inside another alias's value (`x: "… notes,more: y"` for `more`) is read too, so a
-        call can be refused for that alias's text, and never goes out with less read."""
-        breaks = "".join(GH_YAML_BREAKS)
-        entries: list[str] = []
+    def entry(self, name: str) -> list[tuple[int, str]]:
+        """The raw text of the alias NAME, a call's first word or first two words, in config.yml's aliases, each piece
+        with the 1-based line its key is on: from each key NAME there, read loosely (gh_loose_key), to the next key of
+        the aliases mapping, which for a key that starts a line is the next line indented no deeper that is neither
+        blank nor a comment, and for one after a `{` or a `,` the next `,`, `}` or `]` outside quotes and brackets
+        (gh_flow_end); none when NAME is no key there. The aliases are what follows each aliases key (KEYS), up to the
+        next line at column 0 that is none of those either, past it while a `{` or a `[` is still open. Loose, since a
+        call it takes for an alias is only read whole: a text that only looks like NAME's key inside another alias's
+        value (`x: "… notes,more: y"` for `more`) is read too, so a call can be refused for that alias's text, and
+        never goes out with less read."""
+        entries: list[tuple[int, str]] = []
         for start in self.keys:
             section = [self.lines[start].partition(":")[2]]
             depth = sum(map(section[0].count, "{[")) - sum(map(section[0].count, "}]"))
             for line in self.lines[start + 1:]:
-                if depth <= 0 and line.strip(" \t") and line[0] not in f" \t#{breaks}":
+                if depth <= 0 and line.strip(" \t") and line[0] not in " \t#":
                     break
                 section.append(line)
                 depth += sum(map(line.count, "{[")) - sum(map(line.count, "}]"))
@@ -2732,10 +2748,10 @@ class GhAliases:
                     end = gh_flow_end(text, found.end())
                 else:
                     column = len(found[0]) - len(found[0].lstrip(" \t"))
-                    following = re.compile(rf"^ {{0,{column}}}[^ \t#{breaks}]", re.MULTILINE).search(text, found.end())
+                    following = re.compile(rf"^ {{0,{column}}}[^ \t#\n]", re.MULTILINE).search(text, found.end())
                     end = len(text) if following is None else following.start()
-                entries.append(text[found.start():end])
-        return "\n".join(entries) if entries else None
+                entries.append((start + 1 + text.count("\n", 0, found.start()), text[found.start():end]))
+        return entries
 
 
 @lru_cache(maxsize=None)
@@ -2745,27 +2761,50 @@ def gh_aliases(path: Path) -> GhAliases:
     block mapping, each key at one indentation, or a flow mapping on its line (gh_yaml_flow), which gh writes once `gh
     alias delete` removed the last alias; each key and value plain (gh_yaml_plain) or quoted (gh_yaml_quoted, yaml.v3's
     escapes included), a key longer than yaml.v3's simple keys (128 bytes) after a `? `, and in a block mapping a value
-    of several lines a `|` block scalar (gh_yaml_literal), a line that a line separator begins included. gh reads each
-    alias of these forms as the reader does. Where the reader meets a value it does not read exactly, or a line it does
-    not read where the aliases may end, it reads none of them (GhAliases.expansions None), so a call that may run one
-    is read whole (gh_unread_alias_check): the aliases never end short of where yaml.v3 ends them. A form gh writes
-    goes that way: the key of a name that starts or ends with a line feed, which gh writes as a `? |` block scalar
-    (`? |4-` for a first line feed). The others here gh does not write: a folded `>` scalar, an anchor, an alias or a
-    tag, an escape yaml.v3 does not write, a key indented otherwise than the first, an aliases key given twice, a line
-    at column 0 that holds no key at the root, and a `|` block scalar that runs to the end of a file with no final line
-    feed, which yaml.v3 reads with no final break. A config.yml that cannot be read holds no alias: gh does not start
-    with it, so it sends nothing. Until review round 10 of dispatch://INFRA-3365 a YAML reader read every form, and
-    refused a call whose config held a line it did not follow, such as `editor: ?x`, however clean the call; until its
-    round 11 the reader read a block alias of one line alone, and judged every call that may run an alias by the text
-    of every alias; until its round 12 it read no key that gh writes unquoted with a `:` inside (`pr:mine`) or a `?`,
-    `:` or `-` first, nor one after a `? `, so such a key left every call through an alias read whole; until its round
-    13 a `|` block scalar, and the aliases with it, ended at a line that a line separator begins, as `gh alias set`
-    writes a value whose second line begins with one (`note: |-`), so an alias after it was no alias."""
+    of several lines a `|` block scalar (gh_yaml_literal). gh reads each alias of these forms as the reader does. The
+    reader drops a byte order mark and reads each CRLF as one line feed, as yaml.v3 does (gh_config_text).
+
+    Refused: a config.yml that holds a line break other than a line feed (gh_config_break), which gh writes as itself
+    in a `|` or a single-quoted value whose text holds a line or a paragraph separator (U+2028, U+2029), measured with
+    `gh alias set note -` and `gh config set pager`. The reader does not read its lines: it looks for such a break in
+    the whole file before it looks for the aliases key, which a break can hide from a reader that splits at line feeds
+    (`editor: vim<U+2028>aliases:`), and with one each call that may run an alias is refused, the refusal naming the
+    break and its line (GhAliases.broken, gh_alias_command). An alias that shlex cannot split refuses each call that
+    runs it, the refusal naming the alias, the line of its key and shlex's message (gh_alias_command,
+    gh_unread_alias_check).
+
+    Taking the fallback: where the reader meets a value it does not read exactly, or a line it does not read where the
+    aliases may end, it reads none of them (GhAliases.expansions None), so a call that may run one is read whole
+    (gh_unread_alias_check): the aliases never end short of where yaml.v3 ends them. One form gh writes goes that way:
+    the key of a name that starts or ends with a line feed, which gh writes as a `? |` block scalar (`? |4-` for a
+    first line feed). The others here gh does not write: a folded `>` scalar, an anchor, an alias or a tag, an escape
+    yaml.v3 does not write, a key indented otherwise than the first, an aliases key given twice, a line at column 0
+    that holds no key at the root, and a `|` block scalar that runs to the end of a file with no final line feed,
+    which yaml.v3 reads with no final break. A config.yml that cannot be read holds no alias: gh does not start with
+    it, so it sends nothing.
+
+    Until review round 10 of dispatch://INFRA-3365 a YAML reader read every form, and refused a call whose config held
+    a line it did not follow, such as `editor: ?x`, however clean the call; until its round 11 the reader read a block
+    alias of one line alone, and judged every call that may run an alias by the text of every alias; until its round
+    12 it read no key that gh writes unquoted with a `:` inside (`pr:mine`) or a `?`, `:` or `-` first, nor one after
+    a `? `, so such a key left every call through an alias read whole; until its round 13 a `|` block scalar, and the
+    aliases with it, ended at a line that a line separator begins, as `gh alias set` writes a value whose second line
+    begins with one (`note: |-`), so an alias after it was no alias. Until its round 14 the reader read a `|` block
+    scalar's lines as yaml.v3's line breaks end them and every other line at line feeds alone, so on the fallback an
+    alias whose key follows a break on its line was no alias (`gh pp`, after a `|+` value that ends with a line
+    separator, went to gh unread); there were no aliases where a break hid the aliases key; a CRLF config.yml took the
+    fallback; and on a readable config an alias that shlex could not split was taken for none, so a call through it
+    went to gh unread."""
     try:
-        text = path.read_bytes().decode("utf-8").removeprefix("\ufeff")
+        text = gh_config_text(path.read_bytes().decode("utf-8"))
     except (OSError, UnicodeDecodeError):
         return GhAliases(path, {})
     lines = newline_lines(text)
+    broken = gh_config_break(text)
+    if broken is not None:
+        return GhAliases(path, None, lines=tuple(lines), broken=(
+            f"{path} holds {broken}, a line break other than a line feed, so the check cannot read gh's aliases: "
+            "fix that line"))
     keys = gh_root_keys(lines, "aliases")
     if not keys:
         return GhAliases(path, {})
@@ -2781,10 +2820,10 @@ def gh_aliases(path: Path) -> GhAliases:
         found = gh_yaml_flow(lines[start], flow.end())
         if found is None or not re.fullmatch(r"(?:[ \t]+#.*)?[ \t]*", lines[start][found[1]:]):
             return unread(f"line {start + 1} holds a flow mapping the check does not read")
-        return GhAliases(path, {name: value for name, value in found[0].items() if value})
+        return GhAliases(path, {name: (value, start + 1) for name, value in found[0].items() if value})
     if not re.fullmatch(r"aliases:(?:[ \t]+#.*)?[ \t]*", lines[start]):
         return unread(f"line {start + 1} holds an aliases key that is not `aliases:` at column 0")
-    expansions: dict[str, str] = {}
+    expansions: dict[str, tuple[str, int]] = {}
     indent = 0
     number = start + 1
     while number < len(lines):
@@ -2795,8 +2834,7 @@ def gh_aliases(path: Path) -> GhAliases:
         column = len(line) - len(line.lstrip(" "))
         if not column:
             # The aliases end at the next key at the root, as gh writes `http_unix_socket:` after them. A line at
-            # column 0 that holds none, such as one that a line separator begins, which yaml.v3 reads as a line break
-            # and not as the end of the aliases, leaves them unread.
+            # column 0 that holds none is no line the reader reads where the aliases may end, and leaves them unread.
             if gh_yaml_key(line, 0) is None:
                 return unread(f"line {number + 1} holds neither an alias nor a key at the root the check reads")
             break
@@ -2817,9 +2855,10 @@ def gh_aliases(path: Path) -> GhAliases:
                 return unread(f"line {number + 1} holds no alias key the check reads")
             row, at = number + 1, column + 1
         header = lines[row][at:].strip(" \t")
+        key_line = number + 1
         if header.startswith("|"):
-            literal = gh_yaml_literal(lines, row, header, column)
-            if literal is None or literal[1] == len(lines) and not text.endswith("\n"):
+            literal = gh_yaml_literal(lines, row, header, column, text.endswith("\n"))
+            if literal is None:
                 return unread(f"line {row + 1} holds a block scalar the check does not read")
             value, number = literal
         else:
@@ -2828,12 +2867,14 @@ def gh_aliases(path: Path) -> GhAliases:
                 return unread(f"line {row + 1} holds a value the check does not read")
             number = row + 1
         if value:
-            expansions.setdefault(name, value)
+            expansions.setdefault(name, (value, key_line))
     return GhAliases(path, expansions)
 
 
 def gh_expand_alias(expansion: str, arguments: Sequence[str]) -> list[str] | None:
-    """gh 2.98.0's expansion of an alias (`$1`… take the arguments, the rest follow), or None where gh refuses it."""
+    """gh 2.98.0's expansion of an alias (`$1`… take the arguments, the rest follow), split as a shell line; None where
+    a `$N` is left that the arguments do not fill, for which gh refuses the call itself. ValueError where shlex cannot
+    split it (gh_alias_command refuses the call)."""
     extra: list[str] = []
     for number, argument in enumerate(arguments, start=1):
         if "$" not in expansion:
@@ -2842,10 +2883,7 @@ def gh_expand_alias(expansion: str, arguments: Sequence[str]) -> list[str] | Non
             expansion = expansion.replace(f"${number}", argument)
     if re.search(r"\$\d", expansion):
         return None
-    try:
-        return [*shlex.split(expansion), *extra]
-    except ValueError:
-        return None
+    return [*shlex.split(expansion), *extra]
 
 
 def gh_next_command(arguments: Sequence[str]) -> tuple[str, list[str]] | None:
@@ -2871,19 +2909,32 @@ def gh_next_command(arguments: Sequence[str]) -> tuple[str, list[str]] | None:
 @dataclass(frozen=True)
 class GhUnreadAlias:
     """A gh call whose first word, or first two words, NAME, may be an alias of ALIASES, a config.yml gh_aliases does
-    not read: ENTRY is that alias's raw text (GhAliases.entry), and REST the arguments gh gives the alias. What it runs,
-    and where, is unknown, so gh_unread_alias_check reads the call whole."""
+    not read: ENTRY is that alias's raw text, each piece with the line of its key (GhAliases.entry), and REST the
+    arguments gh gives the alias. What it runs, and where, is unknown, so gh_unread_alias_check reads the call whole."""
 
     name: str
     rest: tuple[str, ...]
-    entry: str
+    entry: tuple[tuple[int, str], ...]
     aliases: GhAliases
+
+
+class GhAliasError(Exception):
+    """A gh call that may run an alias the check cannot read, refused with TEXT_EXIT (gh_check): ARGS are the alias the
+    call names and why, with the line of config.yml to fix."""
+
+
+def gh_unsplit(name: str, line: int, path: Path, error: ValueError) -> str:
+    """Why a call that runs the alias NAME, whose key is on LINE of config.yml at PATH and whose text shlex cannot
+    split (ERROR), is refused."""
+    return (f"shlex cannot split gh's alias {name}, on line {line} of {path}, as a shell line ({error}), so the check "
+            "cannot read what it runs: fix that line")
 
 
 def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
                depth: int = 0) -> tuple[str, str, list[str]] | GhUnreadAlias | None:
     """(group, subcommand, the arguments the subcommand reads) of a gh call that can send text, after a gh alias;
-    GhUnreadAlias for a call that may run an alias of a config.yml the check does not read; None for any other call."""
+    GhUnreadAlias for a call that may run an alias of a config.yml the check does not read; None for any other call.
+    GhAliasError for a call that may run an alias the check cannot read (gh_alias_command)."""
     found = gh_next_command(arguments)
     if found is None:
         return None
@@ -2908,16 +2959,32 @@ def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
 def gh_alias_command(name: str, rest: Sequence[str], environment: Mapping[str, str],
                      depth: int) -> tuple[str, str, list[str]] | GhUnreadAlias | None:
     """gh_command of what the gh alias NAME runs with REST; None for no such alias, for a shell alias (`!…`), which
-    runs a shell whose own gh calls come back through shims/gh, and past three aliases in a row; GhUnreadAlias where
-    gh_aliases does not read config.yml and NAME is a key of its aliases (GhAliases.entry)."""
+    runs a shell whose own gh calls come back through shims/gh, for one whose `$N` the arguments do not fill, which gh
+    refuses, and past three aliases in a row; GhUnreadAlias where gh_aliases does not read config.yml and NAME is a key
+    of its aliases (GhAliases.entry). GhAliasError, refusing the call, where shlex cannot split NAME's expansion (gh
+    splits it with google/shlex, which splits text Python's shlex refuses, a `#` beginning a comment there, so gh may
+    run what the check could not read); and where config.yml holds a line break other than a line feed
+    (GhAliases.broken) and NAME occurs in its text before a `:`, read loosely: in quotes or not, with blanks and one
+    line feed with blanks before the `:`, and wherever it stands, since the check cannot know where yaml.v3 begins a
+    line, so a NAME that only looks like a key inside a value counts too."""
     if depth >= 3:
         return None
     aliases = gh_aliases(gh_config_directory(environment) / "config.yml")
+    if aliases.broken:
+        named = re.search(rf"""{re.escape(name)}["']?[ \t]*(?:\n[ \t]*)?:""", "\n".join(aliases.lines))
+        if named is None:
+            return None
+        raise GhAliasError(name, aliases.broken)
     if aliases.expansions is None:
         entry = aliases.entry(name)
-        return None if entry is None else GhUnreadAlias(name, tuple(rest), entry, aliases)
-    expansion = aliases.expansions.get(name)
-    expanded = None if expansion is None or expansion.startswith("!") else gh_expand_alias(expansion, rest)
+        return GhUnreadAlias(name, tuple(rest), tuple(entry), aliases) if entry else None
+    found = aliases.expansions.get(name)
+    if found is None or found[0].startswith("!"):
+        return None
+    try:
+        expanded = gh_expand_alias(found[0], rest)
+    except ValueError as error:
+        raise GhAliasError(name, gh_unsplit(name, found[1], aliases.path, error)) from None
     return gh_command(expanded, environment, depth + 1) if expanded else None
 
 
@@ -3266,10 +3333,13 @@ def gh_config_condition(directory: Path) -> str | None:
     `github.com`, plain or quoted, with its `:` (gh_yaml_key), and the first such line is at column 0; the lines
     indented below a key are that host's. A hosts.yml that is absent, empty or holds only `{}`, which gh writes once
     `gh auth logout` logged out of the last host (measured 2026-11-20 with gh 2.98.0, which then takes github.com),
-    lists none. config.yml holds no `hosts` key at its root (gh_root_keys): gh takes the hosts of that key before those
-    of hosts.yml, and the check reads none of them, so such a key takes a call out of the plain case; an alias named
-    `hosts`, which `gh alias set hosts …` writes inside the aliases, is no such key. Any layout this does not read is
-    not plain: a host indented at the root, a flow mapping, a `---`, a file that cannot be read. The agent config
+    lists none. config.yml holds no line break other than a line feed (gh_config_break): the check reads its lines at
+    its line feeds, and yaml.v3 begins a line at each break, so a key after such a break, a `hosts` key among them,
+    would be one the check does not see. Nor does it hold a `hosts` key at its root (gh_root_keys): gh takes the hosts
+    of that key before those of hosts.yml, and the check reads none of them, so such a key takes a call out of the
+    plain case; an alias named `hosts`, which `gh alias set hosts …` writes inside the aliases, is no such key. Any
+    layout this does not read is not plain: a host indented at the root, a flow mapping, a `---`, a file that cannot be
+    read. hosts.yml is split by str.splitlines, which splits at each break yaml.v3 reads and more. The agent config
     directory of scripts/gh-agent-config, whose hosts.yml lists `github.com:` and whose config.yml is the user's, is
     plain."""
     texts: dict[str, str] = {}
@@ -3292,7 +3362,11 @@ def gh_config_condition(directory: Path) -> str | None:
             return "gh's hosts.yml is not in the layout the check reads"
         if entry[0] != "github.com":
             return f"gh's config lists {entry[0]}"
-    if gh_root_keys(newline_lines(texts["config.yml"].removeprefix("\ufeff")), "hosts"):
+    config = gh_config_text(texts["config.yml"])
+    broken = gh_config_break(config)
+    if broken is not None:
+        return f"gh's config.yml holds {broken}, a line break other than a line feed, which the check does not read"
+    if gh_root_keys(newline_lines(config), "hosts"):
         return "gh's config.yml has a hosts key, which the check does not read"
     return None
 
@@ -3734,7 +3808,9 @@ def graphql_tokens(document: str) -> list[tuple[str, str]] | None:
                 # surrogate, and a code point past Unicode's, GraphQL rejects.
                 if escape.group(2) and 0xD800 <= point <= 0xDBFF:
                     low = GRAPHQL_ESCAPE.match(document, index)
-                    low_point = int(low.group(2), 16) if low and low.group(2) else 0
+                    if low is None:
+                        return None
+                    low_point = int(low.group(2), 16) if low.group(2) else 0
                     if not 0xDC00 <= low_point <= 0xDFFF:
                         return None
                     point = 0x10000 + ((point - 0xD800) << 10) + (low_point - 0xDC00)
@@ -4729,23 +4805,19 @@ def gh_refusal(name: str, reached: Sequence[GhTarget], matcher: TermMatcher | No
 
 
 def gh_alias_words(text: str) -> list[tuple[list[str], bool]]:
-    """The words of TEXT, an alias's raw entry in config.yml (GhAliases.entry), each way the check splits them, since it
-    does not read the entry as gh does, each with whether they are whole shell words: at each blank and each quote,
-    which gives the pieces of a quoted word too; as Python's shlex splits a shell line; and as shlex splits the value
-    quoted after the entry's key (gh_yaml_quoted), its lines joined by blanks, as YAML folds them. So a quoted name that
-    holds a blank is read whole in a plain, a folded or a quoted value, of one line or of several, and a `-` that is
-    only a piece of a quoted word, as in `--title 'WIP - draft'`, is no standard input (gh_alias_files)."""
+    """The words of TEXT, one piece of an alias's raw entry in config.yml (GhAliases.entry), each way the check splits
+    them, since it does not read the entry as gh does, each with whether they are whole shell words: at each blank and
+    each quote, which gives the pieces of a quoted word too; as Python's shlex splits a shell line; and as shlex splits
+    the value quoted after the entry's key (gh_yaml_quoted), its lines joined by blanks, as YAML folds them. So a quoted
+    name that holds a blank is read whole in a plain, a folded or a quoted value, of one line or of several, and a `-`
+    that is only a piece of a quoted word, as in `--title 'WIP - draft'`, is no standard input (gh_alias_files).
+    ValueError where shlex cannot split the entry or that value (gh_unread_alias_check refuses the call)."""
     words = [([word for word in re.split(r"[\s'\"]+", text) if word], False)]
     joined = " ".join(line.strip(" \t") for line in text.split("\n"))
     colon = re.search(r":[ \t]+", joined)
     start = colon.end() if colon else len(joined)
     decoded = gh_yaml_quoted(joined, start) if joined[start:start + 1] in ("'", '"') else None
-    for line in (text, *(decoded[:1] if decoded else ())):
-        try:
-            words.append((shlex.split(line), True))
-        except ValueError:
-            continue
-    return words
+    return [*words, *((shlex.split(line), True) for line in (text, *(decoded[:1] if decoded else ())))]
 
 
 def gh_alias_files(word_lists: Sequence[tuple[Sequence[str], bool]]) -> list[GhText]:
@@ -4783,39 +4855,55 @@ def gh_alias_files(word_lists: Sequence[tuple[Sequence[str], bool]]) -> list[GhT
 
 
 def gh_unread_alias_check(arguments: Sequence[str], alias: GhUnreadAlias, environment: Mapping[str, str]) -> int:
-    """gh_check of a call that may run ALIAS, an alias of a config.yml gh_aliases does not read, which gh does not write
-    but in one form (gh_aliases): what the call runs, and where, is unknown, so the call is read whole, with one target
-    read as public (no repository, every list counting and no own name exempt, as for a raw GraphQL mutation): each of
-    its ARGUMENTS; the alias's own entry in config.yml (GhUnreadAlias.entry), and the entry of each alias that a word of
-    an entry read, or two words (`pr say`), names, since gh runs one alias through another (`b: note`); and each file
-    and standard input that the arguments, or one of those entries, name on their own (gh_alias_words,
-    gh_alias_files). A file named only by joining the call's argument with the entry is not read: `-F body=@$1.md`
-    called with `NOTES`, or an entry that ends in `-F` called with `body=@NOTES.md`. Those are deliberate
-    constructions, which the check does not try to stop. Each text is read as gh_check reads a call's texts
-    (gh_contents), so a file the check cannot read (a pipe, a device, one it may not open) refuses the call, and the
-    refusal says why. The entries are read loosely (GhAliases.entry): a text that only looks like a key inside another
-    alias's value is read too. A call none of whose texts holds a listed term, and every file of which was read, goes
-    out. Until review round 10 of dispatch://INFRA-3365 such a call was refused whatever it held; until its round 11 it
-    was judged by the text of every alias, and a file or standard input it sent was not read; until its round 12 the
-    files and standard input an entry named (`note: pr comment --body-file NOTES.md`) were not read, nor the entry of an
-    alias it runs."""
+    """gh_check of a call that may run ALIAS, an alias of a config.yml gh_aliases does not read: what the call runs,
+    and where, is unknown, so the call is read whole, with one target read as public (no repository, every list
+    counting and no own name exempt, as for a raw GraphQL mutation): each of its ARGUMENTS; the alias's own entry in
+    config.yml (GhUnreadAlias.entry), and the entry of each alias that a word of an entry read, or two words (`pr
+    say`), names, since gh runs one alias through another (`b: note`); and each file and standard input that the
+    arguments, or one of those entries, name on their own (gh_alias_words, gh_alias_files). A file named only by
+    joining the call's argument with the entry is not read: `-F body=@$1.md` called with `NOTES`, or an entry that ends
+    in `-F` called with `body=@NOTES.md`. Those are deliberate constructions, which the check does not try to stop.
+    Each text is read as gh_check reads a call's texts (gh_contents), so a file the check cannot read (a pipe, a device,
+    one it may not open) refuses the call, and the refusal says why. The entries are read loosely (GhAliases.entry): a
+    text that only looks like a key inside another alias's value is read too. A call none of whose texts holds a listed
+    term, and every file of which was read, goes out.
+
+    Taking the fallback: the `? |` key gh writes for a name that starts or ends with a line feed, and the forms gh does
+    not write (gh_aliases). Refused, before any text is read: a call one of whose entries shlex cannot split, the
+    alias's own entry, one it runs, or the value quoted in one (gh_alias_words), the refusal naming that alias, the line
+    of its key and shlex's message (GhAliasError). A config.yml that holds a line break other than a line feed never
+    comes here: it refuses each call that may run an alias (gh_alias_command).
+
+    Until review round 10 of dispatch://INFRA-3365 a call that may run such an alias was refused whatever it held; until
+    its round 11 it was judged by the text of every alias, and a file or standard input it sent was not read; until its
+    round 12 the files and standard input an entry named (`note: pr comment --body-file NOTES.md`) were not read, nor
+    the entry of an alias it runs; until its round 14 an entry shlex could not split was read without that splitting,
+    so a `-` it named was no standard input (`--body-file - # Sami's alias` in a folded alias sent a term on standard
+    input unread), and a config.yml that holds a line break other than a line feed could take this fallback, where an
+    alias whose key follows such a break on its line was no alias."""
     entries = {alias.name: alias.entry}
     word_lists: list[tuple[Sequence[str], bool]] = [(alias.rest, True)]
-    pending = [alias.entry]
+    pending = [alias.name]
     while pending:
-        for words, whole in gh_alias_words(pending.pop()):
-            word_lists.append((words, whole))
-            for name in dict.fromkeys([*words, *map(" ".join, zip(words, words[1:]))]):
-                entry = None if name in entries else alias.aliases.entry(name)
-                if entry is not None:
-                    entries[name] = entry
-                    pending.append(entry)
+        name = pending.pop()
+        for line, text in entries[name]:
+            try:
+                splits = gh_alias_words(text)
+            except ValueError as error:
+                raise GhAliasError(alias.name, gh_unsplit(name, line, alias.aliases.path, error)) from None
+            for words, whole in splits:
+                word_lists.append((words, whole))
+                for word in dict.fromkeys([*words, *map(" ".join, zip(words, words[1:]))]):
+                    if word not in entries and (found := alias.aliases.entry(word)):
+                        entries[word] = tuple(found)
+                        pending.append(word)
     pieces = [GhText(f"argument {number}", text=value) for number, value in enumerate(arguments, start=1)]
     texts = gh_contents([*pieces, *gh_alias_files(word_lists)], environment)
     if texts is None:
         return GH_STDIN_EXIT
     contents, unreadable = texts
-    contents += [(GhText(f"gh's alias {name}", str(alias.aliases.path)), entry) for name, entry in entries.items()]
+    contents += [(GhText(f"gh's alias {name}", str(alias.aliases.path)), "\n".join(text for _, text in entry))
+                 for name, entry in entries.items()]
     matcher, list_problem, findings = gh_terms(contents, lambda piece: False)
     target = GhTarget(f"what the gh alias {alias.name} runs, read as public, since the check cannot read gh's aliases "
                       f"exactly: {alias.aliases.problem}", "", True)
@@ -4824,17 +4912,32 @@ def gh_unread_alias_check(arguments: Sequence[str], alias: GhUnreadAlias, enviro
 
 def gh_check(arguments: Sequence[str]) -> int:
     """`gh -- ARGV…`: refuse a gh call that sends a listed term to anything not confirmed private (exit 3), whose text
-    cannot be checked because the list cannot be read (exit 2), or that names a file nobody can read (exit 4); exit
-    GH_STDIN_EXIT to ask for standard input. Any other call exits 0 untouched, and the text of a call that reaches only
-    private or internal repositories is not checked, nor are their visibilities, nor the facts of the plain case
-    (gh_plain_case), read before a term is found. Outside the plain case a call that holds a listed term is one target
-    read as public, as a raw GraphQL mutation is."""
+    cannot be checked because the list cannot be read (exit 2), that names a file nobody can read (exit 4), or that
+    may run a gh alias the check cannot read (exit 4); exit GH_STDIN_EXIT to ask for standard input. Any other call
+    exits 0 untouched, and the text of a call that reaches only private or internal repositories is not checked, nor
+    are their visibilities, nor the facts of the plain case (gh_plain_case), read before a term is found. Outside the
+    plain case a call that holds a listed term is one target read as public, as a raw GraphQL mutation is.
+
+    A call through a gh alias is read as the command it expands to (gh_aliases). Refused: a config.yml that holds a
+    line break other than a line feed, which gh writes as itself in a `|` or a single-quoted value whose text holds a
+    line or a paragraph separator (U+2028, U+2029), refuses each call that may run an alias; an alias that shlex cannot
+    split refuses each call that runs it; each refusal names its cause and the line of config.yml to fix, and says
+    nothing was sent (GhAliasError). Taking the fallback, where a call that may run an alias is read whole
+    (gh_unread_alias_check): the `? |` key gh writes for a name that starts or ends with a line feed, and the forms gh
+    does not write. Until review round 14 of dispatch://INFRA-3365 neither was refused, and a call through an alias
+    whose key follows such a break, or through one shlex could not split, could go to gh unread."""
     environment = os.environ
-    command = gh_command(arguments, environment)
+    try:
+        command = gh_command(arguments, environment)
+        if isinstance(command, GhUnreadAlias):
+            return gh_unread_alias_check(arguments, command, environment)
+    except GhAliasError as error:
+        name, problem = error.args
+        print(f"leak terms: gh {name}: {problem}", file=sys.stderr)
+        print(f"leak terms: gh {name}: refused before gh ran, so nothing was sent.", file=sys.stderr)
+        return TEXT_EXIT
     if command is None:
         return 0
-    if isinstance(command, GhUnreadAlias):
-        return gh_unread_alias_check(arguments, command, environment)
     group, sub, rest = command
     long = gh_long_names(GH_TEXT_COMMANDS[(group, sub)])
     read = gh_walk(rest, gh_options(GH_TEXT_COMMANDS[(group, sub)]))
