@@ -7,7 +7,7 @@
 
 ## Conflict chains
 
-- When a rebase across a moved trunk re-conflicts each commit on the same hunks, squash your branch to one commit (two when a pure move, rename or reformat must stay apart from the logic change for review), then rebase and resolve once.
+- When a rebase across a moved trunk re-conflicts each commit on the same hunks, squash your branch to one commit, then rebase and resolve once. Keep a series of commits only when the layers help review: a reviewer asked for them, or each layer is one complete change whose commit builds and passes the tests without the layers above it.
 - The members of an octopus merge share one fork point: rebase each from it, not from the member's own base.
 - Do not restructure a shared stack (duplicate instead) or a fork branch whose release pin follows the change ID.
 

@@ -19,7 +19,7 @@ Use an Apify Actor, not one-off browser scraping, when any one of these holds: t
 4. Read the results: `get-dataset-items` with the run's `datasetId`.
 5. Keep the fields the user asked for (for example price, location, URL), drop duplicate items, and give the user a table. Sort it by the first criterion the user named; when they named none, sort by price if the items have one, else keep the Actor's order. Say which order you used.
 
-With no Actor for the site, call a general tool directly: `apify--web-fetch` for one page at a known URL, `apify--rag-web-browser` for a web search by query.
+With no Actor for the site, call a general tool directly: `apify--web-fetch` for one page at a known URL, `apify--web-search` for a web search by query.
 
 ## Calling the tools
 

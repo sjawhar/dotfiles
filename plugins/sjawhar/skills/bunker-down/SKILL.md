@@ -53,7 +53,7 @@ GATE: the user can still SSH to the Tailscale IP.
 
 ## 5. SSH and fail2ban
 
-Ask the user whether they use SFTP (VS Code Remote, scp, rsync over SSH). Name the file `00-hardening.conf` so that it sorts first: sshd keeps the first value it reads, so a looser `50-cloud-init.conf` would otherwise win.
+Ask the user whether they use SFTP (VS Code Remote, scp, rsync over SSH). Name it `00-hardening.conf`: sshd keeps the first value it reads, so a file sorted before it would win. Where Step 1 found a stricter value, write that one.
 
 ```bash
 SFTP_LINE="Subsystem sftp /bin/false"         # no SFTP

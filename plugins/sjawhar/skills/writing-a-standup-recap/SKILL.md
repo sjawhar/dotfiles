@@ -87,8 +87,8 @@ The rules reviewer checks the draft against each rule here, one at a time.
   repeats it, and keep the source's link beside the number in the draft. When a number went down, say why.
 - Measure a merged change on the same inputs, old against new. Do not hold a result back because production has not
   adopted it: merging is what puts code into production.
-- Shapes that read well: a before and after from production, plain scores per attempt, and one row per number with
-  a small chart whose direction over the window a reader sees at a glance.
+- Shapes that read well: a before and after from production, plain scores per attempt, and a page whose rows each
+  show a trend at a glance, such as the timeline's row per project (`references/page.md`, Charts).
 
 ### Dates and charts
 

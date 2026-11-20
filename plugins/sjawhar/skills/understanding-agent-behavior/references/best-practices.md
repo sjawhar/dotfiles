@@ -35,7 +35,7 @@ For a guide or a skill, the limits are in the `writing-agent-skills` skill.
 
 - Keep instructions short. Every line of an always-loaded file costs attention on every task, and recall falls as the context fills: hold only what the agent cannot work out from the code. [S2][S11][S12]
 - Write at the level a capable new hire can apply: heuristics, not if-else logic and not vague principles. Three to five varied examples beat a growing list of edge cases. [S2][S5]
-- Give every rule its reason, not just the rule ("a TTS engine reads this aloud, so no ellipses"): the model generalizes from the reason to cases the rule never named. [S5]
+- Give each rule its reason in one clause, not just the rule ("a TTS engine reads this aloud, so no ellipses"): the model generalizes from the reason to cases the rule never named. [S5]
 - Do not add force with capitals or "CRITICAL": newer models over-trigger on it, so write "Use this tool when ..." [S5]. A rule that needs force belongs in a hook or a check.
 - At a model upgrade, remove anti-laziness and "verify your work" prompting rather than rewording it. [S5]
 - Do not answer each new failure with another edge case in the prompt: fixing one mode surfaces the next while the prompt grows. [S8][S2]

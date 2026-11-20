@@ -21,7 +21,7 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 - Only a current decision sets a hold or a quiet window: never restore a lifted hold or infer a window from history.
 - Merge only by an ordinary protected squash merge, never under a permission inferred from earlier use. A grant given to this queue session stays live for it. Ask Sami once for a merge window: a span to merge READY PRs without asking per PR.
 - At registration, check the author, the account this session writes as (`gh api user --jq .login`), required reviews and CODEOWNERS. An approval that account cannot give is unmet until `landing-a-pr`'s repo merge rules name who gives it.
-- With no explicit priority, merge first what Sami's stated goal needs, then parents before children, then a corpus change (one that changes more files than any other open PR it shares files with) before those PRs, so they integrate with it. Never by READY arrival order.
+- With no explicit priority, merge first what Sami's stated goal needs, then parents before children, then a corpus change (one that adds or rewrites a body of content, such as task data, that other open PRs edit) before those PRs, so they integrate with it. Never by READY arrival order.
 - Ask Sami with `dispatch ask` on the Dispatch issue the PR names, or on the queue record for a question about the whole queue. Dispatch is the issue tracker the `dispatch` skill covers.
 - Read [sequencing](references/sequencing.md) for holds that need a composition test, migration batches, colliding PRs, stacks, or reading a Dispatch answer.
 

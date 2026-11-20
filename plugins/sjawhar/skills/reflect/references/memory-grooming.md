@@ -2,7 +2,7 @@
 
 Banks: `~/.omp/agent/memories/mnemopi/mnemopi.db` (global) and `banks/*/mnemopi.db` beside it (per project). `memory_edit` reaches only the global bank and the current project's. Open any other bank read-only, and list it in the report for grooming from a session in its own project.
 
-1. Find candidates with read-only SQLite (`working_memory`, `facts`, and rows whose `veracity` is `unknown`, `inferred` or `imported`; a deliberate save is `stated` or `tool`). Change memory only through `memory_edit`: SQL writes skip the index the recall path reads.
+1. Find candidates with read-only SQLite (`working_memory`, `facts`, and rows whose `veracity` is not `stated`: `unknown`, `inferred`, `imported`, `tool` or `false`). Change memory only through `memory_edit`: SQL writes skip the index the recall path reads.
 2. `recall` this window's correction topics, user preferences, project decisions and tooling facts.
 3. Near-duplicates: keep the best-worded one, and `invalidate` the rest with `replacement_id` set to it.
 4. Contradictions: decide by recency and transcript evidence. Read the full `memory://<id>` first, because a preview is truncated. `update` the survivor, `invalidate` the losers.

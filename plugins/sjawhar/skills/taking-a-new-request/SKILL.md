@@ -16,6 +16,6 @@ A request folded into running work gets done only where it overlaps, and the res
 
 ## When the person folds the work into this session
 
-Do steps 1 to 3 anyway. Then name what this session cannot cover, and offer a fresh agent for it with the command that starts it. This session cannot cover a requirement that needs another repository or branch, that blocks on something this session waits for, or that would hold back the running work's next delivery (a push, a pull request, a report) until it is done. Do not accept the whole request silently and deliver only the overlap.
+Do steps 1 to 3 anyway. Then name what this session cannot cover, and offer a fresh agent for it with the command that starts it. This session cannot cover a requirement that needs another repository or branch, that blocks on something this session waits for, or that this session could not finish together with the running work, so the running work would end this session undelivered. Do not accept the whole request silently and deliver only the overlap.
 
 The command is `agent-new <issue key>` when the request has a Dispatch issue, else `agent-new @brief.md` or `agent-new "<request>"`. Add `--repo <repo> --name <name>` to start it in its own worktree, and `--window <stream window>` to start it beside that stream's lead (`agent-new --help`).

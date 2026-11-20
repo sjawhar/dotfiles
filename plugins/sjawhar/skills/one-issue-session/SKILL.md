@@ -29,7 +29,7 @@ else's, does not make your issue done.
   pin change, a release, a CI gate and ledger rows in three repositories. A wave of several batches with one build
   and one launch is one issue.
 - Done is evidence for every done condition the issue states: a merged pull request, a measured result, or, when
-  the result arrives only after the rest of the issue's work is finished (a task's reading a day after launch), the
+  the result arrives more than an hour after the work that starts it ends (a task's reading a day after launch), the
   work itself: launched with the control runs (the runs that show the measurement can fail) and the number of
   attempts the issue states, or refused with the reason. A job of the stream's scheduler reads the late result;
   name it in your done line. When no job reads it, add one to the jobs file of the scheduler whose heartbeat file
@@ -73,7 +73,7 @@ issue stays open and waits on that work as above. The measurement counts every h
   background jobs and subagents die with it, and nobody notices.
 - A standing role (a merge train's runner, a multi-day run's supervisor) is a session only when its issue states
   the condition that ends it. A role with no end condition is a job.
-- A measurement whose result arrives only after the rest of your work is finished is a scheduled job plus one
+- A measurement whose result arrives more than an hour after the work that starts it ends is a scheduled job plus one
   issue per measurement.
 - A session that holds claims on several issues today finishes what it holds, claims no new issue, and exits; each
   next piece of work starts as a new session on its own issue.

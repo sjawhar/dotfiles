@@ -11,8 +11,8 @@ Your record is the ledger: `dispatch doc-read --project INFRA --artifact librari
 
 ## Rules
 
-- Only Claude models read sessions or text from them: a session can hold HDO material that must not reach a non-Claude model. HDO material is a transcript of a model run on the HDO key (`ANTHROPIC_API_KEY_HDO`, the Anthropic API key that bills the HDO accounts), a `-hdo` repository (one whose name ends in `-hdo`), or a result from either. Discard a consult answer or reader report whose served model does not start with `anthropic/`.
-- Put no HDO material in a lesson, ledger row or reply, since none of them is on an HDO account: no quote, paraphrase or summary. OSS Verify work (the OSSV Dispatch project, the sessions that work on its issues, and their VMs) is not HDO material, although it runs on the HDO key; inside it, a named `-hdo` repository and HDO run results still are. Other work on the HDO key is HDO material.
+- Only Claude models read sessions or text from them: a session can hold HDO material that must not reach a non-Claude model. HDO material is a transcript of a model run on Theorem's HDO accounts at Anthropic, a `-hdo` repository (one whose name ends in `-hdo`), or a result from either. Discard a consult answer or reader report whose served model does not start with `anthropic/`.
+- Put no HDO material in a lesson, ledger row or reply, since none of them is on an HDO account: no quote, paraphrase or summary. OSS Verify work (the OSSV Dispatch project, the sessions that work on its issues, and their VMs) is not HDO material, although it runs on the HDO accounts; inside it, a named `-hdo` repository and HDO run results still are. Other work on the HDO accounts is HDO material.
 - Run readers as `task` agents, not `scout`, which has no bash and so no `omp-session-render`.
 - Interview a session only through omp's read-only seance consult (`task` with `agent: "seance"`). Never resume, fork or copy a session to interview it: a resumed copy keeps the live session's id, which takes over its Envoy role and its secretsd token.
 - Interview only top-level sessions on this machine; the reader covers their subagents. Not over ssh: other machines send lessons over Envoy.
@@ -44,5 +44,5 @@ Your record is the ledger: `dispatch doc-read --project INFRA --artifact librari
 
 ## Reports
 
-- When a lesson lands or closes (a commit, a merged PR or a tool fix, by anyone), in the same step as its ledger row: `dispatch issue-update --issue INFRA-26 --external-link <URL>`. INFRA-26 is the librarian's issue.
+- When a lesson lands or closes (a commit, a merged PR or a tool fix, by anyone), in the same step as its ledger row: `dispatch issue-update --issue <the librarian's issue> --external-link <URL>`. The ledger's first paragraph names that issue.
 - Post a Dispatch message, with its link, only when a deliverable lands that a person asked for or that changes what a person, not only an agent, must do. Any other landing gets only the `issue-update` link.

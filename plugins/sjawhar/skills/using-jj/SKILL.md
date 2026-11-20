@@ -56,7 +56,7 @@ Read `references/commands.md` for a command or revset you do not know, bookmark 
 - A `jj rebase` with no `-r`, `-s` or `-b` means `-b @`: the whole branch, with any commits other sessions stacked on it. `-r` re-parents descendants onto the old parents. `jj rebase --help` has each flag's effect and the diagrams.
 - A rebase that succeeds can record conflicts, and a refusal is not success: read `jj log` after every rebase.
 - Do not rebase only because main moved: the rewrite moves descendants and voids the review.
-- If your private, unpublished chain conflicts at every commit, squash it to one commit (two when a pure move, rename or reformat must stay apart from the logic change for review), then rebase and resolve once. Never rewrite another owner's chain or a published chain as cleanup.
+- If your private, unpublished chain conflicts at every commit, squash it to one commit, or to the layers that help review (Conflict chains in `references/stack-and-conflict-details.md` says when), then rebase and resolve once. Never rewrite another owner's chain or a published chain as cleanup.
 - Before you resolve a conflict, read jj's conflict markers in `references/commands.md`, then follow the `resolve-conflicts` skill for what to keep.
 - Before you restructure a stack, read `references/stack-and-conflict-details.md` and `jj rebase --help`: to restack after a squash merge, move a child stack, publish from a stack other sessions share, or fix a divergent change.
 
