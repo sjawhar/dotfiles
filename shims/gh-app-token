@@ -66,8 +66,8 @@ session ends with the secret-run that made it.
 In an agent box the broker identity arrives after the box does, so a request waits while the
 launcher's enrollment.pending marker says one is still under way, up to 300 s
 (ENROLLMENT_WAIT_SECONDS). The marker is looked for in the key dir the agent-secrets client
-reads: AGENT_SECRETS_KEY_DIR, else $XDG_RUNTIME_DIR/agent-secrets. Nowhere else is there such a
-marker, so nothing else waits.
+reads: AGENT_SECRETS_KEY_DIR, else $XDG_RUNTIME_DIR/agent-secrets, else
+/run/user/<uid>/agent-secrets. Nowhere else is there such a marker, so nothing else waits.
 
 --repo and --read-only narrow the token of one owner (INFRA-322) to those repositories and to
 contents:read and metadata:read: secret-run passes them to the broker as --github-owner,
@@ -186,6 +186,12 @@ MIN_LIFETIME_ENV = "GH_APP_TOKEN_MIN_LIFETIME"
 ENROLLMENT_MARKER = "enrollment.pending"
 ENROLLMENT_MARKER_FRESH_SECONDS = 160
 ENROLLMENT_WAIT_SECONDS = 300
+# The lines the agent-secrets client prints while it waits for the launcher itself, before its
+# own refusal or its success; neither is ever the cause of a failed call (broker_failure_cause).
+CLIENT_ENROLLMENT_NOTICES = (
+    "agent-secrets: the launcher is still enrolling this process (",
+    "agent-secrets: still waiting for the launcher's ",
+)
 
 
 class AppTokenError(Exception):
@@ -557,24 +563,36 @@ def parse_broker_installations(release: str) -> dict[str, BrokerInstallation]:
     return parsed
 
 
-def box_key_dir() -> Path | None:
+def box_key_dir() -> Path:
     """The key dir the agent-secrets client reads (its keyDir): AGENT_SECRETS_KEY_DIR, else
-    $XDG_RUNTIME_DIR/agent-secrets; None where neither variable is set."""
+    $XDG_RUNTIME_DIR/agent-secrets, else /run/user/<uid>/agent-secrets (helper.DefaultSocket's
+    directory)."""
     key_dir = os.environ.get("AGENT_SECRETS_KEY_DIR")
     if key_dir:
         return Path(key_dir)
-    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
-    return Path(runtime_dir) / "agent-secrets" if runtime_dir else None
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    return Path(runtime_dir) / "agent-secrets"
+
+
+def broker_failure_cause(stderr: str) -> str:
+    """The cause of a failed broker call: the first line of its stderr that is not one of the
+    client's notices that it waits for a launcher still enrolling the box. The client names the
+    cause on that line (broker unreachable, an old broker that cannot narrow, an old client that
+    lacks a flag) and never a value there; the release itself goes only to stdout. A notice comes
+    only once wait_for_box_enrollment's own bound ran out with the marker still fresh, and the
+    client's refusal after it says what it waited for, or the later step that failed once the
+    launcher finished."""
+    for line in stderr.strip().splitlines():
+        if line and not line.startswith(CLIENT_ENROLLMENT_NOTICES):
+            return line
+    return "no message"
 
 
 def wait_for_box_enrollment() -> None:
     """Block while this box's secrets-broker enrollment is still under way, up to
-    ENROLLMENT_WAIT_SECONDS. Returns at once - and so changes nothing - wherever there is no key
-    dir, no marker, or a marker no launcher is renewing."""
-    key_dir = box_key_dir()
-    if key_dir is None:
-        return
-    marker = key_dir / ENROLLMENT_MARKER
+    ENROLLMENT_WAIT_SECONDS. Returns at once - and so changes nothing - wherever there is no
+    marker, or a marker no launcher is renewing."""
+    marker = box_key_dir() / ENROLLMENT_MARKER
     deadline = time.monotonic() + ENROLLMENT_WAIT_SECONDS
     announced = False
     while True:
@@ -635,14 +653,8 @@ def request_broker_installations(
             f"broker request for {secret_name} was denied; run agent-secrets-login before retrying"
         )
     if result.returncode:
-        # agent-secrets names the cause on the first line of stderr (broker unreachable, an old
-        # broker that cannot narrow, an old client that lacks a flag) and never a value there;
-        # the release itself goes only to stdout. Its one line before the cause, that it waits
-        # for a launcher still enrolling the box, comes only once wait_for_box_enrollment has
-        # waited its whole bound with the marker still fresh: the cause is then that launcher,
-        # unless it finished within the client's own 20 s wait and a later step failed.
-        cause = result.stderr.strip().splitlines()[:1] or ["no message"]
-        detail = f"broker request for {secret_name} failed (exit {result.returncode}): {cause[0]}"
+        cause = broker_failure_cause(result.stderr)
+        detail = f"broker request for {secret_name} failed (exit {result.returncode}): {cause}"
         if scope:
             detail += "; a --repo/--read-only token has no fallback"
         raise AppTokenError(detail)
