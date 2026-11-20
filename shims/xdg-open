@@ -5,9 +5,20 @@
 # routing through forward would be a pointless round trip AND would subject local
 # clicks to the daemon's allowlist, silently turning them into notifications.
 # The headless devbox has no display, so it tunnels the URL to the laptop instead.
+#
+# .bashrc points $BROWSER at this file, and the real xdg-open falls back to
+# $BROWSER for a file no program is registered to open. It drops $BROWSER only
+# when it is the bare word "xdg-open", so with this path left in it each fallback
+# ran this shim, which ran xdg-open on the same file again, without end: on
+# 2026-11-19 one .mhtml on the laptop recursed 101,566 levels deep in a day, each
+# level opening a session-bus connection of its own. The display branch therefore
+# drops $BROWSER when it names this file, and xdg-open uses its own browser list.
 set -euo pipefail
 
 if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
+    if [ -n "${BROWSER:-}" ] && [ "$(readlink -f -- "$BROWSER" 2>/dev/null)" = "$(readlink -f -- "${BASH_SOURCE[0]}")" ]; then
+        unset BROWSER
+    fi
     exec /usr/bin/xdg-open "$@"
 fi
 
