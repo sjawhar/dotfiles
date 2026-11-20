@@ -1,6 +1,6 @@
 ---
 name: speaking-as-sami
-description: "Use when you write to other people as Sami or on his behalf: Slack messages, emails, customer docs, Google Docs or Sheets, PR descriptions, issue comments, outreach, announcements. Also when you edit text Sami wrote. Not for reports, asks or messages to Sami himself."
+description: "Use when you write to people as Sami or on his behalf (Slack, email, customer docs, Google Docs or Sheets, PR descriptions, issue comments, outreach, announcements), edit his text, or before a message or a program's posts reach people outside the company. Not for reports, asks or messages to Sami."
 ---
 
 # Speaking as Sami
@@ -9,12 +9,12 @@ Write plain, factual and understated. Use none of the forms in "Never write" bel
 
 ## Before you write
 
-- A message to a person outside the company follows `outside-message` first: his approval of the exact text, the audience research and the fresh reviewer's cut.
-- Sami's personal admin (sellers, vendors, couriers, taskers, family) in the omp `personal` profile follows `contacting`, which holds its identity and approval rules.
+- A message to a person outside the company, or a program that will post to such people, follows `outside-message` first. It says which messages need his approval of the exact text and how to ask for it, and holds the two steps: research the reader and run the writing skills, then a fresh reviewer's cut.
+- Sami's personal admin (sellers, vendors, couriers, taskers, family) in the omp `personal` profile follows `contacting`, which holds its identity and approval rules. omp is the agent harness; the session is in that profile when its `OMP_PROFILE` or `PI_PROFILE` environment variable is `personal`.
 - Write as Claude on Sami's behalf, not in his name, unless Sami says otherwise. For upstream pull requests he did: write their body, comments and replies in his first person, because the maintainer reads the PR as his.
 - Add no line about who or what wrote the text, except his standard contributor sentence, which goes unchanged in every upstream PR (the `fork-and-upstream.md` reference of `opening-a-pr`).
-- Read the recent DM and thread history first, replies included, so you do not repeat what he told them or ping them twice.
-- In Slack, follow `omp/rules/slack-shared-channels.md`: a shared channel, not a direct message.
+- Read the whole thread you will post in, replies included, and Sami's direct messages with each recipient back to the first one on this topic, so you do not repeat what he told them or ping them twice.
+- In Slack, post in a thread in the project's channel or another shared channel, so the people who need the answer see it. Send a direct message only after Sami says yes to that message (`omp/rules/slack-shared-channels.md`).
 - Check a shared surface's audience first. Customer-facing docs get no internal ops detail (internal tool names, pipeline caveats, internal-only tabs).
 - Build the draft from what Sami already said on the topic (transcript, Slack thread, meeting notes, earlier tracker answers), and reuse any answer he gave.
 - Use his facts and tone in your own sentences. Do not join copied fragments of his messages.
@@ -52,7 +52,7 @@ Write plain, factual and understated. Use none of the forms in "Never write" bel
 
 ## Editing Sami's drafts
 
-- Keep his wording unless it is wrong in fact or breaks a "Never write" rule. The result must sound like him.
+- Keep his wording unless it is wrong in fact or breaks a "Never write" rule. Change only those words, and do not rephrase or smooth the rest, so the result still sounds like him: each change in your diff fixes a fact or a "Never write" form.
 - When a colleague's style is the reference (sales copy, for example), match that colleague's prior messages.
 - Merge around his live edits in shared docs. Do not overwrite them.
 

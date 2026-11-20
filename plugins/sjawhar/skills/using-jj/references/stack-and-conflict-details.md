@@ -7,10 +7,19 @@
 
 ## Conflict chains
 
-- When a rebase across a moved trunk re-conflicts each commit on the same hunks, squash your branch to one commit, or the few a reviewer needs, then rebase and resolve once.
+- When a rebase across a moved trunk re-conflicts each commit on the same hunks, squash your branch to one commit (two when a pure move, rename or reformat must stay apart from the logic change for review), then rebase and resolve once.
 - The members of an octopus merge share one fork point: rebase each from it, not from the member's own base.
 - Do not restructure a shared stack (duplicate instead) or a fork branch whose release pin follows the change ID.
-- After resolving, compare the diff against main with the pre-rebase diff, so nothing was lost or reverted. The `resolve-conflicts` skill has the rest.
+
+## Resolving conflicts
+
+1. Run `jj log` to see what diverged.
+2. List what each side adds. After you resolve, check that each item is still in the result. Delete a local change only after its owner says yes.
+3. When one side is the old version and the other the new version of the same logic, keep only the new. Then scan for duplicated blocks.
+4. Compare the diff against main with the pre-rebase diff, so nothing was lost or reverted.
+5. Run tests, lint and format before you squash commits together.
+
+The `resolve-conflicts` skill has the rest.
 
 ## After a squash merge
 
@@ -31,5 +40,5 @@
 2. Find the copy current work uses. An operation-log snapshot can predate later edits, and a recovery copy can hold work that looks unsaved.
 3. Check `descendants(<commit>) ~ <commit>` before any rewrite or abandon, and the real remote head before you change a published bookmark.
 4. Point your conflicted bookmark at the verified survivor. Do not delete the remote branch to tidy the local view.
-5. Abandon a stale copy only when it is your own change, its content is reachable elsewhere, `jj log -r 'descendants(<id>) ~ <id>'` is empty, and `jj log -r <id> --no-graph -T bookmarks` prints nothing. An empty commit can be another workspace's `@`: identify it by workspace name.
+5. Abandon a stale copy only when it is your own change, its content is reachable elsewhere, `jj log -r 'descendants(<id>) ~ <id>'` is empty, and `jj log -r <id> --no-graph -T bookmarks` prints nothing. Being empty does not make a copy yours: an empty commit can be another workspace's `@`. Identify it by workspace name, and never abandon or forget a live workspace.
 6. An abandon can delete local bookmarks, and the next push then deletes the remote branch: read the dry-run's direction before each push.

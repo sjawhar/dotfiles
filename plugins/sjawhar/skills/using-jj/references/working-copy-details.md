@@ -18,9 +18,9 @@
 
 ## After a rebase or an interruption
 
-- `jj rebase` leaves `@` where it was. With `@` on A, rebasing B onto A and then editing for B amends A. Run `jj edit B`, or `jj new B`, first.
+- `jj rebase` leaves `@` where it was. With `@` on A, rebasing B onto A and then editing for B amends A. A bare `jj new` first does not fix this: the edit lands in a new sibling of B, not in B. Run `jj edit B`, or `jj new B`, first.
 - Check `@` after every rebase, edit or workspace update: `jj log -r @ --no-graph -T 'change_id.short() ++ " " ++ description.first_line()'`.
-- After an interruption `@` may be another session's commit, so a grep of the working copy is not a grep of main. Run `jj log -r '@ | main@origin'` and check they are related; `jj status` does not show it. An empty `@` can have an unpublished parent.
+- After an interruption `@` may be another session's commit, so a grep of the working copy is not a grep of main. Run `jj log -r '@ | main@origin'` and check they are related; `jj status` does not show it. An empty `@` can have an unpublished parent: compare `@`, `@-` and the remote bookmark with `jj log -r '@ | @- | <name>@origin'`.
 - To find where a hunk entered, grep its identifier in the file at each SHA: pre-rebase, approved tip, current tip. Diff from the SHA a reviewer or CI check cited, not from the branch name.
 
 ## `jj describe` replaced a message

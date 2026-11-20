@@ -37,7 +37,7 @@ def load_rows(paths: list[str]) -> dict[str, dict]:
 def record_index(records_dir: str) -> dict[str, dict]:
     """Every record of the run, by id: `records.jsonl` and any sibling index beside it.
 
-    A run adds records a later step built — the Dispatch-only `M99xxx` ones — as their own
+    A run adds records a later step built — the Dispatch-only `M9xxx` ones — as their own
     `records-*.jsonl`, and a finding of such a record is a KeyError to a reader of the first
     file alone.
     """

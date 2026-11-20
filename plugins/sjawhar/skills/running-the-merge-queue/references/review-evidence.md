@@ -6,8 +6,10 @@ Read before you verify READY, and again when a new review artifact appears.
 
 - Read every review surface as `landing-a-pr`'s review-and-readiness reference says ("Closure"), on every page. The queue adds:
   - the PR body (claims, verification, linked artifacts) and the linked gate, pair and oracle artifacts (coverage, head, gaps);
+  - threads, review bodies and issue comments, each read on its own, since a finding can appear in one of them and not the others: GraphQL `reviewThreads` (unresolved threads by author, each disposition), review bodies (reviewed head and scope, findings outside threads), issue comments (verdicts, unanchored findings, holds, closure evidence);
+  - every page of each: in REST, one `gh api --paginate` call per collection (`repos/O/R/pulls/N/reviews`, `.../files`, `.../commits`, `repos/O/R/issues/N/comments`); in GraphQL, follow `reviewThreads.pageInfo.endCursor` while `hasNextPage`, and page the comments inside each thread too;
   - every author, not only the bot the packet names. A scoped query or truncated body supports only a scoped count: record the population and the pages you could not read;
-  - prose, not tokens such as P1, Major, BLOCK, MERGE. A finding can have no label, and a positive verdict can quote a fixed historical blocker.
+  - prose, not tokens such as P1, Major, BLOCK, MERGE. A finding can have no label, and a positive verdict can quote a fixed historical blocker. Read each hit in context with the verdict's scope line.
 
 ## Bind each artifact
 
@@ -28,7 +30,7 @@ Read before you verify READY, and again when a new review artifact appears.
 - Other valid finding: fixed, or a named destination (follow-up PR, existing backlog item, next task of that session) in the thread reply and merge record, thread resolved. "Later" is not a destination.
 - Refuted: the owner's evidence plus independent confirmation, never a silently resolved thread.
 - Human thread: blocking until the human resolves it.
-- One push per review round, not per finding. Never tell an owner to stop pushing a correctness fix. Do not turn minor wording or disposition updates into new review rounds.
+- One push per review round, not per finding. Never tell an owner to stop pushing a correctness fix. Do not turn a wording change in text that nothing executes, or a change to a finding's disposition reply, into a new review round.
 
 ## Simplify and the thermonuclear pair
 
@@ -40,7 +42,7 @@ For runtime code, CI configuration, scripts, Dockerfiles and infrastructure, in 
 
 Not per push, not after merge. The only exceptions, none of them a waiver for runtime code:
 
-- A documented minor-only prose round after the pair keeps the verdict and the pair. Check its scope by [head changes](head-changes.md), not the owner's word.
+- A round after the pair that the owner documents as prose-only, and whose diff between the two heads touches only comments and docs, keeps the verdict and the pair. Check that diff by [head changes](head-changes.md) section 3, not the owner's word.
 - A prose, comment or docstring-only PR: one reviewer, no simplify, no pair.
 - A test-only PR: one reviewer and no pair, if adversarial exercises show the assertions are non-vacuous in both directions and no gate was deleted or loosened.
 - A test-only delta on a paired PR keeps the pair, with reviewer confirmation of the new head.

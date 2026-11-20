@@ -9,8 +9,13 @@
 
 ## Running it
 
-- Run the affected end-to-end scenarios before merge and mark each as `opening-a-pr` says, with the source, dependency and image revisions per scenario. Check a blocker another session reports against its record.
+- For a slice that changes what runs, run its affected end-to-end scenarios before merge, under the pre-merge scenario rule in `opening-a-pr`. Record the source, dependency and image revisions per scenario, then mark it:
+  - `RAN`: observed through the real surface (the command, URL or record a user touches, not a test, a fixture or a log line), with outcome and duration.
+  - `BLOCKED`: the failed command and the authoritative record that shows the blocker (the CI run, issue or record, linked), never a person's name. Check a blocker another session reports against that record.
+  - `WAIVED-BY-SAMI`: a named blocker Sami explicitly waived, linked to his words. It covers that blocker on that change only.
 - Exercise every human entry point the plan's `## Contract change census` lists through the real client and the new check. Each entry not run is `BLOCKED`.
+- Build or repair missing infrastructure, tooling, skills or drivers at the tested head, then rerun the affected scenarios.
+- Do not ask Sami to omit acceptance or to accept a proxy. A named blocker that survives building or repairing the surface goes to him as a pre-merge decision. His explicit waiver of that blocker is the only exception; the change's size, its kind and green CI never are.
 - Iterate on the repo's fastest loop and keep its slowest surface for the final proof. The repo's testing skill defines what counts as production-like.
 
 ## A slice with a browser page

@@ -25,6 +25,6 @@ fetch_part() {
 
 ## While the workers run
 
-- A silent worker: message it once with a direct question, and redispatch the same brief only if it still does not answer.
+- A worker is silent when it has sent nothing and shows no fresh tool output (`history://<id>:-3`) for about 10 minutes, longer while it runs builds or long test suites. Message it once with a direct question, and redispatch the same brief only if it still does not answer.
 - A `deep` worker has no eval tool: when its bash breaks, give it a shell tool from your kernel (`using-subagents`).
 - While a PR waits for merge or deploy, continue from its branch or a dependency's branch, unless you are revising it. Post-merge production proof runs beside the next work, not instead of it.

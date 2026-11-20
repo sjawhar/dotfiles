@@ -1,12 +1,13 @@
 ---
 name: chat-hub
-description: Use when Sami mentions a chat, text, direct message or "did X reply" on SMS/RCS, WhatsApp, Signal, Discord, Instagram, Messenger or LinkedIn, or asks to read or send one. Not for Slack (slack-messaging, slack-search) or email (the mailbox CLI, google-workspace).
+description: Use when Sami mentions a chat, text, direct message or "did X reply" on SMS/RCS, WhatsApp, Signal, Discord, Instagram, Messenger or LinkedIn, or asks to read or send one. Not for Slack (slack-messaging, slack-search), the inbox (mailbox CLI) or other Gmail, Drive or Docs work (google-workspace).
 ---
 
 # Chat hub
 
-A private Matrix server on oryx bridges Sami's chat networks; each conversation is a room of `@sami:chathub`. The [design](../../../../docs/plans/2026-10-03-chat-hub-design.md) has its parts, state and secrets, and why only an omp session started in the dotfiles repository on oryx loads the `chathub` MCP.
+A private Matrix server on oryx bridges Sami's chat networks; each conversation is a room of `@sami:chathub`. The [design](../../../../docs/plans/2026-10-03-chat-hub-design.md) has its parts, state and secrets.
 
+- Use the hub only in an omp session on oryx: the hub listens only on oryx loopback, and its `MATRIX_HUB_*` secrets are in oryx's `secrets.local.env`. Only an omp session started in the dotfiles repository loads the `chathub` MCP, from `~/.dotfiles/.omp/mcp.json`.
 - The `chathub` MCP reads chats and sends commands to bridge bots. It does not send messages or files to people.
 - On every network but SMS/RCS, a message goes out as Sami, on his real accounts. SMS/RCS has two logins, Sami's phone and the agents' phone; an SMS room sends from the number of its login.
 
@@ -29,10 +30,14 @@ A private Matrix server on oryx bridges Sami's chat networks; each conversation 
    secrets MATRIX_HUB_URL MATRIX_HUB_TOKEN -- ~/.dotfiles/scripts/hub-send <room_id> --text-file <file>
    # a reply: add --reply-to <event_id>; an image or file: --file <path> [--caption-file <file>] instead of --text-file
    ```
-4. Read the result line; the header of `scripts/hub-send` lists the results and exit codes. `SENT` means the network took the message, not that the person read it. After `FAILED` or `UNCONFIRMED`, tell Sami, and do not resend or send anything more to that person, on that network or any other, unless Sami asks. After `REFUSED`, read its reason; for a down login see Logins. A message visible in the room, or no error notice, proves nothing.
+4. Read the result: `hub-send` prints one result line for each command, and the header of `scripts/hub-send` lists the results and exit codes.
+   - `SENT` means the network took the message, not that the person read it.
+   - `FAILED` means the bridge or hub reported a failure. `UNCONFIRMED` means `hub-send` could not learn the result. After either, tell Sami, and do not resend or send anything more to that person, on that network or any other, unless Sami asks.
+   - `REFUSED` means `hub-send` posted nothing; the line gives the reason. For a down login, see Logins.
+   - A message visible in the room, or no error notice, proves nothing.
 
 - Do not send to a person with `matrix_send_message`, `matrix_reply`, `matrix_send_media` or the hub API's `/send` route.
-- Use `--force` only when Sami asks or for a test.
+- Use `--force` only when Sami asks, or when you test `hub-send` itself against a fake hub (a test server, not the real `MATRIX_HUB_URL`), where no message reaches a person. `--force` skips the bridge and login checks, so it can post through a down login.
 
 ## Bridge bot commands and new rooms
 

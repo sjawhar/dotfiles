@@ -1,6 +1,6 @@
 ---
 name: outside-message
-description: "Use when text will reach a person outside Theorem: a comment on a repository we do not own, an email, a Slack message to another company, a release note, an enrollment reply, a bug report, a disclosure. Also before an ask for Sami's approval of such text. Not for messages to Sami or agents."
+description: "Use when text goes to someone outside Theorem: a GitHub issue or pull-request comment on a repository we do not own, an email, another company's Slack, a release note, an enrollment reply, a bug report, a disclosure. Also before asking Sami to approve it. Not for Sami, agents or inside theorem-labs."
 ---
 
 # A message to someone outside Theorem
@@ -21,25 +21,25 @@ The pi-envoy plugin's own `outside-message` skill states this exception only gen
 
 For any other project, all three hold:
 
-- It is a captured routine: a skill or template guides it, and the message is that template sent largely unchanged. The template is approved once; an unchanged send to the same class of reader needs no new ask. The captured routines:
+- It is a captured routine: a skill or template guides it, and the message is that template with only the names, links and numbers that differ per send changed; any other change departs from it. The template is approved once; such a send to the reader its routine names below (an enrolled project's maintainers, or a new enrollee) needs no new ask. The captured routines:
   - a pull request and its maintainer comments to an already-enrolled project (`upstream-bugfix-patch` holds the form and timing of a finding or patch to such a project);
   - the enrollment thank-you and the first "we will start reviewing your PR" note to a new enrollee.
 - The two steps below ran: the writing skills passed over the text, and a fresh reviewer cut the exact text that goes out.
 - It sits in a flow we control: an enrollee who came to us, or a project already enrolled; not contact we open into a space we do not run. A new enrollee counts with no prior rapport: the control is the template and the flow.
 
-Enrolled means the enrolling project's own record, and its stream's brief says where that record is. Do not decide it from a message's tone or from a maintainer having replied before.
+Enrolled means the enrolling project's own record lists the project. The enrolling project's stream (the line of work with its own lead and Dispatch stream issue) names where that record is in its brief, the standing instructions its agents work from. With no record found, the project has not enrolled. Do not decide it from a message's tone or from a maintainer having replied before.
 
 ## Waits for him
 
 Any one of these, except for Oh My Pi:
 
-- Novel contact into a space we do not run: a first contact, or the early contributions, to a project that has not enrolled. Send no batch of pull requests into a cold repository before he has seen how its maintainers react.
+- Novel contact into a space we do not run: a first contact, or any contribution, to a project that has not enrolled, until Sami moves it to "no approval" (below). Ask about one pull request to its repository at a time, and put its maintainers' reaction to the last one, or that they have not reacted yet, in the ask for the next, so he sees how they react before more go out.
 - No skill or template yet, or a send that departs from its template.
 - It commits him or represents his position: a promise, a deadline, a disclosure, a claim he would have to stand behind.
 - A program that will post to people outside the company (a CI review comment, a merge reply, a bot answer): he reviews what it can post before it posts, its fixed text and the prompt behind any text a model writes. Check both first for a promise nobody decided to make, such as a promise to publish proofs.
 - A case between the two lists waits, and the ask says which way it leaned and why.
 
-A project we do not run starts at "approve each". It moves to "no approval" for the captured routines only when Sami says so, once per project; record his call where the project's stream keeps its enrollment record, so no agent promotes a project on its own judgement.
+A project we do not run that has not enrolled starts at "approve each". It moves to "no approval" for the captured routines only when Sami says so, once per project; record his call where the project's stream keeps its enrollment record, so no agent promotes a project on its own judgement. A new enrollee or an enrolled project does not start there: its captured routines go without approval (above).
 
 ## The two steps
 

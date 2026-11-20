@@ -1,7 +1,8 @@
 # Reviewer briefs
 
 Run the five reviewers below in parallel, each a fresh agent that did not write the draft. Give each one the draft
-path, the chart files (read an SVG with the `:img` selector), the rendered page URL, and this shared context:
+path, the chart files (an SVG reads as an image with the `read` tool's `:img` selector: `chart.svg:img`), the
+rendered page URL, and this shared context:
 
 > You review a recap that Sami Jawhar presents at the company standup. Readers: the people of the company,
 > engineers on other projects and staff who are not technical. Read-only: do not edit the page and do not message
@@ -28,17 +29,17 @@ title states the point, the axis is honest, the point is obvious. Check that the
 
 ## Fact check
 Use a reviewer from another model family, which does not share the drafter's blind spots. For a part that carries
-anything taken from HDO model transcripts, use a fresh Claude reviewer instead: HDO material never goes to another
-model family.
+anything taken from HDO model transcripts (transcripts of runs on Theorem's HDO accounts at Anthropic), use a fresh
+Claude reviewer instead: HDO material never goes to another model family.
 Check every number, date and weekend label against every stream draft and the chart script. For each: OK, or
 WRONG or OVERSTATED with the source text and a corrected sentence. Open the cited record itself when a claim is
-load-bearing or unsupported, or when two drafts disagree: agreement with a draft is not evidence. Flag a claim with
-no support, a wrong weekend label (Saturday and Sunday, Pacific), a billing figure whose days are UTC but read as
-Pacific, a chart whose dates disagree with the text, and a dropped caveat that changes the meaning ("not in
-production", "measured on 3 cases", "its definition changed this week"). Then check each conclusion against its
-evidence: a measurement at one size or of one population said to hold for another, a count whose population
-differs from the one the sentence names ("waits on you" for every open ask), a forecast written as a present count,
-a guessed cause stated as fact.
+load-bearing (an item's result or number rests on it) or unsupported, or when two drafts disagree: agreement with a
+draft is not evidence. Flag a claim with no support, a wrong weekend label (Saturday and Sunday, Pacific), a
+billing figure whose days are UTC but read as Pacific, a chart whose dates disagree with the text, and a dropped
+caveat that changes the meaning ("not in production", "measured on 3 cases", "its definition changed this week").
+Then check each conclusion against its evidence: a measurement at one size or of one population said to hold for
+another, a count whose population differs from the one the sentence names ("waits on you" for every open ask), a
+forecast written as a present count, a guessed cause stated as fact.
 
 ## Rules check
 Apply each rule in the "Rules" section of `skill://writing-a-standup-recap` to the draft, one at a time. For each:
@@ -46,5 +47,5 @@ PASS, or FAIL with the line that fails it and the fix.
 
 ## Prose check
 Read `skill://ce-noslop` and `skill://plain-words` first. Audit for AI tells, filler, unsupported connective
-claims, long sentences, passive voice that hides who did the work, and the same thing named two ways. Give a
-rewritten sentence for each. Keep every fact; add none.
+claims, sentences over 25 words, passive voice that hides who did the work, and the same thing named two ways.
+Give a rewritten sentence for each. Keep every fact; add none.

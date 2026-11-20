@@ -3,9 +3,14 @@
 ## Review
 
 - The final `reviewer` after acceptance checks correctness, security, dead code, shims, aliases, dual paths and half-migrations. Do not give it a depth or a file subset.
-- Resolve grounded findings (ones the code or a command output confirms) before you send the merge packet; no other approval waives them. Ungrounded preferences do not bind.
+- Resolve grounded findings (ones the code or a command output confirms) before you send the merge packet; no other approval or follow-up assignment waives them. Ungrounded preferences do not bind.
 - A re-review after fixes resumes the same reviewer session and reads only the diff since the head it last reviewed: it raises no finding it raised before and none on code that diff does not touch. A fresh reviewer reads the PR whole.
-- A prose-only or minor change does not repeat the thermonuclear pair after a review round. A docs-only or runtime-free diff skips `ce-simplify-code` and the pair. The changed paths decide the skip, not a claim that the change looks safe.
+- After a review round, do not repeat the thermonuclear pair when the diff from the head the pair judged to the new head touches only comments and docs. A docs-only or runtime-free diff skips `ce-simplify-code` and the pair. The changed paths decide the skip, not a claim that the change looks safe.
+
+## Judging the result
+
+- An unmet requirement fails the review, whatever the branch, PR body or a report declares, unless the requester recorded before the review that it is out of this work: an ask they answered, a comment they wrote, or a spec version they approved without it. Silence, a reaction or an agent's own spec edit is no record, and moving the missing part to a new issue is not acceptance.
+- The `reviewer` dispatches one subagent to red-team the result against the goal and requirements, and its verdict names each red-team finding and what it did with it. A verdict without them is incomplete, and the work does not pass.
 
 ## Gate ledger
 
@@ -23,4 +28,5 @@ Keep one row per PR and one cell per required gate. At the packet, fill each cel
 - Do not ask Sami or the requester to look at or approve the result before `done`. Close with `dispatch issue-update --issue <KEY> --status done --reason '<what shipped; the check>'`.
 - An issue left at `triage` while work runs is a defect: the Dispatch roadmap view reads these statuses.
 - Waiting for a deploy or a CI job is not a status: the issue stays `needs_review` until your own production check passes. Do not announce the wait.
-- A producer-contract change: the `needs_review` packet carries the downstream delta `opening-a-pr` asks of the PR.
+- At each transition, run the owner audit over the project you own: read `dispatch issues --project <KEY> --priority 0 --priority 1 --all` and act on each row as "The owner audit" in `skill://legion-controller/references/backlog-stewardship.md` says.
+- Producer-contract visibility: when a plan, spec or implementation changes a producer contract in a way a downstream surface shows, the `needs_review` packet and the PR body name every known downstream surface and its visible delta, and each affected consumer's owner reviews that account before merge. No consumer known: record the search that showed it. This needs no approval from Sami.

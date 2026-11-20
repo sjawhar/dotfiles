@@ -16,7 +16,7 @@ A skill's own limits, structure and tests are in `writing-agent-skills`.
 
 Keep a line of an `AGENTS.md`, `CLAUDE.md` or skill file only if all three hold:
 
-1. A competent engineer new to the repository would get the task wrong, or lose real time, without it.
+1. A competent engineer new to the repository would get the task wrong, or lose 10 minutes or more, without it.
 2. They cannot find it in the code, `--help`, a test, or a docs page the doc links.
 3. It is true at main today. Check each path, command, flag and name against the checkout; correct or drop a false line.
 
@@ -41,7 +41,7 @@ Move a fact to a README or `docs/` page only when that page is where an engineer
 - State what the rule requires and what it does not cover, or agents apply it past its edge.
 - Delete a committed policy (gating file, threshold, process doc) when no commit message or PR body records what Sami said to create it, and when.
 - Write "always" or "never" only for a rule with no exception. State the exception, or an agent that meets it drops the whole rule.
-- Before you add a sentence, correct the existing one that is wrong, incomplete or ambiguous. A correction appended beside it leaves both readings.
+- Before you add a sentence, correct the existing one that is wrong, incomplete or ambiguous. Delete or narrow the sentence that caused the failure: a correction appended beside it leaves both readings.
 
 ## Correct an overturned belief
 
@@ -49,18 +49,21 @@ Move a fact to a README or `docs/` page only when that page is where an engineer
 - Correct every copy in place (headings, titles, flags, acceptance rows, downstream steps): a correction under a heading that still asserts the old model has not landed.
 - Grep misses a copy that shares no words with the claim, so also list and check each file, flag, test or step that assumed the old state.
 - Apply the corrected rule to the case that prompted it; do not only restate it.
+- Record what changed in the commit message, not in a note beside the corrected text: readers take the note as current.
 - Mark each claim you did not observe as inferred: a correction's overreach spreads faster than the original error.
 - When a decision says what code may accept, make the code refuse the rest in the same change; a spec alone changes nothing it accepts.
 
 ## On a cutover, sweep the changed directory
 
+A cutover replaces a name, path, command, tool or interface with a new one and removes the old one: a rename, a move, a migration.
+
 - List files with a tree walk (`git ls-files <dir>`), not a hand-written glob, which misses nested paths. Check every file type: scripts and configs record what runs.
 - Before you sweep, write down the questions each file must answer (stale claim? resolved?); without them you check only what you happen to notice.
-- When the claim matters, have a second agent (`task` with `scout`) sweep from the claim itself, not your search terms, and merge the hits.
+- When a decision rests on the sweep (a deletion, a merge, or a report that no stale copy is left), have a second agent sweep from the claim itself, not your search terms, and merge the hits. Start it with omp's `task` tool and `agent: "scout"`, a read-only search agent.
 
 ## Read the whole artifact back
 
-- After an edit, read the whole document, not a grep for what you added: an insert can take the wrong anchor, and an untouched neighbor can be lost.
+- After an edit, read the whole document (every line, in one read or in ranges that cover it), not a grep for what you added. For a file under version control, then read its diff (`git diff -- <file>` or `jj diff <file>`) and check two things: every part of the edit landed where you meant it, since an insert can take the wrong anchor, and the diff changes no line you did not mean to change.
 - Before you trust a read-back, make it find a string you know is there, so a broken reader cannot report success.
 - A change to a string invalidates offsets computed on it. Apply `(start, end, text)` edits back to front, or replace the region in one slice, and check the result.
 - Chain a publish command to its guard with `&&`, or start the script with `set -euo pipefail`: a newline is not a guard.
@@ -71,11 +74,11 @@ Move a fact to a README or `docs/` page only when that page is where an engineer
 - Paraphrase a result from the run's own summary line, with every count it prints; a claim about one test needs that test's own record.
 - Before you describe a format, print one instance verbatim.
 - Prose owns only what its own diff makes true. When another PR, branch or system it describes changes, correct the text in place.
-- Docstrings of tests and witnesses (code that demonstrates a claim) state only what their assertions check.
+- When you sweep prose for stale claims, include the docstrings of tests and witnesses (code that demonstrates a claim): each states only what its assertion checks.
 
 ## Integrate, don't accrete
 
-- Before you add a section, look for one on the topic. If it mostly covers it, rewrite it; patched-in sentences are how two sections come to disagree.
+- Before you add a section, look for one on the topic. If a section's heading names the topic, or it already states half or more of what you would add, rewrite it; patched-in sentences are how two sections come to disagree.
 - Merge per-case sections (per provider, per version) that repeat each other into one that names the differences.
 - A consolidation leaves the doc shorter, and a doc that grows on every edit, even simplifying ones, is accreting: rewrite it. Keep one doc per audience or purpose: merge duplicate files, and state in the PR body why no existing file can hold a new one's content.
 

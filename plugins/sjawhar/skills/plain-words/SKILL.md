@@ -1,6 +1,6 @@
 ---
 name: plain-words
-description: "Use when you write, send or publish text a person reads: an ask, a spec, a Dispatch comment, a message to a colleague, a pull-request body, a commit message, a report, a status update. Also when you answer a question a person asked, and before a draft goes to a reviewer."
+description: "Use when you write, send or publish text a person reads: an ask, a spec, an issue comment, a message to a colleague, a pull-request body, a commit message, a report, a status update. Also when you answer a question a person asked, and before a draft goes to a reviewer."
 ---
 
 # Say the literal thing
@@ -13,24 +13,29 @@ description: "Use when you write, send or publish text a person reads: an ask, a
 
 ## Decisions and terms
 
-Do both as you write, not after a review sends the draft back:
+Do both in your first draft. Before any review reads it, check that each decision in it has its link and each coined name or term has its instance.
 
-1. Do not quote a person, and do not write what they said or why. Write the decision as it now stands, with the link to where it was decided (the Dispatch comment, ask or message) beside it. An artifact version is not where a decision was made. AskGate, which reviews each Dispatch write before it posts, flags a text that quotes the person; with its block arm off (`askgate_block` in `omp/extensions/experiments/gates.json`) the write still posts, with the reason as a warning.
+1. Do not quote a person, and do not write what they said or why. Write the decision as it now stands, with the link to where it was decided beside it.
+   - Where it was decided is a comment, ask or message on Dispatch, the issue tracker that the `dispatch` command reads and writes. Its link has the form `dispatch://KEY/comment/<id>`, `dispatch://KEY/ask/<id>` or `dispatch://KEY/message/<id>`.
+   - A version of an artifact (a file or document attached to a Dispatch issue or project, `dispatch://KEY/artifact/<slug>@vN`) is not where a decision was made: link the comment, ask or message instead.
+   - AskGate reviews each ask, comment, message and document that a `dispatch` command posts, before it posts, and flags a text that quotes the person; with its block arm off (`askgate_block` in `omp/extensions/experiments/gates.json`) the write still posts, with the reason as a warning.
 2. Beside every coined name, abstraction or term the reader cannot already resolve, put one concrete instance: the actual file, number, id or example. A coined or undefined word is what a reader most often cannot read.
 
 ## Before you send
 
 1. Give a fresh session only what the reader has: the draft and what the reader already knows.
-2. It removes what the reader does not need, and lists every term it cannot define.
-3. Fix each listed term.
+2. It deletes from the draft what the reader does not need, and returns the edited draft with two lists: what it deleted, and every term it cannot define.
+3. Continue from its edited draft, and fix each listed term.
 
-A reviewer that reads only to approve has not done this step; the two lists show that it ran.
+A reviewer that reads only to approve has not done this step; the two lists from step 2 show that it ran.
 
 ## The test
 
 Take the verb phrase out and ask what literally happens. Write that. If you cannot say what happens, you did not know, and the phrase hid it from you as well as from the reader.
 
 ## The phrases, commonest first
+
+Look for the first phrase first: it is the commonest.
 
 - "land the change", "land the PR": write merge it, release it, deploy it or apply it, whichever it is. If you cannot say which, that is the answer: "it is approved and not merged".
 - "unblock the work": X can start once Y merges.
@@ -41,10 +46,10 @@ Take the verb phrase out and ask what literally happens. Write that. If you cann
 
 ## Do not shout
 
-No all-capitals headers, and no all-capitals phrases for emphasis. Bold only where a number, a name or a choice has to be found again. A shouting header appears when a passage is too long to show its own point: cut the passage instead. An agent reads it as an instruction shouted twice, and a reader who sees three of them stops seeing any.
+No all-capitals headers, and no all-capitals phrases for emphasis. Bold only a number, a name or a choice that the reader must copy or act on after reading, such as a command to run, a deadline or the option to pick. A shouting header appears when a passage is too long to show its own point, that is, when its first sentence does not state the point: cut the passage until its first sentence does, instead of adding the header. An agent reads it as an instruction shouted twice, and a reader who sees three of them stops seeing any.
 
 ## What stays
 
 A verb stays when you can see what it did: merge, delete, send, read, measure, kill a process by pid, repoint a link. A term of art stays when it is the literal name of the thing: a merge queue merges, a garbage collector collects. The rule is against phrases that sound like an action and name none.
 
-`asd-ste100` constrains grammar and vocabulary for a reader whose first language may not be English, and `ce-noslop` removes AI writing tells. Run all three on an outside message; run this one on everything.
+`asd-ste100` constrains grammar and vocabulary for a reader whose first language may not be English, and `ce-noslop` removes AI writing tells. Run all three on an outside message, one that a person outside Theorem reads (`outside-message` defines it); run this one on everything.
