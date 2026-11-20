@@ -20,9 +20,17 @@
 # removed on exit, never to an argument list; the command runs with CLOUDSDK_AUTH_ACCESS_TOKEN_FILE
 # set to that file, a fresh CLOUDSDK_CONFIG, prompts off and file logging off, whatever the caller
 # set: gcloud copies a command's output into a log file under CLOUDSDK_CONFIG/logs, so a printed
-# token would land on disk (dispatch://INFRA-4824). A first word that is no command on PATH
-# is gcloud's: `gcloud-reader storage buckets get-iam-policy gs://b` runs gcloud. Give `gcloud`, `bq`
-# or `sh -c '...'` to choose; a REST call reads the header from stdin:
+# token would land on disk (dispatch://INFRA-4824). On a Google VM the SDK's bq wrapper takes the
+# metadata server's account for the active one and hands bq --use_gce_service_account, and bq reads
+# the token file only through its own call to gcloud, which fails under the gcloud shim when the
+# SDK is the snap: bq ran as the box. So the token also goes, as bq's oauth_access_token, to a 0600
+# bigqueryrc in the same directory (BIGQUERYRC; it replaces the caller's), and core/check_gce_metadata
+# is off: the metadata server names no account and no default project (name the project: --project,
+# bq's --project_id), and a bq left with no token fails rather than run as the box. gsutil cannot
+# use the token file and took the box's account from /etc/boto.cfg ([GoogleCompute]); it gets an
+# empty BOTO_CONFIG of that directory instead, so it runs anonymous: use `gcloud storage`. A first
+# word that is no command on PATH is gcloud's: `gcloud-reader storage buckets get-iam-policy gs://b`
+# runs gcloud. Give `gcloud`, `bq` or `sh -c '...'` to choose; a REST call reads the header from stdin:
 #   sh -c 'printf "header = \"Authorization: Bearer %s\"\n" "$(cat "$CLOUDSDK_AUTH_ACCESS_TOKEN_FILE")" | curl -sS -f -K - URL'
 #
 # Exit 2 for a usage error, before anything reaches the broker; secret-run's own status when the
@@ -62,9 +70,12 @@ dir=$(mktemp -d "${TMPDIR:-/tmp}/gcloud-reader.XXXXXX")
 trap 'rm -rf "$dir"' EXIT
 umask 077
 printf '%s' "$token" >"$dir/token"
+printf 'oauth_access_token = %s\n' "$token" >"$dir/bigqueryrc"
 unset "$secret" token GCLOUD_READER_INNER GCLOUD_READER_REASON GCLOUD_ACCOUNT CLOUDSDK_ACTIVE_CONFIG_NAME \
   CLOUDSDK_CORE_ACCOUNT CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT GOOGLE_APPLICATION_CREDENTIALS
 mkdir "$dir/config"
+: >"$dir/boto"
 command -v -- "$1" >/dev/null 2>&1 || set -- gcloud "$@"
-CLOUDSDK_CONFIG="$dir/config" CLOUDSDK_AUTH_ACCESS_TOKEN_FILE="$dir/token" CLOUDSDK_CORE_DISABLE_PROMPTS=1 \
-  CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true "$@"
+CLOUDSDK_CONFIG="$dir/config" CLOUDSDK_AUTH_ACCESS_TOKEN_FILE="$dir/token" CLOUDSDK_CORE_CHECK_GCE_METADATA=false \
+  CLOUDSDK_CORE_DISABLE_PROMPTS=1 CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true BIGQUERYRC="$dir/bigqueryrc" \
+  BOTO_CONFIG="$dir/boto" "$@"

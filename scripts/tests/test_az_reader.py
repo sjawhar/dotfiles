@@ -11,10 +11,13 @@ command there. Neither token reaches an argument list, and the directory is gone
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -59,7 +62,11 @@ body="{\"token\":\"$FAKE_IDTOKEN\"}"
 if [[ -n $out ]]; then printf '%s' "$body" > "$out"; else printf '%s' "$body"; fi
 """
 
-# The fake az logs its argv, AZURE_CONFIG_DIR, and the content of a --federated-token @FILE.
+# The fake az logs its argv, AZURE_CONFIG_DIR, and the content of a --federated-token @FILE. Like the
+# real one (azure/cli/core/telemetry.py, conclude; azure/cli/telemetry/__init__.py, _start), unless
+# core.collect_telemetry is off it leaves a detached telemetry uploader, which writes its note and log
+# under AZURE_CONFIG_DIR a moment after az has exited (here only while the fixture's log dir is there,
+# so it writes nothing once a test has cleaned up).
 AZ = r"""#!/bin/bash
 printf 'argv %s\n' "$*" >> "$LOG/az.log"
 printf 'config %s\n' "${AZURE_CONFIG_DIR:-}" >> "$LOG/az.log"
@@ -71,6 +78,10 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     [[ $v == @* ]] && printf 'federated_file %s\n' "$(cat "${v#@}")" >> "$LOG/az.log"
   fi
 done
+case "${AZURE_CORE_COLLECT_TELEMETRY:-}" in
+  false|no|off|0) ;;
+  *) (sleep 0.3; [[ -d $LOG ]] || exit 0; mkdir -p "$AZURE_CONFIG_DIR/logs"; printf '1-01-01T00:00:00' > "$AZURE_CONFIG_DIR/telemetry.txt") </dev/null >/dev/null 2>&1 & ;;
+esac
 [[ -z "${AZ_EXIT:-}" || $1 == login ]] || exit "$AZ_EXIT"
 """
 
@@ -191,6 +202,36 @@ class AzReaderTest(unittest.TestCase):
             result = f.run("vm", "start", "-g", "SAMI", "-n", "x", env_extra={"AZ_EXIT": "3"})
             self.assertEqual(result.returncode, 3)
             self.assertEqual(f.leftovers(), [])
+
+    def test_no_telemetry_uploader_puts_the_directory_back(self) -> None:
+        """az's telemetry uploader runs on after az exits and wrote telemetry.txt and
+        logs/telemetry.log into az-reader's AZURE_CONFIG_DIR after the exit trap had removed it:
+        five az-reader.*/config folders were left on a dev box from runs at 20:33-20:37Z on
+        2026-11-20. az-reader runs az with telemetry off, so nothing outlives the run."""
+        with Fixture(SCRIPT) as f:
+            result = f.run("vm", "list", "-g", "SAMI")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            time.sleep(1)
+            self.assertEqual(f.leftovers(), [])
+
+    @unittest.skipUnless(shutil.which("az"), "no az on PATH")
+    def test_the_real_az_with_telemetry_off_starts_no_uploader(self) -> None:
+        """The assumption the fake az holds: AZURE_CORE_COLLECT_TELEMETRY=false keeps the real az
+        from starting its uploader, whose note (telemetry.txt) and log (logs/telemetry.log) are
+        there after a call with telemetry on."""
+        found = {}
+        for telemetry in ("on", "false"):
+            with tempfile.TemporaryDirectory() as tmp:
+                env = {**os.environ, "AZURE_CONFIG_DIR": str(Path(tmp) / "config")}
+                env.pop("AZURE_CORE_COLLECT_TELEMETRY", None)
+                if telemetry == "false":
+                    env["AZURE_CORE_COLLECT_TELEMETRY"] = "false"
+                subprocess.run(["az", "account", "list", "--output", "none"], env=env, capture_output=True, timeout=120, check=False)
+                time.sleep(1)
+                config = Path(tmp) / "config"
+                found[telemetry] = sorted(str(p.relative_to(config)) for p in (config / "telemetry.txt", config / "logs" / "telemetry.log") if p.exists())
+        self.assertEqual(found["on"], ["logs/telemetry.log", "telemetry.txt"], "the control: az with telemetry on started no uploader")
+        self.assertEqual(found["false"], [])
 
     def test_a_refused_release_stops_before_any_call(self) -> None:
         with Fixture(SCRIPT) as f:
