@@ -131,6 +131,8 @@ IN_PROGRESS = {
     "REVERT_HEAD": "a revert",
 }
 LIST_LIMIT = 20
+# How many logs of killed hook sweep passes are kept, newest first (keep_killed_sweep_log).
+KILLED_SWEEP_LOGS = 5
 
 
 def log(message: str) -> None:
@@ -730,7 +732,8 @@ def sweep_hooks(options: argparse.Namespace, kind: str, timeout: float) -> tuple
     checkouts are made, under --sweep-timeout (420 s), and a run at most once per
     --slow-sweep-interval (3600 s) sweeps both kinds of root under --slow-sweep-timeout (1000 s).
     The time is recorded only when a slow pass ends with its summary line, so a killed one is tried
-    again on the next run.
+    again on the next run. A killed pass's log is kept (keep_killed_sweep_log), so the next look at
+    a kill can read what the pass did before it.
 
     How each pass fits the unit's TimeoutStartSec=1170 (--run-limit): run_once keeps a monotonic
     deadline, its start plus --run-limit less alert_reserve (60 s by default), and no pass runs
@@ -767,10 +770,12 @@ def sweep_hooks(options: argparse.Namespace, kind: str, timeout: float) -> tuple
                 os.killpg(proc.pid, 9)
             except OSError:
                 pass
-            proc.communicate()
+            late, _ = proc.communicate()
+            kept = keep_killed_sweep_log(options, kind, sweep_log, late)
             return (
                 f"one {label} of {display_path(script)} did not end in {timeout:.0f}s and was killed,"
                 " so some checkouts may lack the pre-push hook."
+                + (f" Its log is kept at {display_path(kept)}." if kept else " Its log could not be kept.")
             ), False
         lines = sweep_log.read_text().splitlines() if sweep_log.exists() else []
     summary = next((m for m in map(SWEEP_SUMMARY_RE.search, reversed(lines)) if m), None)
@@ -801,6 +806,33 @@ def sweep_hooks(options: argparse.Namespace, kind: str, timeout: float) -> tuple
             + "\n  The next pass reaches them; this clears when a pass defers none."
         )
     return "\n".join(why), True
+
+
+def keep_killed_sweep_log(options: argparse.Namespace, kind: str, sweep_log: Path, output: str | None) -> Path | None:
+    """The path a killed pass's log, and what the pass printed, are kept at, or None when they could
+    not be written. They go in killed-sweeps/ beside the state file, named by the time and the kind
+    of pass, each through a `.new` file and a rename, and only the newest KILLED_SWEEP_LOGS stay.
+
+    Why: the pass's log is in a temporary directory that is removed when the pass ends, and on
+    2026-11-20 journald dropped this unit's lines for the hour around a killed slow-root pass, so
+    nothing showed what that pass had done before its 1000 s bound."""
+    keep = options.state.parent / "killed-sweeps"
+    try:
+        keep.mkdir(parents=True, exist_ok=True)
+        ns = time.time_ns()
+        name = time.strftime("%Y%m%dT%H%M%S", time.gmtime(ns // 10**9)) + f".{ns % 10**9:09d}Z-{kind}.log"
+        text = sweep_log.read_text(errors="replace") if sweep_log.exists() else ""
+        if output:
+            text += "--- what the pass printed ---\n" + output
+        dest = keep / name
+        new = keep / (name + ".new")
+        new.write_text(text)
+        os.replace(new, dest)
+        for old in sorted(keep.glob("*Z-*.log"))[:-KILLED_SWEEP_LOGS]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        return None
+    return dest
 
 
 # ------------------------------------------------------------------------------- state
