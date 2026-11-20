@@ -19,7 +19,7 @@ import threading
 import sys
 import tomllib
 import urllib.parse
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterator, Mapping, Sequence
@@ -2679,10 +2679,11 @@ def gh_host(host: str) -> str:
 
 
 def gh_url_repository(value: str) -> tuple[str, str] | None:
-    """(the host gh sends the call to, gh_host; the `owner/name`) of VALUE when it is an http or https URL whose path
-    starts with an owner and a name, as gh 2.98.0 reads a URL argument (pkg/cmd/pr/shared/finder.go ParseURL, and the
-    issue and discussion lookups: url.Parse, then ghrepo.NewWithHost of the path's first two parts and u.Hostname(),
-    the host without a user or a port, so https://x@github.com:443/o/r/pull/1 is github.com's o/r); else None."""
+    """(the host as written, in lower case; the `owner/name`) of VALUE when it is an http or https URL whose path starts
+    with an owner and a name, as gh 2.98.0 reads a URL argument (pkg/cmd/pr/shared/finder.go ParseURL, and the issue and
+    discussion lookups: url.Parse, then ghrepo.NewWithHost of the path's first two parts and u.Hostname(), the host
+    without a user or a port, so https://x@github.com:443/o/r/pull/1 is github.com's o/r); else None. The one reader of
+    such a URL: gh_call_host reads where gh sends the call for that host."""
     try:
         address = urllib.parse.urlsplit(value)
         host = address.hostname
@@ -2691,18 +2692,18 @@ def gh_url_repository(value: str) -> tuple[str, str] | None:
     parts = address.path.split("/")
     if address.scheme not in ("http", "https") or not host or len(parts) < 3 or not (parts[1] and parts[2]):
         return None
-    return gh_host(host), f"{parts[1]}/{parts[2]}"
+    return host, f"{parts[1]}/{parts[2]}"
 
 
 def gh_argument_repository(group: str, sub: str, number: int, value: str,
-                           default: str | None) -> tuple[str, str, str] | None:
+                           hosts: GhHosts) -> tuple[str, str, str] | None:
     """(the repository; the host gh sends the call to and the repository's URL, as gh_repository_address gives them,
-    DEFAULT gh's default host) when positional argument NUMBER, VALUE, names the repository the call goes to: as an
-    http or https URL (gh_url_repository) in an argument of a GH_URL_ARGUMENT command or in the repository argument of a
-    GH_REPOSITORY_ARGUMENT one, or as that repository argument in any other form gh reads (`[HOST/]OWNER/REPO`, a git
-    URL). gh_reach reads that repository as a target, on that host. None for any other argument, a
-    URL in one included, for each argument of a gist, which has no repository (the later arguments of `gist rename` are
-    the file names it sends), and for the endpoint of `gh api`, which gh_reach reads once gh has filled its
+    HOSTS gh's hosts) when positional argument NUMBER, VALUE, names the repository the call goes to: as an http or
+    https URL (gh_url_repository, its host read by gh_call_host) in an argument of a GH_URL_ARGUMENT command or in the
+    repository argument of a GH_REPOSITORY_ARGUMENT one, or as that repository argument in any other form gh reads
+    (`[HOST/]OWNER/REPO`, a git URL). gh_reach reads that repository as a target, on that host. None for any other
+    argument, a URL in one included, for each argument of a gist, which has no repository (the later arguments of `gist
+    rename` are the file names it sends), and for the endpoint of `gh api`, which gh_reach reads once gh has filled its
     placeholders. Until review round 2 of dispatch://INFRA-3365 a repository argument that is not a URL was given
     github.com as its host, so `ghe.example.com/o/r` was a github.com repository whose visibility could not be read."""
     if group in ("gist", "api"):
@@ -2710,9 +2711,10 @@ def gh_argument_repository(group: str, sub: str, number: int, value: str,
     repository_argument = (group, sub) in GH_REPOSITORY_ARGUMENT and number == 1
     named = gh_url_repository(value) if repository_argument or (group, sub) in GH_URL_ARGUMENT else None
     if named:
-        return named[1], *gh_repository_address(value, default)
+        host = gh_call_host(hosts, GH_GIVEN_HOST, named[0])
+        return named[1], host, f"https://{host}/{named[1]}"
     if repository_argument:
-        return value, *gh_repository_address(value, default)
+        return value, *gh_repository_address(value, hosts)
     return None
 
 
@@ -2910,8 +2912,8 @@ def yaml_mapping(text: str) -> list[tuple[str, object]]:
     """The root mapping of TEXT, a file of gh's config, as go-gh v2.13.0 reads it (pkg/config/config.go load, through
     yaml.v3): its (key, value) pairs in order, each value a mapping read the same way, None for a null, YAML_SCALAR
     or YAML_OTHER; [] for a text that holds no node, which go-gh reads as an empty mapping. The script takes no YAML
-    library, so this reads the YAML a gh config holds, and raises YamlUnread for the rest, which gh_default_host reads
-    as a host the check cannot name: the call is then judged as public, erring toward refusing. Each rule:
+    library, so this reads the YAML a gh config holds, and raises YamlUnread for the rest, which GhHosts reads as a
+    config the check cannot read (gh_call_host): the call is then judged as public, erring toward refusing. Each rule:
 
     - A block mapping at any indentation its lines keep, its keys plain or in quotes (YAML_KEY). A line indented below
       a key belongs to that key's value: a mapping, read the same way; a sequence, a block scalar or a plain scalar's
@@ -3169,26 +3171,108 @@ def gh_config_hosts(environment: Mapping[str, str]) -> list[str]:
 
 
 # The host of a gh call that names none, a `gh api` call with no --hostname or a repository named as `OWNER/REPO`,
-# when the check cannot read gh's config as gh reads it (gh_default_host).
+# when the check cannot read gh's config as gh reads it (GhHosts.default).
 GH_UNREAD_HOST = "a host the check cannot read in gh's config"
+# The host of a URL that is not GitHub's and whose host the check cannot read: a git URL (`git@host:o/r`, `ssh://…`)
+# or a local path, whose host only scripts/github-repo-visibility reads, resolving an ssh alias as git's ssh does.
+GH_URL_HOST = "a host the check cannot read in a URL that is not GitHub's"
 
 
-def gh_default_host(environment: Mapping[str, str]) -> str | None:
-    """gh 2.98.0's default host (go-gh v2.13.0's pkg/auth/auth.go defaultHost, cfg.Authentication().DefaultHost()),
-    where gh sends a `gh api` call that no --hostname names (pkg/cmd/api/api.go apiRun) and the call for a repository
-    named as `OWNER/REPO` (gh_repository_address): GH_HOST, else the one host gh's config lists when it lists exactly
-    one (gh_config_hosts), else github.com; None where the check cannot read that config as gh reads it (YamlUnread),
-    for a host it cannot name (GH_UNREAD_HOST), which is read as public. gh_check reads it at most once. Until review
-    round 8 of dispatch://INFRA-3365 only the keys at column 0 of hosts.yml were read, so a call gh sent to the one
-    host of a hosts.yml indented by two spaces, in flow form or named by config.yml's `hosts:` key was judged as the
-    github.com repository its path named, and the flow form's host was read as `{"ghe.example.com"`."""
-    if environment.get("GH_HOST"):
-        return environment["GH_HOST"]
-    try:
-        hosts = gh_config_hosts(environment)
-    except YamlUnread:
-        return None
-    return hosts[0] if len(hosts) == 1 else "github.com"
+class GhHosts:
+    """gh 2.98.0's hosts as one gh call reads them: VARIABLE, GH_HOST ("" when unset), and LISTED, the hosts gh's
+    config lists (gh_config_hosts), None where the check cannot read that config as gh reads it (YamlUnread). gh_check
+    makes one for each call, which reads gh's config at most once, and only for a reading that takes it; gh_call_host
+    reads every host the gate gives a call from it. Until review round 8 of dispatch://INFRA-3365 only the keys at
+    column 0 of hosts.yml were read, so a call gh sent to the one host of a hosts.yml indented by two spaces, in flow
+    form or named by config.yml's `hosts:` key was judged as the github.com repository its path named, and the flow
+    form's host was read as `{"ghe.example.com"`."""
+
+    def __init__(self, environment: Mapping[str, str]) -> None:
+        self.environment = environment
+        self.variable = environment.get("GH_HOST", "")
+
+    @cached_property
+    def listed(self) -> tuple[str, ...] | None:
+        try:
+            return tuple(gh_config_hosts(self.environment))
+        except YamlUnread:
+            return None
+
+    @property
+    def default(self) -> str | None:
+        """gh's default host (go-gh v2.13.0 pkg/auth/auth.go defaultHost, cfg.Authentication().DefaultHost()): GH_HOST,
+        else the one host gh's config lists when it lists exactly one, else github.com; None where the check cannot
+        read that config."""
+        if self.variable:
+            return self.variable
+        if self.listed is None:
+            return None
+        return self.listed[0] if len(self.listed) == 1 else "github.com"
+
+
+# How a gh call gives the host it goes to (gh_call_host).
+GH_GIVEN_DEFAULT = "no host"
+GH_GIVEN_HOST = "a host"
+GH_GIVEN_ADDRESS = "an address's host"
+GH_GIVEN_URL = "a git URL"
+GH_GIVEN_REMOTE = "a remote's URL"
+GH_GIVEN_CALL = "a call that is not gh api"
+
+
+def gh_call_host(hosts: GhHosts, given: str, value: str | None = None) -> str:
+    """The host gh 2.98.0 sends a call to, as the call gives it (GIVEN, with VALUE), by gh's hosts (HOSTS). Every place
+    the gate decides which host a call reaches reads that host here, and gh_reach reads a host that is not github.com
+    as public, with a repository the check reads nothing of:
+
+    - GH_GIVEN_DEFAULT, no host given: a repository named as `OWNER/REPO` by -R, --branch-repo, GH_REPO or a repository
+      argument (gh_repository_address), and a `gh api` endpoint that no --hostname names (gh_api_resolve), which gh
+      reads on its default host (GhHosts.default; ghrepo.FromFullName, pkg/cmd/api/api.go apiRun), as gh_host reads
+      it; GH_UNREAD_HOST where the check cannot read gh's config.
+    - GH_GIVEN_HOST, VALUE a host gh is given by name: --hostname, the HOST of `HOST/OWNER/REPO`, and the host of an
+      http or https URL that names a repository (gh_url_repository): gh_host, which reads it as gh does.
+    - GH_GIVEN_ADDRESS, VALUE the host of an address that holds `://`, which gh sends a `gh api` call to as it is
+      (gh_api_resolve; "" for one that names no host, None for one the check cannot read): github.com for GitHub's
+      API hosts (GH_API_HOSTS), else that host as written.
+    - GH_GIVEN_URL, VALUE a git URL that names a repository (`git@host:o/r`, `ssh://…`; gh_repository_address):
+      github.com where scripts/github-repo-visibility reads it as GitHub's (gh_repository), else GH_URL_HOST.
+    - GH_GIVEN_REMOTE, VALUE a remote's URL (gh_bases): github.com for one the helper reads as GitHub's, else the
+      host of an http or https URL, else GH_URL_HOST; "" for a remote gh does not take. gh may take a remote on
+      github.com, on GH_HOST's host or on a host its config lists (first a remote on the one host it lists, when it
+      lists one), and drops any other. Measured 2026-11-20 with fake tokens, `pr comment 1` from a checkout whose
+      remotes are origin and upstream, one on github.com and one on ghe.example.com: with hosts.yml listing only
+      ghe.example.com gh went there, either way round; listing both hosts, to the upstream's; listing only github.com,
+      to github.com; and from a checkout whose one remote is github.com's, with hosts.yml listing only ghe.example.com,
+      to github.com. The check keeps each remote gh may take, as gh_bases keeps every remote. A remote whose host the
+      check cannot read is kept when gh's config lists a host that is not github.com, or GH_HOST names one, since its
+      host may be that one, and every remote is kept where the check cannot read gh's config: both err toward refusing.
+    - GH_GIVEN_CALL, a call that is not `gh api`, whatever repositories it reaches: GH_HOST's host when that is set,
+      since gh then takes only a remote on it and refuses the call when none is (measured: "none of the git remotes
+      configured for this repository correspond to the GH_HOST environment variable", nothing sent), which the check
+      reads as sent to that host, erring toward refusing; else github.com, where each repository the call reaches
+      gives its own host (gh_reach), and with none named the remote's (measured 2026-11-20: with hosts.yml listing only
+      ghe.example.com, `pr comment 1` from a checkout whose origin is github.com's went to github.com)."""
+    if given == GH_GIVEN_DEFAULT:
+        return gh_host(hosts.default) if hosts.default else GH_UNREAD_HOST
+    if given == GH_GIVEN_HOST:
+        return gh_host(value or "")
+    if given == GH_GIVEN_ADDRESS:
+        if value is None:
+            return "an address gh was given that the check cannot read"
+        return "github.com" if value in GH_API_HOSTS else value or "an address gh was given that names no host"
+    if given == GH_GIVEN_CALL:
+        return gh_host(hosts.variable) if hosts.variable else "github.com"
+    if gh_repository(value or "") is not None:
+        return "github.com"
+    if given == GH_GIVEN_URL:
+        return GH_URL_HOST
+    named = gh_url_repository(value or "")
+    host = gh_host(named[0]) if named else GH_URL_HOST
+    if hosts.listed is None:
+        return host
+    taken = {gh_host(name) for name in (*hosts.listed, hosts.variable) if name} | {"github.com"}
+    if host == GH_URL_HOST:
+        return host if taken != {"github.com"} else ""
+    return host if host in taken else ""
 
 
 def gh_api_address(host: str, endpoint: str) -> str:
@@ -3283,16 +3367,18 @@ class GhApiAddress:
     graphql: bool | None
 
 
-def gh_api_resolve(named: str | None, value: str) -> GhApiAddress:
+def gh_api_resolve(hosts: GhHosts, hostname: str | None, value: str) -> GhApiAddress:
     """Where gh 2.98.0 sends a `gh api` call whose endpoint, its placeholders filled, is VALUE (pkg/cmd/api/http.go
-    httpRequest), on NAMED, the host the last --hostname names, else gh's default host (gh_default_host, None for one
-    the check cannot name): a VALUE holding `://` is the address itself, whatever NAMED says, and any other an address
-    on NAMED, any host at all (gh_api_address). The one parse of the address (urlsplit) gives all the rest.
+    httpRequest), on HOSTNAME, the host the last --hostname names, else gh's default host (HOSTS): a VALUE holding
+    `://` is the address itself, whatever HOSTNAME says, and any other an address on that host, any host at all
+    (gh_api_address). The one parse of the address (urlsplit) gives all the rest, and gh_call_host its host: the
+    --hostname host (GH_GIVEN_HOST), gh's default host (GH_GIVEN_DEFAULT), or the address's own host
+    (GH_GIVEN_ADDRESS).
 
     The host (GhApiAddress.host) is the one gh sends to, read as gh_host reads it: for a host NormalizeHostname makes
     github.com, gh_api_address builds `https://api.<host>/`, a name under github.com (api.foo.github.com has no
-    address, so gh sends nothing at all). An http or https address on api.github.com or uploads.github.com is
-    github.com's, with its path (and query) as the endpoint, so an upload to
+    address, so gh sends nothing at all). An address on api.github.com or uploads.github.com is github.com's, and an
+    http or https one has its path (and query) as the endpoint, so an upload to
     `https://uploads.github.com/repos/O/R/releases/1/assets?name=x` is O/R's as `repos/O/R/…` is, and
     `https://api.github.com/graphql` is `graphql`. An address on any other host is that host's. The address is GraphQL
     when VALUE is `graphql`, gh's own test, which sends it to the host's GraphQL API whatever the host, or when the
@@ -3300,23 +3386,28 @@ def gh_api_resolve(named: str | None, value: str) -> GhApiAddress:
     host. Until review round 8 of dispatch://INFRA-3365 the endpoint was read before gh fills it and again after, so
     `https://api.github.com:owner/repos/o/r/issues` was github.com's while gh sent it to
     `https://api.github.comsjawhar/…`."""
+    host: str | None = None
     if "://" in value:
-        url, host = value, ""
-    elif named is None:
-        return GhApiAddress(GH_UNREAD_HOST, value, None, False, True if value == "graphql" else None)
+        url = value
     else:
-        url, host = gh_api_address(named, value), gh_host(named)
+        named = hostname or hosts.default
+        host = gh_call_host(hosts, GH_GIVEN_HOST, hostname) if hostname else gh_call_host(hosts, GH_GIVEN_DEFAULT)
+        if named is None:
+            return GhApiAddress(host, value, None, False, True if value == "graphql" else None)
+        url = gh_api_address(named, value)
     try:
         parts = urllib.parse.urlsplit(url)
-        hostname = parts.hostname or ""
+        address = parts.hostname or ""
     except ValueError:
-        return GhApiAddress(host or "an address gh was given that the check cannot read", value, url, False,
+        return GhApiAddress(host or gh_call_host(hosts, GH_GIVEN_ADDRESS), value, url, False,
                             True if value == "graphql" else None)
     endpoint = value
-    if not host and parts.scheme.lower() in ("http", "https") and hostname in GH_API_HOSTS:
-        host, endpoint = "github.com", parts.path.lstrip("/") + (f"?{parts.query}" if parts.query else "")
-    return GhApiAddress(host or hostname or "an address gh was given that names no host", endpoint, url,
-                        hostname == "uploads.github.com", value == "graphql" or gh_graphql_api(parts, hostname))
+    if host is None:
+        host = gh_call_host(hosts, GH_GIVEN_ADDRESS, address)
+        if host == "github.com" and parts.scheme.lower() in ("http", "https"):
+            endpoint = parts.path.lstrip("/") + (f"?{parts.query}" if parts.query else "")
+    return GhApiAddress(host, endpoint, url, address == "uploads.github.com",
+                        value == "graphql" or gh_graphql_api(parts, address))
 
 
 @dataclass(frozen=True)
@@ -3340,13 +3431,13 @@ class GhAddress:
 
 
 def gh_api_endpoint(read: Sequence[tuple[str | None, str | None]], branch: str | None,
-                    bases: Callable[[], Sequence[GhBase]], default: str | None) -> GhAddress:
+                    bases: Callable[[], Sequence[GhBase]], hosts: GhHosts) -> GhAddress:
     """Where a `gh api` call goes (GhAddress), resolved once, in gh 2.98.0's order: gh fills the endpoint's
     placeholders first (pkg/cmd/api/api.go apiRun, fillPlaceholders), from the base repository (BASES, gh_bases, read
     only for an endpoint with a base placeholder) and the current BRANCH (gh_fill), then sends it to the address of
-    the filled endpoint (gh_api_resolve) on the host the last --hostname names, else on gh's default host (DEFAULT,
-    gh_default_host). The endpoint is filled once for each base repository gh may take, and each filling resolved
-    once; HOST and ENDPOINT are those of the filling with any base name, `owner/repo`.
+    the filled endpoint (gh_api_resolve) on the host the last --hostname names, else on gh's default host (HOSTS). The
+    endpoint is filled once for each base repository gh may take, and each filling resolved once; HOST and ENDPOINT are
+    those of the filling with any base name, `owner/repo`.
 
     The call is GraphQL (GhAddress.graphql) when gh sends a filling to a GraphQL API (GhApiAddress.graphql). It is
     GraphQL too, failing closed, when the check cannot fill the endpoint for certain: from a base repository it cannot
@@ -3365,8 +3456,8 @@ def gh_api_endpoint(read: Sequence[tuple[str | None, str | None]], branch: str |
     long = gh_long_names(GH_TEXT_COMMANDS[("api", "")])
     written = next((value or "" for option, value in read if option is None), "")
     hostnames = [value for option, value in read if option and long.get(option, option) == "--hostname" and value]
-    named = hostnames[-1] if hostnames else default
-    shape = gh_api_resolve(named, gh_fill(written, "owner/repo", branch))
+    hostname = hostnames[-1] if hostnames else None
+    shape = gh_api_resolve(hosts, hostname, gh_fill(written, "owner/repo", branch))
     placeholders = frozenset(gh_placeholders(written))
     if "branch" in placeholders and branch is None:
         return GhAddress(shape.host, shape.endpoint, placeholders, graphql=True)
@@ -3374,7 +3465,8 @@ def gh_api_endpoint(read: Sequence[tuple[str | None, str | None]], branch: str |
         # With no base name to fill in, the shape is the endpoint as gh sends it.
         sent, fillings, unread = [shape], (), False
     else:
-        fillings = tuple((base, gh_api_resolve(named, gh_fill(written, base.repository, branch))) for base in bases())
+        fillings = tuple((base, gh_api_resolve(hosts, hostname, gh_fill(written, base.repository, branch)))
+                         for base in bases())
         sent = [address for base, address in fillings if base.repository]
         unread = len(sent) < len(fillings) or not fillings
     return GhAddress(shape.host, shape.endpoint, placeholders,
@@ -3864,46 +3956,48 @@ def gh_visibility(url: str) -> str:
     return "unknown"
 
 
-def gh_repository_address(value: str, default: str | None) -> tuple[str, str]:
+def gh_repository_address(value: str, hosts: GhHosts) -> tuple[str, str]:
     """(the host gh 2.98.0 sends a call for the repository to, the repository's URL as scripts/github-repo-visibility
-    reads it) of a repository gh names as `[HOST/]OWNER/REPO` or by its URL (ghrepo.FromFullName): for an http or https
-    URL its host (gh_url_repository), for `HOST/OWNER/REPO` HOST (gh_host), each read as gh reads it, so a host gh
-    sends to github.com gives github.com's URL; for `OWNER/REPO` gh's default host, DEFAULT (gh_default_host), read as
-    gh_host reads it, which is GH_UNREAD_HOST, read as public, where the check cannot read gh's config (DEFAULT None);
-    and github.com for any other URL (`git@host:o/r`, `ssh://…`), whose host the helper reads as git's ssh does, so
-    that one it does not read as GitHub's has a visibility nobody reads, and is read as public. gh reads -R,
-    --branch-repo, GH_REPO and a repository argument so; measured 2026-11-20 with fake tokens, with hosts.yml listing
-    only ghe.example.com, `pr comment 1 -R cli/cli`, `issue create -R cli/cli`, `GH_REPO=cli/cli pr comment 1`,
+    reads it) of a repository gh names as `[HOST/]OWNER/REPO` or by its URL (ghrepo.FromFullName), each host read by
+    gh_call_host from gh's hosts (HOSTS): for an http or https URL its host (gh_url_repository) and for
+    `HOST/OWNER/REPO` HOST, as gh reads them (GH_GIVEN_HOST), so a host gh sends to github.com gives github.com's URL;
+    for any other URL (`git@host:o/r`, `ssh://…`) github.com where the helper reads it as GitHub's, as git's ssh does,
+    else a host the check cannot read (GH_GIVEN_URL); and for `OWNER/REPO`, and any other name, which gh refuses, gh's
+    default host (GH_GIVEN_DEFAULT), on which a name that is not `OWNER/REPO` has a visibility nobody reads. gh reads
+    -R, --branch-repo, GH_REPO and a repository argument so; measured 2026-11-20 with fake tokens, with hosts.yml
+    listing only ghe.example.com, `pr comment 1 -R cli/cli`, `issue create -R cli/cli`, `GH_REPO=cli/cli pr comment 1`,
     `repo view cli/cli`, `repo edit cli/cli` and `repo fork cli/cli` went to ghe.example.com, and with it listing only
     github.com to github.com. Until review round 3 of dispatch://INFRA-3365 a second parser read the host of every
     target's URL, a remote's too, so a remote `git@gh-work:o/r.git`, gh-work an ssh alias of github.com, was a
     repository on gh-work, read as public, while `gh-work:o/r.git` was o/r. Until review round 8 `OWNER/REPO` was
     github.com's whatever gh's config said, so `pr comment -R O/R` with a listed term was judged by the visibility of
-    github.com's O/R, a private repository's too, while gh sent it to the one host hosts.yml listed."""
+    github.com's O/R, a private repository's too, while gh sent it to the one host hosts.yml listed; and a git URL that
+    is not GitHub's was a github.com repository whose visibility could not be read."""
     named = gh_url_repository(value)
     if named:
-        return named[0], f"https://{named[0]}/{named[1]}"
+        host = gh_call_host(hosts, GH_GIVEN_HOST, named[0])
+        return host, f"https://{host}/{named[1]}"
     if "://" in value or value.startswith("git@"):
-        return "github.com", value
+        return gh_call_host(hosts, GH_GIVEN_URL, value), value
     parts = value.split("/")
     if len(parts) == 3:
-        host = gh_host(parts[0])
+        host = gh_call_host(hosts, GH_GIVEN_HOST, parts[0])
         return host, f"https://{host}/{parts[1]}/{parts[2]}"
-    if len(parts) == 2:
-        return (gh_host(default), f"https://{gh_host(default)}/{value}") if default else (GH_UNREAD_HOST, "")
-    return "github.com", f"https://{value}"
+    host = gh_call_host(hosts, GH_GIVEN_DEFAULT)
+    return host, f"https://{host}/{value}"
 
 
-def gh_remotes() -> tuple[tuple[str, str], ...]:
-    """(name, URL) of each remote of this directory gh can take for the repository: the one `gh repo set-default`
-    named (a remote's `gh-resolved`), else every one, since which one gh takes then depends on its version. A
-    `gh-resolved` value other than `base` names the repository gh takes, on its remote's host, not on gh's default
-    host: measured 2026-11-20 with fake tokens, with hosts.yml listing only ghe.example.com, a checkout whose origin is
-    github.com's and whose origin's `gh-resolved` is `other/repo` sent `pr comment 1` to github.com, and one whose
-    origin is on ghe.example.com sent it there. So that value is github.com's for a remote whose URL is GitHub's, and
-    for any other remote it is given the remote's URL, which gh_bases drops as it drops that remote. Until review round
-    8 of dispatch://INFRA-3365 the value was github.com's whatever its remote, so with a remote on another host it was
-    judged by the visibility of github.com's repository of that name, a private one's too."""
+def gh_remotes() -> tuple[tuple[str, str, str], ...]:
+    """(name, URL, RESOLVED) of each remote of this directory gh can take for the repository: the ones `gh repo
+    set-default` named (a remote's `gh-resolved`), RESOLVED "" for `base`, the remote itself, else the `OWNER/REPO` gh
+    takes in its place, on the remote's host (gh_bases); else every one, RESOLVED "", since which one gh takes then
+    depends on its version. A `gh-resolved` value counts only on a remote git lists, as gh attaches each to the remote
+    of its name, so a checkout whose only values are on no such remote reads every remote. Measured 2026-11-20 with
+    fake tokens, with hosts.yml listing only ghe.example.com: a checkout whose origin is github.com's and whose origin's
+    `gh-resolved` is `other/repo` sent `pr comment 1` to github.com, and one whose origin is on ghe.example.com sent it
+    there. Until review round 8 of dispatch://INFRA-3365 the value was github.com's whatever its remote, so with a
+    remote on another host it was judged by the visibility of github.com's repository of that name, a private one's
+    too."""
     def git(*arguments: str) -> list[str]:
         try:
             completed = subprocess.run(["git", *arguments], stdin=subprocess.DEVNULL, capture_output=True, text=True,
@@ -3919,26 +4013,23 @@ def gh_remotes() -> tuple[tuple[str, str], ...]:
         url = rest.split(" (fetch)", 1)[0] if " (fetch)" in rest else rest.removesuffix(" (push)")
         if name and url and (name, url) not in remotes:
             remotes.append((name, url))
+    names = {name for name, _ in remotes}
     resolved: dict[str, str] = {}
     for line in git("config", "--get-regexp", r"^remote\..*\.gh-resolved$"):
         key, _, value = line.partition(" ")
-        resolved[key.removeprefix("remote.").removesuffix(".gh-resolved")] = value.strip()
+        name = key.removeprefix("remote.").removesuffix(".gh-resolved")
+        if name in names and value.strip():
+            resolved[name] = value.strip()
     if not resolved:
-        return tuple(remotes)
-    chosen = [(name, url) for name, url in remotes if resolved.get(name) == "base"]
-    for name, value in resolved.items():
-        if value and value != "base":
-            # gh takes no value whose remote git does not list; such a value is read as github.com's, one more base,
-            # which can only add a target.
-            urls = [url for remote, url in remotes if remote == name]
-            on_github = not urls or any(gh_repository(url) is not None for url in urls)
-            chosen.append((value, gh_repository_address(value, "github.com")[1] if on_github else urls[0]))
-    return tuple(chosen)
+        return tuple((name, url, "") for name, url in remotes)
+    return tuple((name, url, "" if resolved[name] == "base" else resolved[name])
+                 for name, url in remotes if name in resolved)
 
 
+@lru_cache(maxsize=None)
 def gh_repository(url: str) -> str | None:
     """The `owner/name` of the repository at URL, as repository_of reads it: "" for one it cannot read, None for a URL
-    that is not GitHub's."""
+    that is not GitHub's. Read once for each URL: gh_call_host and gh_repository_on both ask of one URL."""
     found = repository_of(url)
     return found[0] if found else None
 
@@ -3955,32 +4046,44 @@ def gh_repository_on(host: str, url: str) -> str:
 class GhBase:
     """A repository gh 2.98.0 may take as the base repository of a call (gh_bases): SOURCE says where it comes from
     (`GH_REPO`, `remote origin`), SHOWN names it as a target, URL is its address, REPOSITORY its `owner/name`, ""
-    when the check cannot read it, and HOST the host gh sends the call to (gh_repository_address): github.com for a
-    remote, which gh_bases keeps only when scripts/github-repo-visibility reads it as GitHub's."""
+    when the check cannot read it, and HOST the host gh sends the call to (gh_call_host)."""
 
     source: str
     shown: str
     url: str
     repository: str
-    host: str = "github.com"
+    host: str
 
 
-def gh_bases(environment: Mapping[str, str], reads_gh_repo: bool, default: str | None) -> list[GhBase]:
+def gh_bases(environment: Mapping[str, str], reads_gh_repo: bool, hosts: GhHosts) -> list[GhBase]:
     """Each repository gh 2.98.0 may take as the base repository of a call that names none: GH_REPO's when that is set
     and the call reads it (READS_GH_REPO: a command with -R/--repo, whose cmdutil.EnableRepoOverride reads GH_REPO, and
-    the placeholders of `gh api`, whose PreRun does), else each remote of this directory gh can take (gh_remotes) whose
-    URL is GitHub's, since gh takes no other. GH_REPO is `[HOST/]OWNER/REPO` or a URL (ghrepo.FromFullName), on gh's
-    default host (DEFAULT, gh_default_host) when it names none (gh_repository_address), and one on another host names
-    a repository the check cannot read. `repo edit` and `repo fork` have no -R, so with no repository argument they
-    edit or fork the checkout's repository whatever GH_REPO says: until 2026-11-19 they were read as GH_REPO's, so a
-    `repo edit` description went to a public checkout's repository unread while GH_REPO named a private one
-    (dispatch://INFRA-3365). gh_check reads them at most once, and only for a reading that takes them."""
+    the placeholders of `gh api`, whose PreRun does), else each remote of this directory gh can take (gh_remotes) that
+    gh takes (gh_call_host, GH_GIVEN_REMOTE: a remote on github.com, on GH_HOST's host or on a host gh's config lists,
+    HOSTS), on its host, a `gh-resolved` repository on its remote's. GH_REPO is `[HOST/]OWNER/REPO` or a URL
+    (ghrepo.FromFullName), on gh's default host when it names none (gh_repository_address). A base on another host
+    names a repository the check cannot read, read as public. `repo edit` and `repo fork` have no -R, so with no
+    repository argument they edit or fork the checkout's repository whatever GH_REPO says: until 2026-11-19 they were
+    read as GH_REPO's, so a `repo edit` description went to a public checkout's repository unread while GH_REPO named a
+    private one (dispatch://INFRA-3365). Until review round 8 a remote was kept only when its URL was GitHub's, so from
+    a checkout whose remotes were a private repository on github.com and one on ghe.example.com, with hosts.yml listing
+    only ghe.example.com, `pr comment 1` with a listed term went out, judged by the private repository, while gh sent
+    it to ghe.example.com. gh_check reads them at most once, and only for a reading that takes them."""
     value = environment.get("GH_REPO", "") if reads_gh_repo else ""
     if value:
-        host, url = gh_repository_address(value, default)
+        host, url = gh_repository_address(value, hosts)
         return [GhBase("GH_REPO", value, url, gh_repository_on(host, url), host)]
-    return [GhBase(f"remote {name}", f"remote {name}", url, repository)
-            for name, url in gh_remotes() if (repository := gh_repository(url)) is not None]
+    bases: list[GhBase] = []
+    for name, url, resolved in gh_remotes():
+        host = gh_call_host(hosts, GH_GIVEN_REMOTE, url)
+        if not host:
+            continue
+        if resolved:
+            name, url = resolved, f"https://{host}/{resolved}"
+        base = GhBase(f"remote {name}", f"remote {name}", url, gh_repository_on(host, url), host)
+        if base not in bases:
+            bases.append(base)
+    return bases
 
 
 def gh_fills_branch(texts: Sequence[GhText]) -> bool:
@@ -4240,31 +4343,29 @@ class GhCall:
     """gh_check's reading of a gh call that is not judged as GraphQL, from which gh_reach reads where it goes: GROUP and
     SUB, its command; READ, its arguments as gh reads them (gh_walk); ADDRESS, where gh sends it (GhAddress, resolved
     once by gh_api_endpoint for a `gh api` call); MADE_PUBLIC, whether the call makes the repository it goes to public
-    (gh_made_public); and DEFAULT_HOST, gh's default host (gh_default_host), on which a repository the call names as
-    `OWNER/REPO` is (gh_repository_address)."""
+    (gh_made_public); and HOSTS, gh's hosts (GhHosts), from which gh_call_host reads the host of each repository the
+    call names."""
 
     group: str
     sub: str
     read: tuple[tuple[str | None, str | None], ...]
     address: GhAddress
     made_public: bool
-    default_host: str | None
+    hosts: GhHosts
 
 
 @dataclass(frozen=True)
 class GhRepository:
     """A repository a gh call can reach, before gh_reach reads its visibility: SHOWN names it in a refusal, HOST is
-    where gh sends the call for it (decided where its name is read: gh_repository_address for -R, --branch-repo,
-    GH_REPO and a repository argument, gh_url_repository for a URL argument; github.com for a remote and an
-    endpoint's repository), URL is its address, REPOSITORY its `owner/name` ("" for one the check cannot
-    read), NAMED says the call names it (a base repository the call takes from a remote does not count, and is no
-    target when its URL is not GitHub's), and TIE says which texts go to it (GhTie)."""
+    where gh sends the call for it (gh_call_host, read where its name is read: gh_repository_address for -R,
+    --branch-repo, GH_REPO and a repository argument, gh_argument_repository for a URL argument, gh_bases for a remote,
+    and the call's own host for an endpoint's repository), URL is its address, REPOSITORY its `owner/name` ("" for one
+    the check cannot read), and TIE says which texts go to it (GhTie)."""
 
     shown: str
     host: str
     url: str
     repository: str
-    named: bool = True
     tie: GhTie = GhTie()
 
 
@@ -4308,10 +4409,10 @@ def gh_reach(call: GhCall, bases: Callable[[], Sequence[GhBase]]) -> list[GhTarg
     # the repository it forks, so its new name (--fork-name) goes where that one is.
     for value in values.get("--repo", []):
         if value:
-            add(value, *gh_repository_address(value, call.default_host), GhTie(option=("--repo", value)))
+            add(value, *gh_repository_address(value, call.hosts), GhTie(option=("--repo", value)))
     reached: list[GhTarget] = []
     for number, value in enumerate(positionals, 1):
-        argument = gh_argument_repository(group, sub, number, value, call.default_host)
+        argument = gh_argument_repository(group, sub, number, value, call.hosts)
         if argument is not None:
             shown, host, url = argument
             add(shown, host, url)
@@ -4329,26 +4430,26 @@ def gh_reach(call: GhCall, bases: Callable[[], Sequence[GhBase]]) -> list[GhTarg
         if given is None:
             return [GhTarget("no repository, read as public", "", True)]
         if "base" not in address.placeholders:
-            # With no base name to fill in, the endpoint is the one gh sends.
-            add(f"{given[1]}/{given[2]}", "github.com", f"https://github.com/{given[1]}/{given[2]}")
+            # With no base name to fill in, the endpoint is the one gh sends, on the call's host.
+            add(f"{given[1]}/{given[2]}", address.host, f"https://{address.host}/{given[1]}/{given[2]}")
         for base, filled in address.fillings:
             found = GH_API_REPOSITORY.match(filled) if base.repository else None
             if found is None:
                 reached.append(GhTarget(f"a repository filled in from {base.source}, which could not be read, "
                                         "read as public", "", True, tie=GhTie(base=base.source)))
             else:
-                add(f"{found[1]}/{found[2]}, filled in from {base.source}", "github.com",
-                    f"https://github.com/{found[1]}/{found[2]}", GhTie(base=base.source))
+                add(f"{found[1]}/{found[2]}, filled in from {base.source}", address.host,
+                    f"https://{address.host}/{found[1]}/{found[2]}", GhTie(base=base.source))
     elif not repositories:
-        repositories += [GhRepository(base.shown, base.host, base.url, base.repository, base.source == "GH_REPO",
-                                      GhTie(base=base.source)) for base in bases()]
+        repositories += [GhRepository(base.shown, base.host, base.url, base.repository, GhTie(base=base.source))
+                         for base in bases()]
     # `issue develop --branch-repo R` makes the branch in R, one more target and never the call's repository: the
     # issue is in the call's repository (-R, else the issue's URL, else the base repository), which is always a target.
     # Until review round 3 of dispatch://INFRA-3365 R was read as the call's repository, so with no -R the issue's
     # repository was no target, and `--name`, `--base` and R's name went to a public issue judged by R alone.
     for value in values.get("--branch-repo", []):
         if value:
-            add(value, *gh_repository_address(value, call.default_host), GhTie(option=("--branch-repo", value)))
+            add(value, *gh_repository_address(value, call.hosts), GhTie(option=("--branch-repo", value)))
     # One loop reads each repository: on another host, which the check reads nothing of, as public; else by its
     # visibility. Each host is decided where the repository's name is read (GhRepository.host): until review round 2 of
     # dispatch://INFRA-3365 an argument's host was read apart, and `repo edit ghe.example.com/o/r` was a github.com
@@ -4358,8 +4459,6 @@ def gh_reach(call: GhCall, bases: Callable[[], Sequence[GhBase]]) -> list[GhTarg
             reached.append(GhTarget(f"a repository on {candidate.host}, read as public", "", True, tie=candidate.tie))
             continue
         visibility = gh_visibility(candidate.url)
-        if visibility == "not-github" and not candidate.named:
-            continue
         if call.made_public:
             state, open_, public = "made public by the call", True, False
         elif visibility in ("private", "internal"):
@@ -4416,16 +4515,9 @@ def gh_check(arguments: Sequence[str]) -> int:
             stdin = Path(pointer).read_bytes().decode("utf-8", errors="surrogateescape")
         except OSError:
             stdin = None
-    # gh's default host (gh_default_host), read at most once, and only for a reading that takes it: a `gh api` call
-    # (gh_api_endpoint), GH_REPO (gh_bases) and, once a term is found, a repository the call names as `OWNER/REPO`
-    # (gh_reach, gh_repository_address).
-    defaults: list[str | None] = []
-
-    def default_host() -> str | None:
-        if not defaults:
-            defaults.append(gh_default_host(environment))
-        return defaults[0]
-
+    # gh's hosts (GhHosts): GH_HOST, and the hosts gh's config lists, read at most once, and only for a reading that
+    # takes them. Every host the gate gives the call is read from them by gh_call_host.
+    hosts = GhHosts(environment)
     # Each repository gh may take as the base repository (gh_bases), read at most once, and only for a reading that
     # takes one: an endpoint that holds a base placeholder (gh_api_endpoint), a text gh fills that holds one
     # (gh_filled), the repository a `repo edit` that names none makes public (gh_published_names), and, once a term is
@@ -4437,16 +4529,14 @@ def gh_check(arguments: Sequence[str]) -> int:
     def bases() -> tuple[GhBase, ...]:
         nonlocal known
         if known is None:
-            known = tuple(gh_bases(environment, group == "api" or "--repo" in long.values(), default_host()))
+            known = tuple(gh_bases(environment, group == "api" or "--repo" in long.values(), hosts))
         return known
 
     # Where gh sends the call, resolved once (gh_api_endpoint): every reader below takes it from here, the target
     # (gh_reach), the pass for a query, the reading of a document (graphql, below), the advice and gh_is_upload. A call
-    # that is not `gh api` goes to GH_HOST's host when that is set, else by the repositories it reaches (gh_reach): with
-    # no repository named, by the remote's host, not gh's default host (measured 2026-11-20: with hosts.yml listing only
-    # ghe.example.com, `pr comment 1` in a checkout whose origin is github.com's went to github.com).
-    address = (gh_api_endpoint(read, branch, bases, default_host()) if group == "api"
-               else GhAddress(gh_host(environment.get("GH_HOST") or "github.com")))
+    # that is not `gh api` is read by gh_call_host as a whole (GH_GIVEN_CALL), and by the repositories it reaches.
+    address = (gh_api_endpoint(read, branch, bases, hosts) if group == "api"
+               else GhAddress(gh_call_host(hosts, GH_GIVEN_CALL)))
     # A release asset's body is its bytes: never read as JSON (gh_is_upload).
     upload = gh_is_upload(group, sub, address)
     texts = [replace(piece, json_body=piece.json_body and not upload) for piece in pieces]
@@ -4498,7 +4588,7 @@ def gh_check(arguments: Sequence[str]) -> int:
         # dispatch://INFRA-3365 a call to another host was read as REST before it was read as GraphQL.
         reached = [GhTarget(GH_GRAPHQL_TARGET if mutation else GH_GRAPHQL_UNREAD_TARGET, "", True)]
     else:
-        reached = gh_reach(GhCall(group, sub, tuple(read), address, made_public, default_host()), bases)
+        reached = gh_reach(GhCall(group, sub, tuple(read), address, made_public, hosts), bases)
     open_targets = [target for target in reached if target.open]
     if not open_targets:
         return 0

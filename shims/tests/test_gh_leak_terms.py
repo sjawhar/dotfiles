@@ -1754,6 +1754,17 @@ class GhLeakTerms(unittest.TestCase):
             self.assertIn("to a repository on a host the check cannot read in gh's config, read as public:",
                           refused.stderr.decode())
 
+    def checkout(self, *remotes: tuple[str, str], resolved: str = "") -> None:
+        """Make the work directory a new checkout whose remotes are REMOTES, (name, URL) pairs, and whose origin's
+        `gh-resolved` (`gh repo set-default`) is RESOLVED when given."""
+        shutil.rmtree(self.work / ".git", ignore_errors=True)
+        subprocess.run(["git", "init", "-q", str(self.work)], check=True, env=self.env)
+        git = ["git", "-C", str(self.work)]
+        for name, url in remotes:
+            subprocess.run([*git, "remote", "add", name, url], check=True, env=self.env)
+        if resolved:
+            subprocess.run([*git, "config", "remote.origin.gh-resolved", resolved], check=True, env=self.env)
+
     def test_the_repository_gh_repo_set_default_names_is_on_its_remote_s_host(self) -> None:
         # `gh repo set-default` can name a repository that is no remote's, as a remote's `gh-resolved` value
         # (`OWNER/REPO`), and gh 2.98.0 takes that repository on the remote's host, not on its default host: measured
@@ -1761,27 +1772,115 @@ class GhLeakTerms(unittest.TestCase):
         # github.com's and whose origin's `gh-resolved` is `other/repo` sent `pr comment 1` to github.com, and one whose
         # origin is on ghe.example.com sent it there. So, gh's config listing only ghe.example.com, a write with a
         # listed term goes out from a checkout whose github.com remote is resolved to a private repository, and is
-        # refused from one whose remote on ghe.example.com is, for no GitHub repository the check can read. Until
-        # review round 8 of dispatch://INFRA-3365 the value was github.com's whatever its remote, and the second write
-        # went out.
+        # refused from one whose remote on ghe.example.com is, as a repository on ghe.example.com, read as public
+        # (gh_call_host, GH_GIVEN_REMOTE). Until review round 8 of dispatch://INFRA-3365 the value was github.com's
+        # whatever its remote, and the second write went out.
         self.answer(self.AGENT_INFRA, "private")
         env = self.gh_config("only-ghe", 'version: "1"\n', "ghe.example.com:\n    oauth_token: gho_fake\n    user: x\n")
         argv = ["pr", "comment", "1", "--body", TEXT]
-        git = ["git", "-C", str(self.work)]
         for remote in ("https://github.com/o/fork.git", "https://ghe.example.com/o/fork.git"):
             with self.subTest(remote=remote):
-                shutil.rmtree(self.work / ".git", ignore_errors=True)
-                subprocess.run(["git", "init", "-q", str(self.work)], check=True, env=self.env)
-                subprocess.run([*git, "remote", "add", "origin", remote], check=True, env=self.env)
-                subprocess.run([*git, "config", "remote.origin.gh-resolved", self.AGENT_INFRA], check=True,
-                               env=self.env)
+                self.checkout(("origin", remote), resolved=self.AGENT_INFRA)
                 self.setUp_calls()
                 if remote.startswith("https://github.com/"):
                     self.assert_sent(self.run_gh(argv, env=env), argv)
                     continue
                 refused = self.run_gh(argv, env=env)
                 self.assert_refused(refused, "--body")
-                self.assertIn("to no GitHub repository found for the call, read as public:", refused.stderr.decode())
+                self.assertIn("to a repository on ghe.example.com, read as public:", refused.stderr.decode())
+
+    def test_gh_takes_a_remote_on_a_host_gh_s_config_lists(self) -> None:
+        # gh 2.98.0 takes a remote on github.com, on GH_HOST's host or on a host its config lists, and drops any other
+        # (gh_call_host, GH_GIVEN_REMOTE). Measured 2026-11-20 with fake tokens, `pr comment 1` from a checkout whose
+        # remotes are a repository on github.com and o/r on ghe.example.com, origin and upstream either way round: with
+        # hosts.yml listing only ghe.example.com gh went to ghe.example.com; listing both hosts, to the upstream's;
+        # listing only github.com, to github.com; and with o/r on ghe.example.com as the one remote and hosts.yml
+        # listing only github.com, gh refused the call, "none of the git remotes configured for this repository point
+        # to a known GitHub host", and sent nothing. An ssh remote on ghe.example.com was the same: gh went to it with
+        # hosts.yml listing only ghe.example.com, and to github.com with it listing only github.com. So a write with a
+        # listed term from a checkout whose other remote is a private repository on github.com is refused, as a
+        # repository on ghe.example.com, read as public, wherever gh may take the remote on ghe.example.com, and goes
+        # out where gh drops it. The check keeps each remote gh may take: listing both hosts, gh may take either. An ssh
+        # remote's host is read only by scripts/github-repo-visibility, which reads whether it is GitHub's, so one that
+        # is not is on a host the check cannot read, kept wherever gh's config lists a host that is not github.com.
+        # Until review round 8 of dispatch://INFRA-3365 a remote was kept only where its URL was GitHub's, so these
+        # writes were judged by the private repository and went out, while gh sent them to ghe.example.com.
+        self.answer(self.AGENT_INFRA, "private")
+        github, ghe, ssh = (f"https://github.com/{self.AGENT_INFRA}.git", "https://ghe.example.com/o/r.git",
+                            "git@ghe.example.com:o/r.git")
+        host, version = "    oauth_token: gho_fake\n    user: x\n", 'version: "1"\n'
+        only_ghe, only_github = "ghe.example.com:\n" + host, "github.com:\n" + host
+        on_ghe = "a repository on ghe.example.com, read as public"
+        unread_url = "a repository on a host the check cannot read in a URL that is not GitHub's, read as public"
+        # git's ssh, which the helper runs as `ssh -G`, reads no ssh command of the caller's.
+        env = {key: value for key, value in self.env.items() if key not in ("GIT_SSH_COMMAND", "GIT_SSH")}
+        argv = ["pr", "comment", "1", "--body", TEXT]
+        for number, (row, remotes, hosts, shown) in enumerate((
+                ("hosts.yml lists only ghe.example.com, its remote origin", (("origin", ghe), ("upstream", github)),
+                 only_ghe, on_ghe),
+                ("hosts.yml lists only ghe.example.com, its remote upstream", (("origin", github), ("upstream", ghe)),
+                 only_ghe, on_ghe),
+                ("hosts.yml lists github.com and ghe.example.com", (("origin", github), ("upstream", ghe)),
+                 only_github + only_ghe, on_ghe),
+                ("hosts.yml lists only github.com", (("origin", github), ("upstream", ghe)), only_github, ""),
+                ("the ghe.example.com remote alone, hosts.yml listing only github.com", (("origin", ghe),),
+                 only_github, "no GitHub repository found for the call, read as public"),
+                ("hosts.yml with an anchor", (("origin", github), ("upstream", ghe)),
+                 "ghe.example.com: &host\n" + host, on_ghe),
+                ("an ssh remote, hosts.yml listing only ghe.example.com", (("origin", github), ("upstream", ssh)),
+                 only_ghe, unread_url),
+                ("an ssh remote, hosts.yml listing only github.com", (("origin", github), ("upstream", ssh)),
+                 only_github, ""))):
+            with self.subTest(row=row):
+                self.checkout(*remotes)
+                run_env = {**env, **self.gh_config(f"remotes-{number}", version, hosts)}
+                self.setUp_calls()
+                if not shown:
+                    self.assert_sent(self.run_gh(argv, env=run_env), argv)
+                    continue
+                refused = self.run_gh(argv, env=run_env)
+                self.assert_refused(refused, "--body")
+                self.assertIn(shown, refused.stderr.decode())
+
+    def test_the_host_of_branch_repo_gh_host_and_a_git_url_is_read_as_gh_reads_it(self) -> None:
+        # Each place the gate decides which host a call reaches reads that host through one function, gh_call_host.
+        # The decision points the other tests leave out, each with gh's config listing the host the row says:
+        # --branch-repo `OWNER/REPO`, on gh's default host (the issue's repository here named as
+        # `github.com/OWNER/REPO`, so only the branch's repository is on ghe.example.com); GH_HOST, which a call that is
+        # not `gh api` goes to as a whole; and -R as a git URL, on its own host (measured 2026-11-20 with fake tokens:
+        # `pr comment 1 -R git@ghe.example.com:cli/cli.git` went to ghe.example.com with hosts.yml listing only
+        # github.com), which only scripts/github-repo-visibility reads, so one that is not GitHub's is on a host the
+        # check cannot read. Each is refused where gh sends it to ghe.example.com, read as public, and goes out where
+        # gh sends it to the private repository on github.com.
+        self.answer(self.AGENT_INFRA, "private")
+        self.checkout(("origin", f"https://github.com/{self.AGENT_INFRA}.git"))
+        host, version = "    oauth_token: gho_fake\n    user: x\n", 'version: "1"\n'
+        ghe = self.gh_config("only-ghe", version, "ghe.example.com:\n" + host)
+        github = self.gh_config("only-github", version, "github.com:\n" + host)
+        env = {key: value for key, value in self.env.items() if key not in ("GIT_SSH_COMMAND", "GIT_SSH")}
+        develop = ["issue", "develop", "1", "-R", f"github.com/{self.AGENT_INFRA}", "--branch-repo",
+                   self.AGENT_INFRA, "--name", f"fix-{CANARY}"]
+        comment = ["pr", "comment", "1", "-R", self.AGENT_INFRA, "--body", TEXT]
+        to_ghe = "a repository on ghe.example.com, read as public"
+        # (decision point, the call gh sends to ghe.example.com and its config, the field and the match its refusal
+        # names, the target it shows; the call gh sends to github.com and its config)
+        for point, refused_argv, refused_env, field, matched, shown, sent_argv, sent_env in (
+                ("--branch-repo", develop, ghe, "--name", CANARY, to_ghe, develop, github),
+                ("GH_HOST", comment, {**github, "GH_HOST": "ghe.example.com"}, "--body", CANARY.upper(), to_ghe,
+                 comment, {**github, "GH_HOST": "github.com"}),
+                ("-R as a git URL",
+                 ["pr", "comment", "1", "-R", f"git@ghe.example.com:{self.AGENT_INFRA}.git", "--body", TEXT], github,
+                 "--body", CANARY.upper(),
+                 "a repository on a host the check cannot read in a URL that is not GitHub's, read as public",
+                 ["pr", "comment", "1", "-R", f"git@github.com:{self.AGENT_INFRA}.git", "--body", TEXT], github)):
+            with self.subTest(point=point, gh_sends_to="ghe.example.com"):
+                self.setUp_calls()
+                refused = self.run_gh(refused_argv, env={**env, **refused_env})
+                self.assert_refused(refused, field, matched, line=1)
+                self.assertIn(shown, refused.stderr.decode())
+            with self.subTest(point=point, gh_sends_to="github.com"):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(sent_argv, env={**env, **sent_env}), sent_argv)
 
     def test_a_repository_argument_on_another_host_is_read_as_public(self) -> None:
         # `repo edit HOST/OWNER/REPO` edits a repository on HOST, where gh sends the call, so it is read as public, as
