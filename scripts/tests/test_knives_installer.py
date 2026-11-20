@@ -557,6 +557,34 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         self.assertEqual(self.ledger_config("core.worktree"), [str(self.config / "ledger")], output)
         self.assertEqual(self.ledger_config("--get-all", "knives.machine"), [MACHINE], output)
 
+    def test_a_git_directory_with_a_push_url_and_no_origin_is_repaired_in_place(self) -> None:
+        git_dir = self.ledger_git_dir()
+        fetch = "+refs/knives/*:refs/knives-remotes/origin/*"
+        # The test HOME's .gitconfig sends LEDGER_URL to the test remote, for a push URL too.
+        push_url = LEDGER_URL
+
+        # Given: a new machine whose ledger git directory has a fetch refspec and a push URL of
+        # origin, but no origin URL, as a person can leave it. `git remote add origin` refuses
+        # such a git directory with "remote origin already exists".
+        (self.config / "state.json").unlink()
+        git_dir.parent.mkdir(parents=True)
+        subprocess.run(["git", "init", "--quiet", "--bare", str(git_dir)], check=True, env=self.env)
+        for key, value in (("remote.origin.fetch", fetch), ("remote.origin.pushurl", push_url)):
+            subprocess.run(["git", "--git-dir", str(git_dir), "config", key, value], check=True, env=self.env)
+
+        # When: the installer joins the machine.
+        result = self.install()
+
+        # Then: it succeeds, and the git directory now has the ledger as its one origin. It keeps
+        # its own fetch refspec and push URL, and it has core.bare false and a machine name.
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertEqual(self.ledger_config("--get-all", "remote.origin.url"), [LEDGER_URL], output)
+        self.assertEqual(self.ledger_config("--get-all", "remote.origin.fetch"), [fetch], output)
+        self.assertEqual(self.ledger_config("--get-all", "remote.origin.pushurl"), [push_url], output)
+        self.assertEqual(self.ledger_config("core.bare"), ["false"], output)
+        self.assertEqual(self.ledger_config("--get-all", "knives.machine"), [MACHINE], output)
+
     def test_the_repair_of_a_git_directory_with_no_origin_writes_the_origin_last(self) -> None:
         real_git = shutil.which("git", path="/usr/local/bin:/usr/bin:/bin")
         self.assertIsNotNone(real_git, "needs git in /usr/local/bin, /usr/bin or /bin")

@@ -108,8 +108,10 @@ ledgers="$(jq -r '[.repos[].ledger // empty] | unique | .[]' <<<"$repos_json")"
 #   replaces the git directory, and it keeps each key that has a value,
 #   except core.bare. It sets core.bare to false, as knives does, because
 #   `git init --bare` sets it to true. It writes core.worktree only when
-#   `git config` reads no value for it. It adds the origin last, with
-#   `git remote add` as knives does, so the fetch refspec is there too. So
+#   `git config` reads no value for it. It writes the fetch refspec that
+#   `git remote add` writes only when the directory has none, and then the
+#   origin last, with `git config`: `git remote add` refuses a directory
+#   whose config already has a fetch refspec or a push URL of origin. So
 #   once the loop adds the origin, `git config` also reads core.bare false
 #   and a value for core.worktree and for knives.machine.
 #
@@ -148,7 +150,9 @@ while IFS= read -r ledger; do
         git --git-dir="$git_dir" config core.bare false
         git --git-dir="$git_dir" config core.worktree >/dev/null ||
             git --git-dir="$git_dir" config core.worktree "$ledger_root"
-        git --git-dir="$git_dir" remote add origin "https://github.com/$ledger"
+        git --git-dir="$git_dir" config --get-all remote.origin.fetch >/dev/null ||
+            git --git-dir="$git_dir" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+        git --git-dir="$git_dir" config remote.origin.url "https://github.com/$ledger"
     fi
 done <<<"$ledgers"
 
