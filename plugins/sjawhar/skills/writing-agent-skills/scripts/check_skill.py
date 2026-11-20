@@ -16,7 +16,7 @@ It prints a FAIL line and exits 1 when a skill breaks any of these:
 A reference is each markdown file (.md in any letter case) at any depth under the skill
 directory, other than the skill's own SKILL.md, that is not a template. A template is a file
 whose path below the skill directory has a directory named exactly "assets" or "templates":
-assets/brief.md, templates/x.md, references/templates/x.yaml. Only that path makes a template,
+assets/brief.md, templates/x.md, references/templates/x.md. Only that path makes a template,
 never the words in the file. Templates, scripts and other files that are not markdown are not
 measured.
 
@@ -38,14 +38,17 @@ TARGET_DESC = 300
 RULE_LINES = 40  # every-rule-obeyed rates collapse between 40 and 80 rules
 GROWTH_ALLOWANCE = 200  # a rewrite may grow this much and no more
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
-LINK_RE = re.compile(r"\]\(([^)#\s]+)\)|`((?:references|scripts|assets)/[^`\s]+)`")
+LINK_RE = re.compile(r"\]\(([^)#\s]+)\)|`((?:references|scripts|assets|templates)/[^`\s]+)`")
 TEMPLATE_DIRS = frozenset({"assets", "templates"})
 
-# SKILL.md's lines and bytes, its body's words, its description's characters and its rule lines.
-Stats = TypedDict(
-    "Stats",
-    {"skill": str, "lines": int, "bytes": int, "body_words": int, "desc_chars": int, "rule_lines": int},
-)
+
+class Stats(TypedDict):
+    skill: str
+    lines: int
+    bytes: int
+    body_words: int
+    desc_chars: int
+    rule_lines: int
 
 
 def split_frontmatter(text: str) -> tuple[dict[str, str], str]:
@@ -202,10 +205,9 @@ def main() -> int:
             print(f"  warn {msg}")
         failed = failed or bool(fails)
     if args.log:
-        new = not args.log.exists()
         args.log.parent.mkdir(parents=True, exist_ok=True)
         with args.log.open("a") as fh:
-            if new:
+            if fh.tell() == 0:
                 _ = fh.write("date\tskill\tbytes\tbody_words\tdesc_chars\trule_lines\n")
             today = datetime.date.today().isoformat()
             for s in rows:

@@ -1,6 +1,9 @@
 # Briefs by lane type
 
-The lines each kind of lane needs on top of `SKILL.md`.
+The lines each kind of lane needs on top of `SKILL.md`. In each of these briefs:
+
+- Before you name a contract field's type, run the constructor.
+- A brief about the evaluation stack (an eval framework or its forks, the platform that runs it, its model proxy) names the code paths to read first, the fork checkout or the installed package under the venv, and asks for a `file:line` citation for every claim about how they behave. An uncited claim is an assumption. Where the repository keeps a known-misreads list, name it as the first read.
 
 ## Tester or acceptance lane
 

@@ -74,7 +74,7 @@ A cutover replaces a name, path, command, tool or interface with a new one and r
 - Paraphrase a result from the run's own summary line, with every count it prints; a claim about one test needs that test's own record.
 - Before you describe a format, print one instance verbatim.
 - Prose owns only what its own diff makes true. When another PR, branch or system it describes changes, correct the text in place.
-- When you sweep prose for stale claims, include the docstrings of tests and witnesses (code that demonstrates a claim): each states only what its assertion checks.
+- Docstrings of tests and witnesses (code that demonstrates a claim) state only what their assertions check. When you sweep prose for stale claims, include the docstrings too.
 
 ## Integrate, don't accrete
 

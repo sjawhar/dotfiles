@@ -5,7 +5,7 @@ description: Use when hardening a publicly reachable EC2 instance used as a dail
 
 # Harden an EC2 devbox
 
-Apply each setting below where the box's current config is looser. Where the box already has a stricter value (a lower `MaxAuthTries`, a longer `bantime`), keep that value. Tell the user each setting you change.
+Apply each setting below where the box's current config is looser. Where the box already has a stricter value (a lower `MaxAuthTries`, a longer `bantime`), write that value in the command instead. Tell the user each setting you change.
 
 - Open each new access path and confirm it works before you close the old one, so the user is never locked out.
 - At each GATE, stop until the user confirms.
@@ -53,7 +53,7 @@ GATE: the user can still SSH to the Tailscale IP.
 
 ## 5. SSH and fail2ban
 
-Ask the user whether they use SFTP (VS Code Remote, scp, rsync over SSH). Name it `00-hardening.conf`: sshd keeps the first value it reads, so a file sorted before it would win. Where Step 1 found a stricter value, write that one.
+Ask the user whether they use SFTP (VS Code Remote, scp, rsync over SSH). Name the drop-in `00-hardening.conf`: sshd keeps the first value it reads, so a file sorted before it would win.
 
 ```bash
 SFTP_LINE="Subsystem sftp /bin/false"         # no SFTP

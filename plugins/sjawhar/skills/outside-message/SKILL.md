@@ -1,6 +1,6 @@
 ---
 name: outside-message
-description: "Use when text goes to someone outside Theorem: a GitHub issue or pull-request comment on a repository we do not own, an email, another company's Slack, a release note, an enrollment reply, a bug report, a disclosure. Also before asking Sami to approve it. Not for Sami, agents or inside theorem-labs."
+description: "Use when text goes to someone outside Theorem: a GitHub issue or pull-request comment an outside person reads, an email, another company's Slack, a release note, an enrollment reply, a bug report, a disclosure. Also before asking Sami to approve it. Not for Sami, agents or Theorem staff."
 ---
 
 # A message to someone outside Theorem

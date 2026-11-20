@@ -1,6 +1,6 @@
 # Routing a decision or a block
 
-Read when the decision goes to someone other than Sami, or your work holds on another agent or a check.
+Read when the decision goes to someone other than Sami, or your work holds on a person (Sami too), another agent or a check, and when asked what you wait on.
 
 - When your work waits on a person, file the ask: a wait with no ask reaches nobody.
 - When asked what you wait on, list every item your work waits on (a person, another agent, a check, a merge), not

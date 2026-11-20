@@ -63,8 +63,8 @@ The rules reviewer checks the draft against each rule here, one at a time.
   at each check-in.
 - Only real blockers. A to-do is not a blocker, and Sami is never the blocker: a decision that needs him goes to him
   alone as a Dispatch ask (`dispatch ask`, unless one is already open on it), never on the page.
-- A shared event once, in one section, and nothing the reader already knows: nothing the last recap or an earlier
-  section of the page says.
+- A shared event once, in one section, and nothing the reader already knows: nothing the last recap says, and
+  nothing an earlier section of the page says, except a result "The week in brief" names and its section explains.
 - No claim stronger than the evidence (a proof against a specification is not proof of every property), and no rule
   Sami did not set.
 

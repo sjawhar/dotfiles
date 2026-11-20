@@ -38,7 +38,7 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 - A self-verdict packet begins `SELF-VERDICT - needs clearance or an independent reader`. Hold it until Sami approves that PR by name, or an independent reviewer posts a verdict on the PR that names the head.
 - For each head, record the registration facts, its gate session and each fact steps 3 to 5 check, each with its read time and source link, plus the disposition and who acts next.
 - GitHub is the live truth, not your record. Re-read held PRs there at each wake before you write "unchanged".
-- Start CI waits as background jobs (for example an async `gh pr checks N --watch`) and keep working.
+- Start CI waits as background jobs (for example an async `gh pr checks N --watch --interval 120`) and keep working.
 - Ask for a rebase or push only when main conflicts with the PR or the PR's own diff needs a change, never only to pick up main: each push restarts CI and review. Read [evidence quality](references/evidence-quality.md) for stale-main reds, empty results or missing logs.
 
 ## 3. Check findings

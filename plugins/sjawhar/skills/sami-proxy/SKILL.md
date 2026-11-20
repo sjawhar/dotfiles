@@ -78,8 +78,8 @@ Return the verdict in the format of the `sami-proxy` agent (`~/.dotfiles/plugins
 which also fixes the `Ask to send` line. A verdict predicts a judgment; it approves no action and no send, and no
 precedent overrides that. It ends in one place:
 
-1. A dispatched ask, when `Sami's call: yes`, or when `Confidence: low` and the action cannot be undone later (a
-   send, a deletion, spend). The verdict carries that ask, ready to send verbatim, with every gate passed; a
+1. A dispatched ask, when `Sami's call: yes`. Mark it yes also when `Confidence: low` and the action cannot be undone later
+   (a send, a deletion, spend). The verdict carries that ask, ready to send verbatim, with every gate passed; a
    description of how to fix the draft is not an ask. The caller sends it and continues all work it does not block.
 2. A recorded decision, in every other case. The caller acts on the verdict and records it, with the answer and
    grounds, where Sami reads its work (its issue, pull request or final report), so he can see each decision made
@@ -99,7 +99,7 @@ Read `references/away-mode.md` when Sami has said he is away. Silence does not s
 ## Routing to someone else
 
 Read `references/routing-a-decision.md` when the decision goes to someone other than Sami, or your work holds on
-another agent or a check.
+a person (Sami too), another agent or a check, and when asked what you wait on.
 
 ## Editing this skill
 

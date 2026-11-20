@@ -4,7 +4,7 @@
 
 An agent's name does not fix its model: its `model:` field (`omp/agents/<name>.md`) is a first choice, and `retry.fallbackChains` in `omp/config.yml` moves it when a provider or subscription window is unavailable. Within a minute of the spawn, not after the bill, read the child's first `"type":"model_change"` line (`grep -m1`) in its session `.jsonl` under `~/.omp/agent/sessions/<cwd-slug>/<parent-session>/`, and cancel a child whose model starts with `openai/` (per-token) that you did not ask for. Read the same line before you claim a model family for a verdict: its `model` and `resolvedModelIsFallback` fields say what served it.
 
-Name the agent in every eval `agent()` and `workpool()` call (`agent=`), then read what the session billed. First `grep -c '"provider":"anthropic"'` its `.jsonl` and confirm a nonzero count, which proves you read the right file. Then grep for `"provider":"openai"`: that is the per-token API, while `openai-codex` is the subscription.
+Name the agent in every eval `agent()` and `workpool()` call (`agent=`), then read what the session billed. Count each provider in one pass over its `.jsonl`, `grep -o '"provider":"[^"]*"' <file> | sort | uniq -c`, and confirm a nonzero count, which proves you read the right file. `"provider":"openai"` is the per-token API, while `openai-codex` is the subscription.
 
 ## Refusals
 

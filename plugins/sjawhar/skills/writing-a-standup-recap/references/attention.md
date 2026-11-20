@@ -1,7 +1,7 @@
 # The attention map
 
-Where Sami's own attention went in the window, counted from what he wrote. It goes to him alone, in the same
-message as the recap link or just after it, never on the team page.
+Where Sami's own attention went in the window, counted from what he wrote. It goes to him alone, in its own message
+to him, never in the standup room thread (the chief of staff and the Legion controllers read it) or on the team page.
 
 ## What to count
 
@@ -21,7 +21,8 @@ message as the recap link or just after it, never on the team page.
    or duration.
 2. One table by project, in his priority order (`dispatch priorities` lists the priorities in rank order), with the
    projects that are not priorities (managing agents; people and outside parties) below it. Classify an item by the
-   priority its Dispatch issue advances (the `Advances:` line of `dispatch read --issue <KEY>`), and a typed turn by
+   priority its Dispatch issue advances (the `Advances:` line of `dispatch read --issue <KEY>`; many items share an
+   issue, so read each distinct key once, in parallel, and classify from those reads), and a typed turn by
    the project of its session's working directory. Items you could not classify get their own row. A priority that
    no item matched is unmeasured, not zero attention: say which it is.
 3. At most three observations, each one the numbers support, and the three to five topics that took the most words,

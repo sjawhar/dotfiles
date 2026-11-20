@@ -19,7 +19,7 @@ You make the PR ready; auto-merge (`gh pr merge --auto`) merges it. `ce-babysit-
 - Do not use `--admin` or any bypass that skips a check that tests the work.
 - When the person who owns the work approves the PR, or says to merge or consolidate PRs, do it yourself; do not hand it back to them to click.
 - Legion, the daemon that runs Dispatch issues labelled `legion` through phase sessions, merges the PRs it produces (branch `legion/<KEY>`): its merger session merges the head it read. The session that asked Legion for the issue watches and does not merge.
-- After the required checks and review pass, merge instead of pushing more: each push restarts every check. Push first only a fix for a defect that would do harm once merged (wrong behavior, a security hole, bad data); other fixes go in one follow-up PR.
+- After the required checks and review pass, merge instead of pushing more: each push restarts every check. Push first only a fix for a defect that would do harm once merged (wrong behavior, a security hole, bad data), with the other fixes folded in; with no such fix, they go in one follow-up PR.
 
 Read `references/repo-merge-rules.md` before you change an enabled auto-merge, merge in `trajectory-labs-pbc/agent-c`, `cybermonklabs/legion`, `theorem-labs/*` or a repo another person maintains, when GitHub refuses an admin action or an approval, and for a PR that adds or changes a database migration.
 In other repos, their own required checks and reviews decide.
@@ -52,7 +52,7 @@ Read `references/review-and-readiness.md` to find every finding, close it, get t
 CI:
 
 - Read a red check's log before you act on it. Call a test flaky only when you can name the mechanism. Reproduce a suspected regression and fix real defects. Fix a test that fails at random at its cause; do not rerun, quarantine or narrow lanes past it, or ask the owner which tests to run, since the skipped flake fails the next PR. Rerun only a failure outside every test (a lost runner, a failed download), once, as failed jobs on a run of the current head.
-- At `check_recur_max >= 2`, `heads_since_progress >= 2` or `stream_alternations >= 3` (`pr-snapshot`'s `trajectory` counters), name the invariant the next fix restores, or return `needs-human`.
+- At a trajectory trigger (item 6 of "The babysitter's brief" in `references/watchers.md`), name the invariant the next fix restores, or return `needs-human`.
 - Read `references/ci-observation.md` to choose the tests to run before a push.
 
 ## 4. After every push

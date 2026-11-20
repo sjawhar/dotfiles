@@ -97,10 +97,10 @@ Write `out/script.txt`: one `Speaker: text` turn per line, exactly two labels ma
 ## Phase 6: render
 
 ```bash
-uv run "$SKILL/scripts/tts.py" --script ./out/script.txt --out ./out/episode.mp3 --voices "Alex=Kore,Jordan=Puck"
+PYTHONUNBUFFERED=1 uv run "$SKILL/scripts/tts.py" --script ./out/script.txt --out ./out/episode.mp3 --voices "Alex=Kore,Jordan=Puck"
 ```
 
-`tts.py`'s docstring covers auth and billing. A long episode takes several minutes: run it in the background, keep working, and check its progress in the `chunk i/n` line it prints per TTS call.
+`tts.py`'s docstring covers auth and billing. A long episode takes several minutes: run it in the background, keep working, and check its progress in the `chunk i/n` line it prints per TTS call (`PYTHONUNBUFFERED=1` makes each line appear when printed, not at the end).
 
 ## Phase 7: deliver locally
 

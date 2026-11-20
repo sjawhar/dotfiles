@@ -30,14 +30,14 @@ A private Matrix server on oryx bridges Sami's chat networks; each conversation 
    secrets MATRIX_HUB_URL MATRIX_HUB_TOKEN -- ~/.dotfiles/scripts/hub-send <room_id> --text-file <file>
    # a reply: add --reply-to <event_id>; an image or file: --file <path> [--caption-file <file>] instead of --text-file
    ```
-4. Read the result: `hub-send` prints one result line for each command, and the header of `scripts/hub-send` lists the results and exit codes.
+4. Read the result: `hub-send` prints one result line for each command, except a usage error, which prints its reason on stderr and exits 2; the header of `scripts/hub-send` lists the results and exit codes.
    - `SENT` means the network took the message, not that the person read it.
    - `FAILED` means the bridge or hub reported a failure. `UNCONFIRMED` means `hub-send` could not learn the result. After either, tell Sami, and do not resend or send anything more to that person, on that network or any other, unless Sami asks.
    - `REFUSED` means `hub-send` posted nothing; the line gives the reason. For a down login, see Logins.
    - A message visible in the room, or no error notice, proves nothing.
 
 - Do not send to a person with `matrix_send_message`, `matrix_reply`, `matrix_send_media` or the hub API's `/send` route.
-- Use `--force` only when Sami asks, or when you test `hub-send` itself against a fake hub (a test server, not the real `MATRIX_HUB_URL`), where no message reaches a person. `--force` skips the bridge and login checks, so it can post through a down login.
+- Use `--force` only when Sami asks, or when you test `hub-send` itself against a fake hub (a test server, not the real `MATRIX_HUB_URL`), where no message reaches a person. `--force` skips the bridge and login checks, so it can post through a down login; it still needs the room's `m.bridge` state.
 
 ## Bridge bot commands and new rooms
 

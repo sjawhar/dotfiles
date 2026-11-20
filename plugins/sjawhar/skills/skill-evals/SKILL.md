@@ -21,6 +21,6 @@ disable-model-invocation: true
 
 ## Scenario runs
 
-No shared scenario runner exists. The first change that needs one builds it in the repo whose prompt it tests, so it gates that repo's pull requests: `omp --mode rpc` with the production prompt, tools that record each Dispatch, Envoy and Legion call instead of making it, repeated trials, and a control run on the unchanged prompt.
+Shared scenario runners exist: `skill://writing-agent-skills/references/testing.md`, "Measuring a harness change", names them, and says how to build one in the repo whose prompt it tests when neither covers that prompt.
 
 The archived `agent-evals` runs, cases and comparison code (`src/agent_evals/comparison.py`, a cluster bootstrap over case families) are in `sjawhar/agent-eval-data`. Reproduce an archived comparison with `uv run --project <clone> agent-evals compare --run-dir <run>`.

@@ -27,7 +27,7 @@ A session's own memory of its work is the thing that fails, so a fresh agent rea
    as the file says, with the session id, the window and a report path filled in.
 2. Read the report yourself. Open the FILE:LINE behind each DROPPED, MISSED-GOAL, UNSURFACED, WAITING-UNREPORTED and
    LOCAL-ONLY row before you act on it.
-3. Within one hour of receiving the report, take the action below for each row that is not DONE. Work that takes
+3. Within one hour of receiving the report, take the action below for each row its closing list names. Work that takes
    longer starts in that hour and goes on until it is delivered.
 4. Report done with the audit's counts: rows found, and rows closed by each action.
 

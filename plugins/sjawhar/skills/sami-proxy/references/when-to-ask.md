@@ -8,8 +8,9 @@ Read before you file an ask, or when the question is whether an ask can wait.
   become the critical path.
 - A decision on another person's draft prose can wait even while he is live.
 - While a block you do not control stops your work (another team, a deploy window, a person elsewhere), ask him
-  about the decisions you made for him without his answer (on a proxy verdict, for example): the ask costs nothing
-  while you wait. Do not use a block you are fixing as cover for a slow ask.
+  about each decision taken in his place on a question that was his call (`Sami's call: yes`), such as a lead's
+  answer for him while he was away: the ask costs nothing while you wait. Do not use a block you are fixing as
+  cover for a slow ask.
 - Take decisions one at a time in a live exchange; for unattended work use Dispatch, where several threads can stay
   open. Do not duplicate another owner's asks, treat silence as consent, or turn status updates into an approval
   queue.

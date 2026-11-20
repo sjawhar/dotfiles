@@ -32,25 +32,25 @@ def text_of(lines: int, size: int, start: str = "", final_newline: bool = True) 
     return text
 
 
-def run(tmp_path: Path, files: dict[str, str]) -> tuple[int, list[str], str]:
-    """Write the good skill with `files` over it, check it; return exit status, FAIL lines, output."""
+def run(tmp_path: Path, files: dict[str, str], args: tuple[str, ...] = ()) -> tuple[int, list[str], str]:
+    """Write the good skill with `files` over it, check it with `args`; return exit status, FAIL lines, output."""
     skill = tmp_path / NAME
     for rel, text in {"SKILL.md": GOOD, **files}.items():
         path = skill / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         _ = path.write_bytes(text.encode())
-    proc = subprocess.run([sys.executable, str(SCRIPT), str(skill)], capture_output=True, text=True, check=False)
+    proc = subprocess.run([sys.executable, str(SCRIPT), *args, str(skill)], capture_output=True, text=True, check=False)
     fails = [line.strip() for line in proc.stdout.splitlines() if line.strip().startswith("FAIL ")]
     return proc.returncode, fails, proc.stdout + proc.stderr
 
 
-def assert_passes(tmp_path: Path, files: dict[str, str]) -> None:
-    code, fails, out = run(tmp_path, files)
+def assert_passes(tmp_path: Path, files: dict[str, str], args: tuple[str, ...] = ()) -> None:
+    code, fails, out = run(tmp_path, files, args)
     assert (code, fails) == (0, []), out
 
 
-def assert_fails(tmp_path: Path, files: dict[str, str], fail: str) -> None:
-    code, fails, out = run(tmp_path, files)
+def assert_fails(tmp_path: Path, files: dict[str, str], fail: str, args: tuple[str, ...] = ()) -> None:
+    code, fails, out = run(tmp_path, files, args)
     assert (code, fails) == (1, [f"FAIL {fail}"]), out
 
 
@@ -60,6 +60,15 @@ def desc_of(chars: int) -> str:
 
 def test_a_good_skill_passes(tmp_path: Path) -> None:
     assert_passes(tmp_path, {})
+
+
+def test_an_empty_description_fails(tmp_path: Path) -> None:
+    assert_fails(tmp_path, {"SKILL.md": head("") + "x\n"}, "description is empty or missing")
+
+
+def test_a_name_that_is_not_lowercase_words_joined_by_hyphens_fails(tmp_path: Path) -> None:
+    skill_md = f"---\nname: Demo_Skill\ndescription: {DESC}\n---\n\nx\n"
+    assert_fails(tmp_path, {"SKILL.md": skill_md}, "name 'Demo_Skill' is not lowercase words joined by hyphens")
 
 
 def test_a_300_character_description_passes(tmp_path: Path) -> None:
@@ -195,10 +204,6 @@ def test_markdown_under_references_templates_is_not_measured(tmp_path: Path) -> 
     assert_passes(tmp_path, {"references/templates/x.md": text_of(200, 12_000)})
 
 
-def test_yaml_under_references_templates_is_not_measured(tmp_path: Path) -> None:
-    assert_passes(tmp_path, {"references/templates/x.yaml": text_of(200, 12_000)})
-
-
 def test_a_script_is_not_measured(tmp_path: Path) -> None:
     assert_passes(tmp_path, {"scripts/tool.py": text_of(200, 12_000)})
 
@@ -216,4 +221,34 @@ def test_a_missing_linked_path_fails(tmp_path: Path) -> None:
         tmp_path,
         {"SKILL.md": GOOD + "Read `references/missing.md` before you start.\n"},
         "missing path: references/missing.md",
+    )
+
+
+def test_a_missing_template_path_fails(tmp_path: Path) -> None:
+    assert_fails(
+        tmp_path,
+        {"SKILL.md": GOOD + "Copy `templates/missing.md` into the brief.\n"},
+        "missing path: templates/missing.md",
+    )
+
+
+def old_copy(tmp_path: Path) -> tuple[str, ...]:
+    """An old copy of the good skill, as the --old arguments that name it."""
+    old = tmp_path / "old"
+    old.mkdir()
+    _ = (old / "SKILL.md").write_bytes(GOOD.encode())
+    return ("--old", str(old))
+
+
+def test_a_rewrite_that_grows_200_bytes_passes(tmp_path: Path) -> None:
+    assert_passes(tmp_path, {"SKILL.md": GOOD + "x" * 199 + "\n"}, old_copy(tmp_path))
+
+
+def test_a_rewrite_that_grows_201_bytes_fails(tmp_path: Path) -> None:
+    old = len(GOOD.encode())
+    assert_fails(
+        tmp_path,
+        {"SKILL.md": GOOD + "x" * 200 + "\n"},
+        f"SKILL.md grew from {old} to {old + 201} bytes, over the 200-byte allowance",
+        old_copy(tmp_path),
     )

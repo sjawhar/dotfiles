@@ -10,8 +10,8 @@
 ## After subagents return
 
 1. Run `git -C <dir> --no-optional-locks status --porcelain` on the checkout your session started in. A stray file there is a subagent's.
-2. Run `git -C <dir> status --porcelain --ignored=matching` as the control. It must print at least one line; if it prints nothing, step 1 did not read the tree you think. Report both line counts.
-3. Do not run `jj status` in a shared jj checkout: it snapshots another session's working copy. To audit another session's checkout without touching it, run `git -C <repo> status --porcelain`, which creates no commit.
+2. Run `git -C <dir> --no-optional-locks status --porcelain --ignored=matching` as the control. It must print at least one line; if it prints nothing, step 1 did not read the tree you think. Report both line counts.
+3. Do not run `jj status` in a shared jj checkout: it snapshots another session's working copy. To audit another session's checkout without touching it, run `git -C <repo> --no-optional-locks status --porcelain`, which creates no commit and takes no index lock.
 4. If a worker's clone holds an empty commit after it reported edits, its writes went to the default checkout. Look there before you redo them.
 
 Put three questions in every lane's output contract: any write outside its own workspace, even one it reverted; how it did the work; what it did not run or check. When a lane reports such a write, check the named checkout yourself. When your own report turns out wrong, say how you did the work.
@@ -24,7 +24,7 @@ Put three questions in every lane's output contract: any write outside its own w
 
 ## `isolated: true`
 
-An isolated task's patch is applied to the head your checkout sits on. Commit or stash your own changes first, so your working copy (jj: `@`) is empty, and read `git status --short | wc -l` before the next command. Read the result's `Applied patches:` line.
+An isolated task's patch is applied to the head your checkout sits on. Commit or stash your own changes first, so your working copy (jj: `@`) is empty, and read `git status --short | wc -l` before the next command. In a jj checkout, commit (`jj describe`, then `jj new`): there `git stash` destroys `@`'s work. Read the result's `Applied patches:` line.
 
 ## Sizing a lane's copy of the tree
 

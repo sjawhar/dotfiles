@@ -10,7 +10,7 @@
 
 ## A major design change
 
-Hold an architectural change as a conversation with Sami in the issue's spec, written as `dispatch-writing-specs` says: its outline, a proposed answer to each point, and an ask only for what needs his authority, taste or risk appetite. Without Dispatch, hold it on the tracker you have, or in chat when none is reachable. Outside that conversation, use chat only to carry out the plan and to settle a design question Sami is discussing with you in the current chat whose answer changes no shared contract, slice or decision he approved. Any other design question goes into the spec.
+Hold an architectural change as a conversation with Sami in the issue's spec, written as `dispatch-writing-specs` says: its outline, a proposed answer to each point, and an ask only for what needs his authority, taste or risk appetite, or the reason for an instruction he gave without one. Without Dispatch, hold it on the tracker you have, or in chat when none is reachable. Outside that conversation, use chat only to carry out the plan and to settle a design question Sami is discussing with you in the current chat whose answer changes no shared contract, slice or decision he approved. Any other design question goes into the spec.
 
 ## Workspaces
 

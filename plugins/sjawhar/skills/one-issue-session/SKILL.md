@@ -38,14 +38,16 @@ else's, does not make your issue done.
 ## While you work
 
 - Do every part of your outcome in this issue: review findings, follow-ups, fixes to your own pull requests, the
-  parts you found late. Create no child issue for any of it.
+  parts you found late. Create no child issue for any of it, unless you run `sdd`: it files each piece of work you
+  own as a child issue of its root, as `sdd` says.
 - Work outside your outcome (another stream's bug, a separate feature) is not yours: search Dispatch, then file it
   unclaimed for its owner, and do not start it.
-- When your issue's spec, a file or a command's output does not settle a choice (an approach, a trade-off, an
-  owner), ask your issue's Dispatch project's Legion controller. That is the session that holds the Envoy role
-  `legion-<project>-controller`, with the project key in lower case (`legion-infra-controller`). An Envoy role is a
-  named duty that one session holds at a time; a message published to `notifications.role.<role>` reaches its
-  holder, so publish your question there. Its answer is advice; you decide.
+- When your issue's spec, a file or a command's output does not settle a choice of scope or of owner (whether a
+  piece of work is part of your outcome, or whose it is), ask your issue's Dispatch project's Legion controller.
+  That is the session that holds the Envoy role `legion-<project>-controller`, with the project key in lower case
+  (`legion-infra-controller`). An Envoy role is a named duty that one session holds at a time; a message published
+  to `notifications.role.<role>` reaches its holder, so publish your question there. Its answer is advice; you
+  decide. Decide an approach or a trade-off yourself, or consult `sami-proxy` when it may be Sami's call.
 
 ## Waiting on another issue
 

@@ -18,7 +18,7 @@
 
 - `jj bookmark delete <name>`, then `jj git push --bookmark <name>`.
 - `jj abandon` of a bookmarked commit deletes the bookmark too, so the next `-b <name>` push is `[delete from <sha>]`, and GitHub closes the PR. Read the dry-run's direction before every push that follows an abandon.
-- Never use `jj git push --deleted`: it pushes every pending deletion in the repository, with or without `--bookmark`, and GitHub closes each PR whose branch goes.
+- Never use `jj git push --deleted`: it pushes every pending deletion in the repository, and GitHub closes each PR whose branch goes.
 
 ## Rebase of published work
 

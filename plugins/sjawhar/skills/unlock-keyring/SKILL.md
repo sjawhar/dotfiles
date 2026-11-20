@@ -7,7 +7,7 @@ description: "Use when the devbox GNOME keyring is locked, or after a devbox reb
 
 Every reboot locks the `login` keyring. SSH login cannot unlock it: `ubuntu` has no Unix password, and only `/etc/pam.d/common-password` loads `pam_gnome_keyring.so`.
 
-This skill applies only to a machine with the `gnome-keyring` package; check with `command -v gnome-keyring-daemon`. A machine without it has no keyring to unlock, and `unlock-keyring` says so. There, a tool that keeps its login in a keyring falls back to the kernel keyring, which a reboot clears, and the tool needs its own login again.
+This skill applies only to a machine with the `gnome-keyring` package; check with `command -v gnome-keyring-daemon`. A machine without it has no keyring to unlock, and `unlock-keyring` says so. There, a tool that keeps its login in a keyring falls back to the kernel keyring, which is session-scoped: the login ends with the shell that made it, and the tool needs its own login again.
 
 ## Unlock
 

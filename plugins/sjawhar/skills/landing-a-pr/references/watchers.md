@@ -11,7 +11,7 @@ Give `ce-babysit-pr` these instructions before its first tick:
 3. When one check completes, wait without a full tick until every expected check is present and done: each check the branch rules require (`gh pr checks <N> -R <owner>/<repo> --required`) and each check the previous head ran. Tick then, on a review event, or on a push. Zero checks is not "all passed".
 4. Skip your checkout step; edit the PR title, body and `## Verification` directly (`ce-commit-push-pr` is disabled here). Your sub-skills do not rebase, force-push, approve gated runs or merge.
 5. `MERGEABLE`, `CLEAN`, no open review items and settled checks do not make the PR ready. Proof and a review of the current head decide.
-6. Keep your dedup, stale-sha cancellation, trajectory triggers, settle window and three-day backstop, so one event does not start two fix rounds. The trajectory triggers are the `pr-snapshot` thresholds that pass its `trajectory` facts to `ce-debug` or `ce-resolve-pr-feedback`: `check_recur_max >= 2`, `stream_alternations >= 3`, a rising `unresolved_trend` with new threads, `heads_since_progress >= 2`, or any `invariant_rounds` at 2.
+6. Keep your dedup, stale-sha cancellation, trajectory triggers, settle window and three-day backstop, so one event does not start two fix rounds. The trajectory triggers are your own `references/tick.md` thresholds over `pr-snapshot`'s `trajectory` facts, which you pass to `ce-debug` or `ce-resolve-pr-feedback`: `check_recur_max >= 2`, `stream_alternations >= 3`, a rising `unresolved_trend` with new threads, `heads_since_progress >= 2`, or any `invariant_rounds` at 2.
 
 ## The watcher
 

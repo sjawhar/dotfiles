@@ -10,5 +10,3 @@
 - Re-derive a claim before you act on it: echoing one turns someone else's uncertainty into your own assertion.
 - Re-derive a scout's test matrix from the scout's own predicate before a builder gets it; a builder pins the table as given. The scout surfaces a contradiction; you, the dispatcher, resolve it in writing, in the spec or plan that the builder's brief cites, before any test exists.
 - "On main" in a brief is a branch name; the worker measures whatever tree its workspace holds.
-- Before you name a contract field's type, run the constructor.
-- A brief about the evaluation stack (an eval framework or its forks, the platform that runs it, its model proxy) names the code paths to read first, the fork checkout or the installed package under the venv, and asks for a `file:line` citation for every claim about how they behave. An uncited claim is an assumption. Where the repository keeps a known-misreads list, name it as the first read.
