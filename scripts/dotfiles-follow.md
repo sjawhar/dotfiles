@@ -1,10 +1,10 @@
 # dotfiles-follow
 
 Keeps a machine's `~/.dotfiles` on origin's main, writes the machine's knives registry copy again
-when `knives/repos.toml` changed, then installs mise and omp pins. A git checkout moves by
-fast-forward; a colocated jj checkout moves through `scripts/dotfiles-sync`. When it cannot
-follow, write the copy or install tools, it tells the box-health owner over Envoy, once per
-condition.
+when `knives/repos.toml`, the workspaces path or the render script changed, then installs mise and
+omp pins. A git checkout moves by fast-forward; a colocated jj checkout moves through
+`scripts/dotfiles-sync`. When it cannot follow, write the copy or install tools, it tells the
+box-health owner over Envoy, once per condition.
 
 Armed by `devbox/install.sh` as the `dotfiles-follow` user timer
 (`devbox/dotfiles-follow.{service,timer}`), on a Google VM only (`scripts/on-google-vm`:
