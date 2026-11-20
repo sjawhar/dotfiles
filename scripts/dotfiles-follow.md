@@ -21,6 +21,7 @@ dotfiles-follow                  # one run, as the timer does it; alerts go over
 dotfiles-follow --print-alert    # the same, and print each message
 journalctl --user -u dotfiles-follow.service -n 50
 jq . /mnt/nvme/$USER/tmp/dotfiles-follow/state.json   # open conditions, last run, last outcome
+ls /mnt/nvme/$USER/tmp/dotfiles-follow/killed-sweeps/  # the logs of the last 5 killed sweep passes
 ```
 
 `--no-hook-sweep` skips the hook sweep. It logs that configuration and opens no hook condition.
@@ -105,7 +106,10 @@ Follow restores the managed marketplace lock before it calls the sync.
    a later pass because the pass had spent its GitHub visibility lookups (dispatch://BET-706), is a
    condition; a deferral clears when a pass defers none. The script loops for ever, so its code up to the
    loop is loaded and `sweep` runs once, and its whole process group is killed past the pass's
-   bound. Two kinds of pass:
+   bound. A killed pass's log, and what it printed, are kept in `killed-sweeps/` beside the state
+   file, the newest five only (`KILLED_SWEEP_LOGS`), and the alert names the file: the pass's own
+   log is in a temporary directory, and journald may drop the unit's lines (on 2026-11-20 it
+   dropped them for the hour around a killed slow-root pass). Two kinds of pass:
    - **fast-root pass**, every run: the script's `fast_roots` only, bounded by `--sweep-timeout`
      (420 s).
    - **slow-root pass**, at most once per `--slow-sweep-interval` (3600 s): `fast_roots` and

@@ -100,6 +100,7 @@ sweep() {
       echo "2026-11-03T00:00:00Z sweep [$*]: 41 checkouts hooked or public or unreadable, 1 deferred, 40 installed, 0 failed" >> "$log" ;;
     deferred_count) echo "2026-11-03T00:00:00Z sweep [$*]: 41 checkouts hooked or public or unreadable, 2 deferred, 39 installed, 0 failed" >> "$log" ;;
     hang) sleep 60 ;;
+    hang_logged) echo "2026-11-03T00:00:00Z FAILED /src/stuck" >> "$log"; echo "still walking"; sleep 60 ;;
     broken) echo "sweep: cannot walk a root"; exit 3 ;;
     nosummary) echo "2026-11-03T00:00:00Z INSTALLED /src/one" >> "$log" ;;
   esac
@@ -622,6 +623,29 @@ class PrePushHooks(Harness):
         self.assertIn("one fast-root pass (fast_roots only) of", messages[0])
         self.assertIn("did not end in 1s and was killed", messages[0])
         self.assertEqual(self.state_data()["slow_sweep_at"], 999000.0)
+
+    def test_a_killed_pass_keeps_its_log_and_only_the_newest_few(self) -> None:
+        # The pass's log lives in a temporary directory removed when the pass ends; a killed pass's
+        # log, and what it printed, are kept beside the state file, and only the newest
+        # KILLED_SWEEP_LOGS of them stay. Control: before this change the alert named no log and
+        # nothing was kept.
+        self.tools_passed(slow_sweep_at=999000.0)
+        os.environ["FAKE_SWEEP"] = "hang_logged"
+        keep = self.state.parent / "killed-sweeps"
+        with unittest.mock.patch.object(FOLLOW, "KILLED_SWEEP_LOGS", 2):
+            messages = self.run_follow(sweep_timeout=1.0, slow_sweep_timeout=30.0)
+            first = sorted(keep.glob("*Z-fast.log"))
+            self.assertEqual(len(first), 1)
+            self.assertEqual(len(messages), 1)
+            self.assertIn(f"Its log is kept at {FOLLOW.display_path(first[0])}.", messages[0])
+            self.assertIn("FAILED /src/stuck", first[0].read_text())
+            self.assertIn("still walking", first[0].read_text())
+            for now in (1_000_600.0, 1_001_200.0):
+                self.run_follow(now=now, sweep_timeout=1.0, slow_sweep_timeout=30.0)
+        left = sorted(keep.glob("*Z-*.log"))
+        self.assertEqual(len(left), 2)
+        self.assertNotIn(first[0], left)
+        self.assertEqual(list(keep.glob("*.new")), [])
 
     def test_a_missing_sweep_alerts(self) -> None:
         (self.hooks_dir / "sweep-hooks.sh").unlink()
