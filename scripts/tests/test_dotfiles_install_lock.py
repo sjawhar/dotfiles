@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""R4 of dispatch://INFRA-4798: a first install of a new knives pin does not fail a tools step.
+"""R1 of dispatch://INFRA-4798: a first install of a new knives pin does not fail a tools step.
 
 The knives shim's install of a missing pin (shims/knives `install_pin`) and the `mise install` of
 every other writer of mise's data dir take one lock, `<data dir>/.dotfiles-install.lock`, so the
@@ -18,7 +18,7 @@ wait line, its exit, or its own install's outcome). Each wait of the test has a 
 which only detects a failure. Every process gets an environment built from nothing, under this
 test's temporary directory. Standard library only; no git and no systemd-run anywhere.
 
-Each test is a row of the plan's state table (dispatch://INFRA-4798/artifact/plan-md, "The R4
+Each test is a row of the plan's state table (dispatch://INFRA-4798/artifact/plan-md, "The R1
 test"); a row marked "each holder" is one test per entry of HOLDERS.
 """
 
