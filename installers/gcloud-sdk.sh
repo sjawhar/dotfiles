@@ -71,6 +71,17 @@ else
     echo "gcloud-sdk: installed $GCLOUD_SDK_VERSION at $GCLOUD_SDK_ROOT"
 fi
 
+# gcloud copies each command's output into a log file under its configuration directory's logs/,
+# so a token it prints lands on disk: on sami-devbox on 2026-11-20, 85,032 of the 87,264 files in
+# ~/.config/gcloud/logs held an access token: 84,618 of them, and every one written since
+# 2026-11-10, from `auth docker-helper` (dispatch://INFRA-4824). shims/gcloud turns file logging
+# off for each call it runs, but docker-credential-gcloud runs this SDK's gcloud by its path, past
+# the shim, and not every caller has the shim on PATH or its environment (a system unit, an
+# `env -i` caller). An installation property holds for every caller of this SDK, in every
+# configuration directory and every box that mounts ~/.gcloud. A reinstall above replaces the
+# properties file, so this runs every time.
+"$GCLOUD_SDK_BIN" config set --installation core/disable_file_logging true
+
 # The SDK's own installer is not run, so nothing edits .bashrc; the components command needs no
 # prompt with --quiet.
 if [[ ! -x "$GCLOUD_SDK_ROOT/google-cloud-sdk/bin/gke-gcloud-auth-plugin" ]]; then

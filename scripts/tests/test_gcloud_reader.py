@@ -8,7 +8,7 @@ max-grant is an hour. The broker releases a google-service-account secret as a b
 (cybermonklabs/legion packages/envoy/internal/broker/secrets/googleserviceaccount.go, Minted{Value:
 token.AccessToken}), which the fake secret-run below hands over the same way. The token goes to a
 0600 file of a directory removed on exit, never into an argument list, and the command runs with
-CLOUDSDK_AUTH_ACCESS_TOKEN_FILE set to it and a fresh CLOUDSDK_CONFIG.
+CLOUDSDK_AUTH_ACCESS_TOKEN_FILE set to it, a fresh CLOUDSDK_CONFIG and gcloud's file logging off.
 """
 
 from __future__ import annotations
@@ -24,6 +24,17 @@ from pathlib import Path
 DOTFILES = Path(__file__).resolve().parents[2]
 SCRIPT = DOTFILES / "scripts" / "gcloud-reader"
 TOKEN = "fake-reader-access-token"
+SDK_BIN = Path(os.environ.get("HOME", "/nonexistent")) / ".gcloud" / "google-cloud-sdk" / "bin"
+# Run by the command gcloud-reader gives it: prints the token as gcloud would, then lists the log
+# files gcloud wrote under the configuration directory gcloud-reader made, and those holding the
+# token, before the reader removes that directory on exit. A failed print leaves no token in
+# "printed", which the test reads.
+PRINT_TOKEN_AND_LIST_LOGS = (
+    'gcloud auth print-access-token > "$LOG/printed"; '
+    'find "$CLOUDSDK_CONFIG" -path "*/logs/*" -type f > "$LOG/log-files"; '
+    'find "$CLOUDSDK_CONFIG" -path "*/logs/*" -type f -exec grep -lF "$FAKE_TOKEN" {} + > "$LOG/token-files"; '
+    'exit 0'
+)
 
 # The fake secret-run logs each argument on its own line, then, unless SECRET_RUN_EXIT is set,
 # exports the requested key (the word before `--`) as the bare token and runs the command after
@@ -50,6 +61,7 @@ TOOL = r"""#!/bin/bash
   printf 'impersonate %s\n' "${CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT:-}"
   printf 'env_metadata %s\n' "${METADATA_READ:-}"
   printf 'env_legion %s\n' "${LEGION_READ:-}"
+  printf 'file_logging %s\n' "${CLOUDSDK_CORE_DISABLE_FILE_LOGGING:-}"
 } >> "$LOG/tool.log"
 """
 
@@ -213,6 +225,26 @@ class GcloudReaderTest(unittest.TestCase):
             result = f.run("storage", "buckets", "list")
             self.assertEqual(result.returncode, 3)
             self.assertEqual(f.leftovers(), [])
+
+    def test_the_command_runs_with_file_logging_off(self) -> None:
+        """gcloud copies a command's output into a log file under CLOUDSDK_CONFIG/logs, so a printed
+        token lands on disk (dispatch://INFRA-4824). The command runs with file logging off, whatever
+        the caller set."""
+        for caller in ({}, {"CLOUDSDK_CORE_DISABLE_FILE_LOGGING": "false"}):
+            with self.subTest(caller=caller), Fixture(SCRIPT) as f:
+                result = f.run("auth", "print-access-token", env_extra=caller)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(f.tool_log()["file_logging"], "true")
+
+    @unittest.skipUnless((SDK_BIN / "gcloud").is_file(), "no Google Cloud SDK at ~/.gcloud")
+    def test_the_real_gcloud_writes_no_log_file(self) -> None:
+        with Fixture(SCRIPT) as f:
+            result = f.run("sh", "-c", PRINT_TOKEN_AND_LIST_LOGS,
+                           env_extra={"PATH": f"{SDK_BIN}:{f.bin}:/usr/bin:/bin"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((f.log / "printed").read_text().strip(), TOKEN, "gcloud printed no token")
+            self.assertEqual((f.log / "token-files").read_text(), "", "a log file holds the token")
+            self.assertEqual((f.log / "log-files").read_text(), "", "gcloud wrote a log file")
 
 
 if __name__ == "__main__":
