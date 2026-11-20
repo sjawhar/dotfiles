@@ -23,7 +23,19 @@ case "$*" in
     "--user show -p NextElapseUSecRealtime --value dotfiles-follow.timer")
         echo 'Thu 2026-11-13 00:00:00 UTC'
         ;;
+    "is-enabled --quiet bluetooth" | "is-active --quiet bluetooth")
+        [[ "$STUB_BLUETOOTH" == on ]]
+        ;;
 esac
+'''
+
+# sudo logs its argv and runs the command, as root would: the stubs log under their own names.
+SUDO = 'echo "sudo $*" >>"$STUB_LOG"\nexec "$@"'
+
+LOGINCTL = r'''echo "loginctl $*" >>"$STUB_LOG"
+if [[ "$*" == "show-user sami -p Linger --value" ]]; then
+    echo "$STUB_LINGER"
+fi
 '''
 
 
@@ -54,6 +66,8 @@ class OryxInstall(unittest.TestCase):
         write_command(fakebin, "hostname", 'printf "%s\\n" "$STUB_HOSTNAME"')
         write_command(fakebin, "systemd-detect-virt", "exit 1")
         write_command(fakebin, "systemctl", SYSTEMCTL)
+        write_command(fakebin, "sudo", SUDO)
+        write_command(fakebin, "loginctl", LOGINCTL)
         write_command(fakebin, "forward", 'echo "$*" >>"$FORWARD_LOG"')
         for tool in ("dirname", "mkdir", "ln", "grep"):
             tool_path = shutil.which(tool)
@@ -66,6 +80,9 @@ class OryxInstall(unittest.TestCase):
             "STUB_HOSTNAME": "oryx",
             "STUB_LOG": str(self.log),
             "FORWARD_LOG": str(self.forward_log),
+            # The agent phone line's settings as a new oryx has them: bluetooth off, no linger.
+            "STUB_BLUETOOTH": "off",
+            "STUB_LINGER": "no",
         }
         self.forward_config = self.home / ".config/forward/config.toml"
         self.forward_config.parent.mkdir(parents=True)
@@ -105,6 +122,12 @@ class OryxInstall(unittest.TestCase):
             "--user enable --now dotfiles-follow.timer",
             "--user list-timers --all dotfiles-follow.timer",
             "--user show -p NextElapseUSecRealtime --value dotfiles-follow.timer",
+            "is-enabled --quiet bluetooth",
+            "sudo systemctl enable --now bluetooth",
+            "enable --now bluetooth",
+            "loginctl show-user sami -p Linger --value",
+            "sudo loginctl enable-linger sami",
+            "loginctl enable-linger sami",
         ])
         self.assertEqual(self.forward_config.read_bytes(), self.forward_bytes)
         self.assertFalse(self.forward_log.exists())
@@ -119,6 +142,17 @@ class OryxInstall(unittest.TestCase):
         self.assertFalse((self.home / ".config/systemd/user/dotfiles-follow.timer").exists())
         self.assertEqual(self.calls(), [])
         self.assertEqual(self.forward_config.read_bytes(), self.forward_bytes)
+
+    def test_leaves_bluetooth_and_linger_alone_when_already_on(self) -> None:
+        result = self.install(STUB_BLUETOOTH="on", STUB_LINGER="yes")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls()[-3:], [
+            "is-enabled --quiet bluetooth",
+            "is-active --quiet bluetooth",
+            "loginctl show-user sami -p Linger --value",
+        ])
+        self.assertFalse([call for call in self.calls() if call.startswith("sudo ")])
 
     def test_run_from_a_workspace_links_the_dropin_from_home_dotfiles(self) -> None:
         # arm_user_timer links the units from ~/.dotfiles so that a unit armed from a workspace
