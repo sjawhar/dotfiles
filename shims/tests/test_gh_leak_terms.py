@@ -413,7 +413,7 @@ class GhLeakTerms(unittest.TestCase):
         (knives / "repos.toml").write_text(
             '[repos.ygo-fork]\nupstream = "https://github.com/reearth/ygo.git"\n'
             'origin = "https://github.com/sjawhar/ygo.git"\nrelease = "https://github.com/theorem-labs/ygo.git"\n'
-            'forbidden = ["dispatch://", "INFRA-", "theorem-labs"]\n', encoding="utf-8")
+            'forbidden = ["INFRA-", "theorem-labs"]\n', encoding="utf-8")
         return {**self.env, "DOTFILES_LEAK_TERMS_KNIVES_DIR": str(knives)}
 
     def ygo_writes(self) -> list[tuple[str, list[str]]]:
@@ -445,13 +445,46 @@ class GhLeakTerms(unittest.TestCase):
                 ("--title", ["pr", "create", "-R", YGO, "--head", "x", "--title", "Fixes INFRA-1", "--body", "b"],
                  "--title", "INFRA-"),
                 ("--body", ["pr", "comment", "1", "-R", YGO, "--body", "Fixes INFRA-1"], "--body", "INFRA-"),
-                ("--body dispatch://", ["pr", "comment", "1", "-R", YGO, "--body", "See dispatch://x"], "--body",
-                 "dispatch://")):
+                ("--body, a Dispatch link that holds INFRA-1",
+                 ["pr", "comment", "1", "-R", YGO, "--body", "See dispatch://INFRA-1"], "--body", "INFRA-")):
             with self.subTest(form=name):
                 self.setUp_calls()
                 refused = self.run_gh(argv, env=env)
                 self.assert_refused(refused, field, matched, YGO_LIST, line=1)
                 self.assertNotIn("--repo line", refused.stderr.decode())
+
+    def test_a_dispatch_link_is_no_term_of_the_knives_registry(self) -> None:
+        # Sami ruled on 2026-11-20 that a Dispatch link is no leak term
+        # (dispatch://INFRA-2111/ask/40b0b5c5-4575-44da-9afb-dbcf2bb9214d), so this checkout's knives/repos.toml
+        # does not list `dispatch://` for ygo-fork. With that registry, read whole: a write to the public
+        # theorem-labs/ygo whose title holds only a Dispatch link goes out, as in the gh-gate-ygo check's row, and so
+        # does a body that holds one. oh-my-pi's list still holds `dispatch://`: Legion's push check refuses any change
+        # to that line, which names the company, so it stays as on main (the PR body's stated limits). Controls: a link
+        # that holds INFRA-1, a term of the ygo-fork list, and a body that holds `envoy`, a term of the oh-my-pi list,
+        # are refused, so the registry's lists are read.
+        knives = self.tmp / "knives"
+        knives.mkdir()
+        shutil.copyfile(DOTFILES / "knives" / "repos.toml", knives / "repos.toml")
+        env = {**self.env, "DOTFILES_LEAK_TERMS_KNIVES_DIR": str(knives)}
+        omp = "cybermonklabs/oh-my-pi"
+        self.answer(YGO, "public")
+        self.answer(omp, "public")
+        for name, argv in (
+                ("a title that holds only a link, to theorem-labs/ygo",
+                 ["pr", "create", "-R", YGO, "--title", "dispatch://x", "--body", "b", "--head", "x"]),
+                ("a body, to theorem-labs/ygo", ["pr", "comment", "1", "-R", YGO, "--body", "See dispatch://x"])):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=env), argv)
+        for name, argv, field, matched, term_list in (
+                ("a link that holds INFRA-1, to theorem-labs/ygo",
+                 ["pr", "create", "-R", YGO, "--title", "dispatch://INFRA-1", "--body", "b", "--head", "x"], "--title",
+                 "INFRA-", YGO_LIST),
+                ("envoy, to cybermonklabs/oh-my-pi", ["pr", "comment", "1", "-R", omp, "--body", "See envoy"], "--body",
+                 "envoy", "the knives oh-my-pi list")):
+            with self.subTest(control=name):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(argv, env=env), field, matched, term_list, line=1)
 
     def test_a_write_to_a_private_repository_named_with_a_listed_term_goes_out(self) -> None:
         # Given the same list and theorem-labs/ygo private: no target is public, so the calls go out, a term of the
@@ -2104,6 +2137,43 @@ class GhLeakTerms(unittest.TestCase):
                     if row in shown:
                         self.assertEqual(line, shown[row])
 
+    def test_a_line_a_line_separator_begins_is_one_more_line_of_a_block_alias(self) -> None:
+        # yaml.v3 ends a line at each of its line breaks, a line separator (U+2028) among them (GH_YAML_BREAKS), so a
+        # `|` block scalar whose next line begins with one goes on there. The reviewer's case (review round 13 of
+        # dispatch://INFRA-3365), as gh 2.98.0 wrote it on 2026-11-20 in a scratch GH_CONFIG_DIR, under `env -i` with
+        # no token: `gh alias set note -` with `pr comment 1 -R o/pub --body x`, a line feed, a line separator and the
+        # term on standard input, then `gh alias set pp 'issue comment 1 -R o/pub --body …'`. gh writes `note: |-`,
+        # the block's second line beginning with the separator, then `pp`, and `gh alias list` lists both. So `pp` with
+        # a term is refused, judged by the public repository, and so is `note`, whose second line holds the term; `pp`
+        # with none goes out. Beside the `? |` key gh writes for a name that ends with a line feed (`gh alias set
+        # $'trail\n' 'pr view'`), which the reader does not read, the aliases are read as the fallback reads them, past
+        # that line too, and the same holds. Until that round the block, and the aliases with it, ended at that line:
+        # `note` was read without its term, `pp` was no alias, and each went out.
+        unread = "read as public, since the check cannot read gh's aliases exactly"
+        for number, (form, before) in enumerate((("as gh wrote it", ""),
+                                                 ("beside a `? |` key", "\n    ? |\n        trail\n    : pr view"))):
+            for body in (CANARY, "clean"):
+                env = self.gh_config(f"separator-{number}-{body}", None, gh_config_yml(
+                    f"\n    co: pr checkout{before}\n    note: |-\n        pr comment 1 -R {PUBLIC} --body x\n"
+                    f"\u2028        {CANARY}\n    pp: issue comment 1 -R {PUBLIC} --body {body}"))
+                config = f"{env['GH_CONFIG_DIR']}/config.yml"
+                if body != CANARY:
+                    with self.subTest(form=form, call="pp", term=False):
+                        self.setUp_calls()
+                        self.assert_sent(self.run_gh(["pp"], env=env), ["pp"])
+                    continue
+                for name in ("pp", "note"):
+                    with self.subTest(form=form, call=name, term=True):
+                        self.setUp_calls()
+                        refused = self.run_gh([name], env=env)
+                        stderr = refused.stderr.decode()
+                        if before:
+                            self.assert_refused(refused, f"gh's alias {name} {config}", CANARY)
+                            self.assertIn(f"gh {name} to what the gh alias {name} runs, {unread}", stderr)
+                        else:
+                            self.assert_refused(refused, "--body" if name == "pp" else "argument 2", CANARY, line=1)
+                            self.assertIn(f"to {PUBLIC} (public):", stderr)
+
     def test_a_call_through_an_alias_is_judged_by_that_alias_alone(self) -> None:
         # Until review round 11 of dispatch://INFRA-3365 one alias that held a listed term refused every call through
         # any alias, reads included, since the text of every alias was read with each. With the reviewer's aliases, as
@@ -2229,17 +2299,47 @@ class GhLeakTerms(unittest.TestCase):
             self.assertEqual(self.gh_calls(), [])
             self.assertIn(": cannot read --body-file pipe: a pipe or a device, which the check cannot read", stderr)
 
+    def test_a_dash_inside_a_quoted_word_of_an_unread_alias_is_no_standard_input(self) -> None:
+        # On the fallback (gh_unread_alias_check) a `-` is standard input only where it is a whole shell word, as
+        # shlex splits the entry (gh_alias_words, gh_alias_files). The reviewer's folded config (review round 13 of
+        # dispatch://INFRA-3365): `title_dash: >-` and then `pr create -R o/priv --title 'WIP - draft' --body x`, whose
+        # split at every blank and quote gives a bare `-`. The call goes out, and the check never asks the shim for
+        # standard input: gh gets the pipe it was given, not the shim's buffer. Until that round the check asked for
+        # it, and at a terminal the shim would read until the input ends. A `--body-file -` is still standard input,
+        # read, in a folded value and in a double-quoted value of two lines: with a term on it the call is refused,
+        # and with none it goes out.
+        env = self.gh_config("dash", None, gh_config_yml(
+            "\n    co: pr checkout\n    title_dash: >-\n        pr create -R o/priv --title 'WIP - draft' --body x"
+            "\n    folded: >-\n        pr create -R o/priv --title 'WIP - draft' --body-file -"
+            '\n    quoted: "pr create -R o/priv --title \'WIP - draft\'\n        --body-file -"'))
+        with self.subTest(call="title_dash"):
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(["title_dash"], b"piped", env), ["title_dash"], b"piped")
+            self.assertEqual(self.gh_calls()[0][2], "fifo", "the check asked the shim for standard input")
+        for name in ("folded", "quoted"):
+            for text in (TEXT, CLEAN):
+                with self.subTest(call=name, term=text == TEXT):
+                    self.setUp_calls()
+                    result = self.run_gh([name], text.encode(), env)
+                    if text == CLEAN:
+                        self.assert_sent(result, [name], text.encode())
+                        continue
+                    self.assert_refused(result, "--body-file - (standard input)", line=1)
+                    self.assertIn(f"gh {name} to what the gh alias {name} runs, read as public", result.stderr.decode())
+
     def test_a_directory_or_a_glob_through_an_unread_alias_is_a_word(self) -> None:
         # Through an alias of a config.yml gh does not write, a call's words are read as every command reads them
         # (gh_alias_files), so a word may name a file: the check keeps `-`, standard input, and a path to anything but
         # a directory, reads a regular file, refuses a pipe, and expands no glob. From a checkout with a `docs/`
-        # directory: `b docs`, `b .`, `co docs` and `co --body '*'`, none holding a listed term, go out; until review
-        # round 12 of dispatch://INFRA-3365 each was refused, `docs` being a directory the check cannot read, and `*`
-        # read as every file of the directory. A bare argument that names a clean file goes out. `g` runs `gist
+        # directory, and `star.md`, which holds a listed term: `b docs`, `b .`, `co docs` and `co --body '*'` go out,
+        # since none holds a listed term itself and `*` names no file; until review round 12 of dispatch://INFRA-3365
+        # each was refused, `docs` being a directory the check cannot read, and `*` read as every file of the
+        # directory, which here would read `star.md`. A bare argument that names a clean file goes out. `g` runs `gist
         # create`, which reads a bare argument as a file, so `g notes.md` with a term in the file is refused; and a
         # body file that is a pipe, `--body-file <(…)`, is refused, the refusal saying why.
         (self.work / "docs").mkdir()
         self.file("notes.md", CLEAN)
+        self.file("star.md", TEXT)
         env = self.gh_config("words", None, gh_config_yml(
             "\n    co: pr checkout\n    b: browse\n    g: >-\n        gist create"))
         for argv in (["b", "docs"], ["b", "."], ["co", "docs"], ["co", "--body", "*"], ["b", "notes.md"]):
@@ -2470,8 +2570,7 @@ class GhLeakTerms(unittest.TestCase):
                 ("a JSON body's string", ["api", f"repos/{PUBLIC}/issues/1/comments", "--input", input_body], self.env,
                  "--input md.json .body", CANARY, GLOBAL),
                 ("INFRA\\-1 under the ygo list", [*ygo, "see INFRA\\-1"], env, "--body", "INFRA-", YGO_LIST),
-                ("dispatch&colon;// under the ygo list", [*ygo, "see dispatch&colon;//x"], env, "--body", "dispatch://",
-                 YGO_LIST)):
+                ("INFRA&#45;1 under the ygo list", [*ygo, "see INFRA&#45;1"], env, "--body", "INFRA-", YGO_LIST)):
             with self.subTest(form=name):
                 self.setUp_calls()
                 self.assert_refused(self.run_gh(argv, env=run_env), f"{field} (Markdown escapes undone)", matched,
