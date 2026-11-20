@@ -65,12 +65,12 @@ def test_missing_parts_are_tolerated(tmp_path):
     assert "No FINAL section yet." in v2_render.loop_section(r)
 
 
-def test_round_files_are_served_by_exact_name_only(tmp_path, monkeypatch):
+def test_round_files_are_served_by_exact_name_only(tmp_path, socket_dir, monkeypatch):
     monkeypatch.setattr(server, "STATE_DIR", tmp_path)
     monkeypatch.setattr(rounds, "ROUNDS", tmp_path)
     write(tmp_path, "2026-10-26T03.md", ROUND)
     (tmp_path / "secret.txt").write_text("no")
-    sock = tmp_path / "s.sock"
+    sock = socket_dir / "s.sock"
     srv = server._UnixHTTPServer(str(sock), server.make_handler(server.Dashboard(), proxy_uid=os.getuid()))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
 

@@ -17,10 +17,13 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from disk_fill_watch_no_boxes import no_agent_boxes  # noqa: E402 - found through the path above
 
 SCRIPT = Path(__file__).resolve().parents[1] / "disk-fill-watch"
 LOADER = importlib.machinery.SourceFileLoader("disk_fill_watch_entry_owner", str(SCRIPT))
@@ -86,6 +89,7 @@ class EntryOwnerTest(unittest.TestCase):
             original = getattr(WATCH, name)
             setattr(WATCH, name, replacement)
             self.addCleanup(lambda n=name, o=original: setattr(WATCH, n, o))
+        no_agent_boxes(self, WATCH)
         self.addCleanup(self.reset_live)
         self.reset_live()
         # One young, big entry for the rule to find.

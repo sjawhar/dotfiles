@@ -1,20 +1,43 @@
 #!/bin/bash
-# nvme-cache-cap: hold the shared language caches on the big disk under a size cap.
+# nvme-cache-cap: hold the shared language caches on the big disk under a size cap, and never
+# remove a cache a running process may read.
 #
 # scripts/agent-session and .bashrc point every session's uv, cargo and Go module caches at
 # /mnt/nvme/<user> (dispatch://INFRA-613), where they are shared by every session and reused
 # across them. Shared and reused is the point; unbounded is not, so each one has a cap here and
 # devbox/nvme-cache-cap.service checks them hourly. The Go BUILD cache has its own, older unit
-# (devbox/gocache-cap, 80 GB). devbox/nvme-cache-cap.md says what each cap costs and how to
+# (devbox/gocache-cap). devbox/nvme-cache-cap.md says what each cap costs and how to
 # turn it off.
 #
-# Every cap is enforced with the tool's own cleaner, and over the cap the cache is emptied rather
-# than trimmed: none of these tools can trim to a size, and everything removed is re-downloadable
-# or rebuildable. Nothing here is a working copy.
+# Over the cap a cache is removed whole rather than trimmed: none of these tools can trim to a
+# size, and everything removed is re-downloadable or rebuildable. Nothing here is a working copy.
+# Before a cache is removed, two things must hold, and either one merely unknown keeps it:
+#   - no process holds it: no open file, cwd, exe, root, mapped file or command-line argument at
+#     or under it (devbox/proc-holds.sh, the rule devbox/tmp-stale-reap uses too). The Go module
+#     cache holds the toolchain every build on sami-devbox runs from, so a build in progress
+#     holds it through its compile and link processes' exe;
+#   - none of the commands that read the cache without keeping a file open is running: go and
+#     gopls for the Go module cache, cargo and rustc for cargo's sources, uv, pip and pip3, mise.
+# Then the cache is renamed to a sibling, <dir>.removing.<time>.<pid>, so a reader sees the whole
+# cache or none of it and the tool starts a new one, and the sibling is removed once no process
+# holds it. A sibling still held, or left by a run that stopped, is removed by a later run. Until
+# then `go clean -modcache`, `uv cache clean`, `pip cache purge`, `bun pm cache rm`, `mise cache
+# clear` and plain removals ran with no such check (dispatch://INFRA-3905).
 #
-# NVME_CACHE_ROOT, SCRATCH_CACHE_ROOT and each <NAME>_CACHE_CAP_BYTES below override the defaults,
-# so a test can run the unit against scratch directories. --dry-run reports and cleans nothing.
+# uv's prune keeps its cheap first pass: it runs only when nothing holds the cache, and uv itself
+# refuses to prune what a uv process is using.
+#
+# A held cache stays over its cap until it is free; the disk floors (box-cleanup, disk-fill-watch)
+# are what speak if the disk fills.
+#
+# NVME_CACHE_ROOT, SCRATCH_CACHE_ROOT, NVME_CACHE_PROC (a scratch /proc), NVME_CACHE_SCAN_SECONDS
+# (the limit of one scan of /proc, default 600) and each <NAME>_CACHE_CAP_BYTES below override the
+# defaults, so a test can run the unit against scratch directories. --dry-run reports and removes
+# nothing.
 set -euo pipefail
+# stream, next_record and proc_holds come from devbox/proc-holds.sh.
+# shellcheck source=devbox/proc-holds.sh
+source "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/proc-holds.sh"
 
 root="${NVME_CACHE_ROOT:-/mnt/nvme/$(id -un)}"
 # On sami-devbox the uv and pip caches are on the local-SSD scratch, /mnt/scratch/<user>
@@ -22,6 +45,8 @@ root="${NVME_CACHE_ROOT:-/mnt/nvme/$(id -un)}"
 # like one under the root. A machine without that directory keeps them under the root.
 scratch="${SCRATCH_CACHE_ROOT:-/mnt/scratch/$(id -un)}"
 [[ -d "$scratch" ]] || scratch="$root"
+proc="${NVME_CACHE_PROC:-/proc}"
+scan_seconds="${NVME_CACHE_SCAN_SECONDS:-600}"
 uv_cap="${UV_CACHE_CAP_BYTES:-40000000000}"
 cargo_cap="${CARGO_CACHE_CAP_BYTES:-20000000000}"
 modcache_cap="${GOMODCACHE_CAP_BYTES:-40000000000}"
@@ -54,9 +79,10 @@ size_of() {
     printf '%s\n' "${out%%$'\t'*}"
 }
 
-# What this pass actually removed, summed over the caches it touched. Each figure is one
-# directory's own before-and-after, never a df delta around the run: the disks here are shared
-# with seventy lanes, so a df delta measures them, not this. A dry run reclaims nothing.
+# What this pass actually removed, summed over the caches it touched: each sibling's size as it
+# went, and uv's prune as its directory's own before-and-after, never a df delta around the run:
+# the disks here are shared with seventy lanes, so a df delta measures them, not this. A dry run
+# reclaims nothing.
 RECLAIMED=0
 took() { # took DIR BYTES_BEFORE
     local now=0 d
@@ -70,29 +96,122 @@ report() { # report NAME DIR SIZE CAP
     echo "nvme-cache-cap: $1 $2 is $3 bytes, cap $4"
 }
 
+# The first of this user's processes whose command is one of NAMES, as "pid N (name)".
+running() { # running NAME...
+    local comm_file comm name pid
+    for comm_file in "$proc"/[0-9]*/comm; do
+        [[ -O "$comm_file" ]] || continue
+        IFS= read -r comm 2>/dev/null <"$comm_file" || continue
+        for name in "$@"; do
+            [[ "$comm" == "$name" ]] || continue
+            pid="${comm_file#"$proc"/}"
+            echo "pid ${pid%%/*} ($comm)"
+            return 0
+        done
+    done
+    return 1
+}
+
+# held DIR [NAME...]: whether a process may read DIR. 0, with the reason in $holder, when one holds
+# it, when one of NAMES runs, or when the scan of /proc did not finish; 1 when DIR is free.
+holder=""
+# shellcheck disable=SC2329  # proc_holds calls it by name
+first_holder() { [[ -n "$holder" ]] || holder="pid $1 holds $3 ($2)"; }
+held() {
+    local dir="$1" who
+    shift
+    holder=""
+    deadline=$((EPOCHSECONDS + scan_seconds))
+    if ! proc_holds "$proc" "$dir" first_holder; then
+        holder="${holder:-the scan of $proc did not finish ($stream_end), so nothing is known to be free}"
+        return 0
+    fi
+    [[ -z "$holder" ]] || return 0
+    if (($#)) && who="$(running "$@")"; then
+        holder="$who is running, and it reads this cache without keeping a file open"
+        return 0
+    fi
+    return 1
+}
+
+# remove_sibling PATH [BYTES]: remove a cache already renamed away, once nothing holds it. rm -rf
+# does not chmod, and the Go module cache is read-only, so a first failure gets a chmod and a
+# second try.
+remove_sibling() {
+    local sibling="$1" bytes="${2:-}"
+    if held "$sibling"; then
+        echo "nvme-cache-cap: kept $sibling for a later run: $holder"
+        return 0
+    fi
+    if [[ -n "$dry" ]]; then
+        echo "nvme-cache-cap: would remove $sibling, which nothing holds"
+        return 0
+    fi
+    [[ -n "$bytes" ]] || bytes="$(size_of "$sibling" 2>/dev/null || echo 0)"
+    rm -rf -- "$sibling" 2>/dev/null || { chmod -R u+rwX -- "$sibling" && rm -rf -- "$sibling"; } || true
+    if [[ -e "$sibling" ]]; then
+        echo "nvme-cache-cap: FAILED to remove $sibling" >&2
+        status=1
+        return 0
+    fi
+    echo "nvme-cache-cap: removed $sibling ($bytes bytes)"
+    RECLAIMED=$((RECLAIMED + bytes))
+}
+
+# sweep DIR: the siblings an earlier run renamed DIR to and could not yet remove.
+sweep() {
+    local sibling
+    for sibling in "$1".removing.*; do
+        [[ -d "$sibling" ]] && remove_sibling "$sibling"
+    done
+    return 0
+}
+
+# clean NAME DIR SIZE [READER...]: remove DIR, a cache over its cap, unless a process may read it.
+clean() {
+    local name="$1" dir="$2" size="$3" sibling
+    shift 3
+    if held "$dir" "$@"; then
+        echo "nvme-cache-cap: $name: kept $dir: $holder"
+        return 0
+    fi
+    if [[ -n "$dry" ]]; then
+        echo "nvme-cache-cap: $name: nothing holds $dir; would rename it to a sibling and remove that"
+        return 0
+    fi
+    sibling="$dir.removing.$EPOCHSECONDS.$$"
+    if ! mv -T -- "$dir" "$sibling"; then
+        echo "nvme-cache-cap: $name: renaming $dir to $sibling failed" >&2
+        status=1
+        return 0
+    fi
+    echo "nvme-cache-cap: $name: nothing held $dir; renamed it to $sibling"
+    remove_sibling "$sibling" "$size"
+}
+
 # uv: `uv cache prune` removes the entries no environment on this machine still points at, which
-# is the cheap pass; `uv cache clean` empties the cache and is what a cap over budget needs.
+# is the cheap pass; over the cap after it, the cache goes.
 uv_dir="${UV_CACHE_DIR:-$scratch/cache/uv}"
+[[ "$uv_dir" == "$root"/* || "$uv_dir" == "$scratch"/* ]] && sweep "$uv_dir"
 if [[ -d "$uv_dir" && ("$uv_dir" == "$root"/* || "$uv_dir" == "$scratch"/*) ]]; then
     size="$(size_of "$uv_dir")"
     if ((size <= uv_cap)); then
         report uv "$uv_dir" "$size" "$uv_cap"
+    elif held "$uv_dir" uv; then
+        echo "nvme-cache-cap: uv $uv_dir is $size bytes, over the cap of $uv_cap; kept: $holder"
     elif [[ -n "$dry" ]]; then
-        echo "nvme-cache-cap: uv $uv_dir is $size bytes, over the cap of $uv_cap; would prune, then clean if still over"
-    elif ! command -v uv >/dev/null 2>&1; then
-        echo "nvme-cache-cap: uv $uv_dir is $size bytes, over the cap of $uv_cap, and uv is not on PATH" >&2
-        status=1
+        echo "nvme-cache-cap: uv $uv_dir is $size bytes, over the cap of $uv_cap; nothing holds it; would prune, then remove it if still over"
     else
-        UV_CACHE_DIR="$uv_dir" uv cache prune >/dev/null
-        after="$(size_of "$uv_dir")"
-        if ((after > uv_cap)); then
-            UV_CACHE_DIR="$uv_dir" uv cache clean >/dev/null
+        after="$size"
+        if command -v uv >/dev/null 2>&1; then
+            UV_CACHE_DIR="$uv_dir" uv cache prune >/dev/null
             after="$(size_of "$uv_dir")"
-            echo "nvme-cache-cap: uv $uv_dir was $size bytes, over the cap of $uv_cap; pruned and cleaned; now $after bytes"
-        else
+            took "$uv_dir" "$size"
             echo "nvme-cache-cap: uv $uv_dir was $size bytes, over the cap of $uv_cap; pruned; now $after bytes"
+        else
+            echo "nvme-cache-cap: uv $uv_dir is $size bytes, over the cap of $uv_cap, and uv is not on PATH to prune it"
         fi
-        took "$uv_dir" "$size"
+        ((after <= uv_cap)) || clean uv "$uv_dir" "$after" uv
     fi
 fi
 
@@ -100,96 +219,76 @@ fi
 # and all three come back from the network. registry/index, the config and bin/ (a symlink to
 # ~/.cargo/bin, where rustup's shims and every `cargo install` binary live) are never touched.
 cargo_dir="${CARGO_HOME:-$root/cargo}"
+if [[ "$cargo_dir" == "$root"/* ]]; then
+    for sub in registry/cache registry/src git/checkouts git/db; do sweep "$cargo_dir/$sub"; done
+fi
 if [[ -d "$cargo_dir" && "$cargo_dir" == "$root"/* ]]; then
+    targets=()
+    for sub in registry/cache registry/src git/checkouts git/db; do
+        [[ -d "$cargo_dir/$sub" ]] && targets+=("$cargo_dir/$sub")
+    done
     size="$(size_of "$cargo_dir")"
     if ((size <= cargo_cap)); then
         report cargo "$cargo_dir" "$size" "$cargo_cap"
+    elif ((${#targets[@]} == 0)); then
+        echo "nvme-cache-cap: cargo $cargo_dir is $size bytes, over the cap of $cargo_cap, and holds none of the cache directories" >&2
+        status=1
     else
-        targets=()
-        for sub in registry/cache registry/src git/checkouts git/db; do
-            [[ -d "$cargo_dir/$sub" ]] && targets+=("$cargo_dir/$sub")
+        echo "nvme-cache-cap: cargo $cargo_dir is $size bytes, over the cap of $cargo_cap"
+        for target in "${targets[@]}"; do
+            clean cargo "$target" "$(size_of "$target")" cargo rustc
         done
-        if [[ -n "$dry" ]]; then
-            echo "nvme-cache-cap: cargo $cargo_dir is $size bytes, over the cap of $cargo_cap; would remove ${targets[*]:-nothing}"
-        elif ((${#targets[@]} == 0)); then
-            echo "nvme-cache-cap: cargo $cargo_dir is $size bytes, over the cap of $cargo_cap, and holds none of the cache directories" >&2
-            status=1
-        else
-            rm -rf -- "${targets[@]}"
-            echo "nvme-cache-cap: cargo $cargo_dir was $size bytes, over the cap of $cargo_cap; removed ${targets[*]}; now $(size_of "$cargo_dir") bytes"
-            took "$cargo_dir" "$size"
-        fi
     fi
 fi
 
-# Go modules: `go clean -modcache` is the only supported way to shrink it, and it empties it.
+# Go modules: emptied whole, as `go clean -modcache` did, but only while no go command runs.
 modcache_dir="${GOMODCACHE:-$root/gomodcache}"
+[[ "$modcache_dir" == "$root"/* ]] && sweep "$modcache_dir"
 if [[ -d "$modcache_dir" && "$modcache_dir" == "$root"/* ]]; then
     size="$(size_of "$modcache_dir")"
     if ((size <= modcache_cap)); then
         report gomodcache "$modcache_dir" "$size" "$modcache_cap"
-    elif [[ -n "$dry" ]]; then
-        echo "nvme-cache-cap: gomodcache $modcache_dir is $size bytes, over the cap of $modcache_cap; would run go clean -modcache"
-    elif ! command -v go >/dev/null 2>&1; then
-        echo "nvme-cache-cap: gomodcache $modcache_dir is $size bytes, over the cap of $modcache_cap, and go is not on PATH" >&2
-        status=1
     else
-        # go clean reads the module in its working directory; / has none.
-        (cd / && GOMODCACHE="$modcache_dir" go clean -modcache)
-        echo "nvme-cache-cap: gomodcache $modcache_dir was $size bytes, over the cap of $modcache_cap; cleaned; now $(size_of "$modcache_dir") bytes"
-        took "$modcache_dir" "$size"
+        echo "nvme-cache-cap: gomodcache $modcache_dir is $size bytes, over the cap of $modcache_cap"
+        clean gomodcache "$modcache_dir" "$size" go gopls
     fi
 fi
 
 # The six caches landed on 2026-10-30 (dispatch://INFRA-6: 20 GB of them on a root disk that hit
 # 0 bytes free) are each a single directory one tool fills and refills from the network, so one
-# pass fits them all: under the cap, report; over it, run the tool's own cleaner, or remove the
-# directory when the tool has none. The cleaner is given the directory in the variable the tool
-# reads, which is how every one of them was proved before it was landed.
-cap_cache() { # cap_cache NAME VAR DIR CAP [CLEANER...]
-    local name="$1" var="$2" dir="$3" cap="$4"
-    shift 4
-    [[ -d "$dir" && ("$dir" == "$root"/* || "$dir" == "$scratch"/*) ]] || return 0
+# pass fits them all: under the cap, report; over it, remove the directory as clean does. READERS
+# are the commands that read one without keeping a file open.
+cap_cache() { # cap_cache NAME DIR CAP [READER...]
+    local name="$1" dir="$2" cap="$3"
+    shift 3
+    [[ "$dir" == "$root"/* || "$dir" == "$scratch"/* ]] || return 0
+    sweep "$dir"
+    [[ -d "$dir" ]] || return 0
     local size
     size="$(size_of "$dir")"
     if ((size <= cap)); then
         report "$name" "$dir" "$size" "$cap"
-    elif (($# == 0)); then
-        if [[ -n "$dry" ]]; then
-            echo "nvme-cache-cap: $name $dir is $size bytes, over the cap of $cap; $name has no cleaner of its own, would remove the directory"
-        else
-            rm -rf -- "$dir"
-            echo "nvme-cache-cap: $name $dir was $size bytes, over the cap of $cap, and has no cleaner of its own; removed the directory"
-            took "$dir" "$size"
-        fi
-    elif [[ -n "$dry" ]]; then
-        echo "nvme-cache-cap: $name $dir is $size bytes, over the cap of $cap; would run $var=$dir $*"
-    elif ! command -v "$1" >/dev/null 2>&1; then
-        echo "nvme-cache-cap: $name $dir is $size bytes, over the cap of $cap, and $1 is not on PATH" >&2
-        status=1
-    else
-        env "$var=$dir" "$@" >/dev/null
-        echo "nvme-cache-cap: $name $dir was $size bytes, over the cap of $cap; ran $*; now $(size_of "$dir" 2>/dev/null || echo 0) bytes"
-        took "$dir" "$size"
+        return 0
     fi
+    echo "nvme-cache-cap: $name $dir is $size bytes, over the cap of $cap"
+    clean "$name" "$dir" "$size" "$@"
 }
 
-# huggingface_hub has no non-interactive cleaner: `hf cache delete` (huggingface-cli delete-cache)
-# asks which revisions to drop, so the pass removes the directory. Models come back from the hub.
-cap_cache huggingface HF_HOME "${HF_HOME:-$root/cache/huggingface}" "$hf_cap"
-# Playwright's `uninstall` lives in the per-project package, not on PATH here, and this shell sets
-# PLAYWRIGHT_SKIP_BROWSER_GC=1 (.bashrc) so nothing else trims it either: the pass removes the
-# directory and the next `playwright install` re-downloads the browsers a checkout asks for.
-cap_cache ms-playwright PLAYWRIGHT_BROWSERS_PATH "${PLAYWRIGHT_BROWSERS_PATH:-$root/cache/ms-playwright}" "$playwright_cap"
-# `mise cache clear` removes the directory; it holds version lists and release metadata only.
-cap_cache mise MISE_CACHE_DIR "${MISE_CACHE_DIR:-$root/cache/mise}" "$mise_cap" mise cache clear
-# @puppeteer/browsers has no size or age cleaner, only `uninstall` of a named build, so the pass
-# removes the directory; puppeteer re-downloads the build its package pins on the next run.
-cap_cache puppeteer PUPPETEER_CACHE_DIR "${PUPPETEER_CACHE_DIR:-$root/cache/puppeteer}" "$puppeteer_cap"
-# `pip cache purge` empties the wheel and http caches, which is the whole directory.
-cap_cache pip PIP_CACHE_DIR "${PIP_CACHE_DIR:-$scratch/cache/pip}" "$pip_cap" pip cache purge
-# `bun pm cache rm` removes the install cache directory, bunx packages included.
-cap_cache bun BUN_INSTALL_CACHE_DIR "${BUN_INSTALL_CACHE_DIR:-$root/cache/bun}" "$bun_cap" bun pm cache rm
+# Models come back from the hub; a process loading one maps its files.
+cap_cache huggingface "${HF_HOME:-$root/cache/huggingface}" "$hf_cap"
+# The next `playwright install` re-downloads the browsers a checkout asks for; a running browser's
+# exe is in here.
+cap_cache ms-playwright "${PLAYWRIGHT_BROWSERS_PATH:-$root/cache/ms-playwright}" "$playwright_cap"
+# Version lists and release metadata only.
+cap_cache mise "${MISE_CACHE_DIR:-$root/cache/mise}" "$mise_cap" mise
+# puppeteer re-downloads the build its package pins on the next run.
+cap_cache puppeteer "${PUPPETEER_CACHE_DIR:-$root/cache/puppeteer}" "$puppeteer_cap"
+# The wheel and http caches.
+cap_cache pip "${PIP_CACHE_DIR:-$scratch/cache/pip}" "$pip_cap" pip pip3
+# The install cache, bunx packages included. bun is not a reader here: 168 bun processes ran on
+# sami-devbox on 2026-11-16, nearly all running scripts that never open this cache, and one that
+# installs from it holds the files it links.
+cap_cache bun "${BUN_INSTALL_CACHE_DIR:-$root/cache/bun}" "$bun_cap"
 
 echo "nvme-cache-cap: reclaimed-bytes: $RECLAIMED"
 

@@ -2233,14 +2233,18 @@ def run_once(options: argparse.Namespace) -> int:
                 ),
                 "",
             )
+            # The machine's short name: on sami-devbox the full one is 54 characters of the 600,
+            # and with it the message lost the last cleared line it exists to carry. The report
+            # above names the full one.
+            short = host.split(".")[0]
             head = (
-                f"UNIT RUNS NOT COMPLETING on {host}, for the lead-box-health role: "
+                f"UNIT RUNS NOT COMPLETING on {short}, for the lead-box-health role: "
                 if opened
-                else f"{HEADLINE[first_kind]} on {host}, for the lead-box-health role: "
+                else f"{HEADLINE[first_kind]} on {short}, for the lead-box-health role: "
             )
             message = fit(head, items + [f"also {line}" for line in cleared], tail)
         else:
-            message = fit(f"UNIT HEALTH CLEARED on {host}: ", cleared, tail)
+            message = fit(f"UNIT HEALTH CLEARED on {host.split('.')[0]}: ", cleared, tail)
     prune_reports(options)
 
     # Sessions nobody will restart. Separate from everything above: its own reader, its own

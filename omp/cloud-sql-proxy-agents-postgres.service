@@ -14,8 +14,9 @@ After=network-online.target
 # Default Credentials, with roles/cloudsql.instanceUser: the DSN scripts/omp-session-dsn writes
 # names that IAM database user and carries no password, so no secret exists on the machine at all.
 #
-# scripts/agentbox relays this listener into every box at the same address and port
-# (LOOPBACK_SERVICE_PORTS), so the one DSN serves the host and every session in a box.
+# It serves host sessions only: scripts/agentbox relays this listener into no box and gives a box no
+# route to the database (dispatch://INFRA-1720/ask/16322992), so a box resumes a session only from
+# its transcript file.
 ExecStart=%h/.local/bin/cloud-sql-proxy --auto-iam-authn --address 127.0.0.1 --port 5432 theorem-agent-infra:us-west1:agents-postgres
 Restart=always
 RestartSec=5

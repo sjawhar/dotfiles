@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Size, description and link checks for agent skills (writing-agent-skills, step D).
+"""Size, description and link checks for agent skills (writing-agent-skills: "Limits", and step D of references/rewriting-a-skill.md).
 
 Usage: check_skill.py [--log FILE] <skill dir or SKILL.md>...
 Exit 1 when any skill fails a hard check. Standard library only.
@@ -14,7 +14,7 @@ from pathlib import Path
 HARD_BYTES = 20_000  # Claude Code keeps about this much of a skill after compaction
 TARGET_BYTES = 8_000  # Codex injects only the first 8,000 bytes
 HARD_DESC = 1_024  # Codex catalog cap; also the Agent Skills spec limit
-TARGET_DESC = 500
+TARGET_DESC = 300
 RULE_LINES = 40  # every-rule-obeyed rates collapse between 40 and 80 rules
 GROWTH_ALLOWANCE = 200  # a rewrite may grow this much and no more
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")

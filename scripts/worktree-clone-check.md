@@ -81,8 +81,10 @@ A child that is a **symlink** is not followed by default and is counted at the e
 point at `/mnt/nvme`, so they are not the disk this failure was about. `--follow-symlinks`
 includes them.
 
-The duplication number needs `numpy` (present in this box's `python3`). Without it the check
-still lists every clone and still exits 1; it says that the duplication was not measured.
+The duplication number needs `numpy`, which the script's own `# /// script` header gives it: it
+runs under `uv run --script`. The machine's `python3` has none (sami-devbox's mise Python, for
+one), so run by that python directly the check still lists every clone and still exits 1, and
+says that the duplication was not measured.
 
 ## What it reports, and what it does not decide
 
@@ -142,5 +144,5 @@ through a hardlink is not counted as duplicated bytes and that a `--no-hardlinks
 `scripts/`, not `devbox/`. `devbox/` holds the box's systemd units and the files `install.sh`
 links into `~/.config/systemd/user`; this has no unit, no timer and no state. `scripts/` is on
 `PATH` (`.bashrc`), so the check runs by name in any session, by hand or in a gate, the way
-`scripts/pr-gate` and `scripts/docs-pr-gate` do. Tests:
+`scripts/pr-gate` does. Tests:
 `scripts/tests/test_worktree_clone_check.py`.

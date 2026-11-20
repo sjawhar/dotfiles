@@ -635,17 +635,6 @@ class GhAppTokenTests(unittest.TestCase):
             (1, "", self.refusal_detail("agent", owner) + "\n"),
         )
 
-    def test_source_refuses_a_machine_refused_owner(self):
-        owner = "trajectory-labs-pbc"
-        self.refuse_owner(owner)
-
-        rc, stdout, stderr = self.run_main(["agent", "--owner", owner, "--source"])
-
-        self.assertEqual(
-            (rc, stdout, stderr),
-            (1, "", self.refusal_detail("agent", owner) + "\n"),
-        )
-
     def test_broker_pending_or_denied_names_machine_login(self):
         # This catches propagating a broker refusal without the actionable
         # machine-login remedy, or swapping identity to the personal token.

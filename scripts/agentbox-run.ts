@@ -7,7 +7,8 @@
 // the file afterwards — not `dotfiles-follow`, not a restart in place, which re-execs omp and
 // not the runner. So a fix here reaches a box only when that box is next created, and the
 // boxes that most need a fix are the oldest ones, which are the last to get it.
-// Measured 2026-11-08T03:22Z: `sessionIdFromArgv` (ecb30924) landed at 2026-11-07T00:43:39Z,
+// Measured 2026-11-08T03:22Z: `sessionIdFromArgv` (ecb30924; removed since by INFRA-1720, which
+// restarts only from omp's own report) landed at 2026-11-07T00:43:39Z,
 // and 48 of the 66 live boxes had started before it, the oldest on 11-05. One of them, the
 // librarian lane's, was launched with `--resume <id>` and still answered "this box has no
 // session yet" to a restart in-box at 02:46Z and a forced one at 03:13:33Z, because the code
@@ -18,20 +19,35 @@
 //   bun agentbox-run.ts omp [omp args…]
 //
 // Normally omp's exit is the box's exit (same code), and the launcher's
-// close_box runs. SIGUSR1 asks for a restart instead: the session id is read
-// from omp's open session file, omp is hung up (its ordinary graceful
-// teardown: draft saved, session_shutdown handlers run), and a fresh
-// `omp --resume <id>` is spawned through the shim on PATH - so the new
-// process picks up the current mise pin, plugin tree and config while the
-// container, its workspace and /tmp stay. The relaunch carries no message: omp
-// records a positional as a user message, so the `.` this used to send counted
-// as text the person typed in the transcript store. Without one the agent would
-// sit idle at the prompt, so the runner starts `agentbox move --wake`, which
-// sends one Envoy notice (a custom message) once the new process has
-// registered. The restart request is consumed
+// close_box runs. SIGUSR1 asks for a restart instead: the session is the one
+// the box's omp last reported in the session file (below), omp is hung up (its
+// ordinary graceful teardown: draft saved, session_shutdown handlers run), and
+// a fresh `omp --resume <that session's file>` is spawned through the shim on
+// PATH - so the new process picks up the current mise pin, plugin tree and
+// config while the container, its workspace and /tmp stay. The relaunch carries
+// no message: omp records a positional as a user message, so the `.` this used
+// to send counted as text the person typed in the transcript store. Without one
+// the agent would sit idle at the prompt, so the runner starts `agentbox move
+// --wake`, which sends one Envoy notice (a custom message) once the new process
+// has registered. The restart request is consumed
 // before the relaunch: a replacement that dies on startup ends the box
 // rather than looping. SIGHUP/SIGTERM (pane kill, docker stop) and SIGINT
 // mean "go away" as before - forwarded, never followed by a relaunch.
+//
+// The runner and the box's omp talk through three files in the box's runtime
+// directory, $XDG_RUNTIME_DIR, which the host sees at $RUN_BASE/<box>/run-user/
+// (dispatch://INFRA-1720):
+//   agentbox-session  written by omp (omp/extensions/session-env.ts): version=1,
+//                     its pid, the id of the session it runs and that session's
+//                     file. The only source of the session a restart resumes.
+//   agentbox-runner   written by this runner at start: version=1 and its pid. A
+//                     runner from before INFRA-1720 writes none, which is how the
+//                     host tells a box that answers in the next file.
+//   agentbox-restart  one line per restart request, appended in the signal handler
+//                     before omp is signalled: `<UTC time> started|refused|busy <text>
+//                     [request <id>]`. A caller leaves an empty file named by a fresh
+//                     id in agentbox-restart.d before it signals, and reads only the
+//                     line under its own id; every request waiting gets one.
 //
 // omp's own /restart cannot do this: it re-execs process.execPath, the
 // versioned mise install path, so it never sees a new pin.
@@ -55,6 +71,11 @@ const box = process.env.AGENTBOX_BOX ?? "unknown-box";
 // The machine a move's marker names as `from=`: the host's name, which a box has as AGENTBOX_HOST.
 const machine = process.env.AGENTBOX_HOST || os.hostname().split(".")[0];
 const logPath = `${process.env.HOME}/.cache/omp/agentbox/${box}.log`;
+const runtimeDir = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.()}`;
+const sessionReportPath = `${runtimeDir}/agentbox-session`;
+const versionPath = `${runtimeDir}/agentbox-runner`;
+const answerPath = `${runtimeDir}/agentbox-restart`;
+const requestDir = `${runtimeDir}/agentbox-restart.d`;
 
 function note(message: string, toStderr = false): void {
 	const line = `agentbox-run ${new Date().toISOString()} ${box}: ${message}\n`;
@@ -180,14 +201,6 @@ const SESSION_SOURCE_FLAGS: Record<string, true> = {
 	"--from-claude": true,
 	"--from-codex": true,
 };
-// A profile's transcripts live under ~/.omp/profiles/<name>/agent/sessions/, so the
-// optional segment is load-bearing: without it every `--profile` session in every box
-// was unrestartable, and the runner logged "this box has no session yet" instead.
-// A session resumed from a subagent transcript lives one or more directories deeper
-// (sessions/<cwd>/<parent>/<child>.jsonl), so any depth under sessions/ is accepted:
-// one level made every such session unrestartable (METARQ's box, 2026-11-07).
-const SESSION_FILE = /\/\.omp\/(?:profiles\/[^/]+\/)?agent\/sessions\/(?:[^/]+\/)+[0-9T:-]+Z_([0-9a-f-]{36})\.jsonl$/;
-const SESSION_UUID = /^[0-9a-f-]{36}$/;
 
 function flagConsumesValue(flag: string, next: string | undefined): boolean {
 	if (flag.startsWith("--") && flag.includes("=")) return false;
@@ -206,7 +219,9 @@ function flagConsumesValue(flag: string, next: string | undefined): boolean {
 	);
 }
 
-export function relaunchArgv(argv: string[], sid: string): string[] {
+// The launch flags, without any session source or prompt, then `--resume <session>`: a restart
+// passes the session's file, which names it in either session store.
+export function relaunchArgv(argv: string[], session: string): string[] {
 	const kept: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
@@ -225,7 +240,7 @@ export function relaunchArgv(argv: string[], sid: string): string[] {
 		kept.push(arg);
 		if (consumesNext) kept.push(argv[++i]);
 	}
-	return [...kept, "--resume", sid];
+	return [...kept, "--resume", session];
 }
 
 const RESTART_WAKE_NOTICE =
@@ -287,74 +302,87 @@ export function movedRefusal(argv: string[], home: string, machine: string): str
 	return undefined;
 }
 
-// The session to resume: the file omp holds open (omp exports OMP_SESSION_ID
-// to its children, not itself), else the newest session file of this box's
-// working directory - an idle session holds no writer after a resume or a
-// full-file rewrite. Every session started or resumed in the box lives under a
-// ~/.omp/agent/sessions/ directory omp names after the working directory, so the
-// name holds `-<box>-<repo…>` wherever the box tree is (`-boxes-<box>-<repo>` under
-// $HOME, `--mnt-nvme-<user>-agentbox-boxes-<box>-<repo>--` on the big disk, agentbox's
-// BOXES). A box name is never reused, so the newest file in a directory naming this
-// box is its current session.
-// Every sessions root this box could hold a transcript in: the default one, and one per
-// profile. A `--profile pbc` session writes under ~/.omp/profiles/pbc/agent/sessions/.
-function sessionRoots(): string[] {
-	const omp = `${process.env.HOME}/.omp`;
-	const roots = [`${omp}/agent/sessions`];
-	try {
-		for (const name of fs.readdirSync(`${omp}/profiles`)) roots.push(`${omp}/profiles/${name}/agent/sessions`);
-	} catch {}
-	return roots;
-}
+// The session a restart resumes is the one the box's omp reported in agentbox-session
+// (omp/extensions/session-env.ts) and nothing else (dispatch://INFRA-1720). The runner used to
+// guess: the transcript omp held open, else the newest one in a directory named after the box,
+// else its own `--resume` flag. Each guess was wrong for some session -- one idle after a resume
+// holds no writer, one working in a shared tree names its directory after that tree, one that
+// forked or switched since its launch makes the flag stale -- and a wrong guess resumed the wrong
+// session or none. A report written by an earlier omp (pid not the running one's) is refused like
+// a missing one, and so is a recorded file that is not a regular file now (a /move not yet
+// reported, or a transcript the import sweep deleted): refused before omp is hung up, so a
+// restart never stops a session it cannot resume.
+const SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const NOT_REPORTED = "the session did not report its id";
 
-// A resumed session carries its own id in the runner's argv, which needs no open file
-// descriptor and no directory naming. Used last, never first: argv is authoritative only
-// at launch, so a session that later forked or switched would make it stale.
-function sessionIdFromArgv(argv: string[]): string | undefined {
-	for (let i = 0; i < argv.length; i++) {
-		if (argv[i] !== "--resume") continue;
-		const value = argv[i + 1];
-		if (!value) return undefined;
-		return SESSION_UUID.test(value) ? value : SESSION_FILE.exec(value)?.[1];
-	}
-	return undefined;
-}
-
-function sessionId(pid: number, argv: string[]): string | undefined {
+function reportedSession(ompPid: number): { sid: string; file: string } | { refusal: string } {
+	let text: string;
 	try {
-		for (const name of fs.readdirSync(`/proc/${pid}/fd`)) {
-			try {
-				const m = SESSION_FILE.exec(fs.readlinkSync(`/proc/${pid}/fd/${name}`));
-				if (m) return m[1];
-			} catch {}
-		}
+		if (!fs.statSync(sessionReportPath).isFile()) return { refusal: `${NOT_REPORTED}: ${sessionReportPath} holds no report` };
+		text = fs.readFileSync(sessionReportPath, "utf8");
 	} catch {
-		return undefined; // omp is gone
+		return { refusal: `${NOT_REPORTED}: there is no ${sessionReportPath}` };
 	}
-	// A session whose working directory is a shared tree (~/src/...) names its directory
-	// after that path, so it holds no box marker and this scan cannot find it. That is why
-	// argv is the last resort rather than the only fallback.
-	const marker = `-${process.env.AGENTBOX_BOX}-`;
-	let newest: { path: string; mtimeMs: number } | undefined;
-	for (const root of sessionRoots()) {
-		let dirs: string[];
-		try {
-			dirs = fs.readdirSync(root);
-		} catch {
-			continue;
-		}
-		for (const dir of dirs) {
-			if (!dir.includes(marker)) continue;
-			for (const file of fs.readdirSync(`${root}/${dir}`)) {
-				if (!file.endsWith(".jsonl")) continue;
-				const p = `${root}/${dir}/${file}`;
-				const mtimeMs = fs.statSync(p).mtimeMs;
-				if (!newest || mtimeMs > newest.mtimeMs) newest = { path: p, mtimeMs };
-			}
-		}
+	const m = /^version=1\npid=(\d+)\nsession=([^\n]*)\nfile=([^\n]*)\n$/.exec(text);
+	if (!m || !SESSION_UUID.test(m[2]) || !path.isAbsolute(m[3])) {
+		return { refusal: `${NOT_REPORTED}: ${sessionReportPath} is not a version=1 report of a session id and an absolute file` };
 	}
-	// A newest file the pattern cannot name falls through to argv, as no file does.
-	return (newest && SESSION_FILE.exec(newest.path)?.[1]) || sessionIdFromArgv(argv);
+	if (Number(m[1]) !== ompPid) {
+		return { refusal: `${NOT_REPORTED}: ${sessionReportPath} was written by omp pid ${m[1]}, not by the omp running now (pid ${ompPid})` };
+	}
+	let isFile = false;
+	try {
+		isFile = fs.statSync(m[3]).isFile();
+	} catch {}
+	if (!isFile) return { refusal: `session ${m[2]}: its file ${m[3]} is not a regular file, so there is nothing to resume` };
+	return { sid: m[2], file: m[3] };
+}
+
+// One line per restart request, for `agentbox restart` on the host or in the box to read back.
+// Appended in the signal handler, before omp is signalled, so the line is there by the time
+// anything can see the restart happen. A request a caller left in requestDir (below) is answered
+// under its id, ` [request <id>]` at the end of the line, and its file removed: that id, not the
+// line's place in the file, is how a caller finds its own answer.
+function answer(word: "started" | "refused" | "busy", text: string, request?: string): void {
+	const tag = request ? ` [request ${request}]` : "";
+	note(`restart request: ${word}: ${text}${tag}`);
+	try {
+		fs.appendFileSync(answerPath, `${new Date().toISOString()} ${word} ${text.replace(/\n/g, " ")}${tag}\n`);
+	} catch (error) {
+		note(`could not append to ${answerPath}: ${error}`);
+	}
+	if (!request) return;
+	answeredRequests.add(request);
+	try {
+		fs.unlinkSync(`${requestDir}/${request}`);
+	} catch {}
+}
+
+// The restart requests waiting for an answer, oldest first. `agentbox restart` writes an empty file
+// named by a fresh id into requestDir, then signals; a signal carries no sender, and two sent
+// together can arrive as one, so on 2026-11-16 two callers could both read the first one's
+// `started` from its place in the file. Each is answered under its own id instead. A request older
+// than STALE_REQUEST_MS is one whose caller is gone (it waits 15 s, and withdraws its request when
+// it gives up, unless it was killed): it is deleted unanswered, so it never takes a live caller's turn.
+const answeredRequests = new Set<string>();
+export const STALE_REQUEST_MS = 60_000;
+export function pendingRequests(dir: string, answered: Set<string> = new Set(), now = Date.now()): string[] {
+	let names: string[] = [];
+	try {
+		names = fs.readdirSync(dir);
+	} catch {
+		return [];
+	}
+	return names
+		.filter((name) => {
+			if (!/^[A-Za-z0-9._-]{1,80}$/.test(name) || answered.has(name)) return false;
+			try {
+				if (now - fs.statSync(`${dir}/${name}`).mtimeMs <= STALE_REQUEST_MS) return true;
+				fs.unlinkSync(`${dir}/${name}`);
+			} catch {}
+			return false;
+		})
+		.sort();
 }
 
 // The Dispatch and Envoy environment of a host session, for the omp of a box: the pi-envoy
@@ -415,7 +443,10 @@ function appendStderr(chunk: Uint8Array): void {
 	}
 }
 
-function spawnOmp(argv: string[]) {
+/** The omp the runner runs: its stdin and stdout are the pane's, its stderr a pipe it tees. */
+type OmpProcess = Bun.Subprocess<"inherit", "inherit", "pipe">;
+
+function spawnOmp(argv: string[]): OmpProcess {
 	const child = Bun.spawn(argv, {
 		stdio: ["inherit", "inherit", "pipe"],
 		env: { ...process.env, ...dispatchEnv(argv, process.env), AGENTBOX_RUNNER_PID: String(process.pid) },
@@ -520,51 +551,53 @@ if (import.meta.main) {
 		process.exit(3);
 	}
 
-	let child = spawnOmp(launchArgv);
+	// The signal handlers come first, before the version file and before omp: the host signals a
+	// box once `agentbox-runner` names its runner, and a SIGUSR1 that came before its handler was
+	// in place took the signal's default action, which ended the runner and the box with it (seen
+	// under load on sami-devbox, 2026-11-16, as a request that never got its answer).
+	let child: OmpProcess | undefined;
 	let startedAt = Date.now();
-	note(`omp started (pid ${child.pid}): ${launchArgv.join(" ")}`);
-	const oomBias = setInterval(() => {
-		try {
-			oomBiasPass(process.pid, child.pid);
-		} catch (error) {
-			note(`oom bias pass failed: ${error}`);
-		}
-	}, OOM_BIAS_INTERVAL_MS);
-	oomBias.unref();
-	let relaunch: string[] | undefined;
+	let relaunch: { argv: string[]; sid: string } | undefined;
 	// The session a relaunch marker was written for, so the box's own shutdown can remove it.
 	let markedSid: string | undefined;
 	let restarting = false;
 	let shuttingDown = false;
 
+	// Every request gets its line in the answer file before this handler returns: the oldest
+	// waiting request is this signal's, and every other one waiting is answered too, busy when this
+	// one starts a restart and with the same refusal when it does not.
 	process.on("SIGUSR1", () => {
-		if (shuttingDown || restarting) return;
+		const [request, ...others] = pendingRequests(requestDir, answeredRequests);
+		const reply = (word: "started" | "refused" | "busy", text: string): void => {
+			answer(word, text, request);
+			for (const other of others) {
+				if (word === "started") answer("busy", "another restart request came first; this one is ignored", other);
+				else answer(word, text, other);
+			}
+		};
+		if (shuttingDown) return reply("refused", "the box is shutting down");
+		if (restarting) return reply("busy", "a restart is already in progress; this signal is ignored");
+		if (!child) return reply("refused", "omp has not started yet; omp left as it is");
+		const running = child;
+		const session = reportedSession(running.pid);
+		if ("refusal" in session) return reply("refused", `${session.refusal}; omp left running`);
+		const argv = relaunchArgv(launchArgv, session.file);
+		const moved = movedRefusal(argv, home, machine);
+		if (moved) return reply("refused", moved);
 		restarting = true;
-		const sid = sessionId(child.pid, launchArgv);
-		if (!sid) {
-			note("restart requested, but this box has no session yet; omp left running, restart not performed");
-			restarting = false;
-			return;
-		}
-		const refused = movedRefusal(relaunchArgv(launchArgv, sid), home, machine);
-		if (refused) {
-			note(`restart refused, omp left running: ${refused}`);
-			restarting = false;
-			return;
-		}
-		relaunch = relaunchArgv(launchArgv, sid);
+		relaunch = { argv, sid: session.sid };
 		// Before the hang-up, never after it: the gap this marker covers starts here.
-		markedSid = sid;
-		markRestarting(sid);
-		note(`restart requested: hanging up omp (pid ${child.pid}) to resume session ${sid}`);
-		child.kill("SIGHUP");
+		markedSid = session.sid;
+		markRestarting(session.sid);
+		reply("started", `session ${session.sid}: hanging up omp (pid ${running.pid}) to resume ${session.file}`);
+		running.kill("SIGHUP");
 	});
 	for (const sig of ["SIGHUP", "SIGTERM"] as const) {
 		process.on(sig, () => {
 			shuttingDown = true;
 			note(`${sig} received: shutting omp down, no relaunch`);
 			relaunch = undefined;
-			child.kill(sig);
+			child?.kill(sig);
 			// The box is going away, so no relaunch follows and a marker from a relaunch that
 			// was already in flight must not outlive it.
 			if (markedSid) clearRestarting(markedSid);
@@ -578,19 +611,40 @@ if (import.meta.main) {
 		relaunch = undefined;
 	});
 
+	// Written whole before omp starts, so the host never reads half of it.
+	try {
+		fs.writeFileSync(`${versionPath}.${process.pid}.tmp`, `version=1\npid=${process.pid}\n`);
+		fs.renameSync(`${versionPath}.${process.pid}.tmp`, versionPath);
+	} catch (error) {
+		note(`could not write ${versionPath}: ${error}`);
+	}
+	let running = spawnOmp(launchArgv);
+	child = running;
+	startedAt = Date.now();
+	note(`omp started (pid ${running.pid}): ${launchArgv.join(" ")}`);
+	const oomBias = setInterval(() => {
+		try {
+			oomBiasPass(process.pid, running.pid);
+		} catch (error) {
+			note(`oom bias pass failed: ${error}`);
+		}
+	}, OOM_BIAS_INTERVAL_MS);
+	oomBias.unref();
+
 	for (;;) {
-		const code = await child.exited;
-		const ran = `after ${Math.round((Date.now() - startedAt) / 1000)}s (exit code ${code ?? "none"}, signal ${child.signalCode ?? "none"})`;
+		const code = await running.exited;
+		const ran = `after ${Math.round((Date.now() - startedAt) / 1000)}s (exit code ${code ?? "none"}, signal ${running.signalCode ?? "none"})`;
 		if (shuttingDown || relaunch === undefined) {
-			note(`omp (pid ${child.pid}) exited ${ran}; the box ends`, true);
+			note(`omp (pid ${running.pid}) exited ${ran}; the box ends`, true);
 			process.exit(code ?? 1);
 		}
-		const argv = relaunch;
+		const next = relaunch;
 		relaunch = undefined;
 		restarting = false;
-		child = spawnOmp(argv);
+		running = spawnOmp(next.argv);
+		child = running;
 		startedAt = Date.now();
-		note(`omp exited ${ran} for the restart; relaunched (pid ${child.pid}): ${argv.join(" ")}`);
-		wakeOverEnvoy(argv[argv.length - 1]);
+		note(`omp exited ${ran} for the restart; relaunched (pid ${running.pid}): ${next.argv.join(" ")}`);
+		wakeOverEnvoy(next.sid);
 	}
 }

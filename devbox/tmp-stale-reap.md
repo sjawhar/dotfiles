@@ -87,8 +87,14 @@ when **all** of these hold, and survives whenever any one of them is merely unsu
 2. **It is a plain file or a plain directory.** Never a socket, fifo, device or symlink.
 3. **Its name is not on the keep list** (below).
 4. **No process holds it** — not as `cwd`, `exe` or `root`, not an open fd, not a mapped file,
-   and not named in `TMPDIR` or `AGENT_SESSION_SCRATCH`. One pass over `/proc` answers this for
-   every candidate at once; never an `lsof` per candidate, which walks the whole tree.
+   not a command-line argument, and not named in `TMPDIR` or `AGENT_SESSION_SCRATCH`. One pass over
+   `/proc` answers this for every candidate at once; never an `lsof` per candidate, which walks the
+   whole tree. The pass is `devbox/proc-holds.sh`, which `devbox/nvme-cache-cap` uses too. It gives
+   find and grep the `/proc` entries on stdin: until 2026-11-16 they went on one command line, and at
+   22,765 processes on sami-devbox that command line was over the 2 MB limit, so the fd, cwd, exe and
+   root read failed with "Argument list too long" (exit 126), which this script took as a finished
+   scan that found no holder. A scan that does not list this script's own process now counts as
+   unfinished, and the pass removes nothing.
 5. **Nothing in it, at any depth, is a unix socket.** A daemon may still be serving it.
 6. **Nothing in it, at any depth, belongs to another user.** A container that runs as root
    writes root-owned files into a directory this user made: `/tmp/r22651/.coq-native` on
@@ -144,7 +150,7 @@ the test below gets a window of seconds.
 ## What it will never touch
 
 - **Anything a live process holds** — see rule 4. Not its cwd, not an open fd, not a mapped
-  shared object, not a `TMPDIR` or `AGENT_SESSION_SCRATCH` that names it.
+  shared object, not a command-line argument, not a `TMPDIR` or `AGENT_SESSION_SCRATCH` that names it.
 - **Anything owned by another user.** `root`'s `systemd-private-*` trees, `dd-agent`'s files,
   `trivy`'s `/tmp/trivy-*`: never candidates, whatever their age.
 - **Any entry that is not a plain file or directory**: a socket, a fifo, a device, a symlink.
@@ -246,7 +252,7 @@ A pass now ends itself:
 |---|---|
 | Deadline | `TMP_REAP_RUN_SECONDS` after the script starts. The service sets 1680 (28 min), 2 min inside its 30-min `TimeoutStartSec`, which stays as the backstop. A hand run has no deadline unless it sets one |
 | Checked | before each top-level entry of the listing, each candidate, each walk and each removal |
-| Every disk step | the listing, the three `/proc` reads, each tree walk, each `rm`, the cursor write and `df` run in a child under `timeout -s KILL` with the time left, or the step's own limit when that is shorter. The run reads the child's answer through a pipe with `read -t` of that time plus 2 s and never waits on the child itself: a `stat` or an `unlink` stuck on a stalled disk sleeps where no signal reaches it, and `timeout` then waits on it too. Such a child is left behind, and the unit's cgroup takes it when the run exits |
+| Every disk step | the listing, the four `/proc` reads, each tree walk, each `rm`, the cursor write and `df` run in a child under `timeout -s KILL` with the time left, or the step's own limit when that is shorter. The run reads the child's answer through a pipe with `read -t` of that time plus 2 s and never waits on the child itself: a `stat` or an `unlink` stuck on a stalled disk sleeps where no signal reaches it, and `timeout` then waits on it too. Such a child is left behind, and the unit's cgroup takes it when the run exits |
 | At the deadline | one line, the cursor saved, exit 0 (1 only when a removal really failed, as before): `tmp-stale-reap: /tmp: stopped at its deadline after N removals, M entries checked; next pass resumes at /tmp/<name>`. M counts the candidates pass 3 finished, kept or removed |
 | The cursor | `${XDG_STATE_HOME:-~/.local/state}/tmp-stale-reap/cursor`: the first candidate the pass did not finish. Pass 3 takes the candidates in byte order of their names, starting at the cursor and wrapping round at the end, so every candidate gets its turn within one full turn of the order, whatever the deadline cuts. A pass that gets through all of them clears it. Only `--apply` moves it |
 | A cut removal | what is left is renamed to `/tmp/.tmp-stale-reap-removing.<time>.<pid>` (10 s limit), which the next pass removes first without judging it again: this pass already proved it dead by every rule. The cursor moves past it |
@@ -261,7 +267,9 @@ first on `PATH` playing the stalled disk and a scratch `/proc`: a walk that stal
 at its deadline with the line and exit 0, and the next pass resumes at that entry and wraps round
 to the one before it; a removal that stalls leaves its rest renamed and the next pass removes it
 first; a child no signal ends does not hold the pass past its deadline; a stalled listing stops
-before any entry and keeps the cursor; and every keep of the proof above still holds.
+before any entry and keeps the cursor; every keep of the proof above still holds, a command-line
+argument among them; and a scratch `/proc` too big for one argument list (8,000 processes at a long
+path) still keeps the entry its last process holds, where the old single `find` removed it.
 
 ## Running it by hand
 

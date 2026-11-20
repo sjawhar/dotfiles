@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type attentionQueue from "../attention-queue";
@@ -16,6 +16,23 @@ type Exec = (command: string, args: string[], verb: string) => Promise<Result>;
 const TMUX_ATTENTION = path.resolve(import.meta.dir, "../../../scripts/tmux-attention");
 const PANE = "%42";
 const SERVER = "4242";
+
+/** Resolves once a `tmux-attention drop` runs in a session other than SESSION's (its setsid ran). */
+async function untilDetached(session: number): Promise<void> {
+	const deadline = Date.now() + 30_000;
+	while (Date.now() < deadline) {
+		for (const pid of readdirSync("/proc").filter((name) => /^\d+$/.test(name))) {
+			try {
+				const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+				if (!argv.includes(TMUX_ATTENTION) || !argv.includes("drop")) continue;
+				const sid = Number(readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").pop()!.split(" ")[3]);
+				if (sid !== session) return;
+			} catch {}
+		}
+		await Bun.sleep(20);
+	}
+	throw new Error("the drop never ran in a session of its own");
+}
 
 // The extension reads TMUX, TMUX_PANE and TMUX_ATTENTION_SCRIPT once, when the
 // module loads, and a subagent inherits its parent's. A static import is
@@ -182,6 +199,12 @@ describe("attention-queue", () => {
 		try {
 			await once(holder.stdout, "data");
 			await once(omp.stdout!, "data");
+			// omp gives a session_shutdown handler 2 s before it exits and its pane closes, and the
+			// drop's `setsid` has run long before that. This driver says "shut down" as soon as the
+			// call is spawned, so under load the hangup below reached the call before setsid did and
+			// killed it (1 of 6 suites run at once on sami-devbox): wait for the drop to be in a
+			// session of its own first, as it always is by the time omp's pane closes.
+			await untilDetached(omp.pid!);
 			// The pane closes: its process group gets the hangup, the drop's own call included.
 			process.kill(-omp.pid!, "SIGHUP");
 			await once(omp, "exit");

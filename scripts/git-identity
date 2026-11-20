@@ -14,16 +14,30 @@
 #   git-identity tl|trajectory   use sami@trajectorylabs.net for this repo
 #   git-identity cm|cybermonk    use sami@thecybermonk.com for this repo
 #   git-identity th|theorem      use sami@theorem.dev for this repo
+#   git-identity nr|noreply      use sjawhar@users.noreply.github.com for this repo
 #
 # sjawhar/legion (sami@thecybermonk.com) and every theorem-labs repository
 # (sami@theorem.dev) need none of these: they get their identity by rule in every
 # clone (.gitconfig matches the remote URL, .jjconfig.toml the jj checkouts' paths).
+#
+# noreply is opt-in, for a checkout whose commits must carry no personal address:
+# a fork whose own forbidden-term list holds the default address (knives'
+# oh-my-pi list does), so a commit made with it is refused at a release cut.
+# Set it in your own workspace of such a repo before you commit there. It is
+# scoped to that workspace, never the repo, because knives' workspaces of one
+# fork share the jj repo config and the git config of its canonical checkout,
+# so a repo-scoped change would re-identify every other session's workspace:
+# jj is set with --workspace; git with --worktree only where
+# extensions.worktreeConfig keeps that per worktree, else (a linked worktree
+# sharing its config) git is left alone and plain git commits there keep the
+# repo's identity, so commit with jj.
 set -euo pipefail
 
 NAME="Sami Jawhar"
 TL_EMAIL="sami@trajectorylabs.net"
 CM_EMAIL="sami@thecybermonk.com"
 TH_EMAIL="sami@theorem.dev"
+NR_EMAIL="sjawhar@users.noreply.github.com"
 
 git rev-parse --git-dir >/dev/null 2>&1 || { echo "not a git repo" >&2; exit 1; }
 in_jj() { jj root >/dev/null 2>&1; }
@@ -35,7 +49,11 @@ show() {
     if in_jj; then
         j=$(jj config get user.email 2>/dev/null || echo "(unset)")
         echo "jj:  ${j}"
-        [ "$g" = "$j" ] || echo "MISMATCH — jj will drop signatures on rewrite. Run: git-identity tl|cm|th" >&2
+        if [ "$g" != "$j" ] && [ "$j" = "$NR_EMAIL" ]; then
+            echo "note: jj uses the noreply identity in this workspace only; commit with jj here, since plain git commits keep git's identity" >&2
+        elif [ "$g" != "$j" ]; then
+            echo "MISMATCH — jj will drop signatures on rewrite. Run: git-identity tl|cm|th|nr" >&2
+        fi
     else
         echo "jj:  (not a jj repo)"
     fi
@@ -46,22 +64,37 @@ case "${1-}" in
     tl | trajectory | trajectorylabs) EMAIL="$TL_EMAIL" ;;
     cm | cybermonk | thecybermonk) EMAIL="$CM_EMAIL" ;;
     th | theorem) EMAIL="$TH_EMAIL" ;;
+    nr | noreply) EMAIL="$NR_EMAIL" ;;
     -h | --help)
-        sed -n '2,20p' "$0" | sed 's/^# \?//'
+        sed -n '2,34p' "$0" | sed 's/^# \?//'
         exit 0
         ;;
     *)
-        echo "unknown identity: $1 (want tl, cm or th)" >&2
+        echo "unknown identity: $1 (want tl, cm, th or nr)" >&2
         exit 1
         ;;
 esac
 
 if [ -n "${EMAIL-}" ]; then
-    git config --local user.email "$EMAIL"
-    git config --local user.name "$NAME"
+    if [ "$EMAIL" = "$NR_EMAIL" ]; then
+        JJ_SCOPE=--workspace
+        if [ "$(git config --bool extensions.worktreeConfig 2>/dev/null)" = true ]; then
+            git config --worktree user.email "$EMAIL"
+            git config --worktree user.name "$NAME"
+        elif [ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]; then
+            echo "note: this git worktree shares its config with $(git rev-parse --git-common-dir); git's identity is left as it is. Commit with jj here." >&2
+        else
+            git config --local user.email "$EMAIL"
+            git config --local user.name "$NAME"
+        fi
+    else
+        JJ_SCOPE=--repo
+        git config --local user.email "$EMAIL"
+        git config --local user.name "$NAME"
+    fi
     if in_jj; then
-        jj config set --repo user.email "$EMAIL"
-        jj config set --repo user.name "$NAME"
+        jj config set "$JJ_SCOPE" user.email "$EMAIL"
+        jj config set "$JJ_SCOPE" user.name "$NAME"
 
         # Config only affects future commits, so the change already in the
         # working copy keeps the old author — leaving it mismatched, which is

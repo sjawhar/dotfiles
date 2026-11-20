@@ -8,6 +8,7 @@ and stays as it was.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 import unittest
@@ -47,6 +48,14 @@ class EnsureLink(unittest.TestCase):
     def test_repoints_a_link_to_somewhere_else(self) -> None:
         self.dst.symlink_to(self.dst.parent / "elsewhere")
         self.assert_linked(self.ensure_link())
+
+    def test_leaves_a_correct_link_unchanged(self) -> None:
+        self.dst.symlink_to(self.src)
+        before = os.lstat(self.dst)
+        self.assert_linked(self.ensure_link())
+        after = os.lstat(self.dst)
+        self.assertEqual(after.st_ino, before.st_ino)
+        self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
 
     def test_relinks_a_plain_file_identical_to_the_source(self) -> None:
         self.dst.write_text("true")

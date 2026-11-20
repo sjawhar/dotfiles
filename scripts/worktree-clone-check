@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["numpy>=2"]
+# ///
 """worktree-clone-check: find a worktree that is really a clone, and say how many bytes that cost.
 
 Under a worktrees root, every child is supposed to be a git **worktree**: its `.git` is a small
@@ -32,7 +36,7 @@ optional locks off. Exit 1 when it finds a clone, so it can be used as a gate; 0
 
 Why scripts/ and not devbox/: devbox/ holds the box's systemd units and the files its install.sh
 links into place; this has no unit and no state. scripts/ is on PATH (.bashrc), so the check runs
-by name in any session, by hand or in a gate, the way scripts/pr-gate and scripts/docs-pr-gate do.
+by name in any session, by hand or in a gate, the way scripts/pr-gate does.
 """
 
 from __future__ import annotations

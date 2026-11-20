@@ -1,6 +1,6 @@
 ---
 name: apify
-description: Use when scraping websites or listing sites, extracting structured data in bulk, running prebuilt scrapers (Apify Actors), or researching sites that block plain page fetches. Use it whenever apartment hunting, Airbnb or marketplace listings, anti-bot or JS-heavy sites, or batch data collection need a scraping platform, not browser clicks.
+description: "Use when scraping websites or listing sites, extracting structured data in bulk, running prebuilt scrapers (Apify Actors), or researching sites that block plain page fetches: apartment hunting, Airbnb or marketplace listings, anti-bot or JS-heavy sites, batch data collection."
 mcp:
   apify:
     command: secrets
@@ -19,12 +19,8 @@ Use an Apify Actor, not one-off browser scraping, when any one of these holds: t
 4. Read the results: `get-dataset-items` with the run's `datasetId`.
 5. Keep the fields the user asked for (for example price, location, URL), drop duplicate items, and give the user a table sorted by their main criterion.
 
-Without an Actor:
-
-- One page at a known URL: `apify--web-fetch`.
-- A web search by query: `apify--rag-web-browser`.
+With no Actor for the site, run a general one with `call-actor`: `apify/web-fetch` for one page at a known URL, `apify/rag-web-browser` for a web search by query.
 
 ## Calling the tools
 
-- The `apify` MCP server supplies these tools; its config above gets `APIFY_TOKEN` from `secrets`.
-- In omp, write JSON arguments to `xd://mcp__apify_<tool>`. To get `<tool>`, remove an `apify--` prefix and change dashes to underscores: `search-actors` is `xd://mcp__apify_search_actors`, and `apify--web-fetch` is `xd://mcp__apify_web_fetch`. Read that path first for the argument schema.
+In omp, write JSON arguments to `xd://mcp__apify_<tool>`, with the tool's dashes changed to underscores: `search-actors` is `xd://mcp__apify_search_actors`. Read that path first for the argument schema.

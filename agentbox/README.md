@@ -13,12 +13,15 @@ agentbox runs each agent session in its own disposable [Sysbox](https://github.c
   bind-mounted.
 - Root in the box is an unprivileged user on the host, so `sudo apt-get install`, an inner Docker daemon and
   nested containers work without host privileges.
-- Each box has its own cpu, memory, pids and disk limit. When the session ends, the box and its directory go.
-  A clone with uncommitted changes, or commits that no remote has, keeps its directory, and the pane names it.
+- Each box has its own cpu, memory, pids and disk limit. When the session ends, everything in the box is deleted:
+  its clones (uncommitted changes and commits no remote has too), its home, `/tmp` and its inner Docker store.
+  Push what you want kept before the session ends. A box whose launcher died is deleted later by the collector
+  that every `agentbox new` starts.
+- The box gets no route to omp's session database, so a box resumes a session only from its transcript file.
 
 This is part of Sami's dotfiles, not a stand-alone tool. It expects a host set up by this repository's
 `install.sh`. (`devbox/gce-host.sh` is for Sami's own Google Cloud devbox only: it needs its disks and must run
-before `install.sh`.) The details and the reasons for each choice are in
+before `install.sh`.) The traps to know before you change a box are in
 [AGENTS.md](AGENTS.md).
 
 ## What the host must have
@@ -54,10 +57,27 @@ On any other machine, the same steps by hand (version and sha256 from the
 [v0.7.1 release](https://github.com/nestybox/sysbox/releases/tag/v0.7.1)):
 
 ```bash
-curl -fsSLO https://github.com/nestybox/sysbox/releases/download/v0.7.1/sysbox-ce_0.7.1.linux_amd64.deb
-echo "9d6d5484f980d0a17f86c492c1262015c2afb66280bdb97215b79fde6a0261c5  sysbox-ce_0.7.1.linux_amd64.deb" | sha256sum -c -
-sudo apt-get install -y ./sysbox-ce_0.7.1.linux_amd64.deb
+curl -fsSLO https://github.com/nestybox/sysbox/releases/download/v0.7.1/sysbox-ce_0.7.1.linux_amd64.deb &&
+echo "9d6d5484f980d0a17f86c492c1262015c2afb66280bdb97215b79fde6a0261c5  sysbox-ce_0.7.1.linux_amd64.deb" | sha256sum -c - &&
+if sysbox_state="$(dpkg-query -W -f='${db:Status-Want} ${db:Status-Status}' sysbox-ce 2>/dev/null)" &&
+   { [ "${sysbox_state##* }" != not-installed ] || [ "${sysbox_state%% *}" = hold ]; }; then
+  echo "dpkg already knows sysbox-ce: $(dpkg-query -W -f='${Status} ${Version}' sysbox-ce | sed 's/ $//'). These steps are for a machine where dpkg does not know sysbox-ce and nothing holds it; run 'sudo bash ~/.dotfiles/installers/sysbox.sh' from a dotfiles checkout instead." >&2
+  false
+fi &&
+sudo apt-get satisfy -y --no-install-recommends "$(dpkg-deb --field sysbox-ce_0.7.1.linux_amd64.deb Pre-Depends)" "$(dpkg-deb --field sysbox-ce_0.7.1.linux_amd64.deb Depends)" &&
+sudo dpkg -i ./sysbox-ce_0.7.1.linux_amd64.deb
 ```
+
+Both ways install the package's dependencies with apt and the checked file itself with `dpkg -i`:
+apt given the `.deb` file can install a configured source's copy of the same version instead
+([Debian bug #1058934](https://bugs.debian.org/1058934)). The 0.7.1 file has both a `Pre-Depends`
+and a `Depends` field; for a file that lacks one, leave that argument out, because `apt-get satisfy`
+refuses an empty one. These steps are for a machine where dpkg does not know sysbox-ce and nothing
+holds it. The block after the `sha256sum` check reads dpkg's want and status in one `dpkg-query`
+call, and prints them and stops, installing nothing, in two cases: dpkg knows sysbox-ce in a state
+other than `not-installed` (installed, unpacked, half-configured, or configuration files only), or
+the package is on hold, which includes a hold with nothing installed (`hold ok not-installed`). Run
+`installers/sysbox.sh` there, which handles those states.
 
 You do not edit Docker's configuration by hand, and `sysbox-runc` need not be the default runtime:
 `scripts/agentbox` passes `--runtime sysbox-runc` itself. Check it:
@@ -112,7 +132,7 @@ or prints credential values.
 # Change limits, set variables (a bare NAME passes your value):
 ~/.dotfiles/scripts/agentbox new -e MY_VAR=1 --memory 32g --cpus 4 --disk 64g my-repo -- omp
 
-~/.dotfiles/scripts/agentbox ls                       # running boxes, then box trees kept for unpushed work
+~/.dotfiles/scripts/agentbox ls                       # running boxes, then box trees with no box running
 ~/.dotfiles/scripts/agentbox sh <box|session-id>      # a shell in a running box
 ~/.dotfiles/scripts/agentbox grow <box|session-id> 256g # grow the home filesystem online, without restarting
 ~/.dotfiles/scripts/agentbox restart <box|session-id> # ask the session to relaunch omp in place at a safe point;
@@ -120,8 +140,8 @@ or prints credential values.
 ~/.dotfiles/scripts/agentbox move --plan              # which host sessions could move into a box
 ```
 
-`scripts/agentbox` with no argument prints its usage (exit 2); the usage stops part way, so read the comment block at the top of `scripts/agentbox` and `agentbox/AGENTS.md`
-for the rest (`move <session-id>… | --all`, `move --to <machine>`, `doctor --here`).
+`scripts/agentbox` with no argument prints its usage (exit 2); the usage stops part way, so read the comment block at the top of `scripts/agentbox`
+and `scripts/agentbox move --help` for the rest (`move <session-id>… | --all`, `move --to <machine>`, `doctor --here`).
 Memory defaults to one twentieth of host memory, with a 24 GiB minimum. CPU defaults to 8 cores.
 The sparse disk defaults to 128 GiB on sami-devbox and 32 GiB on other hosts.
 Creating an image requires at least 500 GiB free on its host filesystem. Sparse capacity reserves no space.

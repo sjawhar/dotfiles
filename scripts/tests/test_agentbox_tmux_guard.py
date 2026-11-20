@@ -247,8 +247,9 @@ class TmuxGuard(unittest.TestCase):
                 out.unlink(missing_ok=True)
                 done = self.box(*args, f"{write}; sleep 5")
                 self.assertEqual(done.returncode, 0, done.stderr)
+                # The shell's `>` makes the file before printenv writes to it: wait for the line itself.
                 for _ in range(100):
-                    if out.exists():
+                    if out.exists() and out.stat().st_size:
                         break
                     time.sleep(0.1)
                 self.assertTrue(out.exists(), "the command never ran")
@@ -265,8 +266,9 @@ class TmuxGuard(unittest.TestCase):
                 out.unlink(missing_ok=True)
                 done = self.box("run-shell", "-b", "-t", self.box_pane, shape.format(out=out))
                 self.assertEqual(done.returncode, 0, done.stderr)
+                # The shell's `>` makes the file before printenv writes to it: wait for the line itself.
                 for _ in range(100):
-                    if out.exists():
+                    if out.exists() and out.stat().st_size:
                         break
                     time.sleep(0.1)
                 self.assertTrue(out.exists(), "the command never ran")
@@ -283,8 +285,9 @@ class TmuxGuard(unittest.TestCase):
         out.unlink(missing_ok=True)
         done = self.box("run-shell", "-b", "-t", self.box_pane, command, **extra)
         self.assertEqual(done.returncode, 0, done.stderr)
+        # The shell's `>` makes the file before the command writes to it: wait for the output itself.
         for _ in range(100):
-            if out.exists():
+            if out.exists() and out.stat().st_size:
                 break
             time.sleep(0.1)
         self.assertTrue(out.exists(), f"the command never ran: {done.stderr}")
@@ -348,8 +351,9 @@ class TmuxGuard(unittest.TestCase):
                         f'printf "%s" queued > {out}',
                         ";", "pipe-pane", "-t", "%999", "cat > /dev/null")
         self.assertNotEqual(done.returncode, 0, "the second command was meant to fail")
+        # The shell's `>` makes the file before printf writes to it: wait for the output itself.
         for _ in range(100):
-            if out.exists():
+            if out.exists() and out.stat().st_size:
                 break
             time.sleep(0.1)
         self.assertTrue(out.exists(), "the queued command's file was taken from under it")

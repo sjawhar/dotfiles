@@ -30,6 +30,15 @@ program="$(PATH="$lookup" command -v "$4")"
 PATH="$lookup" exec "$program" "${@:5}"
 """
 
+# mise.toml's [env] `_.path` puts the dotfiles shims dir first in every PATH mise builds, ahead of the
+# tool dir `mise exec` adds (@SHIMS@ is replaced with that dir).
+MISE_EXEC_SHIMS_FIRST = r"""
+[[ "$1" == exec && "$3" == -- ]] || { echo "unexpected mise $*" >&2; exit 99; }
+lookup="@SHIMS@:$MISE_DATA_DIR/installs/npm-basedpyright/1.0.0/bin:$PATH"
+program="$(PATH="$lookup" command -v "$4")"
+PATH="$lookup" exec "$program" "${@:5}"
+"""
+
 
 def write_stub(directory: Path, name: str, body: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
@@ -68,6 +77,33 @@ class PyrightShims(unittest.TestCase):
                             "HOME": str(self.root),
                             "MISE_DATA_DIR": str(self.mise_data),
                             "PATH": path,
+                        },
+                        check=False,
+                        timeout=LOOP_TIMEOUT,
+                    )
+                except subprocess.TimeoutExpired:
+                    self.fail(
+                        f"shims/{shim} was still running after {LOOP_TIMEOUT}s: mise execs it again"
+                    )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "RELEASE basedpyright --version\n")
+
+    def test_mises_shims_first_path_still_reaches_the_release(self) -> None:
+        # From 2026-11-02 mise.toml's `_.path` put shims/ ahead of the tool dir in the PATH `mise exec` builds, so
+        # it found shims/basedpyright again, and shim and mise exec'd each other in one process until killed.
+        write_stub(self.stub_dir, "mise", MISE_EXEC_SHIMS_FIRST.replace("@SHIMS@", str(SHIMS)))
+        for shim in ("basedpyright", "pyright"):
+            with self.subTest(shim=shim):
+                try:
+                    result = subprocess.run(
+                        [str(SHIMS / shim), "--version"],
+                        capture_output=True,
+                        text=True,
+                        cwd=self.work,
+                        env={
+                            "HOME": str(self.root),
+                            "MISE_DATA_DIR": str(self.mise_data),
+                            "PATH": f"{self.stub_dir}:{SHIMS}:/usr/bin:/bin",
                         },
                         check=False,
                         timeout=LOOP_TIMEOUT,

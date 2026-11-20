@@ -1,13 +1,11 @@
 [Unit]
 Description=SSH tunnel carrying forward's channels to the %i pair
-# One per pair whose laptop daemon listens on loopback: laptop/oryx-tunnel-setup
-# enables it beside forward-daemon@oryx, and the legacy devbox pairs
-# (forward/migration.md) used it the same way. The forwards live in Host
-# %i-tunnel (~/.ssh/config for oryx, ~/.ssh/config.local for a devbox), which
-# signs in with its own key so a
-# reconnect never waits on 1Password. It stops and starts with the graphical
-# session, as forward-daemon@.service does. StartLimitIntervalSec=0: systemd
-# never stops restarting it, however often the link drops.
+# Legacy devbox pairs only. One per pair whose laptop daemon listens on
+# loopback. The forwards live in Host %i-tunnel (~/.ssh/config.local for a
+# devbox), which signs in with its own key so a reconnect never waits on
+# 1Password. It stops and starts with the graphical session, as
+# forward-daemon@.service does. StartLimitIntervalSec=0: systemd never stops
+# restarting it, however often the link drops.
 After=graphical-session.target
 PartOf=graphical-session.target
 StartLimitIntervalSec=0
@@ -22,8 +20,6 @@ StartLimitIntervalSec=0
 # OpenSSH (ClientAlive): a devbox's Host %i-tunnel names port 443, because on
 # port 22 the tailnet answers with Tailscale's own ssh server, which kept a dead
 # session's ports for over an hour on 2026-10-21 (dispatch://INFRA-103).
-# oryx's Host oryx-tunnel reaches OpenSSH on oryx's port 22 through Cloudflare,
-# at oryx.thecybermonk.com, the hostname that ssh oryx also uses.
 ExecStart=/usr/bin/ssh -o ConnectTimeout=30 -N %i-tunnel
 Restart=always
 RestartSec=10

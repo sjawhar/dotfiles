@@ -1,4 +1,4 @@
-# Laptop role, oryx pair: run by forward-daemon@oryx.service. forward trusts
+# Laptop role, oryx pair: run by forward-oryx.service. forward trusts
 # exactly one peer per daemon, so each devbox gets its own daemon. This file is
 # the reference for every config-daemon-*.toml: the fields and the URL policy are
 # explained here once, and the other pairs say only how they differ.
@@ -7,8 +7,8 @@
 # compared against by nothing; peer is the devbox's literal address, compared
 # against every inbound connection and dialled for nothing on this side. Literal
 # addresses only: a MagicDNS name is mutable from the admin console and must never
-# sit inside a security decision. oryx's pair rides forward-tunnel@oryx, one SSH
-# connection through Cloudflare Access that carries forward's default ports to the
+# sit inside a security decision. oryx's pair rides forward-oryx, whose one SSH
+# connection through Cloudflare Access carries forward's default ports to the
 # same ports on the far side's loopback, so both addresses are 127.0.0.1 (the
 # other tunnel pairs do the same on 127.0.0.2 and 127.0.0.3). bridge_port is the
 # devbox's OAuth callback bridge port,

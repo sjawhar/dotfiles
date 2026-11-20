@@ -168,7 +168,7 @@ if [ -d "/mnt/nvme/${USER:-$(id -un)}" ]; then
     unset _nvme_tmp _nvme_gotmp _scratch
 fi
 
-# YubiKey PC/SC: forward serve owns ~/.pcscd/pcscd.comm on machines with the marker dir (devbox: forward's pcsc channel to the laptop; oryx: forward's pcsc channel through forward-tunnel@oryx).
+# YubiKey PC/SC: forward serve owns ~/.pcscd/pcscd.comm on machines with the marker dir (devbox: forward's pcsc channel to the laptop; oryx: forward's pcsc channel through forward-oryx).
 if [ -d "${HOME}/.pcscd" ]; then
     export PCSCLITE_CSOCK_NAME="${HOME}/.pcscd/pcscd.comm"
 fi
@@ -301,10 +301,6 @@ alias ucheck='uv run ruff format && uv run ruff check --fix && uv run basedpyrig
 # Attach to main session (creates if doesn't exist), like: mosh server -- tm
 alias tm='tmux attach -t main || tmux new -s main'
 alias s='secrets'
-
-# Proxy toggle (for Tailscale userspace networking)
-alias proxy-on='. "${DOTFILES_DIR}/devpod/proxy.sh"'
-alias proxy-off='unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy && echo "Proxy disabled"'
 
 # ------------------------------------------------------------------------------
 # AWS profile management

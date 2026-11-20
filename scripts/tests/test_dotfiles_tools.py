@@ -550,7 +550,7 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
     def test_case_22_publish_uses_checkout_mise_without_path_or_mise_environment(self) -> None:
         minimal_bin = self.root / "without-mise"
         minimal_bin.mkdir()
-        for name in ("git", "jj", "bun"):
+        for name in ("git", "jj", "bun", "gh"):
             (minimal_bin / name).symlink_to(self.root / "bin" / name)
         self.assertFalse((minimal_bin / "mise").exists())
         env = {key: value for key, value in self.env.items() if not key.startswith("MISE_")}

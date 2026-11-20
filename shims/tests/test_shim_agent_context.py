@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""The agent test the identity shims share (INFRA-1538).
+"""The agent test the identity shims share (INFRA-1538, INFRA-4089).
 
-`shims/az`, `gcloud`, `gh`, `git` and `jj` each hold a copy of `agent_context`. The copies are
-kept identical by hand (there is no sourced library in `shims/`), so the first test here compares
-them byte for byte; the second drives the function itself over every case, with the stdin of each
-case named, so the matrix is proved once for all five copies and each shim's own test file carries
-only its own end-to-end case. `shims/secrets` has its own marker loop in POSIX sh, tested in
+`shims/az`, `gcloud`, `gh`, `git`, `jj` and `tmux` each hold a copy of `agent_context`. The copies
+are kept identical by hand (there is no sourced library in `shims/`), so the first test here
+compares them byte for byte; the second drives the function itself over every case, with the
+session of each case named — its controlling terminal and its stdin — so the matrix is proved once
+for every copy, `shims/gh-app-token`'s Python one included, and each shim's own test file carries
+only its own end-to-end case. `shims/secrets` makes the same test inline, tested in
 `test_secrets_shim.py`.
 
-A command that arrives over SSH in a session with no terminal is an agent's: on 2026-11-07 an
-agent's `ssh sami-devbox az account show` ran as Sami@Theorem.dev, because the shim saw no
-session marker and took the call for a person's. The session decides, not the command's own
-stdin: sshd sets `SSH_TTY` for the session it gave a terminal, so `echo x | gh …` in a person's
-interactive SSH shell, and git handing a credential helper its request down a pipe, stay the
-person's. `AGENT_SHIM_PERSON=1` is the person's escape; it does not turn off the session
-markers, which still mean an agent.
+A command that arrives over SSH in a session with no controlling terminal is an agent's: on
+2026-11-07 an agent's `ssh sami-devbox az account show` ran as Sami@Theorem.dev, because the shim
+saw no session marker and took the call for a person's. The session decides, not the command's own
+stdin and not `SSH_TTY` alone: a person's session has a terminal — sshd's for an interactive login,
+tmux's for every pane — and every process of it has that terminal, so `echo x | gh …` in a
+person's shell, and git handing a credential helper its request down a pipe, stay the person's. On
+2026-11-17 a pane of a tmux server started before `.tmux.conf` carried `SSH_TTY` held
+`SSH_CONNECTION` and no `SSH_TTY`, and Sami's own `gh auth status` there was routed as an agent's
+(dispatch://INFRA-4089). `AGENT_SHIM_PERSON=1` is the person's escape; it does not turn off the
+session markers, which still mean an agent, terminal or not.
 """
 
 from __future__ import annotations
@@ -47,6 +51,38 @@ ROUTING_INCLUDE = {
     "GIT_CONFIG_VALUE_0": "/home/u/.dotfiles/gh-app-routes.gitconfig",
 }
 BASE_ENV = {"PATH": "/usr/bin:/bin"}
+# shims/gh-app-token makes the same test in Python: whether a credential request may fall back to
+# the person's own upstream token. Loaded as test_gh_app_token.py loads it, and asked once.
+GH_APP_TOKEN_PROBE = (
+    "import importlib.util, sys\n"
+    "from importlib.machinery import SourceFileLoader\n"
+    "loader = SourceFileLoader('gh_app_token', sys.argv[1])\n"
+    "module = importlib.util.module_from_spec(importlib.util.spec_from_loader('gh_app_token', loader))\n"
+    "loader.exec_module(module)\n"
+    "print('AGENT' if module.agent_context() else 'PERSON')\n"
+)
+
+
+# The sessions a case runs in (stdin_cases.py), each its own session whatever the runner's.
+def no_terminal(argv: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+    """`ssh host cmd`: no controlling terminal, stdin /dev/null."""
+    return run_without_tty(argv, **kwargs)
+
+
+def pty_not_controlling(argv: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+    """No controlling terminal, and a pty on stdin all the same: `[[ -t 0 ]]` is true."""
+    return run_without_tty(argv, pty_on_stdin=True, **kwargs)
+
+
+def terminal(argv: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+    """A person's shell, a tmux pane, `ssh -t`: a pty is the controlling terminal and stdin."""
+    return run_with_tty(argv, **kwargs)
+
+
+def terminal_piped(argv: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+    """A pipe into one command of a terminal session, or git handing its credential helper the
+    request: the controlling terminal is there, stdin is a pipe."""
+    return run_with_tty(argv, input="", **kwargs)
 
 
 def agent_context_source(shim: str) -> str:
@@ -60,59 +96,93 @@ class AgentContextCopies(unittest.TestCase):
         first = agent_context_source(COPIES[0])
         self.assertIn("SSH_CONNECTION", first)
         self.assertIn("SSH_TTY", first)
+        self.assertIn("/dev/tty", first)
         self.assertIn("AGENT_SHIM_PERSON", first)
         for shim in COPIES[1:]:
             self.assertEqual(agent_context_source(shim), first, f"shims/{shim} has drifted")
 
 
 class AgentContextCases(unittest.TestCase):
-    """Each case: the environment, the stdin, and whether the function says agent (exit 0)."""
+    """Each case: the environment, the session, and whether the function says AGENT or PERSON.
 
-    def probe(self, shim: str, env: dict[str, str], tty: bool) -> int:
-        run = run_with_tty if tty else run_without_tty
-        script = "set -u\n" + agent_context_source(shim) + "\nagent_context\n"
-        return run(["bash", "-c", script], env={**BASE_ENV, **env}).returncode
+    The probe prints its verdict rather than exiting with it, so a shell that dies on the way —
+    a POSIX-mode bash ending at a failed redirection — reads as neither, never as a person.
+    """
 
-    def assert_all(self, env: dict[str, str], tty: bool, agent: bool) -> None:
-        for shim in COPIES:
-            with self.subTest(shim=shim, env=sorted(env), tty=tty):
-                self.assertEqual(self.probe(shim, env, tty), 0 if agent else 1)
+    def probe(self, shim: str, env: dict[str, str], session) -> str:
+        if shim == "gh-app-token":
+            argv = [sys.executable, "-I", "-c", GH_APP_TOKEN_PROBE, str(SHIMS / shim)]
+        else:
+            script = ("set -u\n" + agent_context_source(shim) +
+                      "\nif agent_context; then echo AGENT; else echo PERSON; fi\n")
+            argv = ["bash", "-c", script]
+        done = session(argv, env={**BASE_ENV, **env}, timeout=60)
+        return done.stdout.strip() or f"no verdict (exit {done.returncode}): {done.stderr}"
+
+    def assert_all(self, env: dict[str, str], session, agent: bool) -> None:
+        for shim in (*COPIES, "gh-app-token"):
+            with self.subTest(shim=shim, env=sorted(env), session=session.__name__):
+                self.assertEqual(self.probe(shim, env, session), "AGENT" if agent else "PERSON")
 
     def test_ssh_with_no_terminal_in_the_session_is_an_agent(self) -> None:
-        # Whatever this one command reads on stdin: a pipe into it is not a person.
-        self.assert_all({"SSH_CONNECTION": SSH_CONNECTION}, tty=False, agent=True)
-        self.assert_all({"SSH_CONNECTION": SSH_CONNECTION}, tty=True, agent=True)
+        # `ssh host cmd`: sshd gives the session no terminal, whatever the command reads.
+        self.assert_all({"SSH_CONNECTION": SSH_CONNECTION}, no_terminal, agent=True)
+        # A pty on stdin that the session does not control is no terminal of the session's. With
+        # terminal_piped below, this tells the session's terminal from stdin, which the first
+        # draft of INFRA-1538 tested (`[[ -t 0 ]]`).
+        self.assert_all({"SSH_CONNECTION": SSH_CONNECTION}, pty_not_controlling, agent=True)
+
+    def test_a_terminal_session_with_no_ssh_tty_is_the_person(self) -> None:
+        # dispatch://INFRA-4089: Sami's own pane of a tmux server started before .tmux.conf
+        # carried SSH_TTY holds SSH_CONNECTION and no SSH_TTY, and `gh auth status` there was
+        # routed as an agent's. The pane's terminal is the controlling terminal of every process
+        # of it, a pipe into one command and git's credential helper included.
+        self.assert_all({"SSH_CONNECTION": SSH_CONNECTION}, terminal, agent=False)
+        self.assert_all({"SSH_CONNECTION": SSH_CONNECTION}, terminal_piped, agent=False)
 
     def test_a_persons_ssh_session_is_a_person_even_with_a_pipe_on_stdin(self) -> None:
         # The P2 case of the review: `echo x | gh …`, and git's credential helper, in a terminal
-        # shell the person is sitting at.
-        person = {"SSH_CONNECTION": SSH_CONNECTION, "SSH_TTY": SSH_TTY}
-        self.assert_all(person, tty=False, agent=False)
-        self.assert_all(person, tty=True, agent=False)
+        # shell the person is sitting at. SSH_TTY names that session even where the command has
+        # lost the terminal itself.
+        self.assert_all(SSH_PERSON, no_terminal, agent=False)
+        self.assert_all(SSH_PERSON, terminal_piped, agent=False)
+        self.assert_all(SSH_PERSON, terminal, agent=False)
 
     def test_agent_shim_person_is_the_escape(self) -> None:
         self.assert_all(
-            {"SSH_CONNECTION": SSH_CONNECTION, "AGENT_SHIM_PERSON": "1"}, tty=False, agent=False
+            {"SSH_CONNECTION": SSH_CONNECTION, "AGENT_SHIM_PERSON": "1"}, no_terminal, agent=False
         )
 
     def test_a_local_shell_is_a_person_with_or_without_a_terminal(self) -> None:
-        self.assert_all({}, tty=False, agent=False)
-        self.assert_all({}, tty=True, agent=False)
+        self.assert_all({}, no_terminal, agent=False)
+        self.assert_all({}, terminal, agent=False)
 
     def test_the_markers_still_mean_an_agent(self) -> None:
         for marker in MARKERS:
-            self.assert_all({marker: "x", **SSH_PERSON}, tty=True, agent=True)
+            # Whatever the terminal: an agent's pane has one, and so has `ssh -t`.
+            self.assert_all({marker: "x", "SSH_CONNECTION": SSH_CONNECTION}, terminal, agent=True)
+            self.assert_all({marker: "x", **SSH_PERSON}, terminal, agent=True)
             # The escape is for the SSH rule only; a session marker is not a person.
-            self.assert_all({marker: "x", "AGENT_SHIM_PERSON": "1"}, tty=True, agent=True)
-        self.assert_all({**ROUTING_INCLUDE, **SSH_PERSON}, tty=True, agent=True)
-        self.assert_all({**ROUTING_INCLUDE, "AGENT_SHIM_PERSON": "1"}, tty=True, agent=True)
+            self.assert_all({marker: "x", "AGENT_SHIM_PERSON": "1"}, terminal, agent=True)
+        self.assert_all({**ROUTING_INCLUDE, "SSH_CONNECTION": SSH_CONNECTION}, terminal, agent=True)
+        self.assert_all({**ROUTING_INCLUDE, **SSH_PERSON}, terminal, agent=True)
+        self.assert_all({**ROUTING_INCLUDE, "AGENT_SHIM_PERSON": "1"}, terminal, agent=True)
 
     def test_an_empty_ssh_connection_is_not_an_ssh_command(self) -> None:
-        self.assert_all({"SSH_CONNECTION": ""}, tty=False, agent=False)
+        self.assert_all({"SSH_CONNECTION": ""}, no_terminal, agent=False)
 
     def test_an_empty_ssh_tty_is_no_terminal(self) -> None:
         # sshd sets SSH_TTY only for a session it gave one; an empty value is not one.
-        self.assert_all({"SSH_CONNECTION": SSH_CONNECTION, "SSH_TTY": ""}, tty=True, agent=True)
+        self.assert_all({"SSH_CONNECTION": SSH_CONNECTION, "SSH_TTY": ""}, no_terminal, agent=True)
+
+    def test_a_posix_mode_shell_survives_the_terminal_test(self) -> None:
+        # With POSIXLY_CORRECT in the environment bash runs in POSIX mode, where a failed
+        # redirection of a special builtin ends the whole shell: `{ : </dev/tty; }` with no
+        # terminal ended the shim with exit 1 and no output (measured 2026-11-17). The test opens
+        # it with `true`, a regular builtin.
+        posix = {"SSH_CONNECTION": SSH_CONNECTION, "POSIXLY_CORRECT": "1"}
+        self.assert_all(posix, no_terminal, agent=True)
+        self.assert_all(posix, terminal, agent=False)
 
     def test_tmux_decides_nothing_by_itself(self) -> None:
         # Round 3 of INFRA-1538 removed the "inside tmux means the person" exemption: a pane
@@ -120,18 +190,18 @@ class AgentContextCases(unittest.TestCase):
         # server produced an unmarked pane that then ran as the person. What marks a pane is the
         # marker shims/tmux passes it; TmuxPanes below drives that through a real server.
         tmux = {"TMUX": "/tmp/tmux-1000/default,42,0"}
-        self.assert_all({**tmux, "SSH_CONNECTION": SSH_CONNECTION}, tty=False, agent=True)
-        self.assert_all(tmux, tty=False, agent=False)
+        self.assert_all({**tmux, "SSH_CONNECTION": SSH_CONNECTION}, no_terminal, agent=True)
+        self.assert_all(tmux, no_terminal, agent=False)
         for marker in MARKERS:
-            self.assert_all({**tmux, marker: "x"}, tty=False, agent=True)
-        self.assert_all({**tmux, **ROUTING_INCLUDE}, tty=False, agent=True)
+            self.assert_all({**tmux, marker: "x"}, no_terminal, agent=True)
+        self.assert_all({**tmux, **ROUTING_INCLUDE}, no_terminal, agent=True)
 
     def test_every_harness_marker_means_an_agent(self) -> None:
         # The set is one list now, shared with shims/secrets: Claude Code, an envoy session and
         # a Legion pane (packages/daemon/internal/runtime/tmux/spawn.go) are agents too.
         for marker in ("CLAUDECODE", "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE",
                        "LEGION_CONTROLLER", "LEGION_DAEMON_URL"):
-            self.assert_all({marker: "1"}, tty=True, agent=True)
+            self.assert_all({marker: "1"}, terminal, agent=True)
 
 
 TMUX = shutil.which("tmux")
@@ -160,10 +230,11 @@ class TmuxPanes(unittest.TestCase):
         self.probe.write_text(
             "#!/bin/bash\nset -u\n" + agent_context_source("az") +
             'if agent_context; then verdict=AGENT; else verdict=PERSON; fi\n'
+            'if { true < /dev/tty; } 2> /dev/null; then terminal=yes; else terminal=no; fi\n'
             'printf \'{"verdict":"%s","ssh_connection":"%s","ssh_tty":"%s","tmux":"%s",'
-            '"omp":"%s","routing":"%s","shim_agent":"%s","pwd":"%s"}\' '
+            '"omp":"%s","routing":"%s","shim_agent":"%s","pwd":"%s","terminal":"%s"}\' '
             '"$verdict" "${SSH_CONNECTION:-}" "${SSH_TTY:-}" "${TMUX:-}" "${OMP_SESSION_ID:-}" '
-            '"${GIT_CONFIG_VALUE_0:-}" "${AGENT_SHIM_AGENT:-}" "$PWD" > "$1"\n'
+            '"${GIT_CONFIG_VALUE_0:-}" "${AGENT_SHIM_AGENT:-}" "$PWD" "$terminal" > "$1"\n'
         )
         self.probe.chmod(0o755)
         # shims/tmux hands a shell command to tmux through a file under XDG_RUNTIME_DIR, which
@@ -183,12 +254,26 @@ class TmuxPanes(unittest.TestCase):
     def kill_server(self) -> None:
         subprocess.run([TMUX, "-S", str(self.socket), "kill-server"],
                        env=self.person_env, capture_output=True, timeout=30, check=False)
+        # kill-server returns once the server has the command, not once it is gone, so a
+        # new-session on this socket right after it could reach the exiting server and fail with
+        # "server exited unexpectedly" (6 runs in 20 of the respawn subtests on sami-devbox).
+        # Return when the socket refuses a connection: then a new-session starts its own server.
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                try:
+                    probe.connect(str(self.socket))
+                except OSError:  # refused, or no socket at all
+                    return
+            time.sleep(0.05)
+        self.fail("the tmux server still accepts connections 20 s after kill-server")
 
     def tmux(self, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-        """A tmux command through shims/tmux, the way any caller on PATH reaches it."""
-        return subprocess.run([str(SHIMS / "tmux"), "-S", str(self.socket), *args],
-                              env=env or self.person_env, capture_output=True, text=True,
-                              timeout=30, check=False)
+        """A tmux command through shims/tmux, the way any caller on PATH reaches it, from a
+        session with no terminal: `ssh host tmux …` for a caller with SSH_CONNECTION, and never
+        the terminal of whoever runs the suite."""
+        return run_without_tty([str(SHIMS / "tmux"), "-S", str(self.socket), *args],
+                               env=env or self.person_env, timeout=30)
 
     def agent_env(self, **extra: str) -> dict[str, str]:
         """An agent's own environment: an omp session id and the gh-app routing include."""
@@ -220,12 +305,16 @@ class TmuxPanes(unittest.TestCase):
 
     def test_a_server_an_ssh_agent_starts_makes_agent_panes(self) -> None:
         # Case (a): an agent whose only evidence is the SSH rule starts a server of its own. The
-        # server, and so every pane of it, holds SSH_CONNECTION and no SSH_TTY.
+        # server, and so every pane of it, holds SSH_CONNECTION and no SSH_TTY, but a pane has a
+        # terminal of its own, so the SSH rule does not decide there (INFRA-4089). The marker
+        # does: shims/tmux gave the new session AGENT_SHIM_AGENT=1 for its caller.
         env = {**self.person_env, "SSH_CONNECTION": SSH_CONNECTION}
         got = self.pane("-f", "/dev/null", "new-session", "-d", "-s", "s0", env=env)
         self.assertTrue(got["tmux"], "the probe did not run inside tmux")
         self.assertEqual(got["ssh_connection"], SSH_CONNECTION, got)
         self.assertEqual(got["ssh_tty"], "", got)
+        self.assertEqual(got["terminal"], "yes", got)
+        self.assertEqual(got["shim_agent"], "1", got)
         self.assertEqual(got["verdict"], "AGENT", got)
 
     def test_an_agents_window_under_the_persons_server_is_an_agent_pane(self) -> None:
@@ -464,8 +553,8 @@ class TmuxPanes(unittest.TestCase):
 
     def test_the_dotfiles_tmux_config_keeps_a_reattaching_person_the_person(self) -> None:
         # tmux's default update-environment carries SSH_CONNECTION into the windows a reattached
-        # session opens afterwards and NOT SSH_TTY, which read as a non-interactive ssh command.
-        # `.tmux.conf` adds SSH_TTY to that list; with it, the window stays the person's.
+        # session opens afterwards and NOT SSH_TTY. `.tmux.conf` adds SSH_TTY to that list, so
+        # the variable is true in those windows; the window is the person's either way.
         self.assertIn(UPDATE_ENVIRONMENT, (SHIMS.parent / ".tmux.conf").read_text(encoding="utf-8"))
         config = self.dir / "with-ssh-tty.conf"
         config.write_text(UPDATE_ENVIRONMENT + "\n")
@@ -474,16 +563,19 @@ class TmuxPanes(unittest.TestCase):
         self.assertEqual(got["ssh_tty"], SSH_TTY, got)
         self.assertEqual(got["verdict"], "PERSON", got)
 
-    def test_without_that_line_a_reattached_window_is_taken_for_an_agent(self) -> None:
-        # The deliberate cost of dropping the tmux exemption: a server started before that line
-        # existed carries SSH_CONNECTION into its new windows and not SSH_TTY, so they read as a
-        # non-interactive ssh command. Safe direction, and AGENT_SHIM_PERSON=1 is the escape.
+    def test_without_that_line_a_reattached_window_is_still_the_persons(self) -> None:
+        # dispatch://INFRA-4089, end to end: a server started before that line existed carries
+        # SSH_CONNECTION into the windows opened after a reattach and not SSH_TTY. Sami's own
+        # pane of such a server was routed as an agent's; the pane's terminal keeps it his.
         config = self.dir / "plain.conf"
         config.write_text("")
         self.start_server(self.person_env, config=str(config))
         got = self.reattach(str(config), SSH_TTY)
+        self.assertEqual(got["ssh_connection"], SSH_CONNECTION, got)
         self.assertEqual(got["ssh_tty"], "", got)
-        self.assertEqual(got["verdict"], "AGENT", got)
+        self.assertEqual(got["terminal"], "yes", got)
+        self.assertEqual((got["omp"], got["shim_agent"]), ("", ""), got)
+        self.assertEqual(got["verdict"], "PERSON", got)
 
 
 class TmuxMarkedArgv(unittest.TestCase):
@@ -532,10 +624,17 @@ class TmuxMarkedArgv(unittest.TestCase):
     def test_an_agent_with_no_marker_of_its_own_still_marks_the_pane(self) -> None:
         # The SSH rule alone: AGENT_SHIM_AGENT=1 is the provenance that then travels (round 5).
         env = {**self.env, "SSH_CONNECTION": SSH_CONNECTION}
-        done = subprocess.run([str(SHIMS / "tmux"), "new-window", "-d"], env=env,
-                              capture_output=True, text=True, timeout=30, check=False)
+        done = run_without_tty([str(SHIMS / "tmux"), "new-window", "-d"], env=env, timeout=30)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(done.stdout.splitlines(), ["new-window", "-e", self.DURABLE, "-d"])
+
+    def test_a_persons_pane_with_no_ssh_tty_marks_nothing(self) -> None:
+        # dispatch://INFRA-4089: `tmux new-window` from Sami's own pane of a server that never
+        # carried SSH_TTY. The pane's terminal makes him the person, so nothing is marked.
+        env = {**self.env, "SSH_CONNECTION": SSH_CONNECTION}
+        done = run_with_tty([str(SHIMS / "tmux"), "new-window", "-d"], env=env, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.splitlines(), ["new-window", "-d"])
 
     def wrapped(self, got: list[str]) -> str:
         """The command the shim put in a file, read back from the argv it handed tmux."""

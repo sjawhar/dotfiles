@@ -1,15 +1,19 @@
 [Unit]
-Description=Keep the box's Go build cache (/mnt/nvme/<user>/gocache) near 25 GB, cleaning it past 50 GB
+Description=Keep the box's Go build cache (<scratch>/gocache) near 25 GB without removing an entry a running build may read
 # Go trims only entries unused for 5 days and has no size-based trim, so nothing else bounds the
 # cache. On 2026-11-02 it grew about 20 GB in 80 minutes (agents' `go test` on agent-infra
 # compiling the Pulumi provider SDKs) and two caches together held about 95 GB while /mnt/nvme sat
 # under its 78.2 GiB floor; owners cleared them by hand at 07:30Z and 08:2xZ.
 #
 # Over 25 GB this deletes the entries nobody used in the last 3 hours, which keeps every lane's
-# working set warm (Go refreshes an entry's mtime when it uses one over an hour old). Only if the
-# cache is still over 50 GB, which means three hours of builds wrote that much, does it run a full
-# `go clean -cache`, after which each lane's next build is a cold one. 50 GB is under the floor's
-# margin on a disk that has run 60-140 GiB free; the 80 GB cap this replaced was the whole margin.
+# working set warm (Go refreshes an entry's mtime when it uses one over an hour old). If the cache
+# is still over 50 GB, it deletes the entries nobody used in the last 2 hours too. Neither pass
+# deletes an entry the oldest running `go` command may have looked up (devbox/gocache-cap says
+# how), and it no longer runs `go clean -cache`: on sami-devbox that wiped the cache four times from
+# 2026-11-15 08:17Z to 2026-11-16 04:18Z, under builds that had looked entries up and not yet opened
+# them, and broke them (dispatch://INFRA-3905). Past 50 GB with nothing more that is safe to delete,
+# the cache stays over the cap and the disk floors are what alert. 50 GB is under the floor's margin
+# on a disk that has run 60-140 GiB free; the 80 GB cap this replaced was the whole margin.
 # On sami-devbox GOCACHE is /mnt/scratch/<user>/gocache (devbox/gce-disks); either one runs it.
 ConditionPathIsDirectory=|/mnt/nvme/%u/gocache
 ConditionPathIsDirectory=|/mnt/scratch/%u/gocache
@@ -18,7 +22,7 @@ ConditionPathIsDirectory=|/mnt/scratch/%u/gocache
 Type=oneshot
 Nice=19
 IOSchedulingClass=idle
-# A user unit's PATH holds neither the dotfiles nor mise's shims, where `go` is.
+# The PATH box-cleanup.service gives every cleaner; this one needs only du, find and ps.
 Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
 Environment=MISE_DATA_DIR=%h/.mise
 ExecStart=%h/.dotfiles/devbox/gocache-cap

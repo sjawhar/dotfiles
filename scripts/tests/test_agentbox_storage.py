@@ -19,7 +19,9 @@ class BoxStorage(unittest.TestCase):
                     "AGENTBOX_BOX": "", "AGENTBOX_HOST": "sami-devbox",
                     "AGENTBOX_BOXES": str(self.root / "boxes"),
                     "AGENTBOX_DISKS": str(self.root / "disks"),
-                    "AGENTBOX_CACHE_ROOT": str(self.root / "box-cache")}
+                    "AGENTBOX_CACHE_ROOT": str(self.root / "box-cache"),
+                    # The script sources $DOTFILES_DIR/agent-secrets/broker-url.sh: this tree's, not $HOME/.dotfiles's.
+                    "DOTFILES_DIR": str(SCRIPT.parents[1])}
         self.env.pop("AGENTBOX_DISK", None)
 
     def run_shell(self, body, **env):
@@ -68,13 +70,17 @@ class BoxStorage(unittest.TestCase):
         self.assertTrue(second.is_dir())
 
     def test_cache_is_kept_until_container_removal_is_confirmed(self):
+        """A container that still exists, or a docker that cannot say, leaves the cache in place:
+        a failed removal, said with the command that completes it, and status 1."""
         cache = self.root / "box-cache/agentbox-one"
         cache.mkdir(parents=True)
         for docker in ('docker() { echo agentbox-one; };', 'docker() { return 1; };'):
             result = self.run_shell(docker + ' close_box_cache agentbox-one')
-            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.returncode, 1, result.stderr)
             self.assertTrue(cache.is_dir())
-            self.assertIn("cache", result.stderr)
+            self.assertIn(f"removing agentbox-one's cache {cache} failed", result.stderr)
+            self.assertIn(f"rm -rf {cache}", result.stderr)
+            self.assertNotIn("kept", result.stderr)
 
     def test_failed_cache_creation_never_emits_a_bind_for_docker_to_create(self):
         (self.root / "box-cache").write_text("not a directory")

@@ -14,12 +14,94 @@ set -euo pipefail
 
 name="${BASH_SOURCE[0]##*/}"
 
+# mise_paths: mise as this machine runs it, whatever HOME and PATH the caller set
+# (shims/AGENTS.md, "A moved HOME"). A Legion test pane runs a shim with a
+# temporary HOME and the PATH <bin>:/usr/local/bin:/usr/bin:/bin, where every
+# path under HOME names nothing. Sets, once per process:
+#   _mise_bin     mise on PATH, else the dotfiles checkout's bin/mise, else the
+#                 mise the shims in a data dir link to (a copy or a worktree of
+#                 the checkout has no bin/, which is not committed)
+#   _mise_config  mise's global configuration: MISE_GLOBAL_CONFIG_FILE, else the
+#                 file under HOME when it is readable, else the checkout's
+#                 mise.toml, which installers link that file to
+#   _mise_datas   the data dirs a tool may be installed in: MISE_DATA_DIR and mise's
+#                 default ~/.local/share/mise under HOME; with no MISE_DATA_DIR,
+#                 ~/.mise (.bashrc's) and that default, under HOME, then the passwd home's
+#   _mise_data    the one to give mise: MISE_DATA_DIR, else the first that exists
+# The checkout is DOTFILES_DIR, else the one this file's own path is in.
+mise_paths() {
+    local IFS=$' \t\n'
+    local self dotfiles home dir data seen=""
+    local -a all=()
+    [[ -z "${_mise_config:-}" ]] || return 0
+    _mise_bin=""
+    IFS=':'
+    for dir in ${PATH:-}; do
+        if [[ -n "$dir" && -f "$dir/mise" && -x "$dir/mise" ]]; then
+            _mise_bin="$dir/mise"
+            break
+        fi
+    done
+    IFS=$' \t\n'
+    _mise_config="${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/mise/config.toml}"
+    if [[ -z "$_mise_bin" || ( -z "${MISE_GLOBAL_CONFIG_FILE:-}" && ! -r "$_mise_config" ) ]]; then
+        dotfiles="${DOTFILES_DIR:-}"
+        if [[ -z "$dotfiles" ]]; then
+            self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")" || self=""
+            dotfiles="${self%/shims/*}"
+        fi
+        [[ -n "$_mise_bin" ]] || _mise_bin="$dotfiles/bin/mise"
+        [[ -n "${MISE_GLOBAL_CONFIG_FILE:-}" || -r "$_mise_config" ]] || _mise_config="$dotfiles/mise.toml"
+    fi
+    if [[ -n "${MISE_DATA_DIR:-}" ]]; then
+        all=("$MISE_DATA_DIR" "${XDG_DATA_HOME:-${HOME:-}/.local/share}/mise")
+    else
+        all=("${HOME:-}/.mise" "${XDG_DATA_HOME:-${HOME:-}/.local/share}/mise")
+        # With HOME unset, ~ is the uid's home in the passwd database, which HOME does not move.
+        local HOME
+        unset HOME
+        home=~
+        [[ "$home" != /?* ]] || all+=("$home/.mise" "$home/.local/share/mise")
+    fi
+    _mise_datas=() _mise_data="${MISE_DATA_DIR:-}"
+    for data in "${all[@]}"; do
+        [[ "$data" == /?* && ":$seen:" != *":$data:"* ]] || continue
+        seen+=":$data"
+        _mise_datas+=("$data")
+        [[ -n "$_mise_data" || ! -d "$data" ]] || _mise_data="$data"
+    done
+    if [[ ! -f "$_mise_bin" || ! -x "$_mise_bin" ]]; then
+        for data in ${_mise_datas[@]+"${_mise_datas[@]}"}; do
+            for dir in "$data"/shims/*; do
+                [[ -L "$dir" ]] || continue
+                dir="$(command -p readlink -f -- "$dir")" || dir=""
+                [[ "$dir" != */mise || ! -f "$dir" || ! -x "$dir" ]] || _mise_bin="$dir"
+                break
+            done
+            [[ ! -x "$_mise_bin" ]] || break
+        done
+    fi
+    : "${_mise_data:=${_mise_datas[0]:-}}"
+}
+
+# is_mise_shim FILE: whether FILE is mise's own shim, a file in the shims dir of
+# one of mise's data dirs or a link to mise. It reaches its tool only where mise
+# reads its config and trust list under HOME, which a moved HOME hides.
+is_mise_shim() {
+    local IFS=$' \t\n'
+    local data
+    mise_paths
+    for data in ${_mise_datas[@]+"${_mise_datas[@]}"}; do
+        [[ "${1%/*}" -ef "$data/shims" ]] && return 0
+    done
+    [[ -L "$1" && "$(command -p readlink -f -- "$1")" == */mise ]]
+}
+
 # --- resolve: the first `$name` on PATH past this shim's own entry that is not a wrapper ---
 # Entries ahead of this shim's own (`-ef`: its dir however PATH spells it) had their turn. A file whose
-# real path is in a `shims/` dir is a wrapper (this file, another checkout's copy), and mise's shims dir
+# real path is in a `shims/` dir is a wrapper (this file, another checkout's copy), and mise's own shim
 # hands the call back to PATH when mise has no version for the directory; neither is taken. mise's
 # install dirs are: they hold the real codex.
-mise_root="${MISE_DATA_DIR:-${HOME:-}/.mise}"
 IFS=':' read -ra dirs <<< "${PATH:-}"
 for i in "${!dirs[@]}"; do
     if [[ "${dirs[i]}/$name" -ef "${BASH_SOURCE[0]}" ]]; then
@@ -29,23 +111,32 @@ for i in "${!dirs[@]}"; do
 done
 real=""
 for dir in ${dirs[@]+"${dirs[@]}"}; do
-    [[ -n "$dir" && "$dir" != "$mise_root/shims" && -f "$dir/$name" && -x "$dir/$name" ]] || continue
+    [[ -n "$dir" && -f "$dir/$name" && -x "$dir/$name" ]] || continue
     resolved="$(realpath "$dir/$name")"
     [[ "${resolved%/*}" == */shims ]] && continue
+    is_mise_shim "$dir/$name" && continue
     real="$dir/$name"
     break
 done
 if [[ -z "$real" ]]; then
     # A mise-managed binary (codex) whose install dir is not on this PATH. mise lives in
-    # ~/.dotfiles/bin, which a unit's or harness's PATH can leave out; then run it by its path.
-    mise_bin="$(command -v mise)" || mise_bin="${DOTFILES_DIR:-${HOME:-}/.dotfiles}/bin/mise"
-    real="$(MISE_DATA_DIR="$mise_root" "$mise_bin" which "$name" < /dev/null 2> /dev/null)" || {
-        echo "$name: ${BASH_SOURCE[0]}: no $name on PATH past this shim other than a wrapper, and mise has none" >&2
+    # ~/.dotfiles/bin, which a unit's or harness's PATH can leave out; then run it by its path,
+    # given mise's configuration and data dir (mise_paths). The directory's own pin first, then
+    # the machine's (`-C /`): under a moved HOME mise has no record of trusting the directory's
+    # configuration, and refuses it.
+    mise_paths
+    real="$(MISE_DATA_DIR="$_mise_data" MISE_GLOBAL_CONFIG_FILE="$_mise_config" "$_mise_bin" which "$name" < /dev/null 2> /dev/null)" \
+        || real="$(MISE_DATA_DIR="$_mise_data" MISE_GLOBAL_CONFIG_FILE="$_mise_config" "$_mise_bin" which -C / "$name" < /dev/null 2> /dev/null)" || {
+        echo "$name: ${BASH_SOURCE[0]}: no $name on PATH past this shim other than a wrapper, and $_mise_bin, given $_mise_config and the data dir $_mise_data, has none" >&2
         exit 127
     }
 fi
 
-spend_lib="${DOTFILES_DIR:-${HOME:-}/.dotfiles}/scripts/agent-spend-env.sh"
+# The spend library of the dotfiles checkout this file is in, through a link to it (shims/codex),
+# not the one under HOME: a caller may give the shim a HOME of its own (shims/AGENTS.md, "A moved HOME").
+spend_src="${BASH_SOURCE[0]}"
+[[ ! -L "$spend_src" ]] || spend_src="$(command -p readlink -f -- "$spend_src")"
+spend_lib="${DOTFILES_DIR:-${spend_src%/*}/..}/scripts/agent-spend-env.sh"
 if [[ -r "$spend_lib" ]]; then
     # shellcheck source=../scripts/agent-spend-env.sh
     . "$spend_lib"

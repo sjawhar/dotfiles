@@ -310,6 +310,18 @@ class AgentboxMove(unittest.TestCase):
         # separators into one and shifts every field after an empty one.
         return [line.split("\x1f") for line in result.stdout.splitlines()]
 
+    # ── the git a move pushes with ──────────────────────────────────────────────────────────
+    def test_a_move_pushes_with_the_git_past_the_dotfiles_shim(self) -> None:
+        """A move's push goes to the same tree on another box over ssh, never to GitHub, so it skips shims/git and
+        its leak-term push check, and takes the first git past it (a stub here), as shims/git's real_git does."""
+        write_stub(self.stubs, "git", 'exec /usr/bin/git "$@"')
+        shimmed = {"PATH": ":".join([str(DOTFILES / "shims"), str(self.stubs), "/usr/bin", "/bin"])}
+        result = self.run_bash("move_real_git", shimmed)
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, str(self.stubs / "git")), result.stderr)
+        # The control: the shim itself is the first git on that PATH, and a plain lookup finds it.
+        found = self.run_bash("command -v git", shimmed)
+        self.assertEqual(found.stdout.strip(), str(DOTFILES / "shims" / "git"))
+
     # ── the spec a working directory gets ───────────────────────────────────────────────────
     def test_a_canonical_checkout_is_named_as_its_own_directory_and_nothing_else(self) -> None:
         """$SRC is in every box already, so a checkout under it needs only its own path."""
@@ -1514,6 +1526,10 @@ class AgentboxMove(unittest.TestCase):
         self.make_proc(999999901)
         nested = self.home / ".omp/agent/sessions/-lane/2026-10-14T17-14-49-559Z_01a13b68-d957-74b8-ad2b-b642fd17bfd9" \
             / "2026-10-25T02-17-36-102Z_01a19700-0000-7000-8000-000000000d09.jsonl"
+        # A real re-box resumes this transcript, and refuses before the respawn when it is not a
+        # regular file (dispatch://INFRA-1720): the session's transcript is there.
+        nested.parent.mkdir(parents=True, exist_ok=True)
+        nested.write_text("{}\n", encoding="utf-8")
         env = {
             "AGENTBOX_BOX": "agentbox-aaaaaaaaaaaa",
             "AGENTBOX_DIRS": f"{self.home}/lane",
@@ -1553,6 +1569,12 @@ class AgentboxMove(unittest.TestCase):
         subprocess.run([tmux, "-S", sock, "-f", "/dev/null", "new-session", "-d", "-s", "move", "sleep 600"],
                        env=env, check=True, capture_output=True, timeout=30)
         self.addCleanup(subprocess.run, [tmux, "-S", sock, "kill-server"], env=env, capture_output=True, timeout=30)
+        # tearDown removes the fixture tree, the socket with it, before any cleanup runs, so the
+        # kill-server above reaches nothing: every run left this server and its respawned pane's
+        # `bash -i` (30 of them on sami-devbox on 2026-11-16, the oldest 9 days old). By pid it goes.
+        server = int(subprocess.check_output([tmux, "-S", sock, "display-message", "-p", "#{pid}"],
+                                             env=env, text=True, timeout=30).strip())
+        self.addCleanup(lambda: os.path.exists(f"/proc/{server}") and os.kill(server, signal.SIGTERM))
         pane = subprocess.check_output([tmux, "-S", sock, "display-message", "-p", "#{pane_id}"],
                                        env=env, text=True, timeout=30).strip()
         run = self.run_bash('move_own_omp() { return 1; }\ncmd_move_self --only-dirs --dir "$HOME"', {
@@ -3526,11 +3548,16 @@ class AgentboxMove(unittest.TestCase):
         self.addCleanup(launcher.kill)
         (starting / self.TO).write_text(f"pid={launcher.pid}\nbox=agentbox-stuck\nwindow=%7\n", encoding="utf-8")
         docker = self.root / "DOCKER"
-        write_stub(self.stubs, "docker", f'echo "$*" >>"{docker}"; case "$1" in ps) echo agentbox-stuck ;; inspect) echo "[\"omp\",\"--resume\",\"{self.TO}\"]" ;; esac; exit 0')
+        # The box whose command names the session and the box the launcher recorded are two
+        # names, so each of the two removals is seen on its own (one name for both let either one
+        # lose its `-v` unseen).
+        write_stub(self.stubs, "docker", f'echo "$*" >>"{docker}"; case "$1" in ps) echo agentbox-made ;; inspect) echo "[\\"omp\\",\\"--resume\\",\\"{self.TO}\\"]" ;; esac; exit 0')
         run = self.run_bash(f'move_to_run "{job}"')
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         self.assertEqual(launcher.poll(), -15, "the launcher was not ended")
-        self.assertIn("rm -f agentbox-stuck", docker.read_text(encoding="utf-8"))
+        removals = [line for line in docker.read_text(encoding="utf-8").splitlines() if line.startswith("rm ")]
+        self.assertEqual({line.split()[-1] for line in removals}, {"agentbox-made", "agentbox-stuck"}, removals)
+        self.assertEqual([line for line in removals if not line.startswith("rm -fv ")], [], "each removal takes the volume")
         self.assertFalse((starting / self.TO).exists())
         self.assertIn("rolled back:", run.stdout)
 
@@ -4506,61 +4533,92 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn("kill -s SIGHUP agentbox-0123456789ab", (self.root / "STUB_DOCKER").read_text(encoding="utf-8"))
         self.assertEqual(self.move_log()[0][5], "moved")
 
-    def test_a_transcript_the_session_sweep_took_is_resumed_by_its_recorded_path(self) -> None:
-        # dispatch://OSSV-240 deletes a transcript idle for 6 hours, even under a live omp; omp
-        # resumes it from Postgres by the path the sweep recorded.
-        swept = self.home / ".omp/agent/sessions/-lane" / f"2026-10-25T02-17-36-102Z_{self.METARQ}.jsonl"
-        record = self.root / "deleted.tsv"
-        record.write_text(f"{swept}\t100\tabc\t\t2026-11-02T08:00:00Z\n", encoding="utf-8")
-        self.nested_session(None, cmdline=f"omp --resume {self.METARQ}")
-        moved = self.run_bash('move_own_omp() { echo 1101; }\nmove_image_bytes() { echo 280000000; }\n'
-                              'cmd_move_self --dry-run', {"AGENTBOX_SWEEP_RECORD": str(record)})
-        self.assertEqual(moved.returncode, 0, moved.stderr)
-        self.assertIn(f"-- omp --resume {swept}\n", moved.stdout)
+    def test_each_move_form_refuses_a_path_that_is_not_a_file(self) -> None:
+        """A relaunch of a transcript path that is gone ends the new box, and the end of a box now
+        deletes everything in it (dispatch://INFRA-1720, R6). Before, a move could resume such a
+        path: move_transcript returned a dangling symlink or a path from the import sweep's
+        record where no file is, and in a box the move took PI_SESSION_FILE with no test. Each
+        form now tests the path it chose with -f and refuses before it stops omp: on the host
+        before the hand-off, in a box before the pane's respawn, and for `--to` before any job is
+        written."""
+        sid = "01a19700-0000-7000-8000-000000000d77"
 
-    def agent_db(self, home: Path, rows: list[tuple[str, str | None]]) -> None:
-        """An omp agent.db under `home` holding credential rows (provider, disabled_cause)."""
-        path = home / ".omp/agent/agent.db"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        script = "create table auth_credentials (id integer primary key, provider text, credential_type text," \
-            " data text, disabled_cause text);"
-        for provider, cause in rows:
-            cause_sql = "null" if cause is None else f"'{cause}'"
-            script += f"insert into auth_credentials (provider, credential_type, data, disabled_cause)" \
-                f" values ('{provider}', 'oauth', 'secret-never-read', {cause_sql});"
-        subprocess.run(["sqlite3", str(path), script], check=True)
+        def bad_path(kind: str, where: Path) -> Path:
+            path = where / f"2026-10-25T02-17-36-102Z_{sid if where.name != '-lane' else self.METARQ}.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if os.path.lexists(path):
+                shutil.rmtree(path) if path.is_dir() and not path.is_symlink() else path.unlink()
+            if kind == "a dangling symlink":
+                path.symlink_to(self.root / "gone.jsonl")
+            elif kind == "a directory":
+                path.mkdir()
+            return path
 
-    def test_a_move_warns_of_mcp_logins_the_target_lacks(self) -> None:
-        """omp keeps MCP OAuth logins per machine. The chief of staff moved to sami-devbox, which had
-        no Slack login, and its Slack tools silently never mounted (2026-11-03). The move must say
-        which servers the target lacks a login for, and never print a credential's data."""
-        slack = "mcp_oauth:profile:default:https://mcp.slack.com/mcp"
-        other = "mcp_oauth:profile:default:https://mcp.example.com/mcp"
-        self.agent_db(self.home, [(slack, None), (other, None), ("anthropic", None),
-                                  ("mcp_oauth:profile:default:https://old.example.com/mcp", "replaced")])
-        target_home = self.root / "target-home"
-        self.agent_db(target_home, [(other, None), (slack, "replaced by newer credential")])
-        remote = f'move_remote() {{ HOME="{target_home}" bash -c "$2"; }}\n'
+        kinds = ("a dangling symlink", "a directory", "a path with no file")
+        for kind in kinds:
+            with self.subTest("move_transcript, on the host", kind=kind):
+                held = bad_path(kind, self.home / ".omp/agent/sessions/-lane")
+                shutil.rmtree(self.proc, ignore_errors=True)
+                self.proc.mkdir()
+                self.nested_session(held, cmdline="omp")
+                found = self.run_bash(f"move_transcript 1101 {self.METARQ}")
+                self.assertEqual((found.returncode, found.stdout), (1, ""), found.stderr)
+                refused = self.run_bash('move_own_omp() { echo 1101; }\nmove_image_bytes() { echo 280000000; }\n'
+                                        'move_hand_off() { echo HANDED-OFF; }\ncmd_move_self')
+                self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+                self.assertNotIn("HANDED-OFF", refused.stdout)
+                self.assertIn("not a regular file", refused.stderr)
+            with self.subTest("move <id> --now, on the host", kind=kind):
+                outside = self.run_bash('move_image_bytes() { echo 280000000; }\n'
+                                        f'move_hand_off() {{ echo HANDED-OFF; }}\ncmd_move_notify {self.METARQ} --now')
+                self.assertNotIn("HANDED-OFF", outside.stdout)
+                self.assertIn("cannot be moved", outside.stderr)
+                self.assertIn("not a regular file", outside.stderr)
+            with self.subTest("move --to, on the host", kind=kind):
+                member = self.run_bash(
+                    'move_image_bytes() { echo 280000000; }\nmove_to_scan_processes\n'
+                    f'MT_ROW[{self.METARQ}]="${{MT_ROW_OF[{self.METARQ}]}}"\n'
+                    f'MT_DIRS[{self.METARQ}]="{self.root / "lane"}"\n'
+                    f'move_to_member {self.METARQ} devbox')
+                self.assertEqual(member.returncode, 1, member.stdout + member.stderr)
+                self.assertEqual(member.stdout, "")
+                self.assertIn("not a regular file", member.stderr)
+            with self.subTest("the --resume argument of an omp that holds no transcript", kind=kind):
+                named = bad_path(kind, self.home / ".omp/agent/sessions/-lane")
+                shutil.rmtree(self.proc, ignore_errors=True)
+                self.proc.mkdir()
+                self.nested_session(None, cmdline=f"omp --resume {named}")
+                found = self.run_bash(f"move_transcript 1101 {self.METARQ}")
+                self.assertEqual((found.returncode, found.stdout), (1, ""), found.stderr)
 
-        warned = self.run_bash(remote + "move_to_warn_mcp_logins sami-devbox")
-        self.assertEqual(warned.returncode, 0, warned.stderr)
-        self.assertIn("holds no login for the MCP server(s) https://mcp.slack.com/mcp -", warned.stderr)
-        self.assertIn("/mcp reauth <server>", warned.stderr)
-        self.assertNotIn("mcp.example.com", warned.stderr)
-        self.assertNotIn("old.example.com", warned.stderr)
-        self.assertNotIn("secret-never-read", warned.stderr + warned.stdout)
+        self.target()
+        in_box = self.home / ".omp/agent/sessions/-work"
+        for kind in kinds:
+            env = {"AGENTBOX_BOX": "agentbox-aaaaaaaaaaaa", "AGENTBOX_DIRS": f"{self.home}/lane",
+                   "OMP_SESSION_ID": sid, "PI_SESSION_FILE": str(bad_path(kind, in_box)), "TMUX_PANE": "%7"}
+            with self.subTest("move_self_in_box", kind=kind):
+                self.local_tmux.write_text("", encoding="utf-8")
+                refused = self.run_bash('move_own_omp() { return 1; }\ncmd_move_self', env)
+                self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+                self.assertIn("not a regular file", refused.stderr)
+                self.assertIn("nothing was hung up", refused.stderr)
+                self.assertNotIn("respawn-pane", self.local_tmux.read_text(encoding="utf-8"))
+            with self.subTest("move_to_in_box", kind=kind):
+                refused = self.run_bash('move_own_omp() { return 1; }\ncmd_move_to --to devbox --accept-orphans', env)
+                self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+                self.assertIn("not a regular file", refused.stderr)
+                self.assertEqual(self.jobs(), [])
+        # The control: the same in-box move with the file there respawns the pane.
+        good = in_box / f"2026-10-25T02-17-36-102Z_{sid}.jsonl"
+        shutil.rmtree(good, ignore_errors=True) if good.is_dir() else good.unlink(missing_ok=True)
+        good.write_text("{}\n", encoding="utf-8")
+        self.local_tmux.write_text("", encoding="utf-8")
+        moved = self.run_bash('move_own_omp() { return 1; }\ncmd_move_self', {
+            "AGENTBOX_BOX": "agentbox-aaaaaaaaaaaa", "AGENTBOX_DIRS": f"{self.home}/lane",
+            "OMP_SESSION_ID": sid, "PI_SESSION_FILE": str(good), "TMUX_PANE": "%7"})
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.assertIn("respawn-pane", self.local_tmux.read_text(encoding="utf-8"))
 
-        # A target holding every login, and a host holding none, say nothing.
-        self.agent_db(target_home / "full", [(slack, None), (other, None)])
-        full = f'move_remote() {{ HOME="{target_home / "full"}" bash -c "$2"; }}\n'
-        self.assertEqual(self.run_bash(full + "move_to_warn_mcp_logins sami-devbox").stderr, "")
-        (self.home / ".omp/agent/agent.db").unlink()
-        self.assertEqual(self.run_bash(remote + "move_to_warn_mcp_logins sami-devbox").stderr, "")
-
-        # A target whose agent.db cannot be read lacks every login.
-        absent = f'move_remote() {{ HOME="{self.root / "nowhere"}" bash -c "$2"; }}\n'
-        self.agent_db(self.home, [(slack, None)])
-        self.assertIn("https://mcp.slack.com/mcp", self.run_bash(absent + "move_to_warn_mcp_logins t").stderr)
 
 if __name__ == "__main__":
     unittest.main()

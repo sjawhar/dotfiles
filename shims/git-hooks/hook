@@ -1,13 +1,18 @@
 #!/bin/bash
-# git-trailer-hooks: the hooks directory shims/git points `core.hooksPath` at for the one
-# `git merge`, `git pull`, `git cherry-pick` or `git revert` an omp session runs, so the
-# commit that command makes carries the session's Omp-Session trailer, as a `git commit`
-# does through its `--trailer`. Every hook name here is a link to this file.
+# git-trailer-and-leak-hooks: shims/git points `core.hooksPath` here for every ordinary
+# `git commit` to scan its staged diff and cleaned message, and for the agent-session
+# `git merge`, `git pull`, `git cherry-pick` or `git revert` that needs an Omp-Session trailer.
+# Every hook name here is a link to this file.
 #
-# prepare-commit-msg adds `Omp-Session: $OMP_SESSION_ID` to the message unless the same
-# line is there already, the id is malformed, scripts/omp-session-trailer says no, or a
-# rebase is replaying commits (`pull --rebase`, a rebase started from a hook): a replayed
-# commit keeps the trailer of the session that made it.
+# For the scanned commit, prepare-commit-msg records Git's auto comment character before the
+# editor runs (not under --no-verify, which skips commit-msg, its reader); pre-commit runs the
+# repository hook then scans the staged diff with attributes from an empty tree, so attributes
+# cannot hide text but Git still detects binary content; commit-msg runs the message as Git will
+# clean it. For the agent-session commands
+# that take no --trailer, prepare-commit-msg adds `Omp-Session: $OMP_SESSION_ID` unless the same
+# line is there already, the id is malformed, scripts/omp-session-trailer says no, or a rebase is
+# replaying commits (`pull --rebase`, a rebase started from a hook): a replayed commit keeps the
+# trailer of the session that made it.
 #
 # Then every hook, prepare-commit-msg included, runs the hook git would have run without
 # shims/git's override, if there is one, with the same arguments and stdin, and exits with
@@ -35,27 +40,29 @@ here="$(cd -P -- "${0%/*}" && pwd)"
 # bookkeeping, while a wrong one on someone else's is a false claim of authorship in a public
 # repository. `command git` is deliberate - shims/git prints its own lines, which would otherwise
 # land inside a --format=%ae capture.
-replaying=0
-replayed_author=""
-# Cherry-pick and revert ONLY: they replay another author's commit, preserving its author. A
-# merge or pull writes a NEW commit authored by us, so it is ours to stamp even when what it
-# merges is foreign - including MERGE_HEAD here wrongly silenced merges (measured 2026-11-10).
-for _head in CHERRY_PICK_HEAD REVERT_HEAD; do
-    _p="$(git rev-parse --git-path "$_head" 2> /dev/null)" || continue
-    [[ -f "$_p" ]] || continue
-    replaying=1
-    replayed_author="$(command git log -1 --format=%ae "$(< "$_p")" 2> /dev/null || true)"
-    break
-done
-_mine="$(command git config user.email 2> /dev/null || true)"
-if [[ $replaying -eq 1 ]] &&
-    ! [[ -n "$replayed_author" && -n "$_mine" && "$replayed_author" == "$_mine" ]]; then
-    replay_blocks_trailer=1
-else
-    replay_blocks_trailer=0
+replay_blocks_trailer=0
+# Only the trailer below reads this, and only for a prepare-commit-msg outside the leak-term commit scan.
+if [[ -z "${DOTFILES_GIT_COMMIT_SCAN:-}" && "$name" == prepare-commit-msg ]]; then
+    replaying=0
+    replayed_author=""
+    # Cherry-pick and revert ONLY: they replay another author's commit, preserving its author. A
+    # merge or pull writes a NEW commit authored by us, so it is ours to stamp even when what it
+    # merges is foreign - including MERGE_HEAD here wrongly silenced merges (measured 2026-11-10).
+    for _head in CHERRY_PICK_HEAD REVERT_HEAD; do
+        _p="$(git rev-parse --git-path "$_head" 2> /dev/null)" || continue
+        [[ -f "$_p" ]] || continue
+        replaying=1
+        replayed_author="$(command git log -1 --format=%ae "$(< "$_p")" 2> /dev/null || true)"
+        break
+    done
+    _mine="$(command git config user.email 2> /dev/null || true)"
+    if [[ $replaying -eq 1 ]] &&
+        ! [[ -n "$replayed_author" && -n "$_mine" && "$replayed_author" == "$_mine" ]]; then
+        replay_blocks_trailer=1
+    fi
 fi
 
-if [[ "$name" == prepare-commit-msg && -n "${1:-}" &&
+if [[ -z "${DOTFILES_GIT_COMMIT_SCAN:-}" && "$name" == prepare-commit-msg && -n "${1:-}" &&
     "${OMP_SESSION_ID:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] &&
     [[ ! -d "$(git rev-parse --git-path rebase-merge)" && ! -d "$(git rev-parse --git-path rebase-apply)" ]] &&
     [[ $replay_blocks_trailer -eq 0 ]] &&
@@ -80,7 +87,175 @@ if [[ "$p" == *"$mine"* ]]; then
     if [[ -n "$p" ]]; then export GIT_CONFIG_PARAMETERS="$p"; else unset GIT_CONFIG_PARAMETERS; fi
 fi
 own="$(git rev-parse --path-format=absolute --git-path hooks 2> /dev/null || true)"
-if [[ -n "$own" && -x "$own/$name" && ! "$own" -ef "$here" ]]; then
+
+own_hook_present() {
+    [[ -n "$own" && -x "$own/$name" && ! "$own" -ef "$here" ]]
+}
+
+scan_field() {
+    local wanted="$1" field
+    for field in ${DOTFILES_GIT_COMMIT_SCAN:-}; do
+        if [[ "$field" == "$wanted="* ]]; then
+            printf '%s' "${field#*=}"
+            return
+        fi
+    done
+    printf unknown
+}
+
+commit_status() {
+    local configured code=0
+    case "$(scan_field status)" in
+        0 | 1) scan_field status ;;
+        config)
+            configured="$(git config --type=bool --get commit.status 2> /dev/null)" || code=$?
+            case "$code:$configured" in
+                1:*) printf 1 ;;
+                0:true) printf 1 ;;
+                0:false) printf 0 ;;
+                *) printf unknown ;;
+            esac
+            ;;
+        *) printf unknown ;;
+    esac
+}
+
+# Sets cleanup (the mode git applies), verbose (0, a count, or unknown) and read_every_line
+# (1 when either cannot be read). An explicit `--cleanup=default` resolves as git does
+# (strip with the editor, whitespace without) and beats commit.cleanup; an absent one takes
+# commit.cleanup, whose `default` resolves the same way.
+resolve_cleanup_and_verbose() {
+    local configured code=0
+    read_every_line=0
+    cleanup="$(scan_field cleanup)"
+    if [[ "$cleanup" == absent ]]; then
+        configured="$(git config --get commit.cleanup 2> /dev/null)" || code=$?
+        case "$code:$configured" in
+            0:verbatim | 0:whitespace | 0:strip | 0:scissors) cleanup="$configured" ;;
+            0:default | 1:*) cleanup=default ;;
+            *) cleanup=unknown ;;
+        esac
+    fi
+    case "$cleanup" in
+        default)
+            if [[ "${GIT_EDITOR:-}" == : ]]; then cleanup=whitespace; else cleanup="strip"; fi
+            ;;
+        verbatim | whitespace | strip | scissors) ;;
+        *) cleanup=verbatim; read_every_line=1 ;;
+    esac
+    if [[ "$cleanup" == scissors && "${GIT_EDITOR:-}" == : ]]; then
+        cleanup=whitespace
+    fi
+
+    verbose="$(scan_field verbose)"
+    if [[ "$verbose" == unknown ]]; then
+        read_every_line=1
+    elif [[ "$verbose" == config ]]; then
+        code=0
+        configured="$(git config --type=bool --get commit.verbose 2> /dev/null)" || code=$?
+        case "$code:$configured" in
+            0:true) verbose=1 ;;
+            0:false | 1:*) verbose=0 ;;
+            *) verbose=unknown; read_every_line=1 ;;
+        esac
+    fi
+}
+
+# git writes its cut line into the file only when the editor runs with the status shown,
+# and then only for `scissors` or verbose (a line for each); the scanner trusts cut lines only in
+# that case.
+prepare_auto_comment_char() {
+    local configured code=0 editor status character comment_path cleanup verbose read_every_line cut=0
+    configured="$(git config --get core.commentChar 2> /dev/null)" || code=$?
+    [[ "$code:$configured" == 0:auto ]] || return 0
+    # A file an earlier commit left, its git process of this pid stopped after this hook, must not give this
+    # commit its character: it goes before any return below.
+    comment_path="$(git rev-parse --git-path "dotfiles-leak-terms-comment-char.$PPID")"
+    rm -f -- "$comment_path"
+    # Under --no-verify commit-msg, the file's only reader, does not run.
+    [[ "$(scan_field verify)" != 0 ]] || return 0
+    if [[ "${GIT_EDITOR:-}" == : ]]; then editor=0; else editor=1; fi
+    status="$(commit_status)"
+    [[ "$status" == 0 || "$status" == 1 ]] || return 0
+    resolve_cleanup_and_verbose
+    ((!read_every_line)) || return 0
+    if ((editor && status)) && [[ "$cleanup" == scissors || "$verbose" =~ ^[1-9][0-9]*$ ]]; then
+        cut=1
+    fi
+
+    if ! character="$("$here/../../scripts/leak-terms-check" git-comment-char \
+        --editor-ran "$editor" --status-shown "$status" --cut-line-written "$cut" < "$1")"; then
+        exit 1
+    fi
+    # No character (git's choice is not certain) leaves no file, so commit-msg reads every line.
+    [[ -n "$character" ]] || return 0
+    [[ "$character" =~ ^[\#\;\@\!\$\%\^\&\|\:]$ ]] || exit 1
+    printf '%s' "$character" > "$comment_path"
+}
+
+message_scan_args() {
+    local cleanup verbose configured code=0 comment_path read_every_line encoding
+    resolve_cleanup_and_verbose
+    encoding="UTF-8"
+    configured="$(git config --get i18n.commitEncoding 2> /dev/null)" || code=$?
+    case "$code:$configured" in
+        1:*) ;;
+        0:?*) encoding="$configured" ;;
+        *) exit 1 ;;
+    esac
+    if ((read_every_line)); then
+        scanner_args=(message --cleanup verbatim --place "commit message" --encoding "$encoding")
+        return 0
+    fi
+    code=0
+    configured="$(git config --get core.commentChar 2> /dev/null)" || code=$?
+    case "$code:$configured" in
+        1:*) comment_char="#" ;;
+        0:auto)
+            comment_path="$(git rev-parse --git-path "dotfiles-leak-terms-comment-char.$PPID")"
+            # Read directly: under errexit a `$(< file)` of a missing file ends this hook. The file holds one
+            # character and no newline, so read reports end of file after taking it.
+            comment_char=""
+            if { IFS= read -r comment_char || [[ -n "$comment_char" ]]; } 2> /dev/null < "$comment_path"; then
+                rm -f -- "$comment_path"
+            fi
+            ;;
+        0:?) comment_char="$configured" ;;
+        *) comment_char="" ;;
+    esac
+
+    scanner_args=(message --cleanup "$cleanup" --place "commit message" --encoding "$encoding")
+    if [[ -n "$comment_char" ]]; then
+        scanner_args+=(--comment-char "$comment_char")
+    fi
+    if [[ "$cleanup" == scissors || "$verbose" =~ ^[1-9][0-9]*$ ]]; then
+        scanner_args+=(--cut-at-scissors)
+    fi
+    return 0
+}
+
+if [[ -n "${DOTFILES_GIT_COMMIT_SCAN:-}" ]]; then
+    if [[ "$name" == prepare-commit-msg && -n "${1:-}" ]]; then
+        prepare_auto_comment_char "$1"
+    fi
+
+    if own_hook_present; then
+        "$own/$name" "$@" || exit
+    fi
+
+    case "$name" in
+        pre-commit)
+            "$here/../../scripts/leak-terms-check" staged || exit 1
+            ;;
+        commit-msg)
+            message_scan_args
+            "$here/../../scripts/leak-terms-check" "${scanner_args[@]}" < "$1" || exit 1
+            ;;
+    esac
+    exit 0
+fi
+
+if own_hook_present; then
     exec "$own/$name" "$@"
 fi
 exit 0

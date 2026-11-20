@@ -344,7 +344,8 @@ on a command line, in the environment or a log). On sami-devbox:
 3. `snapshot-copy.sh mount` puts a dm-snapshot copy-on-write overlay (a file on `/mnt/scratch`)
    over the read-only loop and mounts that, so ext4 replays its journal without writing the
    image (`noload` left entries unreadable, "Bad message").
-4. `snapshot-copy.sh copy` lists, filters (EXCLUDE), checks no-offbox, and copies. One rsync
+4. `snapshot-copy.sh copy` lists, filters (EXCLUDE), and copies; it checks no `.no-offbox` marker
+   (5fa06c70, INFRA-702, took that check out). One rsync
    over 33.8 M `--files-from` entries spent hours on its file list: after a first pass,
    `snapshot-missing.py` (lstat of every entry against the target) lists what is left and
    `snapshot-finish.sh` copies it in 16 streams under one guard.
@@ -412,12 +413,11 @@ the reclaim before stop ran only for `pull-unit.sh stop`).
   event in the 60 s after the stop and no hung umount. The guard's own tests:
   `scripts/tests/test_bulk_copy_cgroup_guard.py`.
 
-Data a lane owns may be marked `.no-offbox` or listed in `EXCLUDE`; `upload.sh` refuses to start
-without `EXCLUDE`, `exclude-filter.py`, `offbox-gate.py` and `no-offbox`, and checks each shard
-with `offbox-gate.py`, which runs `no-offbox --root ROOT --from LIST`. One exception, listed in
-`OFFBOX-EXCEPT`: inside `review-evidence`, an **empty** `.no-offbox` is a test fixture
-(SendGateReview12's replays) and copies as data; a marker with text still refuses and goes to
-LANE-C (LANE-C, 2026-11-03).
+Data a lane owns may be listed in `EXCLUDE`, which `upload.sh` refuses to start without, with
+`exclude-filter.py`. It does not check `.no-offbox` markers: 5fa06c70 (INFRA-702) took that
+check, and its `offbox-gate.py` call, out of `upload.sh` and `snapshot-copy.sh`, so a marked tree
+copies like any other. The two copies off this machine that still refuse a marked tree are
+`backup-shared-state` and `omp-teleport --host` (`agentbox/AGENTS.md`).
 
 ## Known issues
 

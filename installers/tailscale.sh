@@ -8,9 +8,10 @@
 # Root-level role installer: devbox/gce-host.sh sources it with sudo. TAILSCALE_HOSTNAME defaults
 # to this machine's short host name, the name the tailnet policy's hosts entries give sami-devbox.
 #
-# Idempotent: the package is installed only when the pinned version is not, and `tailscale up`
-# runs only when the node is not already up, untagged, under that name. A node still tagged from
-# an earlier join signs in again (--force-reauth) and drops its tags (--advertise-tags=).
+# Idempotent: installs unless the pinned version is fully installed (dpkg status `installed`; a
+# held package counts), and `tailscale up` runs only when the node is not already up, untagged,
+# under that name. A node still tagged from an earlier join signs in again (--force-reauth) and
+# drops its tags (--advertise-tags=).
 set -euo pipefail
 # shellcheck source=installers/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -23,17 +24,21 @@ TAILSCALE_DEB_SHA256=8768973def76dd530b53a0fe74ca396252fff050f955aeebfabd33c7796
 
 ((EUID == 0)) || { echo "tailscale.sh: run as root (devbox/gce-host.sh)" >&2; exit 1; }
 
-if [[ "$(dpkg-query -W -f='${Version}' tailscale 2>/dev/null || true)" == "$TAILSCALE_VERSION" ]]; then
+if [[ "$(dpkg-query -W -f='${db:Status-Status} ${Version}' tailscale 2>/dev/null || true)" == "installed $TAILSCALE_VERSION" ]]; then
     echo "tailscale.sh: tailscale $TAILSCALE_VERSION already installed"
 else
     ts_tmp="$(mktemp -d)"
     ts_deb="$ts_tmp/tailscale_${TAILSCALE_VERSION}_amd64.deb"
-    curl -fsSL --retry 3 -o "$ts_deb" \
-        "https://pkgs.tailscale.com/stable/ubuntu/pool/tailscale_${TAILSCALE_VERSION}_amd64.deb"
-    echo "$TAILSCALE_DEB_SHA256  $ts_deb" | sha256sum -c --quiet -
-    # apt-get, not dpkg -i, so the package's dependency (iptables) comes with it.
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$ts_deb"
-    rm -rf "$ts_tmp"
+    # The checked file itself, never apt's copy of it (install_checked_deb, installers/lib.sh).
+    if curl -fsSL --retry 3 -o "$ts_deb" \
+        "https://pkgs.tailscale.com/stable/ubuntu/pool/tailscale_${TAILSCALE_VERSION}_amd64.deb" \
+        && install_checked_deb "$ts_deb" "$TAILSCALE_DEB_SHA256"; then
+        rm -rf -- "$ts_tmp"
+    else
+        ts_status=$?
+        rm -rf -- "$ts_tmp"
+        exit "$ts_status"
+    fi
     echo "tailscale.sh: installed tailscale $TAILSCALE_VERSION"
 fi
 # The package enables tailscaled; a machine without systemd running (a container) has no daemon.

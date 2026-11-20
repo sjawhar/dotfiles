@@ -49,6 +49,7 @@ Then prove the login, which needs no password:
 
   psql "$(cat "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omp-session-sql/dsn")" -Atc 'select current_user, current_database()'
 
-A box started after that reaches the same DSN at the same path and the proxy at the same address
-(scripts/agentbox). A box started before it does not: make a new one.
+These serve host sessions only. scripts/agentbox gives a box no route to the database, neither the
+DSN nor the proxy (dispatch://INFRA-1720/ask/16322992), so a box resumes a session only from its
+transcript file.
 EOF

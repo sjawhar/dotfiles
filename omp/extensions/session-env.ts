@@ -22,7 +22,7 @@
 //     Sami 2026-09-18): `abandon`/`rebase`/`squash` on another lane's commits
 //     fails without `--ignore-immutable`, the same guard that protects main.
 //     In a checkout that sets `git config omp.sessionTrailer false` shims/jj
-//     drops both for its call (scripts/omp-session-trailer, shims/AGENTS.md):
+//     drops both for its call (scripts/omp-session-trailer, shims/jj):
 //     no trailer there, and so no guard, which tells a session's own commits
 //     by that trailer.
 //     The revset guards the frontier — `ancestors(visible_heads(), 4)` minus
@@ -74,6 +74,21 @@
 //     ADC is the metadata server, and a box_credential_config.json there is one
 //     carried over from an Azure box, whose token source a Google VM lacks.
 //
+// It also names a host session to the agent-secrets helper (dispatch://INFRA-3848):
+// `agent-secrets register --session-id <id>`, run once per id in this process,
+// in the background, so a restart of the helper keeps the session's broker
+// identity and its grants. The launcher (scripts/agent-secrets-session) registers
+// the session before omp has a transcript, so it can name no id; the helper takes
+// the name from inside the session it registered, finding the session's root from
+// the caller's pid. It runs only from inside such a session (`agent-secrets
+// identity` exits 0), since a register from outside one makes the helper admit the
+// command's own short-lived pid as a session root (dispatch://INFRA-3890). It does
+// nothing in a box (AGENTBOX_BOX: the box's launcher names its session), with no
+// helper socket, and for a subagent transcript resumed on its own: that process
+// commits as its session but is not it, and naming it would take that session's
+// broker identity from the process that holds it. A refusal writes one line and
+// never fails the session start.
+//
 // omp binds this extension to every subagent too, and a subagent shares its
 // parent's process and environment. A session family deliberately shares one
 // identity (one set of eyes), so a subagent (`ctx.agent.kind === "sub"`)
@@ -96,8 +111,11 @@
 // answers (a PATH wrapper that loops) falls back to jj's default user config
 // paths instead of holding the session past omp's 30 s extension-handler
 // deadline.
+//
+// In an agent box it also tells the box's runner (scripts/agentbox-run.ts) which session the box
+// runs, in one file the runner restarts from and nothing else: see BOX_SESSION_FILE below.
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { existsSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -150,6 +168,50 @@ const ATTRIBUTION_OVERLAY = /^omp-attribution-.*\.toml$/;
 const OVERLAY_DIR = path.join(homedir(), ".cache", "omp", "jj");
 // `jj config path --user` reads no repository and answers in milliseconds.
 const JJ_CONFIG_PATH_TIMEOUT_MS = 10_000;
+// Each agent-secrets call the helper naming makes: `identity` asks the helper once with a 2 s
+// deadline of its own, and `register` redials a helper that is starting for up to 10 s.
+const AGENT_SECRETS_TIMEOUT_MS = 10_000;
+const execFileAsync = promisify(execFile);
+// The ids this process has named, or is naming, to the helper.
+const namedToHelper = new Set<string>();
+
+function isSocket(file: string): boolean {
+	try {
+		return statSync(file).isSocket();
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Names a host session to the agent-secrets helper once in this process, in the background.
+ * The rules are in the header above.
+ */
+function nameSessionToHelper(id: string, report: (message: string) => void): void {
+	if (process.env.AGENTBOX_BOX || namedToHelper.has(id)) return;
+	const sock =
+		process.env.AGENT_SECRETS_HELPER_SOCK ||
+		path.join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 0}`, "agent-secrets", "helper.sock");
+	if (!isSocket(sock)) return;
+	namedToHelper.add(id);
+	const env = { ...process.env, AGENT_SECRETS_HELPER_SOCK: sock };
+	void (async () => {
+		try {
+			await execFileAsync("agent-secrets", ["identity"], { env, timeout: AGENT_SECRETS_TIMEOUT_MS });
+		} catch {
+			return; // no session the helper registered: nothing to name
+		}
+		try {
+			await execFileAsync("agent-secrets", ["register", "--session-id", id], { env, timeout: AGENT_SECRETS_TIMEOUT_MS });
+		} catch (error) {
+			const stderr = error && typeof error === "object" && "stderr" in error && typeof error.stderr === "string" ? error.stderr.trim() : "";
+			const why = stderr || String(error);
+			report(
+				`session-env: agent-secrets register --session-id ${id} failed, so a helper restart ends this session's broker identity: ${why.split("\n").at(-1)}`,
+			);
+		}
+	})();
+}
 
 function withoutOverlays(chain: string): string {
 	return chain
@@ -249,20 +311,78 @@ async function dropOverlays(): Promise<void> {
 	process.env.JJ_CONFIG = (process.env.JJ_CONFIG ? withoutOverlays(process.env.JJ_CONFIG) : "") || (await jjConfigBase());
 }
 
+// The session file of an agent box (dispatch://INFRA-1720, spec v13): `version=1`, this omp's
+// pid, the main session's id and its transcript path, one `key=value` per line. The box's runner
+// restarts the session this file names, resumed by that path, and refuses when there is none. It
+// used to guess instead -- the transcript omp held open, the newest file in a directory named
+// after the box, its own `--resume` flag -- and each guess was wrong for some session: one that
+// held no writer, worked in a shared tree, or had forked or switched since its launch.
+//
+// Only the omp the runner started writes it: AGENTBOX_RUNNER_PID is exported to every process in
+// the box, so an `omp -p` that a tool runs (whose parent is a shell) must not overwrite the
+// report of the session the box runs. Only for the main session: a subagent's and an advisor's
+// events reach these handlers in the same process, with `ctx.agent.kind === "sub"`. omp fires no
+// event when it changes a session's id silently or when /move moves its transcript, so turn_end,
+// each tool call and a timer write again whenever the id or path differs from the last report;
+// the in-box `agentbox restart` is itself a tool call, so the runner reads a current file. Each
+// write first saves the session (ensureOnDisk, as omp's own /new does), so a session with no
+// prompt yet has a transcript to resume. Written to a temporary file in the same directory and
+// renamed over the old one, so a reader never sees half a file.
+const IN_BOX = !!process.env.AGENTBOX_RUNNER_PID && process.env.AGENTBOX_RUNNER_PID === String(process.ppid);
+const BOX_SESSION_FILE = path.join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.()}`, "agentbox-session");
+const BOX_SESSION_INTERVAL_MS = Number(process.env.OMP_AGENTBOX_SESSION_MS) > 0 ? Number(process.env.OMP_AGENTBOX_SESSION_MS) : 10_000;
+
+type SessionSource = {
+	getSessionId?: () => string | undefined;
+	getSessionFile?: () => string | undefined;
+	ensureOnDisk?: () => Promise<void>;
+};
+type SessionContext = {
+	agent?: { kind: "main" | "sub" };
+	hasUI?: boolean;
+	ui?: { notify: (message: string, type?: "info" | "warning" | "error") => void };
+	sessionManager?: SessionSource;
+};
+// One per process: omp rebinds this extension to every subagent session, in the same process.
+/** The main session's manager, kept from the last main event, which the timer reads. */
+let boxSession: SessionSource | undefined;
+/** What this omp last wrote to the session file. */
+let boxReported: { id: string; file: string } | undefined;
+let boxTimerStarted = false;
+
+async function reportBoxSession(session: SessionSource, always: boolean): Promise<void> {
+	try {
+		const id = session.getSessionId?.();
+		const file = session.getSessionFile?.();
+		if (!id || !file) return; // `--no-session`: nothing to resume
+		if (!always && id === boxReported?.id && file === boxReported.file) return;
+		await session.ensureOnDisk?.();
+		// Read again after the save: a report that started later may already have written a newer
+		// id, and this one must not put the older one back.
+		const nowId = session.getSessionId?.();
+		const nowFile = session.getSessionFile?.();
+		if (!nowId || !nowFile || nowFile.includes("\n")) return;
+		const tmp = `${BOX_SESSION_FILE}.${process.pid}.tmp`;
+		writeFileSync(tmp, `version=1\npid=${process.pid}\nsession=${nowId}\nfile=${nowFile}\n`);
+		renameSync(tmp, BOX_SESSION_FILE);
+		boxReported = { id: nowId, file: nowFile };
+	} catch {
+		// Never fatal for omp. Without a report the runner refuses a restart and says why.
+	}
+}
+
+async function reportBox(ctx: SessionContext, always: boolean): Promise<void> {
+	if (!IN_BOX || ctx.agent?.kind === "sub" || !ctx.sessionManager) return;
+	boxSession = ctx.sessionManager;
+	await reportBoxSession(ctx.sessionManager, always);
+}
+
 export default function (pi: ExtensionAPI) {
 	const ghConfigDir = agentGhConfigDir();
 	if (ghConfigDir) process.env.GH_CONFIG_DIR = ghConfigDir;
 	const googleCredentials = agentGoogleCredentials();
 	if (googleCredentials) process.env.GOOGLE_APPLICATION_CREDENTIALS = googleCredentials;
-	const set = async (
-		_event: unknown,
-		ctx: {
-			agent?: { kind: "main" | "sub" };
-			hasUI?: boolean;
-			ui?: { notify: (message: string, type?: "info" | "warning" | "error") => void };
-			sessionManager?: { getSessionFile?: () => string | undefined };
-		},
-	) => {
+	const set = async (_event: unknown, ctx: SessionContext) => {
 		if (ctx.agent?.kind === "sub") return; // a subagent keeps its family's identity
 		const file = ctx.sessionManager?.getSessionFile?.();
 		const id = file ? attributedSessionId(file) : undefined;
@@ -285,6 +405,12 @@ export default function (pi: ExtensionAPI) {
 		}
 		process.env.OMP_SESSION_ID = id;
 		process.env.PI_COMMIT_TRAILERS = `Omp-Session: ${id}`;
+		if (file && TOP_LEVEL_TRANSCRIPT.test(path.basename(file))) {
+			nameSessionToHelper(id, message => {
+				if (ctx.hasUI && ctx.ui) ctx.ui.notify(message, "warning");
+				else process.stderr.write(`${message}\n`);
+			});
+		}
 		const base = await jjConfigBase();
 		const overlay = path.join(OVERLAY_DIR, `omp-attribution-${id}.toml`);
 		if (process.env.JJ_CONFIG?.split(":").includes(overlay)) return; // already active — never rewrite a live layer
@@ -301,7 +427,22 @@ export default function (pi: ExtensionAPI) {
 			process.env.JJ_CONFIG = base; // degrade to no trailer, never a stale one
 		}
 	};
-	pi.on("session_start", set);
-	pi.on("session_switch", set);
-	pi.on("session_branch", set);
+	// The box's report first: `set` can wait on jj for seconds.
+	const onSession = async (event: unknown, ctx: SessionContext) => {
+		await reportBox(ctx, true);
+		await set(event, ctx);
+	};
+	pi.on("session_start", onSession);
+	pi.on("session_switch", onSession);
+	pi.on("session_branch", onSession);
+	if (IN_BOX) {
+		pi.on("turn_end", (_event: unknown, ctx: SessionContext) => reportBox(ctx, false));
+		pi.on("tool_call", (_event: unknown, ctx: SessionContext) => reportBox(ctx, false));
+		if (!boxTimerStarted) {
+			boxTimerStarted = true;
+			setInterval(() => {
+				if (boxSession) void reportBoxSession(boxSession, false);
+			}, BOX_SESSION_INTERVAL_MS).unref();
+		}
+	}
 }

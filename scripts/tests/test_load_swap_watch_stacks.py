@@ -47,7 +47,7 @@ SCAN_STACK = """[<0>] __schedule+0x2d0/0x660
 [<0>] process_one_work+0x17c/0x350
 [<0>] worker_thread+0xaa/0x350"""
 
-# An umount parked in the global wait: the waiting half, the one 7.0.0-1017 does not fix.
+# An umount blocked in the global wait: the waiting half, the one 7.0.0-1017 does not fix.
 WAIT_STACK = """[<0>] __schedule+0x2d0/0x660
 [<0>] schedule+0x27/0xb0
 [<0>] schedule_timeout+0x9e/0x170
@@ -254,7 +254,12 @@ class CaptureShape(unittest.TestCase):
         options = WATCH.parse_args([])
         finding = WATCH.umount_finding(now, options)
         items = [{"kind": "umount", "event": "alert", "finding": finding, "incident": {"opened_at": now["at"] - 1980}}]
-        taken = capture(workers=[{"pid": 77, "comm": "kworker/5:2+inode_switch_wbs", "state": "R", "named": True,
+        # The capture holds the hung umount the sample names, as a capture taken while it hangs
+        # does: since f301693f the reset line goes out only when the capture found a task in D
+        # state, and a capture with none (this fixture's, until then) asks for no reset.
+        taken = capture(tasks=[{"pid": 4242, "comm": "umount", "wchan": "wait_for_completion",
+                                "blocked": 1980.0, "stack": OTHER_STACK}],
+                        workers=[{"pid": 77, "comm": "kworker/5:2+inode_switch_wbs", "state": "R", "named": True,
                                   "busy": True, "cpu_seconds": 5901.0, "stack": SCAN_STACK}])
         message = WATCH.compose_message(items, now, options, None, "/tmp/report.txt", now["at"], "sami-devbox", taken)
         self.assertIn(f"Stack evidence in the report: {WATCH.HALF_SHORT['scanning']}.", message)

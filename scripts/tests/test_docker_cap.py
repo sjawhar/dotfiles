@@ -84,7 +84,10 @@ class DockerCapTest(unittest.TestCase):
         self.addCleanup(self.dir.cleanup)
         binned = root / "bin"
         binned.mkdir()
-        for name, body in (("docker", DOCKER_STUB), ("df", DF_STUB)):
+        # pgrep answers "no docker pull is running": the script skips every image pass while one
+        # is, and on a host where a lane pulls an image beside the test the image passes below
+        # never ran.
+        for name, body in (("docker", DOCKER_STUB), ("df", DF_STUB), ("pgrep", "#!/bin/bash\nexit 1\n")):
             path = binned / name
             path.write_text(body)
             path.chmod(0o755)
@@ -95,6 +98,11 @@ class DockerCapTest(unittest.TestCase):
             "STUB_STATE": str(self.state),
             "STUB_LOG": str(self.log),
             "HOME": str(root),
+            # The script's lock is $XDG_RUNTIME_DIR/docker-cap.lock, else /run/user/<uid>'s: the
+            # host's own, which the hourly run takes, so a test run beside it skipped the real
+            # run or was skipped by it. Where /run/user/<uid> does not exist (a Legion pod) the
+            # script could not open its lock at all.
+            "XDG_RUNTIME_DIR": str(root),
         }
 
     def run_cap(self, cache_bytes, pct, removes="", **extra):
@@ -109,9 +117,16 @@ class DockerCapTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout
 
+    def builder_prunes(self):
+        return [l for l in self.log.read_text().splitlines() if l.startswith("builder prune")]
+
     def prunes(self):
-        lines = [l for l in self.log.read_text().splitlines() if l.startswith("builder prune")]
-        return [l.split("until=")[1] for l in lines]
+        """The ages of the age passes, in order."""
+        return [l.split("until=")[1] for l in self.builder_prunes() if "until=" in l]
+
+    def cap_passes(self):
+        """The pass that asks BuildKit for the cap itself, once the ages leave the cache over it."""
+        return [l for l in self.builder_prunes() if "--max-used-space" in l]
 
     def cache(self):
         return int(self.state.read_text().strip())
@@ -131,20 +146,30 @@ class DockerCapTest(unittest.TestCase):
         self.assertEqual(self.cache(), int(35.1 * GB))
         self.assertIn("build cache is now 35 GB, cap 50GB", out)
 
-    def test_every_prune_names_an_age_and_all(self):
+    def test_every_prune_names_an_age_or_the_cap_and_all(self):
         """--all, because a shared record is no candidate without it; an age, because the floor
-        is what keeps a build that runs now."""
+        is what keeps a build that runs now; and after the last age, with the cache still over
+        the cap, one pass that asks BuildKit for the cap itself."""
         self.run_cap(65.1 * GB, 97, removes=f"48:{GB},24:{GB},12:{GB},6:{GB}")
-        for line in self.log.read_text().splitlines():
-            if line.startswith("builder prune"):
-                self.assertIn("--all", line)
-                self.assertRegex(line, r"--filter until=\d+h")
+        lines = self.builder_prunes()
+        for line in lines:
+            self.assertIn("--all", line)
+        for line in lines[:-1]:
+            self.assertRegex(line, r"--filter until=\d+h")
+        self.assertEqual(lines[-1], "builder prune --force --all --max-used-space 50GB")
 
     def test_the_floor_is_the_last_age(self):
-        """Nothing under the cap is reached, so the ladder walks to its floor and stops there."""
+        """Nothing under the cap is reached, so the ladder walks to its floor and stops there,
+        and the cap pass runs once after it."""
         self.run_cap(65.1 * GB, 97, removes=f"48:{GB},24:{GB},12:{GB},6:{GB}")
         self.assertEqual(self.prunes(), ["48h", "24h", "12h", "6h"])
+        self.assertEqual(len(self.cap_passes()), 1, self.builder_prunes())
         self.assertEqual(self.cache(), int(61.1 * GB))
+
+    def test_a_ladder_that_fits_asks_for_no_cap_pass(self):
+        self.run_cap(65.1 * GB, 97, removes=f"48:{10 * GB},24:{20 * GB}")
+        self.assertEqual(self.prunes(), ["48h", "24h"])
+        self.assertEqual(self.cap_passes(), [])
 
     def test_a_cache_under_the_cap_is_left_alone(self):
         """The cap is read in Docker's SI units: 49.9 GB is under a 50GB cap."""

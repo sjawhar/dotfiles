@@ -45,7 +45,104 @@ for pass in after-self from-top; do
     done
     $past_self && break
 done
-[ -n "$real" ] || { echo "shims/pulumi: no real pulumi on PATH" >&2; exit 127; }
+
+# mise_paths: mise as this machine runs it, whatever HOME and PATH the caller set
+# (shims/AGENTS.md, "A moved HOME"). A Legion test pane runs a shim with a
+# temporary HOME and the PATH <bin>:/usr/local/bin:/usr/bin:/bin, where every
+# path under HOME names nothing. Sets, once per process:
+#   _mise_bin     mise on PATH, else the dotfiles checkout's bin/mise, else the
+#                 mise the shims in a data dir link to (a copy or a worktree of
+#                 the checkout has no bin/, which is not committed)
+#   _mise_config  mise's global configuration: MISE_GLOBAL_CONFIG_FILE, else the
+#                 file under HOME when it is readable, else the checkout's
+#                 mise.toml, which installers link that file to
+#   _mise_datas   the data dirs a tool may be installed in: MISE_DATA_DIR and mise's
+#                 default ~/.local/share/mise under HOME; with no MISE_DATA_DIR,
+#                 ~/.mise (.bashrc's) and that default, under HOME, then the passwd home's
+#   _mise_data    the one to give mise: MISE_DATA_DIR, else the first that exists
+# The checkout is DOTFILES_DIR, else the one this file's own path is in.
+mise_paths() {
+    local IFS=$' \t\n'
+    local self dotfiles home dir data seen=""
+    local -a all=()
+    [[ -z "${_mise_config:-}" ]] || return 0
+    _mise_bin=""
+    IFS=':'
+    for dir in ${PATH:-}; do
+        if [[ -n "$dir" && -f "$dir/mise" && -x "$dir/mise" ]]; then
+            _mise_bin="$dir/mise"
+            break
+        fi
+    done
+    IFS=$' \t\n'
+    _mise_config="${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/mise/config.toml}"
+    if [[ -z "$_mise_bin" || ( -z "${MISE_GLOBAL_CONFIG_FILE:-}" && ! -r "$_mise_config" ) ]]; then
+        dotfiles="${DOTFILES_DIR:-}"
+        if [[ -z "$dotfiles" ]]; then
+            self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")" || self=""
+            dotfiles="${self%/shims/*}"
+        fi
+        [[ -n "$_mise_bin" ]] || _mise_bin="$dotfiles/bin/mise"
+        [[ -n "${MISE_GLOBAL_CONFIG_FILE:-}" || -r "$_mise_config" ]] || _mise_config="$dotfiles/mise.toml"
+    fi
+    if [[ -n "${MISE_DATA_DIR:-}" ]]; then
+        all=("$MISE_DATA_DIR" "${XDG_DATA_HOME:-${HOME:-}/.local/share}/mise")
+    else
+        all=("${HOME:-}/.mise" "${XDG_DATA_HOME:-${HOME:-}/.local/share}/mise")
+        # With HOME unset, ~ is the uid's home in the passwd database, which HOME does not move.
+        local HOME
+        unset HOME
+        home=~
+        [[ "$home" != /?* ]] || all+=("$home/.mise" "$home/.local/share/mise")
+    fi
+    _mise_datas=() _mise_data="${MISE_DATA_DIR:-}"
+    for data in "${all[@]}"; do
+        [[ "$data" == /?* && ":$seen:" != *":$data:"* ]] || continue
+        seen+=":$data"
+        _mise_datas+=("$data")
+        [[ -n "$_mise_data" || ! -d "$data" ]] || _mise_data="$data"
+    done
+    if [[ ! -f "$_mise_bin" || ! -x "$_mise_bin" ]]; then
+        for data in ${_mise_datas[@]+"${_mise_datas[@]}"}; do
+            for dir in "$data"/shims/*; do
+                [[ -L "$dir" ]] || continue
+                dir="$(command -p readlink -f -- "$dir")" || dir=""
+                [[ "$dir" != */mise || ! -f "$dir" || ! -x "$dir" ]] || _mise_bin="$dir"
+                break
+            done
+            [[ ! -x "$_mise_bin" ]] || break
+        done
+    fi
+    : "${_mise_data:=${_mise_datas[0]:-}}"
+}
+
+# is_mise_shim FILE: whether FILE is mise's own shim, a file in the shims dir of
+# one of mise's data dirs or a link to mise. It reaches its tool only where mise
+# reads its config and trust list under HOME, which a moved HOME hides.
+is_mise_shim() {
+    local IFS=$' \t\n'
+    local data
+    mise_paths
+    for data in ${_mise_datas[@]+"${_mise_datas[@]}"}; do
+        [[ "${1%/*}" -ef "$data/shims" ]] && return 0
+    done
+    [[ -L "$1" && "$(command -p readlink -f -- "$1")" == */mise ]]
+}
+
+# mise off PATH: pulumi is a mise-managed tool (`pulumi` in mise.toml), and a unit's or a test
+# harness's PATH can hold this dir without mise's shims dir. mise's own shim on PATH under a HOME
+# that holds no mise configuration (a moved HOME) would refuse, so mise is asked here too
+# (shims/az's lookup): the directory's own pin first, then the machine's (`-C /`), since under a
+# moved HOME mise has no record of trusting the directory's configuration.
+if [ -z "$real" ] || { is_mise_shim "$real" && [ "$_mise_config" != "${XDG_CONFIG_HOME:-${HOME:-}/.config}/mise/config.toml" ]; }; then
+    mise_paths
+    found="$(MISE_DATA_DIR="$_mise_data" MISE_GLOBAL_CONFIG_FILE="$_mise_config" "$_mise_bin" which pulumi 2>/dev/null)" \
+        || found="$(MISE_DATA_DIR="$_mise_data" MISE_GLOBAL_CONFIG_FILE="$_mise_config" "$_mise_bin" which -C / pulumi 2>/dev/null)" || found=""
+    if [ -n "$found" ] && [ -x "$found" ] && [ "$(readlink -f "$found")" != "$self" ]; then
+        real="$found"
+    fi
+fi
+[ -n "$real" ] || { echo "shims/pulumi: no real pulumi on PATH ($PATH), and $_mise_bin, given $_mise_config and the data dir $_mise_data, names none" >&2; exit 127; }
 
 export PULUMI_SKIP_UPDATE_CHECK=true
 

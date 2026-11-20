@@ -35,7 +35,13 @@ TOPIC = "notifications.role.example-watch"
 
 CURL_STUB = r"""
 printf '%s\0' "$@" > "$CURL_LOG"
-echo '{"ok":true}'
+body="${CURL_BODY-}"
+[ -n "$body" ] || body='{"ok":true}'
+printf '%s\n' "$body"
+# The status, where the caller asks for it as scripts/envoy does (-w '\n%{http_code}').
+for arg in "$@"; do
+    if [ "$arg" = '\n%{http_code}' ]; then printf '\n%s' "${CURL_STATUS:-200}"; fi
+done
 """
 
 
@@ -178,6 +184,27 @@ class EnvoySend(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn("Usage: envoy notify <topic> <message>", result.stderr)
                 self.assertFalse(self.curl_log.exists(), "nothing may be posted")
+
+    # A listener answers 202 for a role message it keeps because no live session holds the
+    # role (cybermonklabs/legion#4079): nobody has the message, so the sender must not read it
+    # as delivered. curl -f passes any 2xx, which is how a caller's fallback was skipped.
+    def test_a_role_message_the_listener_kept_fails_as_undelivered(self) -> None:
+        kept = '{"event_id":"e1","kept":true,"kept_reason":"holder_lapsed","kept_until":1}'
+        for args in (("send", "--source", "envoy"), ("notify",)):
+            with self.subTest(args=args):
+                result = self.envoy(
+                    *args, "--message-file", "-", TOPIC,
+                    stdin="daily notice", CURL_STATUS="202", CURL_BODY=kept,
+                )
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("answered POST /v1/messages/publish with HTTP 202, not 200", result.stderr)
+                self.assertIn('"kept_reason":"holder_lapsed"', result.stderr)
+
+    def test_a_message_a_session_took_prints_the_answer(self) -> None:
+        result = self.envoy("notify", "--message-file", "-", TOPIC, stdin="daily notice")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, '{"ok":true}\n')
 
 
 class EnvoyStall(unittest.TestCase):

@@ -1,45 +1,73 @@
 # Repository merge rules
 
-Read before you merge in a repository named below, change an enabled auto-merge, or merge a PR that adds or changes a database migration.
+Read before you change an enabled auto-merge, merge in a repository named below, use an admin token, or merge a PR that adds or changes a database migration.
 
 ## Changing an enabled auto-merge
 
-To change the sha or message auto-merge uses, disable it (`gh pr merge <N> --disable-auto`), enable it again, and check that `enabledAt` (`gh pr view <N> --json autoMergeRequest`) changed: a second `--auto` exits 0 and changes nothing. A refused `--match-head-commit` means someone else pushed, so settle who owns the branch before you retry.
+To change the sha or message auto-merge uses, disable it (`gh pr merge <N> --disable-auto`), enable it again, and check that `enabledAt` (`gh pr view <N> --json autoMergeRequest`) changed: a second `--auto` exits 0 and changes nothing. A refused `--match-head-commit` means someone else pushed; settle who owns the branch before you retry.
 
 ## Whether your token can merge here
 
-Never read `gh api repos/<owner>/<repo> -q .permissions` to decide: it reports a USER's permissions and answers all false for an app installation token whatever the installation grants, so a session that reads it concludes it is blocked and asks for a credential it already has. Check by the operation instead: a merge your identity has already made in that repository, or a dry run. A field that looks like the answer is not the field that carries it.
+Do not decide from `gh api repos/<owner>/<repo> -q .permissions`: it reports a user's permissions and reads all false for an App installation token, whatever the installation grants. Decide by the operation: a merge your identity already made in that repository, or a dry run.
 
-## When GitHub refuses the App an admin action
+## Admin actions
 
-A GitHub admin action that work Sami already asked for needs (an App permission or installation, a CODEOWNERS approval in his name, an admin merge, a repository or branch setting) is yours to do, with his admin token from the credential broker. Never ask him to do it: he said so five times between 2026-10-25 and 2026-11-03, last on dispatch://OSSV-300/ask/dc4e1c38-bd15-4999-9ef5-4c6540a2ce9a ("You can request the admin PAT to do it yourself."). `GITHUB_ADMIN_PAT` reaches theorem-labs repositories, `GITHUB_PERSONAL_ADMIN_PAT` sjawhar's own. The broker puts the token in the variable of its own name, and gh reads only `GH_TOKEN` or `GITHUB_TOKEN`, so hand it over in the command: `secret-run --register --reason '<what and why>' GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh "$@"' gh <the call>`. Sami approves the broker's grant card once per session; the card is not an ask. `--register` makes it work in a session that has no broker identity (one launched past `shims/omp`, where plain `secret-run` answers "not found"), with no restart; in a session that has one it changes nothing. The gh shim's `REFUSED by GitHub` block prints this command for the refused call.
+A GitHub admin action that work Sami already asked for needs (an App permission or installation, an admin merge, a repository or branch setting) is yours to do with his admin token from the credential broker; do not ask him to do it. `GITHUB_ADMIN_PAT` reaches theorem-labs repositories, `GITHUB_PERSONAL_ADMIN_PAT` sjawhar's own. The broker puts the token in the variable of its own name and gh reads only `GH_TOKEN` or `GITHUB_TOKEN`, so pass it in the command:
 
-## A guard over a shared budget
+```sh
+secret-run --register --reason '<what and why>' GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh "$@"' gh <the call>
+```
 
-Where a required check measures a budget several pull requests share — a word or line count, a file or bundle size, a quota — it runs on each head and never on the merged result, so every head is green and the sum is red, and the failure lands on the base branch where no author is watching and every other lane is blocked. Measured: of four open pull requests against one 2,000-word ceiling, each passed alone at 1,999, 1,990 and 1,993, and two of them together hit exactly 2,000. Before you arm a merge, enumerate every open pull request that touches the budgeted files, not only yours, and measure the combination; a merge queue's own build is the merged result, so check whether your guard runs there or only on the pull request. Put the margin in the body, since "1,999 of 2,000" invites the next author to check and "passes" does not.
+- Sami approves the broker's grant card once per session. `--register` gives a session with no broker identity one, with no restart.
+- The token never skips a check that tests the work.
 
-The same gap opens the other way round: a guard that reads a DIFF cannot see the STATE. One scanning added lines correctly refused a new commit message while 32 instances of the same thing already in the tree were invisible to it, so a repository can be clean on every commit and dirty in total. Where what matters is the total rather than the change, scan the tree on a schedule as well as the diff on a push.
+## Approvals
 
-## Per-repository rules
+- An approval of a pull request is not an admin action. No approval uses a person's token, the admin token included.
+- Where a code owner owns the files changed, the approval is that person's: ask them through Dispatch, with the pull request, its head and the review verdict it got.
+- You may approve a pull request your own session wrote when the work had cross-family review under `sdd` and Sami authorized the work.
+- An approval counts only at the head it names: a push after approval needs a new review and approval at the new head.
 
-| Repo | Merge rule |
-|---|---|
-| `trajectory-labs-pbc/agent-c` | At the head: `pr-checks-result` and `review` (workflow "Claude PR Review", run from main's copy); also `checklist-affirmation` (`docs/pre-pr-checklists.md`) when the org ruleset lists it as required, so read the ruleset (`gh api repos/trajectory-labs-pbc/agent-c/rules/branches/main`) before you count it. The org ruleset enforces these. No approval needed. |
-| `cybermonklabs/legion` (formerly `sjawhar/legion`) | One approving review that GitHub accepts: it refuses the pull request author's own account, so the approval comes from another identity. Legion merges the work it produces. Work here goes to Legion, whose reviewer phase is the review, and a dev-box session opens no new pull request here (Sami, 2026-11-12, dispatch://INFRA-460/comment/df4df0a5-3336-485a-a166-289b0d57fb02). A PR a dev-box session already has open gets a full review at its head from a cross-family subagent its author dispatches, and the author posts that verdict with `gh pr review <N> -R cybermonklabs/legion --approve|--request-changes --body-file <file>`. From a dev box, post it as the Legion review App, `agent-secrets LEGION_REVIEW_APP --reason '<N> at <head>: post the author-dispatched review' --ttl 15m --wait 30m --github-owner cybermonklabs --github-repo legion -- sh -c 'GH_TOKEN=$(printf %s "$LEGION_REVIEW_APP" | jq -r '\''.installations["cybermonklabs"].token'\'') exec gh "$@"' gh pr review <N> ...` (the grant is JSON keyed by installation owner: handing gh the whole value fails with 401, and an unquoted key with a hyphen, such as theorem-labs, gives an empty token that the shim then refuses as not routed; the dev box's agent-secrets has no flag that hands over a bare token), with a body that names the model that wrote the verdict and says the author posted it, so it never reads as Legion's own reviewer phase (dispatch://INFRA-1481/comment/5da3e9b4-cd68-4f12-8460-b57a73593d48). A request that answers it is waiting for a person to approve is waiting for the broker's judge too, which approved such a narrow request during the wait in 3 of 3 tries on 2026-11-12: leave it waiting to the end of `--wait`, since cancelling and asking again restarts the wait. If it lapses unapproved, the pull request waits for the repository's own reviewer App. Where a Legion reviewer phase runs, that phase is the review. `GITHUB_PERSONAL_ADMIN_PAT` cannot post it: the CyberMonk Labs enterprise refuses a fine-grained token that lives over 366 days (dispatch://INFRA-3133). `GITHUB_ADMIN_PAT` is for theorem-labs repos and cannot post a review here. This route changes when dispatch://INFRA-1481 takes the review App off dev boxes (Sami, 2026-11-07, dispatch://INFRA-1481/comment/3fe3951b-b788-4117-909f-63634737197e: "nothing on the dev box should be masquerading as Legion"). **You may approve a pull request your own session wrote**, on two conditions Sami gave on 2026-10-28 (dispatch://INFRA-132/ask/3ea952b0): the work got cross-review under the SDD process, and he has generally authorized the work. His words: "Delete the rule. There is no rule about that." This replaces a line that used to read "Never approve your own PR", which paraphrased his 2026-10-24 answer on dispatch://INFRA-155/ask/3d86f1b6 into a ban he had not written; on 2026-10-28 it held agent-infra#645 and #646 for an hour. An approval survives a push, so a push after approval needs a new review and approval at the new head. |
-| Repo another person maintains | The maintainer is not our quality gate. Send a PR only after our review passes at its head and its benefit is measured on their setup. Merge only a change that helps them, after one short note to them. Close the rest. Never hand it to them to judge. |
-| `theorem-labs/*` | Their own required checks and reviews. When all that is left is an approval in Sami's name (CODEOWNERS) for work he already asked for, never ask him for it: approve with `GITHUB_ADMIN_PAT` and a body that says you approve for him and why (`secret-run --register --reason '<why>' GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh "$@"' gh pr review <N> -R theorem-labs/<repo> --approve --body '<why>'`; Sami, dispatch://OSSV-159/ask/8282a4d2-cece-4faf-89d3-0dbb7fef0b37; see "When GitHub refuses the App an admin action"). The token never skips a check that tests the work. On `theorem-labs/agent-infra` the CI reviewer App (`theorem-labs-ci-review`) reviews each head, and its approval meets the merge rule: push, fix what it finds, and request no review App for your own reviewer; a cross-family review of your own is optional and posts as a comment (Sami, 2026-11-12, dispatch://INFRA-460/comment/df4df0a5-3336-485a-a166-289b0d57fb02). |
-| Other repos | Their own required checks and reviews. |
+## A check over a shared budget or a total
 
-## agent-c
+A required check that measures a budget several PRs share (a word or line count, a file or bundle size, a quota) runs on each head, not on the merged result, so each head can pass while their sum fails on the base branch. Before you enable auto-merge, measure your PR together with every open PR that touches the budgeted files, and check whether the guard runs in the merge queue's build. Put the margin in the body ("1,999 of 2,000", not "passes").
 
+A guard that reads a diff cannot see the state: a repository can be clean on every commit and dirty in total. Where the total matters, scan the tree on a schedule as well as the diff on a push.
+
+## trajectory-labs-pbc/agent-c
+
+- Required at the head: `pr-checks-result` and `review` (workflow "Claude PR Review", run from main's copy). `checklist-affirmation` (`docs/pre-pr-checklists.md`) counts only when the org ruleset lists it: read `gh api repos/trajectory-labs-pbc/agent-c/rules/branches/main`. No approval is needed.
 - The session or person that owns the PR merges it; no one else does.
-- `review` starts only on `opened`, `synchronize` or `reopened` of a non-draft PR. Marking ready starts nothing. Mark ready, then push or close and reopen, but only while no PR Checks run is in flight, because either event cancels it. A push starts a new run.
-- `review` fails on an error or a refusal on both models. `claude[bot]`'s `REQUEST_CHANGES` holds the merge until it approves. An unresolved thread also holds it.
-- The merge rule reads the newest `review` check-run at the head sha. A `@claude review` comment starts nothing.
-- A required run failed: rerun it instead of pushing, with `gh api -X POST repos/<owner>/<repo>/actions/runs/<id>/rerun-failed-jobs`. It reviews the same head and leaves PR Checks alone. `gh run rerun` 404s on these.
+- `review` starts only on `opened`, `synchronize` or `reopened` of a non-draft PR; marking ready starts nothing. Mark ready, then push or close and reopen, but only while no PR Checks run is in flight, because either event cancels it.
+- `review` fails on an error or a refusal on both models. `claude[bot]`'s `REQUEST_CHANGES` holds the merge until it approves, and so does an unresolved thread. The merge rule reads the newest `review` check-run at the head sha; a `@claude review` comment starts nothing.
+- Rerun a failed required run with `gh api -X POST repos/<owner>/<repo>/actions/runs/<id>/rerun-failed-jobs` instead of pushing; `gh run rerun` returns 404 on these. It reviews the same head and leaves PR Checks alone.
 - Other PR events (`gh stack link` too) start a `follow` run that copies the newest review result. After a review rerun, rerun a newer `follow` run too (`rerun-failed-jobs`, or `.../runs/<id>/rerun` if it passed), or its stale result decides.
-- Fix a red `checklist-affirmation` (the body's affirmation line) by editing the body. Do not push.
+- Fix a red `checklist-affirmation` (the body's affirmation line) by editing the body, not by pushing.
+
+## cybermonklabs/legion
+
+- Work here goes to Legion, whose reviewer phase is the review; a dev-box session opens no new PR here. Legion merges the work it produces.
+- GitHub needs one approving review from an identity other than the PR author's.
+- A PR a dev-box session already has open gets a full review at its head from a cross-family subagent its author dispatches. The approval comes from Legion's own reviewer: ask the INFRA Legion controller (Envoy `notifications.role.legion-infra-controller`) which running Legion reviewer reads the repository, and send that reviewer the PR and its head. Ask for no review issue, and send each new head you push.
+- Nothing on a dev box posts as the Legion review App.
+
+## theorem-labs/*
+
+- Their own required checks and reviews; approvals as in "Approvals".
+- On `theorem-labs/agent-infra` the CI reviewer App (`theorem-labs-ci-review`) reviews each head, and its approval meets the merge rule: push, fix what it finds, and request no review App for your own reviewer. A cross-family review of your own is optional and posts as a comment.
+
+## A repository another person maintains
+
+The maintainer is not our quality gate. Send a PR only after our review passes at its head and its benefit is measured on their setup. Merge only a change that helps them, after one short note to them; close the rest. Do not hand it to them to judge.
+
+## Other repositories
+
+Their own required checks and reviews.
 
 ## Database migrations
 
-Merge a PR that adds or changes a database migration by hand (`gh pr merge <N> --squash --match-head-commit <sha>`), not with auto-merge, until the repo has a merge-time migration check: two auto-merged migration PRs can leave main with two migration heads. Merge right after you check that main has one migration head and the PR builds on it. If main's head moved, merge main into the branch, run `alembic merge heads`, push, and merge by hand when green. Never re-parent or renumber an existing migration.
+Merge a PR that adds or changes a database migration by hand (`gh pr merge <N> --squash --match-head-commit <sha>`), not with auto-merge, until the repo has a merge-time migration check: two auto-merged migration PRs can leave main with two migration heads.
+
+1. Check that main has one migration head and the PR builds on it, then merge at once.
+2. If main's head moved, merge main into the branch, run `alembic merge heads`, push, and merge by hand when green.
+3. Do not re-parent or renumber an existing migration.

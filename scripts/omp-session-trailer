@@ -1,9 +1,10 @@
 #!/bin/bash
-# omp-session-trailer GIT [GIT_OPTION…]: whether a commit that `GIT [GIT_OPTION…]` makes
-# from an omp session carries the Omp-Session trailer. Exit 0 adds it, exit 1 leaves it
-# off; stdout says why. shims/git asks it for every commit it stamps (and its prepare-
-# commit-msg hook, shims/git-hooks/, asks again for the repository it runs in), and
-# shims/jj for every jj command that can write a description (`shims/AGENTS.md`).
+# omp-session-trailer [--overlay PATH]… GIT [GIT_OPTION…]: whether a commit that
+# `GIT [GIT_OPTION…]` makes from an omp session carries the Omp-Session trailer. Exit 0 adds
+# it, exit 1 leaves it off; stdout says why. shims/git asks it for every commit it stamps (and
+# its prepare-commit-msg hook, shims/git-hooks/, asks again for the repository it runs in), and
+# shims/jj for every jj command that can write a description, naming with
+# --overlay each `omp-attribution-*.toml` on JJ_CONFIG, the files that give jj its trailers.
 #
 # Every repository carries the trailer, public ones included: it is how a commit is
 # traced to its session (session attribution, Legion's Delivery page, scripts/pr-gate,
@@ -21,8 +22,22 @@
 # keeps its trailer from its first commit, and a /tmp worktree of a repository with a
 # remote keeps it. Anything this cannot read keeps the trailer: attribution may be
 # absent only where nothing can be attributed.
+#
+# That exception is for a trailer that leaked into a test from the agent session running it.
+# A trailer whose overlays all lie under a temporary root too is the trailer of a session the
+# test made itself, and the test's subject: Legion's commit-trailers test starts an omp pane
+# whose overlay is in its scratch root and asserts the pane's commit carries it, in a scratch
+# repository with no remote, and shims/jj took it off until 2026-11-17. A real session's
+# overlay is not under a temporary root (omp/extensions/session-env.ts writes
+# ~/.cache/omp/jj, Legion its state dir), so that trailer still stays out of a throwaway
+# repository; `omp.sessionTrailer false` still takes off either.
 set -euo pipefail
 
+overlays=()
+while [[ "${1:-}" == --overlay ]]; do
+    overlays+=("${2:?--overlay names a path}")
+    shift 2
+done
 git=("$@")
 case "$("${git[@]}" config --type=bool --get omp.sessionTrailer 2>/dev/null || true)" in
     false) echo "off: omp.sessionTrailer is false"; exit 1 ;;
@@ -43,13 +58,37 @@ if ! common="$("${git[@]}" rev-parse --path-format=absolute --git-common-dir 2>/
     exit 0
 fi
 user="$(id -un)"
+roots=()
 for root in ${TMPDIR:+"$TMPDIR"} /tmp /var/tmp "/mnt/nvme/$user/session-tmp" "/mnt/scratch/$user/session-tmp"; do
     real="$(realpath -e -- "$root" 2>/dev/null)" || continue
     # A root that resolves to / would take in every repository.
-    if [[ "$real" != / && "$common" == "$real"/* ]]; then
-        echo "off: no remote, and the git common directory $common is under the temporary root $root"
-        exit 1
-    fi
+    if [[ "$real" != / ]]; then roots+=("$real"); fi
 done
+# temporary_root PATH: prints the temporary root PATH, resolved through symlinks, lies under.
+temporary_root() {
+    local path real
+    path="$(realpath -m -- "$1" 2>/dev/null)" || return 1
+    for real in ${roots[@]+"${roots[@]}"}; do
+        if [[ "$path" == "$real"/* ]]; then
+            printf '%s\n' "$real"
+            return 0
+        fi
+    done
+    return 1
+}
+if repo_root="$(temporary_root "$common")"; then
+    if ((${#overlays[@]})); then
+        for overlay in "${overlays[@]}"; do
+            temporary_root "$overlay" > /dev/null || {
+                echo "off: no remote, and the git common directory $common is under the temporary root $repo_root"
+                exit 1
+            }
+        done
+        echo "on: no remote and the git common directory $common is under the temporary root $repo_root, but every overlay of the trailer is under a temporary root too: a session the test made"
+        exit 0
+    fi
+    echo "off: no remote, and the git common directory $common is under the temporary root $repo_root"
+    exit 1
+fi
 echo "on: omp.sessionTrailer is unset; no remote, but the git common directory $common is under no temporary root"
 exit 0

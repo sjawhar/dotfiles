@@ -18,8 +18,8 @@ where ps.log grew about a kilobyte a second while the probe's own outputs had st
 minutes earlier. So every sentence this source produces names its file, and the quieting
 message says in its own words what it does not establish.
 
-The suppression: narrow to the scheduler's role shape, dated, and visible in every alert of
-every other class while it holds.
+The suppression mechanism, on an entry these tests define, since the watch ships with none: it
+is dated, expires by itself, and is visible in every alert of every other class while it holds.
 
 Nothing here touches the real tree, the real Envoy or the real state file.
 """
@@ -34,6 +34,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from test_envoy_role_holder_watch_tuning import suppression
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "envoy-role-holder-watch"
@@ -218,25 +221,21 @@ class AlertTextTest(unittest.TestCase):
 
 class SuppressionTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.rule = WATCH.SUPPRESSIONS[0]
-        self.until = WATCH.epoch_of(self.rule["until"])
+        self.until = WATCH.epoch_of("2026-11-06T00:00:00Z")
+        self.rule = suppression(self.until)
+        self.enterContext(patch.object(WATCH, "SUPPRESSIONS", (self.rule,)))
 
-    def test_it_matches_the_scheduler_roles_and_nothing_else(self) -> None:
-        for role in ("node-envprobe-d10302249-2", "node-envprobe-d10302216-2", "node-envprobe-d10302253-1"):
-            self.assertIsNotNone(WATCH.suppression_for(role, self.until - 60), role)
-        for role in (
-            "bet-owner-machcsl", "lead-verified-linux", "stream-lead-verified-linux",
-            "node-envprobe-d10302249", "node-verified-linux-2", "linux-baseline",
-        ):
+    def test_it_silences_only_the_roles_its_pattern_matches(self) -> None:
+        self.assertIs(WATCH.suppression_for("probe-7", self.until - 60), self.rule)
+        for role in ("probe-7-x", "lead-probe-7", ROLE, ""):
             self.assertIsNone(WATCH.suppression_for(role, self.until - 60), role)
 
     def test_it_expires_by_itself(self) -> None:
-        self.assertIsNone(WATCH.suppression_for(ROLE, self.until + 1))
+        self.assertIsNone(WATCH.suppression_for("probe-7", self.until + 1))
 
     def test_a_reader_sees_it_in_another_classs_alert_while_it_holds(self) -> None:
-        lines = WATCH.suppression_lines(
-            self.until - 60, {self.rule["shown"]: {"count": 7, "role": ROLE, "at": self.until - 300}}
-        )
+        counts = {self.rule["shown"]: {"count": 7, "role": "probe-7", "at": self.until - 300}}
+        lines = WATCH.suppression_lines(self.until - 60, counts)
 
         self.assertEqual(len(lines), 1)
         self.assertIn("ACTIVE SUPPRESSION", lines[0])
@@ -247,7 +246,7 @@ class SuppressionTest(unittest.TestCase):
 
     def test_the_journal_form_keeps_the_scope_the_date_and_the_tally(self) -> None:
         """Every run writes this; the long form would be 700 characters every 30 s."""
-        counts = {self.rule["shown"]: {"count": 4, "role": ROLE, "at": self.until - 300}}
+        counts = {self.rule["shown"]: {"count": 4, "role": "probe-7", "at": self.until - 300}}
 
         active = WATCH.suppression_lines(self.until - 60, counts, short=True)[0]
         expired = WATCH.suppression_lines(self.until + 60, counts, short=True)[0]
@@ -255,7 +254,7 @@ class SuppressionTest(unittest.TestCase):
         self.assertEqual(
             active,
             f"SUPPRESSION ACTIVE: {self.rule['shown']} until {self.rule['until']}. It has"
-            f" suppressed 4 role(s) so far, last {ROLE} at {WATCH.iso(self.until - 300)}.",
+            f" suppressed 4 role(s) so far, last probe-7 at {WATCH.iso(self.until - 300)}.",
         )
         self.assertIn("SUPPRESSION EXPIRED, DELETE THE ENTRY", expired)
 

@@ -18,6 +18,7 @@ docker. The whole chain was also run against the real thing from a fresh box on 
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -60,9 +61,18 @@ class TailnetServe(unittest.TestCase):
         self.stub("systemctl", "exit 3")  # no unit is active
         self.stub("ss", f'while read -r line; do printf "%s\\n" "$line"; done <"{self.root}/listeners"')
         (self.root / "listeners").write_text("", encoding="utf-8")
+        # The system's tools, all but its own tailscale, so the only tailscale on PATH is the
+        # stub. A tailnet machine has one in /usr/bin (sami-devbox does), and with
+        # /usr/bin:/bin on PATH the case with no tailscale read that machine's tailnet.
+        system = self.root / "system"
+        system.mkdir()
+        for directory in ("/usr/bin", "/bin"):
+            for entry in os.scandir(directory):
+                if entry.name != "tailscale" and not os.path.lexists(system / entry.name):
+                    (system / entry.name).symlink_to(entry.path)
         self.env = {
             "HOME": str(self.root),
-            "PATH": f"{self.bin}:/usr/bin:/bin",
+            "PATH": f"{self.bin}:{system}",
             "DOTFILES_DIR": str(DOTFILES),
             "AGENTBOX_BOXES": str(self.root / "boxes"),
             "STATUS_FIXTURE": str(self.status),

@@ -296,6 +296,19 @@ retry:
       - anthropic/claude-opus-4-6:high
 task:
   maxRecursionDepth: 3
+  # The progress probe asks each running subagent of a top-level session for a percent and a
+  # line on what it does now, and each ask sends the agent's whole context. On 2026-11-16 those
+  # asks were 14% of sami-devbox's model usage, because they read only about 30% of that context
+  # from the prompt cache; Sami chose "Turn it off now" on
+  # dispatch://INFRA-4027/ask/e1be5d7e-c945-438b-b7aa-e1649ca8a9b4 (2026-11-16 19:41Z).
+  # The fix is in v18.18.6-sami.20261117-053702, and Sami said on 2026-11-17 to turn the probe on
+  # (dispatch://INFRA-4027/ask/32dc7c33-b1bd-49aa-9048-dd941ecb2b63). It is on in
+  # omp/config.probe.yml, which scripts/agent-session names only for a session of a release that
+  # holds the fix. It stays false in THIS file: a running session watches every PI_CONFIG_FILES
+  # entry and reads this key at each subagent start, so true here turns the unfixed probe on in
+  # every session that still runs an older release. Do not set it true here while a process of
+  # such a release runs on any machine.
+  completionProbe: false
   # task.softRequestBudget is deliberately ABSENT: the shipped default of 200 stands.
   # Sami decided it on 2026-10-25 04:55Z, choosing "Keep 200" from options that
   # included removing it and raising it to 1000, with the words "I do not care about
@@ -329,6 +342,15 @@ task:
     test-analyzer: "@review"
     type-checker: anthropic/claude-opus-5-5:xhigh
     ux-designer: "@vision"
+    # 2026-11-17 — THE SECURITY REVIEW AGENT ALONE ON CLAUDE, UNTIL OPENAI APPROVES THEOREM'S
+    # ORGANIZATION FOR DAYBREAK RED (its cyber-access program). Sami, 07:07:07Z on
+    # dispatch://INFRA-3682/ask/69b3e36a-c5b4-411b-8e34-d79109f5cfb4: "Both, for a time". OpenAI
+    # refused nine of this agent's calls on cyber_policy from 05:46Z to 06:47Z, and repeated refusals
+    # can revoke the whole organization's access when no per-user safety_identifier is sent (the
+    # gateway sends none), which would take gpt-6.1-sol from every team. Every other role keeps its
+    # model. REVERT this line when Daybreak Red is approved: the agent's own frontmatter,
+    # model: ["@review"], then applies again.
+    thermonuclear-deep-review: anthropic/claude-opus-5-5:xhigh
     # 2026-11-12 — EVERY CLAUDE WORKLOAD ON OPUS 5.5 AT XHIGH. Sami, 2026-11-12T06:00:10Z
     # (dispatch://INFRA-1393/comment/6d689bf2-526e-4224-86f6-56a585ce1267): "Unless we're actually running
     # into rate limits, please just make sure that we bump everything up to the latest model version ...
@@ -426,7 +448,16 @@ doubleEscapeAction: tree
 extendedContext: true
 dev:
   autoqaConsent: granted
-setupVersion: 2
+# omp's setup wizard shows every scene newer than this number at each interactive start that is
+# not a resume, and holds the session's first prompt until a person answers it. Its answer goes
+# only to the profile's own config.yml (setupVersion, update.auto), which this committed value
+# overrides, so the wizard came back at every start. The pinned releases since
+# v18.18.6-sami.20261110-032522 have setup version 3, whose one new scene is "Keep omp up to
+# date" (measured 2026-11-17 on that release and on v18.18.6-sami.20261117-053702: with 2 here a
+# fresh session, one started with a prompt included, stops at that scene; with 3 it does not).
+# Keep this equal to the pinned release's CURRENT_SETUP_VERSION
+# (packages/tui/src/setup/setup-version.ts in the fork).
+setupVersion: 3
 # The update check asks upstream (can1357/oh-my-pi) and `omp update` would
 # `mise upgrade github:can1357/oh-my-pi` - the fork's pin in mise.toml is the
 # only version of record; no banner steering a session toward upstream.
@@ -547,6 +578,15 @@ composer:
   shape: box
 isolation:
   backend: auto
+# Off (omp's default is on, dispatch://INFRA-3990). On, the bash tool runs every `git worktree add`
+# as `omp worktree add`, which reflink-copies the whole source checkout: each other session's tree
+# under `.worktrees/` too, its `.git` file still naming that tree's admin directory, so git in the
+# copy works on the original's index and HEAD. The call never reaches shims/git, so the new tree
+# gets no AGENTC-431 lock, and a copy the bash timeout cuts short stays as a partial tree with no
+# `.git` (78 GB at one path on 2026-11-16). Off, `git worktree add` reaches git as typed, and
+# `github pr_checkout` and `/wt` check out plainly.
+worktree:
+  clone: false
 codexResets:
   autoRedeem: "yes"
 # dispatch://INFRA-339: pi-envoy exports DISPATCH_HOST, DISPATCH_SESSION_ID and

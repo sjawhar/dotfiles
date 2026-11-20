@@ -7,26 +7,24 @@ zero bytes free. The tests below build the same shape in miniature — one real 
 clone — and check the three things the gate must get right: which child it names, that an
 identical store reached by a hardlink is not counted as duplicated bytes, and that a copy with
 its own inode is.
+
+worktree-clone-check runs under `uv run --script`, in the environment its own `# /// script`
+header declares (numpy, which the duplication number needs). The tests run it with that
+environment's interpreter, never with the one running the tests, which has no numpy: with it,
+the duplication test failed wherever pytest's own python lacked numpy (sami-devbox, a pod).
 """
 
-import importlib.machinery
-import importlib.util
-import io
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_browser_capture import script_python  # noqa: E402 - found through the path above
 
 SCRIPT = Path(__file__).resolve().parents[1] / "worktree-clone-check"
-LOADER = importlib.machinery.SourceFileLoader("worktree_clone_check", str(SCRIPT))
-SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
-assert SPEC is not None
-CHECK = importlib.util.module_from_spec(SPEC)
-LOADER.exec_module(CHECK)
 
 GIT_ENV = {
     **os.environ,
@@ -46,6 +44,10 @@ def git(*args: str, cwd: Path) -> None:
 
 
 class WorktreeCloneCheckTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.python = script_python(SCRIPT)
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -63,15 +65,9 @@ class WorktreeCloneCheckTest(unittest.TestCase):
         git("repack", "-adq", cwd=self.origin)  # a pack, so the stores have an object set
 
     def run_check(self, *argv: str) -> tuple[int, str]:
-        out = io.StringIO()
-        saved = sys.argv
-        sys.argv = ["worktree-clone-check", str(self.root), *argv]
-        try:
-            with redirect_stdout(out):
-                code = CHECK.main()
-        finally:
-            sys.argv = saved
-        return code, out.getvalue()
+        done = subprocess.run([self.python, str(SCRIPT), str(self.root), *argv],
+                              capture_output=True, text=True, timeout=300, check=False)
+        return done.returncode, done.stdout
 
     def test_flags_the_clone_and_not_the_worktree(self) -> None:
         git("worktree", "add", "-q", "-b", "real", str(self.root / "proj" / "real"), cwd=self.origin)

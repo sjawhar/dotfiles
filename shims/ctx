@@ -21,11 +21,83 @@
 # shim, which hands an unresolved call back to PATH, is never in the loop. It never execs itself.
 set -u
 
-mise="$(command -v mise 2>/dev/null || true)"
-[[ -n "$mise" ]] || mise="${DOTFILES_DIR:-$HOME/.dotfiles}/bin/mise"
+# mise_paths: mise as this machine runs it, whatever HOME and PATH the caller set
+# (shims/AGENTS.md, "A moved HOME"). A Legion test pane runs a shim with a
+# temporary HOME and the PATH <bin>:/usr/local/bin:/usr/bin:/bin, where every
+# path under HOME names nothing. Sets, once per process:
+#   _mise_bin     mise on PATH, else the dotfiles checkout's bin/mise, else the
+#                 mise the shims in a data dir link to (a copy or a worktree of
+#                 the checkout has no bin/, which is not committed)
+#   _mise_config  mise's global configuration: MISE_GLOBAL_CONFIG_FILE, else the
+#                 file under HOME when it is readable, else the checkout's
+#                 mise.toml, which installers link that file to
+#   _mise_datas   the data dirs a tool may be installed in: MISE_DATA_DIR and mise's
+#                 default ~/.local/share/mise under HOME; with no MISE_DATA_DIR,
+#                 ~/.mise (.bashrc's) and that default, under HOME, then the passwd home's
+#   _mise_data    the one to give mise: MISE_DATA_DIR, else the first that exists
+# The checkout is DOTFILES_DIR, else the one this file's own path is in.
+mise_paths() {
+    local IFS=$' \t\n'
+    local self dotfiles home dir data seen=""
+    local -a all=()
+    [[ -z "${_mise_config:-}" ]] || return 0
+    _mise_bin=""
+    IFS=':'
+    for dir in ${PATH:-}; do
+        if [[ -n "$dir" && -f "$dir/mise" && -x "$dir/mise" ]]; then
+            _mise_bin="$dir/mise"
+            break
+        fi
+    done
+    IFS=$' \t\n'
+    _mise_config="${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/mise/config.toml}"
+    if [[ -z "$_mise_bin" || ( -z "${MISE_GLOBAL_CONFIG_FILE:-}" && ! -r "$_mise_config" ) ]]; then
+        dotfiles="${DOTFILES_DIR:-}"
+        if [[ -z "$dotfiles" ]]; then
+            self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")" || self=""
+            dotfiles="${self%/shims/*}"
+        fi
+        [[ -n "$_mise_bin" ]] || _mise_bin="$dotfiles/bin/mise"
+        [[ -n "${MISE_GLOBAL_CONFIG_FILE:-}" || -r "$_mise_config" ]] || _mise_config="$dotfiles/mise.toml"
+    fi
+    if [[ -n "${MISE_DATA_DIR:-}" ]]; then
+        all=("$MISE_DATA_DIR" "${XDG_DATA_HOME:-${HOME:-}/.local/share}/mise")
+    else
+        all=("${HOME:-}/.mise" "${XDG_DATA_HOME:-${HOME:-}/.local/share}/mise")
+        # With HOME unset, ~ is the uid's home in the passwd database, which HOME does not move.
+        local HOME
+        unset HOME
+        home=~
+        [[ "$home" != /?* ]] || all+=("$home/.mise" "$home/.local/share/mise")
+    fi
+    _mise_datas=() _mise_data="${MISE_DATA_DIR:-}"
+    for data in "${all[@]}"; do
+        [[ "$data" == /?* && ":$seen:" != *":$data:"* ]] || continue
+        seen+=":$data"
+        _mise_datas+=("$data")
+        [[ -n "$_mise_data" || ! -d "$data" ]] || _mise_data="$data"
+    done
+    if [[ ! -f "$_mise_bin" || ! -x "$_mise_bin" ]]; then
+        for data in ${_mise_datas[@]+"${_mise_datas[@]}"}; do
+            for dir in "$data"/shims/*; do
+                [[ -L "$dir" ]] || continue
+                dir="$(command -p readlink -f -- "$dir")" || dir=""
+                [[ "$dir" != */mise || ! -f "$dir" || ! -x "$dir" ]] || _mise_bin="$dir"
+                break
+            done
+            [[ ! -x "$_mise_bin" ]] || break
+        done
+    fi
+    : "${_mise_data:=${_mise_datas[0]:-}}"
+}
+
+mise_paths
+mise="$_mise_bin"
 # The dotfiles keep mise's tools in their own data dir (.bashrc, mise/mise.conf); a unit or a
-# script that sourced neither must look there too, or mise reports nothing installed.
-export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
+# script that sourced neither must look there too, or mise reports nothing installed. Each mise
+# call below names mise's global configuration, which under a moved HOME is the dotfiles
+# checkout's (mise_paths).
+export MISE_DATA_DIR="$_mise_data"
 
 if [[ "${OMP_PROFILE:-${PI_PROFILE:-}}" == personal || -n "${CTX_PERSONAL_ROOT:-}" ]]; then
 	# The XDG data home counts only as an absolute path, as the XDG Base Directory spec says.
@@ -38,7 +110,7 @@ if [[ "${OMP_PROFILE:-${PI_PROFILE:-}}" == personal || -n "${CTX_PERSONAL_ROOT:-
 	if [[ ! -x "$real" ]]; then
 		version="$(cat "$root/ctx-version" 2>/dev/null)"
 		dir=""
-		[[ -n "$version" ]] && dir="$("$mise" where -C / "github:sjawhar/ctx-memory@$version" 2>/dev/null)"
+		[[ -n "$version" ]] && dir="$(MISE_GLOBAL_CONFIG_FILE="$_mise_config" "$mise" where -C / "github:sjawhar/ctx-memory@$version" 2>/dev/null)"
 		real="$dir/ctx"
 		if [[ -z "$dir" || ! -x "$real" ]]; then
 			echo "ctx shim: the personal deployment at $root names no installed ctx (bin/ctx or ctx-version '$version')" >&2
@@ -66,9 +138,9 @@ if [[ "${OMP_PROFILE:-${PI_PROFILE:-}}" == personal || -n "${CTX_PERSONAL_ROOT:-
 	exec "$real" "$@"
 fi
 
-real="$("$mise" which -C / ctx --tool github:sjawhar/ctx-memory 2>/dev/null)" || real=""
+real="$(MISE_GLOBAL_CONFIG_FILE="$_mise_config" "$mise" which -C / ctx --tool github:sjawhar/ctx-memory 2>/dev/null)" || real=""
 if [[ -z "$real" || ! -x "$real" ]]; then
-	echo "ctx shim: mise did not resolve the pinned github:sjawhar/ctx-memory; run \`mise install\`" >&2
+	echo "ctx shim: $mise, given $_mise_config and the data dir $_mise_data, did not resolve the pinned github:sjawhar/ctx-memory; run \`mise install\`" >&2
 	exit 127
 fi
 

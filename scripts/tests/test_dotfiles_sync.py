@@ -13,6 +13,7 @@ main@origin`) conflicted and left markers in shims/gh for 20 seconds.
 
 from __future__ import annotations
 
+import json
 import fcntl
 import os
 import re
@@ -23,6 +24,7 @@ import unittest
 from pathlib import Path
 
 SYNC = Path(__file__).resolve().parents[1] / "dotfiles-sync"
+FAKE_GH = Path(__file__).resolve().with_name("fake_gh.py")
 
 
 def real_binary(name: str) -> str:
@@ -52,6 +54,9 @@ class DotfilesCheckout(unittest.TestCase):
             stand_in = bin_dir / name
             stand_in.write_text("#!/bin/sh\nexit 0\n")
             stand_in.chmod(0o755)
+        # gh is the pull-request side of GitHub over the bare origin below (fake_gh.py).
+        (bin_dir / "gh").symlink_to(FAKE_GH)
+        self.gh_state = root / "gh-state.json"
         self.home = root / "home"
         self.home.mkdir()
         jj_config = root / "jj.toml"
@@ -66,8 +71,11 @@ class DotfilesCheckout(unittest.TestCase):
             "GIT_AUTHOR_EMAIL": "test@example.com",
             "GIT_COMMITTER_NAME": "Test",
             "GIT_COMMITTER_EMAIL": "test@example.com",
+            "DOTFILES_PUBLISH_RETRY_SLEEP": "0",
         }
         self.origin = root / "origin.git"
+        self.env["FAKE_GH_ORIGIN"] = str(self.origin)
+        self.env["FAKE_GH_STATE"] = str(self.gh_state)
         self.run_ok("git", "init", "-q", "--bare", "-b", "main", str(self.origin))
         self.upstream = root / "upstream"
         self.run_ok("git", "clone", "-q", str(self.origin), str(self.upstream))
@@ -336,6 +344,32 @@ class Publish(DotfilesCheckout):
     def publish(self, rev: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["bash", str(PUBLISH), rev], env=self.env, capture_output=True, text=True)
 
+    def gh(self) -> dict:
+        """The fake GitHub's pull requests and the calls it took (fake_gh.py)."""
+        return json.loads(self.gh_state.read_text()) if self.gh_state.exists() else {"prs": [], "calls": []}
+
+    def set_gh(self, **values: object) -> None:
+        state = self.gh() | {"next": self.gh().get("next", 1)}
+        state.setdefault("before_merge", [])
+        state.update(values)
+        self.gh_state.write_text(json.dumps(state))
+
+    def visible(self, change: str) -> str:
+        """The commit ids that hold <change> now, space-separated; empty once it is abandoned."""
+        return self.jj("log", "-r", f"present(change_id({change}))", "--no-graph", "-T", 'commit_id ++ " "').strip()
+
+    def assert_squash_merged(self, base: str, path: str, text: str) -> str:
+        """origin's main is one squash commit on <base> whose <path> holds <text>, its pull request
+        is merged and its branch is gone."""
+        main = self.origin_main()
+        self.assertEqual(self.run_ok("git", "rev-parse", f"{main}^", cwd=self.origin).strip(), base)
+        self.assertEqual(self.run_ok("git", "show", f"{main}:{path}", cwd=self.origin), text)
+        prs = self.gh()["prs"]
+        self.assertEqual([p["state"] for p in prs], ["MERGED"])
+        self.assertEqual(prs[0]["merge_commit"], main)
+        self.assertEqual(self.run_ok("git", "branch", "--list", "dotfiles-publish/*", cwd=self.origin), "")
+        return main
+
     def test_a_conflicting_commit_is_refused_and_no_file_moves(self) -> None:
         change = self.my_commit("shared.txt", "my edit\n")
         (self.upstream / "shared.txt").write_text("upstream edit\n")
@@ -380,7 +414,7 @@ class Publish(DotfilesCheckout):
         self.assertEqual((self.checkout / "wip.txt").read_text(), "another session's edit\n")
         self.assertEqual(self.jj("log", "-r", "conflicts()", "--no-graph", "-T", "change_id"), "")
 
-    def test_a_commit_that_does_not_conflict_is_rebased_and_pushed(self) -> None:
+    def test_a_commit_that_does_not_conflict_is_squash_merged_and_the_checkout_moves_onto_it(self) -> None:
         change = self.my_commit("other.txt", "my edit\n")
         (self.upstream / "shared.txt").write_text("upstream edit\n")
         self.commit_upstream("upstream")
@@ -389,14 +423,23 @@ class Publish(DotfilesCheckout):
         result = self.publish(change)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        pushed = self.jj("log", "-r", change, "--no-graph", "-T", "commit_id")
-        self.assertEqual(self.origin_main(), pushed)
-        self.assertEqual(self.jj("log", "-r", f"{change}-", "--no-graph", "-T", "commit_id"), upstream_head)
+        main = self.assert_squash_merged(upstream_head, "other.txt", "my edit\n")
+        self.assertIn(f"main is {main}", result.stdout)
+        # The squash is the commit's tree on its parent, so the commit is abandoned and the working
+        # copy sits on main, with every file as it was.
+        self.assertEqual(self.visible(change), "")
+        self.assertEqual(self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"), main)
         self.assertEqual((self.checkout / "other.txt").read_text(), "my edit\n")
         self.assertEqual((self.checkout / "shared.txt").read_text(), "upstream edit\n")
         self.assertEqual((self.checkout / "wip.txt").read_text(), "another session's edit\n")
+        create = next(c for c in self.gh()["calls"] if c[:2] == ["pr", "create"])
+        self.assertEqual(create[create.index("--base") + 1], "main")
+        self.assertEqual(create[create.index("--title") + 1], "mine")
+        merge = next(c for c in self.gh()["calls"] if c[:2] == ["pr", "merge"])
+        self.assertIn("--squash", merge)
+        self.assertIn("--match-head-commit", merge)
 
-    def test_a_commit_named_by_its_commit_id_is_rebased_and_the_rebased_commit_pushed(self) -> None:
+    def test_a_commit_named_by_its_commit_id_is_rebased_and_the_rebased_commit_merged(self) -> None:
         # The rebase gives the change a new commit id, and the old id still names the commit from
         # before it. On 2026-11-02 at 16:19Z a run given a commit id pushed that old commit, was
         # refused 3 times, and left a duplicate of the change.
@@ -410,15 +453,17 @@ class Publish(DotfilesCheckout):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("refused", result.stderr)
-        pushed = self.jj("log", "-r", change, "--no-graph", "-T", "commit_id")
-        self.assertNotEqual(pushed, old)
-        self.assertEqual(self.origin_main(), pushed)
-        self.assertEqual(self.jj("log", "-r", f"{change}-", "--no-graph", "-T", "commit_id"), upstream_head)
-        self.assertEqual(self.jj("log", "-r", 'description(glob:"mine\n*")', "--no-graph", "-T", "commit_id ++ ' '"), f"{pushed} ")
+        main = self.assert_squash_merged(upstream_head, "other.txt", "my edit\n")
+        merge = next(c for c in self.gh()["calls"] if c[:2] == ["pr", "merge"])
+        merged_head = merge[merge.index("--match-head-commit") + 1]
+        self.assertNotEqual(merged_head, old)
+        self.assertEqual(self.run_ok("git", "rev-parse", f"{merged_head}^", cwd=self.checkout).strip(), upstream_head)
+        self.assertEqual(self.visible(change), "")
+        self.assertEqual(self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"), main)
         self.assertEqual((self.checkout / "other.txt").read_text(), "my edit\n")
         self.assertEqual((self.checkout / "wip.txt").read_text(), "another session's edit\n")
 
-    def test_a_rebased_commit_whose_push_loses_a_race_is_kept_and_pushed_on_the_next_try(self) -> None:
+    def test_a_rebased_commit_whose_push_loses_a_race_is_kept_and_merged_on_the_next_try(self) -> None:
         change = self.my_commit("other.txt", "my edit\n")
         (self.upstream / "shared.txt").write_text("upstream edit\n")
         self.commit_upstream("upstream")
@@ -431,11 +476,179 @@ class Publish(DotfilesCheckout):
         result = self.publish(change)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("push refused", result.stderr)
-        pushed = self.jj("log", "-r", change, "--no-graph", "-T", "commit_id")
-        self.assertEqual(self.origin_main(), pushed)
-        self.assertEqual(self.jj("log", "-r", f"{change}-", "--no-graph", "-T", "commit_id"), upstream_head)
+        self.assertIn("push refused (another session pushed first?) on dotfiles-publish/", result.stderr)
+        main = self.assert_squash_merged(upstream_head, "other.txt", "my edit\n")
+        self.assertEqual(self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"), main)
         self.assertEqual((self.checkout / "other.txt").read_text(), "my edit\n")
+        self.assertEqual((self.checkout / "wip.txt").read_text(), "another session's edit\n")
+
+    def test_main_moving_under_the_pull_request_lands_the_squash_on_it_and_the_checkout_follows(self) -> None:
+        # Another session's publish merges while this pull request is open, with no conflict: GitHub
+        # squashes onto the newer main, whose files the checkout does not have yet. The run moves the
+        # checkout with dotfiles-sync, which abandons the original, whose change main holds under
+        # another commit id. No file moves backwards: the other session's uncommitted line stays,
+        # and the newer main's file arrives.
+        change = self.my_commit("other.txt", "my edit\n")
+        upstream_head = self.origin_main()
+        (self.upstream / "new.txt").write_text("their publish\n")
+        self.run_ok("git", "add", "-A", cwd=self.upstream)
+        self.run_ok("git", "commit", "-q", "-m", "their publish", cwd=self.upstream)
+        theirs = self.run_ok("git", "rev-parse", "HEAD", cwd=self.upstream).strip()
+        self.set_gh(before_merge=[f"git -C {self.upstream} push -q origin HEAD:main"])
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("main moved under the pull request", result.stdout)
+        self.assertNotIn("did not move the checkout", result.stderr)
+        main = self.assert_squash_merged(theirs, "other.txt", "my edit\n")
+        self.assertNotEqual(upstream_head, theirs)
+        self.assertEqual(self.run_ok("git", "show", f"{main}:new.txt", cwd=self.origin), "their publish\n")
+        self.assertEqual(self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"), main)
+        self.assertEqual(self.visible(change), "")
+        self.assertEqual(self.run_ok("git", "rev-parse", "HEAD", cwd=self.checkout).strip(), main)
+        self.assertEqual((self.checkout / "other.txt").read_text(), "my edit\n")
+        self.assertEqual((self.checkout / "new.txt").read_text(), "their publish\n")
+        self.assertEqual((self.checkout / "wip.txt").read_text(), "another session's edit\n")
+        self.assertEqual(self.jj("log", "-r", "conflicts()", "--no-graph", "-T", "change_id"), "")
+
+    def test_main_moving_under_the_pull_request_where_the_working_copy_would_conflict_leaves_every_file(self) -> None:
+        # The other session's publish changes the line another session holds uncommitted here: the
+        # squash still lands (it touches neither), and dotfiles-sync refuses to move the working
+        # copy, so no file on disk changes and no conflict marker is written.
+        change = self.my_commit("other.txt", "my edit\n")
+        (self.upstream / "wip.txt").write_text("their publish\n")
+        self.run_ok("git", "add", "-A", cwd=self.upstream)
+        self.run_ok("git", "commit", "-q", "-m", "their publish", cwd=self.upstream)
+        theirs = self.run_ok("git", "rev-parse", "HEAD", cwd=self.upstream).strip()
+        self.set_gh(before_merge=[f"git -C {self.upstream} push -q origin HEAD:main"])
+        parent = self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id")
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("did not move the checkout", result.stderr)
+        self.assert_squash_merged(theirs, "other.txt", "my edit\n")
+        self.assertEqual(self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"), parent)
+        self.assertEqual((self.checkout / "other.txt").read_text(), "my edit\n")
+        self.assertEqual((self.checkout / "wip.txt").read_text(), "another session's edit\n")
+        self.assertEqual(self.jj("log", "-r", "conflicts()", "--no-graph", "-T", "change_id"), "")
+
+    def test_main_moving_under_the_pull_request_with_a_conflict_is_refused_on_the_next_try(self) -> None:
+        change = self.my_commit("other.txt", "my edit\n")
+        (self.upstream / "other.txt").write_text("their edit\n")
+        self.run_ok("git", "add", "-A", cwd=self.upstream)
+        self.run_ok("git", "commit", "-q", "-m", "their publish", cwd=self.upstream)
+        theirs = self.run_ok("git", "rev-parse", "HEAD", cwd=self.upstream).strip()
+        self.set_gh(before_merge=[f"git -C {self.upstream} push -q origin HEAD:main"])
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("merge of https://github.com/", result.stderr)
+        self.assertIn("CONFLICT", result.stderr)
+        self.assertEqual(self.origin_main(), theirs)
+        self.assertEqual([p["state"] for p in self.gh()["prs"]], ["OPEN"])
+        self.assertEqual((self.checkout / "other.txt").read_text(), "my edit\n")
+        self.assertEqual((self.checkout / "wip.txt").read_text(), "another session's edit\n")
+        self.assertEqual(self.jj("log", "-r", "conflicts()", "--no-graph", "-T", "change_id"), "")
+
+    def with_codeowners(self) -> str:
+        """origin's main gives every AGENTS.md and every skills/ file to @sjawhar, as the real one does."""
+        (self.upstream / ".github").mkdir(exist_ok=True)
+        (self.upstream / ".github" / "CODEOWNERS").write_text(
+            "# Agent instruction files and skills\n**/AGENTS.md @sjawhar\n**/SKILL.md @sjawhar\nskills/ @sjawhar\n"
+        )
+        self.commit_upstream("code owners")
+        self.jj("git", "fetch", "--quiet")
+        self.jj("rebase", "--quiet", "-s", "@", "-d", "main@origin")
+        return self.origin_main()
+
+    def test_a_commit_that_changes_a_code_owned_file_waits_for_its_owner_and_merges_after_approval(self) -> None:
+        base = self.with_codeowners()
+        (self.checkout / "docs").mkdir()
+        change = self.my_commit("docs/AGENTS.md", "an agent rule\n")
+
+        waiting = self.publish(change)
+
+        self.assertEqual(waiting.returncode, 3, waiting.stdout + waiting.stderr)
+        self.assertIn("waits for that owner's review", waiting.stderr)
+        self.assertIn("docs/AGENTS.md: @sjawhar", waiting.stderr)
+        self.assertIn("https://github.com/", waiting.stderr)
+        self.assertEqual(self.origin_main(), base)
+        self.assertEqual([p["state"] for p in self.gh()["prs"]], ["OPEN"])
+        self.assertNotEqual(self.run_ok("git", "branch", "--list", "dotfiles-publish/*", cwd=self.origin), "")
+        self.assertFalse(any(c[:2] == ["pr", "merge"] for c in self.gh()["calls"]))
+        self.assertEqual((self.checkout / "docs" / "AGENTS.md").read_text(), "an agent rule\n")
+
+        state = self.gh()
+        state["prs"][0]["latestReviews"] = [{"state": "APPROVED", "author": {"login": "sjawhar"}}]
+        self.gh_state.write_text(json.dumps(state))
+        merged = self.publish(change)
+
+        self.assertEqual(merged.returncode, 0, merged.stdout + merged.stderr)
+        main = self.assert_squash_merged(base, "docs/AGENTS.md", "an agent rule\n")
+        self.assertEqual(self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"), main)
+        self.assertEqual(len([c for c in self.gh()["calls"] if c[:2] == ["pr", "create"]]), 1)
+
+    def test_an_approval_by_someone_who_is_not_an_owner_does_not_merge(self) -> None:
+        base = self.with_codeowners()
+        (self.checkout / "plugins" / "skills" / "x").mkdir(parents=True)
+        change = self.my_commit("plugins/skills/x/notes.md", "a skill's file\n")
+        self.assertEqual(self.publish(change).returncode, 3)
+        state = self.gh()
+        state["prs"][0]["latestReviews"] = [{"state": "APPROVED", "author": {"login": "someone-else"}}]
+        self.gh_state.write_text(json.dumps(state))
+
+        again = self.publish(change)
+
+        self.assertEqual(again.returncode, 3, again.stdout + again.stderr)
+        self.assertIn("plugins/skills/x/notes.md: @sjawhar", again.stderr)
+        self.assertEqual(self.origin_main(), base)
+        self.assertEqual(len([c for c in self.gh()["calls"] if c[:2] == ["pr", "create"]]), 1)
+
+    def test_a_commit_that_changes_no_code_owned_file_merges_with_no_review(self) -> None:
+        # The control of the case above: the same CODEOWNERS on main, a file it gives nobody.
+        base = self.with_codeowners()
+        change = self.my_commit("other.txt", "my edit\n")
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("waits", result.stderr)
+        self.assert_squash_merged(base, "other.txt", "my edit\n")
+
+    def test_a_merge_a_rule_of_main_refuses_waits_and_leaves_the_pull_request_open(self) -> None:
+        upstream_head = self.origin_main()
+        change = self.my_commit("other.txt", "my edit\n")
+        self.set_gh(require_review=True)
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("which a rule of main holds", result.stderr)
+        self.assertEqual(self.origin_main(), upstream_head)
+        self.assertEqual([p["state"] for p in self.gh()["prs"]], ["OPEN"])
+        self.assertEqual(len([c for c in self.gh()["calls"] if c[:2] == ["pr", "merge"]]), 1)
+
+    def test_a_change_main_already_has_under_another_commit_id_is_dropped(self) -> None:
+        # Its pull request was merged by hand after the run that opened it stopped for a review.
+        self.with_codeowners()
+        change = self.my_commit("AGENTS.md", "a rule\n")
+        self.assertEqual(self.publish(change).returncode, 3)
+        merged = subprocess.run(
+            ["gh", "pr", "merge", "1", "-R", "sjawhar/dotfiles", "--squash"], env=self.env, capture_output=True, text=True
+        )
+        self.assertEqual(merged.returncode, 0, merged.stderr)
+        main = self.origin_main()
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("already has", result.stdout)
+        self.assertEqual(self.visible(change), "")
+        self.assertEqual(self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"), main)
+        self.assertEqual((self.checkout / "AGENTS.md").read_text(), "a rule\n")
         self.assertEqual((self.checkout / "wip.txt").read_text(), "another session's edit\n")
 
 

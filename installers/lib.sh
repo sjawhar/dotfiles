@@ -15,6 +15,9 @@ ensure_link() {
         echo "ensure_link: $2 is a directory, not a link to $1; move what it holds that you want into $1, remove it, then re-run" >&2
         return 1
     fi
+    if [[ -L $2 && "$(readlink -- "$2")" == "$1" ]]; then
+        return 0
+    fi
     if [[ -e $2 && ! -L $2 ]] && ! cmp -s "$1" "$2"; then
         echo "ensure_link: $2 is a file that differs from $1; copy it over $1 to keep it or delete it, then re-run" >&2
         diff -u "$1" "$2" >&2 || true
@@ -77,6 +80,66 @@ ensure_json() {
     real=$(readlink -f "$file")
     tmp=$(mktemp)
     jq "$transform" "$file" > "$tmp" && mv "$tmp" "$real"
+}
+
+# apt 2.8 can install a configured source's same-version copy instead of a local file
+# (Debian bug #1058934), so apt gets only dependency fields and dpkg gets the checked file.
+# It keeps the two refusals of apt that `dpkg -i` lacks: it installs nothing over a newer
+# installed version or over a package held at another version. A hold at the pinned version is
+# kept: `dpkg -i` sets the selection back to install, so the hold is set again after it, whether
+# `dpkg -i` succeeds or fails; a failed re-hold says it could not set the hold again and returns
+# non-zero, because the package may be left on install, where the next apt run can move it.
+# Every step returns its own failure because `||` and `if` callers disable `set -e` inside it.
+install_checked_deb() {
+    local deb="$1" expected="$2"
+    local actual package version installed want state installed_version held pre_depends depends rc
+    local -a deps=()
+    actual="$(sha256sum -- "$deb")" || return 1
+    actual="${actual%% *}"
+    if [[ "$actual" != "$expected" ]]; then
+        echo "install_checked_deb: SHA-256 of $deb is $actual, expected $expected; installed nothing" >&2
+        return 1
+    fi
+    package="$(dpkg-deb --field "$deb" Package)" || return 1
+    version="$(dpkg-deb --field "$deb" Version)" || return 1
+    # dpkg-query exits 1 for a package dpkg does not know (nothing is installed); any other
+    # failure is an error.
+    installed="$(dpkg-query -W -f='${db:Status-Want} ${db:Status-Status} ${Version}' "$package" 2>/dev/null)" || {
+        rc=$?
+        if ((rc != 1)); then
+            echo "install_checked_deb: dpkg-query failed for $package (exit $rc); installed nothing" >&2
+            return 1
+        fi
+        installed=""
+    }
+    read -r want state installed_version <<< "$installed"
+    if [[ "$want" == hold && "$installed_version" != "$version" ]]; then
+        # dpkg prints no version for a held package it has not installed, so name the state.
+        if [[ -n "$installed_version" ]]; then held="at $installed_version"; else held="(${state//-/ })"; fi
+        echo "install_checked_deb: $package is on hold $held; installed nothing (apt-mark unhold $package to install $version)" >&2
+        return 1
+    fi
+    # apt counts neither `config-files` (only configuration files left) nor `not-installed` as
+    # installed, so the version either state reports refuses nothing.
+    if [[ "$state" == config-files || "$state" == not-installed ]]; then installed_version=""; fi
+    if dpkg --compare-versions "$installed_version" gt "$version"; then
+        echo "install_checked_deb: $package $installed_version is installed, newer than $version; installed nothing" >&2
+        return 1
+    fi
+    pre_depends="$(dpkg-deb --field "$deb" Pre-Depends)" || return 1
+    depends="$(dpkg-deb --field "$deb" Depends)" || return 1
+    if [[ -n "$pre_depends" ]]; then deps+=("$pre_depends"); fi
+    if [[ -n "$depends" ]]; then deps+=("$depends"); fi
+    if ((${#deps[@]})); then
+        DEBIAN_FRONTEND=noninteractive apt-get satisfy -y --no-install-recommends "${deps[@]}" || return 1
+    fi
+    rc=0
+    DEBIAN_FRONTEND=noninteractive dpkg -i "$deb" || rc=$?
+    if [[ "$want" == hold ]] && ! dpkg --set-selections <<< "$package hold"; then
+        echo "install_checked_deb: could not set the hold on $package again; check apt-mark showhold and run apt-mark hold $package" >&2
+        return "$((rc == 0 ? 1 : rc))"
+    fi
+    return "$rc"
 }
 
 # Give a box watch's service the session that owns THIS machine's box health, from

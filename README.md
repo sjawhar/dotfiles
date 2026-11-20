@@ -4,33 +4,35 @@ Read [AGENTS.md](AGENTS.md) before changing these files.
 
 ## Laptop
 
-Run this command on the laptop. It works from an old `~/.dotfiles` checkout.
+After setup, use `ssh oryx` for a terminal on oryx. The browser asks for a
+Google sign-in about once a day. Use `ssh oryx-ssm` when Cloudflare is down; run
+`aws login --profile personal` first if AWS says the sign-in expired. When
+forward to oryx seems broken, run `systemctl --user status forward-oryx` or
+`systemctl --user restart forward-oryx`. Forward to oryx needs nothing else
+from you.
 
-```bash
-git -C ~/.dotfiles fetch -q origin main && s=$(git -C ~/.dotfiles show origin/main:laptop/oryx-tunnel-setup) && bash -c "$s" oryx-tunnel-setup
-```
+Before these commands, this laptop already has `cloudflared` and
+`~/.ssh/config` linked from earlier runs. A new laptop gets both from
+`bash ~/.dotfiles/laptop/install.sh`, which runs command 4.
 
-During the command, sign in to Cloudflare Access in the browser. Touch the
-YubiKey when the command asks for it. Answer `y` or `N` for the browser and
-sound checks. The command installs Cloudflare Access's SSH client, replaces the
-laptop SSH configuration with the Cloudflare hosts, copies the tunnel service
-token from oryx, writes oryx's loopback forward configuration, starts the
-forward user units, and ends the old tunnel.
+| Command | What it prints when it works |
+| --- | --- |
+| `~/.dotfiles/scripts/dotfiles-sync local` | `== local`, then `<hostname> on <commit>`, then `tools: <command> passed in <directory>` lines |
+| `ssh oryx true` | A browser tab may open for the Cloudflare Access sign-in. Then it prints nothing and returns to the prompt with exit 0. If it prints `Permission denied (publickey)`, give an agent the public-key output from `ssh-add -L` so the agent can add the key on oryx. |
+| `ssh -t oryx '~/.local/bin/oryx-edge-cutover'` | Touch the YubiKey when asked. Its last line is `oryx-edge-cutover: complete`. |
+| `bash ~/.dotfiles/installers/forward.sh daemon` | One `forward.sh daemon: oryx: <step>: <what it did>` line per step. Its last line is `forward.sh daemon: oryx: connected: forward-oryx is running`. |
+| `ssh oryx-ssm true` | It prints nothing from `true` and exits 0. The Session Manager ProxyCommand can print its own lines. |
 
-Run `bash ~/.dotfiles/laptop/oryx-tunnel-setup` again to repeat the setup. Each
-run writes a mode-0600 report at
-`~/.local/state/oryx-laptop/report-<UTC>.txt` on the laptop, then uploads it to
-the same path on oryx after the login probe succeeds. The command prints the
-oryx report path. If the upload fails, it prints the local report path.
+To rotate the service token, run `bash ~/.dotfiles/installers/forward.sh daemon`
+again.
 
 ## SSH to oryx
 
 oryx has one SSH hostname, `oryx.thecybermonk.com`, which Cloudflare Access sends
-to sshd on oryx's port 22. The laptop is the way in: `ssh oryx` signs in with
-the login key in 1Password, and the forward connection, `Host oryx-tunnel`,
-which `forward-tunnel@oryx` runs, signs in with its own key and the tunnel's
-service token. The two never share an SSH connection. The phone setup below is
-a backup for when you are away from the laptop.
+to sshd on oryx's port 22. `ssh oryx` uses the login key in 1Password.
+`forward-oryx` uses `forward/forward-oryx.ssh-config`, its own key and the
+service token. It never shares an SSH connection with `ssh oryx`. The phone
+setup below is a backup for when you are away from the laptop.
 
 ## Oryx tunnel ports
 
@@ -49,12 +51,16 @@ a backup for when you are away from the laptop.
 Run `bash ~/.dotfiles/oryx/install.sh` once on oryx. It arms the
 `dotfiles-follow` user timer with oryx's drop-in, so oryx's `~/.dotfiles`
 follows `origin/main` every 10 minutes and its alerts go to the HOME controller.
-It needs no Tailscale; the laptop command above writes oryx's forward config.
+It needs no Tailscale; `oryx-edge-cutover` writes oryx's forward configuration.
+Run it as `agent`, the sudo user: it also enables and starts `bluetooth` and
+turns on lingering for `sami`, because the Galaxy A15 agent phone line pairs with
+oryx over Bluetooth and its bridge runs in `sami`'s user session.
 
-The line in `oryx/oryx-tunnel.key-options` is installed on oryx by hand: it goes
-in front of the laptop's tunnel key in `agent`'s `~/.ssh/authorized_keys`. sshd
-on oryx must also set `AllowStreamLocalForwarding no`. The tunnel reaches sshd on
-port 22, so this setting applies to every session there.
+`oryx-tunnel-enrol`, which `bash ~/.dotfiles/installers/forward.sh daemon` runs,
+writes the line in `oryx/oryx-tunnel.key-options` in front of the laptop's
+tunnel key in `agent`'s `~/.ssh/authorized_keys`. sshd on oryx must also set
+`AllowStreamLocalForwarding no`. The tunnel reaches sshd on port 22, so this
+setting applies to every session there.
 
 ## Phone
 

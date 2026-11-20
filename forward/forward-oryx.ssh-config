@@ -1,0 +1,30 @@
+# This connection is only for forward-oryx. It uses its own key and Access
+# service token, so it never shares an interactive ssh oryx connection.
+Host oryx
+  HostName oryx.thecybermonk.com
+  User agent
+  # Do not add --loglevel: cloudflared logs request headers at debug levels.
+  ProxyCommand cloudflared access ssh --hostname %h
+  HostKeyAlias oryx.tail12ec1c.ts.net
+  UserKnownHostsFile ~/.dotfiles/forward/forward-oryx.known_hosts
+  GlobalKnownHostsFile none
+  StrictHostKeyChecking yes
+  IdentityFile ~/.ssh/oryx-tunnel
+  IdentitiesOnly yes
+  IdentityAgent none
+  ForwardAgent no
+  ControlMaster no
+  ControlPath none
+  BatchMode yes
+  ConnectTimeout 30
+  ExitOnForwardFailure yes
+  ServerAliveInterval 15
+  ServerAliveCountMax 4
+  # The daemon and browser relay run through these loopback-only channels.
+  RemoteForward 127.0.0.1:12800 127.0.0.1:12800
+  RemoteForward 127.0.0.1:12803 127.0.0.1:12803
+  RemoteForward 127.0.0.1:12804 127.0.0.1:12804
+  RemoteForward 127.0.0.1:12806 127.0.0.1:12806
+  LocalForward 127.0.0.1:12801 127.0.0.1:12801
+  LocalForward 127.0.0.1:12802 127.0.0.1:12802
+  LocalForward 127.0.0.1:12805 127.0.0.1:12805

@@ -26,6 +26,13 @@ And for the defects the run of 2026-11-08 hit (report.md section 8):
     -> test_scheduler_items_are_excluded_and_his_own_attachment_is_not
   SKILL.md, a command written without the flags its script requires
     -> test_skill_runs_extract_dispatch_human_with_its_required_flags
+
+And for experiments-readout, which still read the rows of a message extractor deleted in October:
+  its turns, read from enumerate-messages.py rows (the excluded ones, restart copies, Dispatch
+    deliveries, and the store's naive UTC against the draw's ISO time)
+    -> test_turns_are_the_enumerated_rows_of_his_own_words
+  its draws, where a restart copies the old session's draw ahead of its own, and a directory is
+    named like a session file -> test_a_restart_copy_is_measured_on_its_own_draw
 """
 
 from __future__ import annotations
@@ -51,6 +58,7 @@ def load(name: str):
 
 check = load("check-findings")
 enumerate_messages = load("enumerate-messages")
+readout = load("experiments-readout")
 
 RECORD = """# Record M0001
 
@@ -275,6 +283,72 @@ class CountTypes(unittest.TestCase):
             self.assertEqual(p.returncode, 0, p.stderr)
             got = [json.loads(line) for line in out.read_text().splitlines()]
             self.assertEqual([(x["id"], x["session_id"]) for x in got], [("M0001#0", "s1"), ("M9001#0", "s2")])
+
+
+def experiments_entry(root: str, ts: str, on: bool) -> str:
+    """One `experiments` entry as omp writes it: compact JSON, so the readout's marker finds it."""
+    return json.dumps({
+        "type": "custom", "customType": "experiments", "timestamp": ts,
+        "data": {"v": 1, "rootSessionId": root,
+                 "features": {"selfcompact": {"gate": "random", "draw": "on" if on else "off", "on": on}}},
+    }, separators=(",", ":"))
+
+
+class ExperimentsReadout(unittest.TestCase):
+    OLD = "01a19679-aacf-7456-a9fa-87327b9ecd86"
+    NEW = "01a19ed6-98e2-730d-a75f-1cc78c7362f4"
+    OTHER = "01a19ed6-98e6-7555-a350-d306431f27e2"
+
+    @staticmethod
+    def row(**fields) -> dict:
+        """A row as `enumerate-messages.py --out` writes it."""
+        return {"source": "tq", "kind": "typed", "host": "host-a", "raw_file": "f", "raw_line": 1,
+                "cwd": None, "title": None, "excluded": None, "also_in": [], "copy_of": None, **fields}
+
+    def test_turns_are_the_enumerated_rows_of_his_own_words(self) -> None:
+        """An excluded row and a restart copy are no turn of his; a Dispatch event counts in each
+        session it reached; the store's naive UTC is compared as a time, not as a string."""
+        since = "2026-11-06T15:00:00.000Z"
+        sessions = {sid: {"since": since} for sid in (self.OLD, self.NEW, self.OTHER)}
+        rows = [
+            self.row(id="M0001", ts="2026-11-06 14:59:59.999", session_id=self.OLD, text="before the draw"),
+            self.row(id="M0002", ts="2026-11-06 15:01:00.698", session_id=self.OLD, text="Why is CI still red?",
+                     also_in=[self.NEW]),
+            self.row(id="M0003", ts="2026-11-06 15:01:00.698", session_id=self.NEW, text="Why is CI still red?",
+                     excluded="restart-copy", copy_of=self.OLD),
+            self.row(id="M0004", ts="2026-11-06 15:02:00.000", session_id=self.OLD, text="Review PR 12, report",
+                     excluded="agent-sent"),
+            self.row(id="M0005", kind="dispatch", ts="2026-11-06 15:03:00.000", session_id=self.OLD,
+                     text="Stop opening asks I already answered", dispatch_id="e1", excluded=None,
+                     also_in=[self.OTHER, "01a1aaaa-0000-7000-8000-000000000000"]),
+            self.row(id="M0006", ts="2026-11-06 15:04:00.000", session_id="01a1bbbb-0000-7000-8000-000000000000",
+                     text="a session with no draw"),
+            # A second message of the same session at the same time is a turn of its own.
+            self.row(id="M0007", ts="2026-11-06 15:01:00.698", session_id=self.OLD, text="and the docs too"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            messages = Path(tmp) / "messages.jsonl"
+            messages.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            turns = readout.load_turns([messages], sessions)
+        self.assertEqual(sorted((t["sid"], t["text"]) for t in turns), [
+            (self.OLD, "Stop opening asks I already answered"),
+            (self.OLD, "Why is CI still red?"),
+            (self.OLD, "and the docs too"),
+            (self.OTHER, "Stop opening asks I already answered"),
+        ])
+
+    def test_a_restart_copy_is_measured_on_its_own_draw(self) -> None:
+        """A restart writes the old session's entries, its draw included, ahead of the new one's."""
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = Path(tmp) / "-src-project"
+            proj.mkdir()
+            (proj / f"2026-11-03T00-37-06-402Z_{self.NEW}.jsonl").write_text(
+                experiments_entry(self.OLD, "2026-11-01T09:39:02.050Z", True) + "\n"
+                + experiments_entry(self.NEW, "2026-11-03T00:38:20.197Z", False) + "\n")
+            (proj / f"2026-11-16T00-58-22-771Z_{self.OTHER}.jsonl").mkdir()
+            sessions = readout.load_sessions([tmp], readout.EXCLUDE_DEFAULT)
+        self.assertEqual({sid: (s["since"], s["arms"]) for sid, s in sessions.items()},
+                         {self.NEW: ("2026-11-03T00:38:20.197Z", {"selfcompact": False})})
 
 
 class SkillDoc(unittest.TestCase):

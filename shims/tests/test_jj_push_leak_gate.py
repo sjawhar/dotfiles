@@ -8,12 +8,13 @@ and update lines. The real jj and the real git do every step here, with this shi
 on PATH. Most remotes are reached through a remote helper (`remote.<name>.vcs=sink`, `git-remote-sink` below): git
 keeps the URL as written, hands it to the hook, and the helper connects git to a local bare repository named after that
 URL. The cases that need git's own transports use a real local path, or ssh through a local-only stand-in
-(`SSH_ADAPTER`). GIT_ALLOW_PROTOCOL allows only those, and a fake gh, first on PATH (ahead of shims/gh too, which
-scripts/github-repo-visibility runs by path and which hands the call to the first gh on PATH), answers nothing. So no
-test can reach GitHub, even when the gate wrongly lets a push through, and each sink shows exactly which commit reached
-which URL. A fake ssh, also first on PATH, runs the real one with the test's own config (SSH_CONFIG), so `ssh -G`
-resolves the same aliases on every machine. The check is the installed one, found the way the shim and the pre-push
-hook find it; HOME is the test's own, so the visibility cache is the test's.
+(`SSH_ADAPTER`). GIT_ALLOW_PROTOCOL allows only those, and a fake gh answers nothing: first on PATH, for a bare `gh`,
+and again just past this shims dir, for shims/gh, which scripts/github-repo-visibility runs by path and which hands the
+call to the first gh past its own PATH entry, never to one above it. So no test can reach GitHub, even when the gate
+wrongly lets a push through, and each sink shows exactly which commit reached which URL. A fake ssh, also first on
+PATH, runs the real one with the test's own config (SSH_CONFIG), so `ssh -G` resolves the same aliases on every
+machine. The check is the installed one, found the way the shim and the pre-push hook find it; HOME is the test's own,
+so the visibility cache is the test's.
 """
 import hashlib
 import os
@@ -422,8 +423,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         for name, word in CACHE.items():
             (self.cache / name).write_text(word, encoding="utf-8")
         # shims/gh, which scripts/github-repo-visibility runs by path, in an agent session: its agent config directory,
-        # no knives, no read cache and no call log, and a token that is not one, so it hands the call straight to the
-        # fake gh.
+        # no knives, and a token that is not one, so it hands the call straight to the fake gh.
         gh_config = self.home / ".config" / "gh-agent"
         gh_config.mkdir(parents=True)
         (gh_config / "hosts.yml").touch()
@@ -435,9 +435,12 @@ class JjPushLeakGateTest(unittest.TestCase):
         # gate reads a command-scope hooks path as the caller's own choice.
         self.env = {
             **{k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG")},
-            # The fake gh first, ahead of this shims dir, whose dotfiles checkout holds shims/gh: no gh past it is
-            # reached. Then this shims dir, then the recording git and the sink helper.
-            "PATH": os.pathsep.join([str(self.ghdir), str(SHIMS), str(fake), str(real_jj().parent), os.environ["PATH"]]),
+            # The fake gh first, for the check's own gh calls, and again right after this shims dir, for
+            # shims/gh: the shim takes the first gh past its own PATH entry and never one above it (shims/AGENTS.md,
+            # "Adding to a shim"), so with the fake only first, its visibility reads reached the machine's real gh.
+            # Then the recording git and the sink helper.
+            "PATH": os.pathsep.join([str(self.ghdir), str(SHIMS), str(self.ghdir), str(fake), str(real_jj().parent),
+                                     os.environ["PATH"]]),
             "HOME": str(self.home),
             "JJ_CONFIG": str(cfg),
             "XDG_CACHE_HOME": str(self.home / ".cache"),
@@ -447,13 +450,14 @@ class JjPushLeakGateTest(unittest.TestCase):
             "GIT_ALLOW_PROTOCOL": "sink",
             "GIT_SSH_COMMAND": "false",
             "DOTFILES_DIR": str(SHIMS.parent),
-            "GH_READ_CACHE": "0",
-            "GH_READ_CACHE_LOG": "0",
             "KNIVES_GH_BYPASS": "1",
             "GH_TOKEN": "fixture-not-a-secret",
         }
         self.assertEqual(shutil.which("ssh", path=self.env["PATH"]), str(self.ghdir / "ssh"), "an ssh other than the fake one comes first")
         self.assertEqual(shutil.which("gh", path=self.env["PATH"]), str(self.ghdir / "gh"), "a gh other than the fake one comes first")
+        past_shims = self.env["PATH"].split(os.pathsep)
+        past_shims = os.pathsep.join(past_shims[past_shims.index(str(SHIMS)) + 1:])
+        self.assertEqual(shutil.which("gh", path=past_shims), str(self.ghdir / "gh"), "shims/gh hands its calls to a gh other than the fake one")
         self.env.pop("DOTFILES_JJ_SHIM", None)
         self.repo = self.tmp / "w"
         self.repo.mkdir()

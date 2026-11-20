@@ -19,7 +19,7 @@ from pathlib import Path
 
 SHIMS = Path(__file__).parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from stdin_cases import SSH_CONNECTION, SSH_TTY, run_without_tty  # noqa: E402
+from stdin_cases import SSH_CONNECTION, SSH_TTY, run_with_tty, run_without_tty  # noqa: E402
 PROFILE = "[gh-app]\n\thost-profile = agent\n"
 
 
@@ -45,7 +45,7 @@ class HostToken(unittest.TestCase):
         self.env = {
             "HOME": str(self.home), "LANG": "C.UTF-8", "TMPDIR": str(self.tmp),
             "PATH": os.pathsep.join([str(stubs), str(SHIMS), str(real), "/usr/bin", "/bin"]),
-            "KNIVES_GH_BYPASS": "1", "GH_READ_CACHE": "0", "GH_READ_CACHE_LOG": "0",
+            "KNIVES_GH_BYPASS": "1",
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
         }
 
@@ -124,7 +124,7 @@ class HostToken(unittest.TestCase):
     # INFRA-1538, and its review: a command over SSH with no terminal in its session is an
     # agent's, and a host profile is NOT an exception to that. The host token below is for a
     # person's own shell and for the machine's own units; an agent's call takes the agent route,
-    # with every agent safeguard (test_gh_unrouted.py), and mints no owner-wide host token here.
+    # with every agent safeguard (test_gh_ssh_agent_context.py), and mints no owner-wide host token here.
     def test_a_call_over_ssh_takes_the_agent_route_and_mints_no_host_token(self):
         self.machine_config()
         result = run_without_tty(["gh", "api", "repos/theorem-labs/x"],
@@ -141,6 +141,25 @@ class HostToken(unittest.TestCase):
                                  env={**self.env, "SSH_CONNECTION": SSH_CONNECTION, "SSH_TTY": SSH_TTY},
                                  cwd=self.tmp, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.recorded()[-1], "real gh api repos/theorem-labs/x token=ghs_APP_theorem-labs")
+
+    # dispatch://INFRA-4089, on this machine's own shape: Sami's pane of a tmux server that never
+    # carried SSH_TTY holds SSH_CONNECTION and no SSH_TTY, and his `gh auth status` there said
+    # "non-interactive SSH, so an agent's call". The pane's terminal makes every call in it his.
+    def test_gh_auth_status_in_a_persons_pane_with_no_ssh_tty_is_the_persons(self):
+        self.machine_config()
+        result = run_with_tty(["gh", "auth", "status"], env={**self.env, "SSH_CONNECTION": SSH_CONNECTION},
+                              cwd=self.tmp, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("non-interactive SSH", result.stderr)
+        self.assertEqual(self.recorded(), ["real gh auth status token=none"])
+
+    def test_a_persons_pane_with_no_ssh_tty_gets_the_host_token(self):
+        self.machine_config()
+        result = run_with_tty(["gh", "api", "repos/theorem-labs/x"],
+                              env={**self.env, "SSH_CONNECTION": SSH_CONNECTION}, cwd=self.tmp, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("non-interactive SSH", result.stderr)
         self.assertEqual(self.recorded()[-1], "real gh api repos/theorem-labs/x token=ghs_APP_theorem-labs")
 
 

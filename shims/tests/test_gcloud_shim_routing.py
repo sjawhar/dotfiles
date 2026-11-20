@@ -13,6 +13,7 @@ the tests never read or write Sami's real ~/.config/gcloud.
 import fcntl
 import json
 import os
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -34,6 +35,10 @@ from stdin_cases import SSH_CONNECTION, SSH_TTY, run_with_tty, run_without_tty  
 # the installed SDK, and kept apart from the shim so the shim's arrays are
 # checked against something they did not produce.
 SDK_FLAGS = json.loads((Path(__file__).resolve().parent / "gcloud_global_flags_589.json").read_text(encoding="utf-8"))
+# What the shim's Google-VM gate reads when GCE_METADATA_HOST is unset (shims/gcloud,
+# drop_azure_credential_on_google_vm): with a Google DMI name it asks the real metadata server.
+_DMI = Path("/sys/class/dmi/id/product_name")
+DMI_SAYS_GOOGLE = os.access(_DMI, os.R_OK) and _DMI.read_text(encoding="utf-8").strip() == "Google Compute Engine"
 
 
 def write_stub(directory: Path, name: str, body: str) -> None:
@@ -102,11 +107,15 @@ class GcloudRouting(unittest.TestCase):
         for name in ("default", "gws-personal", "theorem"):
             (self.configs_dir / f"config_{name}").write_text("[core]\n", encoding="utf-8")
         (self.cloudsdk_config / "active_config").write_text("box\n", encoding="utf-8")
+        # A TMPDIR of the test's own, so nothing a call writes there reaches the machine's /tmp, which every test and
+        # session shares. No XDG_RUNTIME_DIR: an agentbox session then makes no copy of the configuration directory.
+        (self.stub_dir / "tmp").mkdir()
         self.env = {
             "PATH": f"{self.stub_dir}:{SHIMS}:/usr/bin:/bin",
             "HOME": str(self.fake_home),
             # Not a Google VM, wherever the suite runs (scripts/on-google-vm): a closed port.
             "GCE_METADATA_HOST": "127.0.0.1:9",
+            "TMPDIR": str(self.stub_dir / "tmp"),
         }
 
     def tearDown(self) -> None:
@@ -735,12 +744,15 @@ class GcloudRouting(unittest.TestCase):
         The probe is the application-default refusal because it depends only on the
         command path, so it holds for the flags that select an identity
         (`--configuration`) or carry opaque flags (`--flags-file`) as much as for the
-        rest."""
+        rest. `--help` and `-h` are left out: with either, the call only prints help and
+        reaches gcloud on purpose (test_agent_session_passes_a_help_call_every_guard_would_refuse)."""
         self.write_external_account_adc()
         self.stub_gcloud_that_must_not_run()
         protected = ["auth", "application-default", "login"]
 
         for flag, count in SDK_FLAGS["flags"].items():
+            if flag in ("--help", "-h"):
+                continue
             forms = [[flag, *["VALUE"] * count]]
             if count:
                 forms.append([f"{flag}=VALUE"])
@@ -860,6 +872,20 @@ class GcloudRouting(unittest.TestCase):
         (self.cloudsdk_config / "active_config").write_text("default\n", encoding="utf-8")
         result = self.run_shim(google, args=["auth", "application-default", "login"])
         self.assertEqual(result.stdout.strip(), "SHOULD-NOT-RUN")
+
+    def test_adc_refusal_names_the_configuration_variable(self):
+        """agent-secrets passes gcloud no --configuration, and on a box-active machine a store
+        command takes the active (box) account, so the refusal names the variable that chooses the
+        person's own login and no flag (agent-secrets has no --profile since legion-envoy-v30.42.0)."""
+        server = MetadataStub.start()
+        self.addCleanup(server.stop)
+        google = {"GCE_METADATA_HOST": server.host}
+        self.stub_gcloud_that_must_not_run()
+        result = self.run_shim(google, args=["auth", "application-default", "login"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CLOUDSDK_ACTIVE_CONFIG_NAME=theorem agent-secrets secret create NAME", result.stderr)
+        self.assertNotIn("--profile", result.stderr)
+        self.assertEqual(result.stdout, "")
 
     def test_adc_is_opened_only_for_the_commands_it_can_refuse(self):
         """Ordinary calls leave the ADC unopened: a runtime monitor then sees gcloud read it,
@@ -1139,6 +1165,38 @@ class GcloudRouting(unittest.TestCase):
                                    args=["compute", "instances", "create", "vm-1"])
             self.assertEqual(result.returncode, 1)
 
+    def test_agent_session_passes_a_help_call_every_guard_would_refuse(self):
+        """`--help`, `-h` and the `help` command print the SDK's text and run no command, so a help call reaches
+        gcloud unchanged even where the same command would be refused."""
+        self.write_identity_configs()
+        self.write_user_adc()
+        flags_file = self.stub_dir / "flags.yaml"
+        flags_file.write_text("--project: p\n", encoding="utf-8")
+        for args in (["compute", "instances", "create", "--help"],
+                     ["compute", "instances", "create", "vm-1", "-h"],
+                     ["beta", "compute", "instances", "bulk", "create", "--help"],
+                     ["help", "compute", "instances", "create"],
+                     ["auth", "application-default", "login", "--help"],
+                     ["--account", self.USER, "projects", "list", "--help"],
+                     ["config", "list", "--flags-file", str(flags_file), "--help"]):
+            with self.subTest(args=args):
+                result = self.run_shim(self.AGENT_MARKERS[0], args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(stub_argv(result), args)
+
+    def test_a_help_word_that_is_no_help_call_is_still_refused(self):
+        """An instance named `help`, `--help` after `--`, and `--help` as a global flag's separate value
+        (gcloud reads `--flags-file --help` as a file of that name and runs the command) are not help calls."""
+        self.stub_gcloud_that_must_not_run()
+        for args in (["compute", "instances", "create", "help"],
+                     ["compute", "instances", "create", "vm-1", "--", "--help"],
+                     ["config", "set", "core/disable_usage_reporting", "true", "--flags-file", "--help"],
+                     ["--project", "--help", "compute", "instances", "create", "vm-1"]):
+            with self.subTest(args=args):
+                result = self.run_shim(self.AGENT_MARKERS[0], args=args)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("gcloud shim: REFUSED in an agent session", result.stderr)
+
     def test_users_own_session_keeps_its_adc_login(self):
         """Outside an agent session the user's explicit login with --update-adc reaches gcloud as he
         typed it, and a bare one under box is still routed with --update-adc dropped."""
@@ -1198,7 +1256,182 @@ class GcloudRouting(unittest.TestCase):
                     self.assert_agent_refusal(result)
                     self.assertIn(f"Identity: {self.USER}, a person's own Google login, named by {source}.",
                                   result.stderr)
-                    self.assertIn("dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec", result.stderr)
+                    self.assertIn("under Sami's standing permission", result.stderr)
+                    self.assertIn("Post no note of the use: Cloud audit logs record each use.", result.stderr)
+
+    # The same login reached through a CONFIGURATION is the same act: only an explicit
+    # --configuration in argv is the standing route above. An exported CLOUDSDK_ACTIVE_CONFIG_NAME, or
+    # GCLOUD_ACCOUNT, which the shim exports as it, reaches every later call of that shell as the
+    # exported account of 2026-11-02 did, and active_config every call on the machine. Measured on
+    # 2026-11-17 at about 03:37Z: `CLOUDSDK_ACTIVE_CONFIG_NAME=theorem gcloud auth print-access-token`
+    # ran as the person in an agent session, while `--account <the person>` was refused.
+    HOLDER_ROUTE = "select its configuration (theorem) explicitly with --configuration on that one command"
+
+    def test_agent_session_refuses_a_configuration_the_environment_chose_for_a_persons_login(self):
+        self.write_identity_configs()
+        self.stub_gcloud_that_must_not_run()
+        cases = (
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["auth", "print-access-token"],
+             "CLOUDSDK_ACTIVE_CONFIG_NAME"),
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["config", "config-helper", "--format=json"],
+             "CLOUDSDK_ACTIVE_CONFIG_NAME"),
+            # An empty --configuration chooses none (named_configs.py:119-148), so the environment's stands.
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["--configuration=", "projects", "list"],
+             "CLOUDSDK_ACTIVE_CONFIG_NAME"),
+            # Impersonation borrows another identity WITH the person's own credential.
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"},
+             ["auth", "print-access-token", f"--impersonate-service-account={self.APPLIER}"],
+             "CLOUDSDK_ACTIVE_CONFIG_NAME"),
+            ({"GCLOUD_ACCOUNT": "theorem"}, ["auth", "print-access-token"], "GCLOUD_ACCOUNT"),
+            # main exports GCLOUD_ACCOUNT over CLOUDSDK_ACTIVE_CONFIG_NAME, so theorem is what runs.
+            ({"GCLOUD_ACCOUNT": "theorem", "CLOUDSDK_ACTIVE_CONFIG_NAME": "box"}, ["auth", "print-access-token"],
+             "GCLOUD_ACCOUNT"),
+        )
+        for marker in self.AGENT_MARKERS:
+            for env, args, source in cases:
+                with self.subTest(marker=marker, env=env, args=args):
+                    result = self.run_shim({**marker, **env}, args=args)
+                    self.assert_agent_refusal(result)
+                    self.assertIn(f"Identity: {self.USER}, a person's own Google login, from the configuration "
+                                  f"theorem, chosen by {source}.", result.stderr)
+                    self.assertIn(f"unset {source}", result.stderr)
+                    self.assertIn(self.HOLDER_ROUTE, result.stderr)
+                    self.assertIn("under Sami's standing permission", result.stderr)
+                    self.assertIn("Post no note of the use: Cloud audit logs record each use.", result.stderr)
+
+    def test_a_session_copy_of_another_configuration_directory_is_not_this_callers(self):
+        """The session's copy of gcloud's configuration directory (scripts/gcloud-session-config) is shared by whatever
+        shares the scratch it is in, and the first call publishes it. A copy another HOME made, here one whose theorem
+        configuration holds no person's login, says nothing of this caller's directory: the same call is refused."""
+        self.write_identity_configs()
+        self.stub_gcloud_that_must_not_run()
+        runtime = self.stub_dir / "runtime"
+        scratch = runtime / "gcloud-session" / "1"
+        for directory in (runtime, runtime / "gcloud-session", scratch):
+            directory.mkdir()
+            directory.chmod(0o700)
+        copy = scratch / "gcloud"
+        (copy / "configurations").mkdir(parents=True)
+        (copy / "configurations" / "config_theorem").write_text("[core]\n", encoding="utf-8")
+        (copy / "active_config").write_text("box\n", encoding="utf-8")
+        marker = copy / ".gcloud-session-copied"
+        marker.write_text(f"{self.stub_dir / 'another-home'}/.config/gcloud\n", encoding="utf-8")
+        sessions = ({"AGENTBOX_SESSION": "1", "XDG_RUNTIME_DIR": str(runtime)},
+                    {**self.AGENT_MARKERS[0], "AGENT_SESSION_SCRATCH": str(scratch)})
+        for session in sessions:
+            with self.subTest(session=session):
+                result = self.run_shim({**session, "CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"},
+                                       args=["auth", "print-access-token"])
+                self.assert_agent_refusal(result)
+                self.assertIn(f"Identity: {self.USER}, a person's own Google login, from the configuration theorem, "
+                              "chosen by CLOUDSDK_ACTIVE_CONFIG_NAME.", result.stderr)
+        # Control: a copy of this caller's own directory is the one gcloud runs on, so the call is judged by it.
+        marker.write_text(f"{self.cloudsdk_config}\n", encoding="utf-8")
+        for session in sessions:
+            with self.subTest(session=session, copy="own"):
+                result = self.run_shim({**session, "CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"},
+                                       args=["auth", "print-access-token"])
+                self.assertEqual((result.returncode, result.stdout.strip()), (0, "SHOULD-NOT-RUN"), result.stderr)
+
+    def test_agent_session_refuses_an_active_configuration_holding_a_persons_login(self):
+        self.write_identity_configs()
+        self.stub_gcloud_that_must_not_run()
+        active = self.cloudsdk_config / "active_config"
+        with self.subTest("active_config"):
+            active.write_text("theorem\n", encoding="utf-8")
+            result = self.run_shim(self.AGENT_MARKERS[0], args=["auth", "print-access-token"])
+            self.assert_agent_refusal(result)
+            self.assertIn(f"from the configuration theorem, chosen by active_config ({active}).", result.stderr)
+            self.assertIn("--configuration box", result.stderr)
+            self.assertIn(self.HOLDER_ROUTE, result.stderr)
+        with self.subTest("no active configuration"):
+            active.unlink()
+            (self.configs_dir / "config_default").write_text(f"[core]\naccount = {self.USER}\n", encoding="utf-8")
+            result = self.run_shim(self.AGENT_MARKERS[0], args=["auth", "print-access-token"])
+            self.assert_agent_refusal(result)
+            self.assertIn(f"Identity: {self.USER}, a person's own Google login, from the configuration default,",
+                          result.stderr)
+            self.assertIn("select its configuration (default) explicitly with --configuration", result.stderr)
+
+    # `auth print-access-token ACCOUNT` (and print-identity-token, print-refresh-token, describe)
+    # loads the stored credential of that ACCOUNT argument, ahead of --account and of the
+    # configuration (surface/auth/print_access_token.py:131-136,176-177; core/credentials/
+    # store.py:959-960), so a person's login named there prints that person's token whatever
+    # account or configuration the call otherwise holds.
+    def test_agent_session_refuses_a_persons_login_as_the_account_argument(self):
+        self.write_identity_configs()
+        self.stub_gcloud_that_must_not_run()
+        cases = (
+            ({}, ["auth", "print-access-token", self.USER], "print-access-token"),
+            ({}, ["auth", "print-access-token", "--lifetime", "3600s", self.USER], "print-access-token"),
+            ({}, ["beta", "auth", "print-identity-token", "--audiences", "https://a.example", self.USER],
+             "print-identity-token"),
+            ({}, ["auth", "print-refresh-token", self.USER], "print-refresh-token"),
+            ({}, ["auth", "describe", self.USER], "describe"),
+            ({}, ["--account", self.BOX, "auth", "print-access-token", "--", self.USER], "print-access-token"),
+            ({"CLOUDSDK_CORE_ACCOUNT": self.BOX}, ["auth", "print-access-token", self.USER], "print-access-token"),
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "box"}, ["--project", "p", "auth", "print-access-token", self.USER],
+             "print-access-token"),
+        )
+        for marker in self.AGENT_MARKERS:
+            for env, args, verb in cases:
+                with self.subTest(marker=marker, env=env, args=args):
+                    result = self.run_shim({**marker, **env}, args=args)
+                    self.assert_agent_refusal(result)
+                    self.assertIn(f"Identity: {self.USER}, a person's own Google login, named by the ACCOUNT "
+                                  f"argument of auth {verb}.", result.stderr)
+                    self.assertIn(self.HOLDER_ROUTE, result.stderr)
+
+    def test_agent_session_passes_a_machine_configuration_and_the_explicit_route(self):
+        self.write_identity_configs()
+        cases = (
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "box"}, ["auth", "print-access-token"]),
+            ({"GCLOUD_ACCOUNT": "box"}, ["config", "config-helper", "--format=json"]),
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["--configuration", "theorem", "auth", "print-access-token"]),
+            ({"GCLOUD_ACCOUNT": "theorem"}, ["--configuration=theorem", "config", "config-helper"]),
+            # The call's own account is the service account, so the configuration's is not used.
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem", "CLOUDSDK_CORE_ACCOUNT": self.BOX}, ["auth", "print-access-token"]),
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "gws-personal"}, ["auth", "list"]),
+            # A service account as the ACCOUNT argument, as agent-secrets passes the box's.
+            ({}, ["auth", "print-access-token", self.BOX]),
+            ({}, ["auth", "print-identity-token", "--audiences", "https://a.example", self.BOX]),
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["auth", "print-access-token", self.BOX]),
+            ({}, ["auth", "print-identity-token", "--audiences", "https://a.example"]),
+            ({}, ["--configuration", "theorem", "auth", "print-access-token", self.USER]),
+        )
+        for env, args in cases:
+            with self.subTest(env=env, args=args):
+                result = self.run_shim({**self.AGENT_MARKERS[0], **env}, args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(stub_argv(result), args)
+
+    def test_agent_session_keeps_changes_that_outlive_the_call_under_such_a_configuration(self):
+        # persists_config_change: a sign-in, a revoke, a property or a configuration change runs
+        # under the configuration it names, as before.
+        self.write_identity_configs()
+        for env, args in (({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["auth", "login"]),
+                          ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["auth", "login", "--cred-file=/tmp/key.json"]),
+                          ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["auth", "revoke"]),
+                          ({"GCLOUD_ACCOUNT": "theorem"}, ["config", "set", "project", "p"]),
+                          ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["config", "configurations", "activate", "box"])):
+            with self.subTest(env=env, args=args):
+                result = self.run_shim({**self.AGENT_MARKERS[0], **env}, args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(stub_argv(result), args)
+
+    def test_a_persons_own_session_keeps_a_configuration_holding_his_login(self):
+        # No marker and a terminal, on or off SSH: the person's, whatever configuration he exports.
+        self.write_identity_configs()
+        for env, args in (({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["auth", "print-access-token"]),
+                          ({"GCLOUD_ACCOUNT": "theorem"}, ["auth", "print-access-token"]),
+                          ({}, ["auth", "print-access-token", self.USER]),
+                          ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["auth", "login"])):
+            for ssh in ({}, {"SSH_CONNECTION": SSH_CONNECTION}, {"SSH_CONNECTION": SSH_CONNECTION, "SSH_TTY": SSH_TTY}):
+                with self.subTest(env=env, args=args, ssh=sorted(ssh)):
+                    result = run_with_tty([str(SHIMS / "gcloud"), *args], env={**self.env, **ssh, **env})
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(stub_argv(result), args)
+                    self.assertNotIn("REFUSED", result.stderr)
 
     # A --flags-file is argv gcloud has not expanded yet: it loads YAML — a mapping, a list of
     # mappings, a JSON one-liner — expands it IN PLACE before it resolves --account,
@@ -1256,7 +1489,7 @@ class GcloudRouting(unittest.TestCase):
             ({"CLOUDSDK_CORE_ACCOUNT": self.USER}, ["--configuration", "theorem", "auth", "print-access-token"]),
             ({}, ["--configuration=theorem", "--account", self.USER, "projects", "list"]),
             ({}, ["--configuration", "theorem", "auth", "print-access-token"]),
-            ({"GCLOUD_ACCOUNT": "theorem"}, ["auth", "print-access-token"]),
+            ({"GCLOUD_ACCOUNT": "box"}, ["auth", "print-access-token"]),
             ({"CLOUDSDK_CORE_ACCOUNT": self.BOX}, ["auth", "print-access-token"]),
             ({}, ["auth", "print-access-token", f"--account={self.BOX}"]),
             ({}, ["auth", "print-access-token", f"--impersonate-service-account={self.APPLIER}"]),
@@ -1372,9 +1605,9 @@ class GcloudAzureCredentialOnGoogleVm(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def run_shim(self, extra_env: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
+    def run_shim(self, extra_env: Mapping[str, str], shim: Path = SHIMS / "gcloud") -> subprocess.CompletedProcess[str]:
         env = {k: v for k, v in {**self.env, **extra_env}.items() if v is not None}
-        return subprocess.run([str(SHIMS / "gcloud"), "auth", "print-access-token"], capture_output=True,
+        return subprocess.run([str(shim), "auth", "print-access-token"], capture_output=True,
                               text=True, env=env, check=False)
 
     def rows(self, db: str, table: str) -> set[str]:
@@ -1392,7 +1625,7 @@ class GcloudAzureCredentialOnGoogleVm(unittest.TestCase):
                       result.stderr)
         self.assertEqual(self.rows("credentials.db", "credentials"), {"aws@x.iam.gserviceaccount.com", self.PERSON})
         self.assertEqual(self.rows("access_tokens.db", "access_tokens"), {self.PERSON})
-        # No copy of the entry stays in the file, so the next call stops at the shim's grep.
+        # No copy of the entry stays in the file, so the next call's check finds nothing and says nothing.
         self.assertNotIn(b"/metadata/identity/oauth2/token", (self.config / "credentials.db").read_bytes())
         again = self.run_shim({"GCE_METADATA_HOST": server.host})
         self.assertEqual((again.returncode, again.stdout, again.stderr), (0, "REAL-GCLOUD-RAN\n", ""))
@@ -1413,6 +1646,10 @@ class GcloudAzureCredentialOnGoogleVm(unittest.TestCase):
         # A closed port: on-google-vm says no. Unset: an Azure box, where the DMI name is not Google's.
         for host in ("127.0.0.1:9", None):
             with self.subTest(host=host):
+                if host is None and DMI_SAYS_GOOGLE:
+                    # The shim's own gate: with no GCE_METADATA_HOST it asks the real metadata
+                    # server wherever the DMI name is Google's, so an Azure box cannot be made here.
+                    self.skipTest("this machine's DMI name is Google's: the unset case is an Azure box's")
                 result = self.run_shim({"GCE_METADATA_HOST": host})
                 self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "REAL-GCLOUD-RAN\n", ""))
                 self.assertEqual((self.config / "credentials.db").read_bytes(), before)
@@ -1430,19 +1667,22 @@ class GcloudAzureCredentialOnGoogleVm(unittest.TestCase):
         self.assertEqual(result.stdout, "REAL-GCLOUD-RAN\n")
         self.assertIn("gcloud shim: gcloud-drop-azure-credential: cannot change", result.stderr)
 
-    def record_greps(self) -> Path:
-        """A grep that notes its arguments and is then the real grep, ahead of the shim on PATH."""
-        log = Path(self.tmp.name) / "grep.log"
-        stub_dir = Path(self.tmp.name) / "grep-stub"
-        stub_dir.mkdir()
-        write_stub(stub_dir, "grep", f'printf "%s\\n" "$*" >>"{log}"\nexec /usr/bin/grep "$@"')
-        self.env["PATH"] = f"{stub_dir}:{self.env['PATH']}"
-        return log
+    def shim_counting_store_checks(self) -> tuple[Path, Path]:
+        """A copy of the shim whose scripts dir holds a gcloud-drop-azure-credential that notes each
+        run and is then the real one. That script is the store's one reader: the shim's grep went in
+        73bc4345, after a grep on a credential store cost a [high] triage on 2026-11-06."""
+        tree = Path(self.tmp.name) / "tree"
+        (tree / "shims").mkdir(parents=True)
+        (tree / "scripts").mkdir()
+        shutil.copy2(SHIMS / "gcloud", tree / "shims" / "gcloud")
+        shutil.copy2(SHIMS.parent / "scripts" / "on-google-vm", tree / "scripts" / "on-google-vm")
+        log = Path(self.tmp.name) / "checks.log"
+        real = SHIMS.parent / "scripts" / "gcloud-drop-azure-credential"
+        write_stub(tree / "scripts", "gcloud-drop-azure-credential", f'echo "$*" >>"{log}"\nexec "{real}" "$@"')
+        return tree / "shims" / "gcloud", log
 
-    def store_reads(self, log: Path) -> list[str]:
-        if not log.exists():
-            return []
-        return [line for line in log.read_text().splitlines() if "credentials.db" in line]
+    def checks(self, log: Path) -> int:
+        return len(log.read_text().splitlines()) if log.exists() else 0
 
     def set_azure_entry(self, present: bool) -> None:
         db = sqlite3.connect(self.config / "credentials.db", isolation_level=None)
@@ -1456,37 +1696,55 @@ class GcloudAzureCredentialOnGoogleVm(unittest.TestCase):
             db.close()
 
     def test_an_unchanged_store_is_never_read_again(self) -> None:
-        """The grep opened the credential store before every gcloud call, which the CWS rule
-        theorem_gcloud_credential_read reported 109 times in a week (2026-10-30..11-06). A store
-        whose mtime, size and inode are the ones the last check saw is not opened at all."""
-        log = self.record_greps()
-        first = self.run_shim({"GCE_METADATA_HOST": "127.0.0.1:9"})
-        self.assertEqual((first.returncode, first.stdout), (0, "REAL-GCLOUD-RAN\n"), first.stderr)
-        self.assertEqual(len(self.store_reads(log)), 1, self.store_reads(log))
+        """The shim's grep opened the credential store before every gcloud call, which the CWS rule
+        theorem_gcloud_credential_read reported 109 times in a week (2026-10-30..11-06). Off a
+        Google VM nothing opens the store at all; on one, a store a check found clean is not opened
+        again."""
+        shim, log = self.shim_counting_store_checks()
         for run in range(3):
-            with self.subTest(run=run):
-                again = self.run_shim({"GCE_METADATA_HOST": "127.0.0.1:9"})
-                self.assertEqual((again.returncode, again.stdout), (0, "REAL-GCLOUD-RAN\n"), again.stderr)
-        self.assertEqual(len(self.store_reads(log)), 1, self.store_reads(log))
-
-    def test_a_changed_store_is_read_again_and_its_azure_entry_still_goes(self) -> None:
-        """What the marker remembers is one store's bytes. A store that changed after a check that
-        found no Azure entry is checked again, and the entry it gained is removed as before."""
+            with self.subTest(google=False, run=run):
+                result = self.run_shim({"GCE_METADATA_HOST": "127.0.0.1:9"}, shim)
+                self.assertEqual((result.returncode, result.stdout), (0, "REAL-GCLOUD-RAN\n"), result.stderr)
+        self.assertEqual(self.checks(log), 0)
         server = MetadataStub.start()
         self.addCleanup(server.stop)
         self.set_azure_entry(False)
-        log = self.record_greps()
-        clean = self.run_shim({"GCE_METADATA_HOST": server.host})
+        for run in range(4):
+            with self.subTest(google=True, run=run):
+                result = self.run_shim({"GCE_METADATA_HOST": server.host}, shim)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "REAL-GCLOUD-RAN\n", ""))
+        self.assertEqual(self.checks(log), 1)
+
+    def test_a_changed_store_waits_for_the_next_boot_and_its_azure_entry_then_goes(self) -> None:
+        """A clean check covers its config dir for the rest of the boot, even after the store
+        changes: on a Google VM nothing writes an Azure entry (only installers/gcloud-box.sh does, on
+        an Azure box), and until 73bc4345 every write to the store bought another read and another
+        CWS signal. So a dir copied from an Azure box over a path already checked this boot is
+        noticed at the next boot; then the changed store is read again and the entry it gained is
+        removed as before."""
+        server = MetadataStub.start()
+        self.addCleanup(server.stop)
+        shim, log = self.shim_counting_store_checks()
+        self.set_azure_entry(False)
+        clean = self.run_shim({"GCE_METADATA_HOST": server.host}, shim)
         self.assertEqual((clean.returncode, clean.stdout, clean.stderr), (0, "REAL-GCLOUD-RAN\n", ""))
-        self.assertEqual(len(self.store_reads(log)), 1, self.store_reads(log))
+        self.assertEqual(self.checks(log), 1)
 
         self.set_azure_entry(True)
-        changed = self.run_shim({"GCE_METADATA_HOST": server.host})
-        self.assertEqual(changed.returncode, 0, changed.stderr)
-        self.assertEqual(changed.stdout, "REAL-GCLOUD-RAN\n")
-        self.assertEqual(len(self.store_reads(log)), 2, self.store_reads(log))
+        same_boot = self.run_shim({"GCE_METADATA_HOST": server.host}, shim)
+        self.assertEqual((same_boot.returncode, same_boot.stdout, same_boot.stderr), (0, "REAL-GCLOUD-RAN\n", ""))
+        self.assertEqual(self.checks(log), 1)
+        self.assertIn(self.ACCOUNT, self.rows("credentials.db", "credentials"))
+
+        (marker,) = (Path(self.env["HOME"]) / ".cache" / "gcloud-shim").glob("azure-check.*")
+        verdict, stamp, _boot = marker.read_text(encoding="utf-8").strip().split("|")
+        marker.write_text(f"{verdict}|{stamp}|another-boot\n", encoding="utf-8")
+        next_boot = self.run_shim({"GCE_METADATA_HOST": server.host}, shim)
+        self.assertEqual(next_boot.returncode, 0, next_boot.stderr)
+        self.assertEqual(next_boot.stdout, "REAL-GCLOUD-RAN\n")
+        self.assertEqual(self.checks(log), 2)
         self.assertIn(f"gcloud shim: removed the stored external_account credential of {self.ACCOUNT} (an Azure one)",
-                      changed.stderr)
+                      next_boot.stderr)
         self.assertEqual(self.rows("credentials.db", "credentials"), {"aws@x.iam.gserviceaccount.com", self.PERSON})
 
 
@@ -2048,7 +2306,10 @@ class GcloudSessionConfig(unittest.TestCase):
         write_stub(root, "gcloud", 'echo "CLOUDSDK_CONFIG=${CLOUDSDK_CONFIG:-<unset>}"\nprintf "ARG=%s\\n" "$@"')
         self.origin = root / "home" / ".config" / "gcloud"
         (self.origin / "configurations").mkdir(parents=True)
-        (self.origin / "configurations" / "config_default").write_text("[core]\naccount = a@example.com\n")
+        # A service account: the copy is what these tests read, and an agent session refuses a
+        # configuration holding a person's login that active_config chose.
+        (self.origin / "configurations" / "config_default").write_text(
+            "[core]\naccount = a@p.iam.gserviceaccount.com\n")
         (self.origin / "active_config").write_text("default")
         for name in ("logs", ".gcloud-shim-retry-slots", "cache"):
             (self.origin / name).mkdir()
@@ -2118,16 +2379,41 @@ class GcloudSessionConfig(unittest.TestCase):
                 self.assertEqual(self.rows(self.copy / "credentials.db"), ["-".join(args)])
         self.assertTrue(list(self.scratch.glob("gcloud.replaced.*")))
 
-    def test_an_agentbox_session_runs_on_a_copy_in_the_box_tmp(self) -> None:
-        box_tmp = Path(self.tmp.name) / "box-tmp"
-        box_tmp.mkdir()
-        box_copy = box_tmp / "agentbox-gcloud-session" / "gcloud"
-        got = self.run_shim(["storage", "ls"], AGENT_SESSION_SCRATCH=None, AGENTBOX_BOX="agentbox-0123", TMPDIR=str(box_tmp))
+    def test_an_agentbox_session_runs_on_a_copy_in_its_runtime_directory(self) -> None:
+        runtime = Path(self.tmp.name) / "runtime"
+        runtime.mkdir(mode=0o700)
+        box_copy = runtime / "gcloud-session" / "agentbox-0123" / "gcloud"
+        got = self.run_shim(["storage", "ls"], AGENT_SESSION_SCRATCH=None, AGENTBOX_BOX="agentbox-0123",
+                            XDG_RUNTIME_DIR=str(runtime))
         self.assertEqual(got, str(box_copy))
         self.assertEqual(self.rows(box_copy / "credentials.db"), ["refresh-1"])
-        self.assertEqual(stat.S_IMODE(box_copy.parent.stat().st_mode), 0o700)
+        for directory in (box_copy.parent, box_copy.parent.parent):
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
         self.assertFalse(self.copy.exists())
         self.assertEqual(self.rows(self.origin / "credentials.db"), ["refresh-1"], "the box's seed was written")
+
+    def test_two_agentbox_sessions_of_one_user_never_share_a_copy(self) -> None:
+        """A session with no scratch keeps its copy in <XDG_RUNTIME_DIR>/gcloud-session/<its session>, the user's own
+        directory, mode 0700: two sessions that share /tmp (on the host, panes the tmux relay starts with two boxes'
+        markers) share no copy. Until 2026-11-17 both took ${TMPDIR:-/tmp}/agentbox-gcloud-session/gcloud, and the
+        second ran on the first one's copy."""
+        shared_tmp = Path(self.tmp.name) / "shared-tmp"
+        shared_tmp.mkdir()
+        runtime = Path(self.tmp.name) / "runtime"
+        runtime.mkdir(mode=0o700)
+        env = {"AGENT_SESSION_SCRATCH": None, "TMPDIR": str(shared_tmp), "XDG_RUNTIME_DIR": str(runtime)}
+        for session in ("agentbox-aaaa", "agentbox-bbbb"):
+            with self.subTest(session=session):
+                got = self.run_shim(["storage", "ls"], AGENTBOX_SESSION=session, **env)
+                self.assertEqual(got, str(runtime / "gcloud-session" / session / "gcloud"))
+        self.assertEqual(list(shared_tmp.iterdir()), [], "a copy went to the shared /tmp")
+        # Controls: a runtime directory another user can reach, and none at all, make no copy.
+        runtime.chmod(0o755)
+        self.assertEqual(self.run_shim(["storage", "ls"], AGENTBOX_SESSION="agentbox-cccc", **env), "<unset>")
+        runtime.chmod(0o700)
+        self.assertEqual(self.run_shim(["storage", "ls"], AGENTBOX_SESSION="agentbox-cccc",
+                                       **{**env, "XDG_RUNTIME_DIR": None}), "<unset>")
+        self.assertFalse((runtime / "gcloud-session" / "agentbox-cccc").exists())
 
     def test_a_copy_that_cannot_be_made_leaves_the_call_on_the_shared_directory(self) -> None:
         (self.origin / "credentials.db").write_text("not a sqlite database")
@@ -2141,9 +2427,9 @@ class GcloudNonInteractiveSsh(unittest.TestCase):
     agent-session rules apply to it, the shim selects the machine's own configuration for it, and
     the notice names the identity the call ENDED on — the first draft announced "the machine
     identity" before resolving one, and with active_config naming a person's configuration the
-    call ran as that person under that claim (review of INFRA-1538). A person's own SSH session
-    (SSH_TTY set, whatever one command reads on stdin), and a person who sets
-    AGENT_SHIM_PERSON=1, are unchanged."""
+    call ran as that person under that claim (review of INFRA-1538). A person's own session —
+    one with a terminal, sshd's (SSH_TTY set) or a tmux pane's, whatever one command reads on
+    stdin — and a person who sets AGENT_SHIM_PERSON=1, are unchanged."""
 
     USER = "Sami@Theorem.dev"
     BOX = "box-identity@theorem-agent-infra.iam.gserviceaccount.com"
@@ -2207,24 +2493,48 @@ class GcloudNonInteractiveSsh(unittest.TestCase):
         self.assertNotIn("machine identity", result.stderr)
         self.assertEqual(stub_argv(result), ["--configuration", "theorem", "config", "list"])
 
+    def write_machine_configuration(self, name: str = "alt") -> None:
+        (self.configs_dir / f"config_{name}").write_text(f"[core]\naccount = {self.SERVICE_ACCOUNT}\n",
+                                                         encoding="utf-8")
+
     def test_gcloud_account_still_selects_its_configuration(self) -> None:
         self.write_identity_configs()
-        result = self.run_shim({"GCLOUD_ACCOUNT": "theorem"})
+        self.write_machine_configuration()
+        result = self.run_shim({"GCLOUD_ACCOUNT": "alt"})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("CONFIG=theorem", result.stdout)
-        self.assertIn(f"configuration theorem, account {self.USER}", result.stderr)
+        self.assertIn("CONFIG=alt", result.stdout)
+        self.assertIn(f"configuration alt, account {self.SERVICE_ACCOUNT}", result.stderr)
 
     # The notice must name the configuration and account the command ENDS UP on, in main's own
     # order, not the first one some helper resolves: with CLOUDSDK_ACTIVE_CONFIG_NAME=box and
     # GCLOUD_ACCOUNT=theorem it said box while gcloud ran theorem (re-review of INFRA-1538).
     def test_gcloud_account_beats_an_active_config_name_in_the_notice_too(self) -> None:
         self.write_identity_configs()
-        result = self.run_shim({"GCLOUD_ACCOUNT": "theorem", "CLOUDSDK_ACTIVE_CONFIG_NAME": "box"},
+        self.write_machine_configuration()
+        result = self.run_shim({"GCLOUD_ACCOUNT": "alt", "CLOUDSDK_ACTIVE_CONFIG_NAME": "box"},
                                args=["auth", "print-access-token"])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("CONFIG=theorem", result.stdout)
-        self.assertIn(f"configuration theorem, account {self.USER}", result.stderr)
+        self.assertIn("CONFIG=alt", result.stdout)
+        self.assertIn(f"configuration alt, account {self.SERVICE_ACCOUNT}", result.stderr)
         self.assertNotIn("configuration box", result.stderr)
+
+    # A person's login that the ENVIRONMENT chose is refused here as in a marked session; the
+    # refusal names the configuration the call would have ended on, in main's order (theorem
+    # through GCLOUD_ACCOUNT over box), and no notice claims an identity.
+    def test_an_environment_selected_human_configuration_is_refused(self) -> None:
+        self.write_identity_configs()
+        self.stub_gcloud_that_must_not_run()
+        for env, source in (({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, "CLOUDSDK_ACTIVE_CONFIG_NAME"),
+                            ({"GCLOUD_ACCOUNT": "theorem"}, "GCLOUD_ACCOUNT"),
+                            ({"GCLOUD_ACCOUNT": "theorem", "CLOUDSDK_ACTIVE_CONFIG_NAME": "box"}, "GCLOUD_ACCOUNT")):
+            with self.subTest(env=env):
+                result = self.run_shim(env, args=["auth", "print-access-token"])
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+                self.assertIn("gcloud shim: REFUSED in an agent session", result.stderr)
+                self.assertIn(f"Identity: {self.USER}, a person's own Google login, from the configuration theorem, "
+                              f"chosen by {source}.", result.stderr)
+                self.assertNotIn(self.NOTICE, result.stderr)
 
     def test_a_configuration_flag_beats_both_environment_selections(self) -> None:
         # gcloud reads --configuration from raw argv before any environment variable.
@@ -2315,6 +2625,18 @@ class GcloudNonInteractiveSsh(unittest.TestCase):
                 self.write_user_adc()
                 result = self.run_shim({"SSH_TTY": SSH_TTY}, args=["auth", "application-default", "login"],
                                        tty=not stdin_is_a_pipe)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("REFUSED in an agent session", result.stderr)
+                self.assertNotIn(self.NOTICE, result.stderr)
+
+    def test_a_persons_pane_with_no_ssh_tty_is_the_person(self) -> None:
+        # dispatch://INFRA-4089: a pane of a tmux server that never carried SSH_TTY holds
+        # SSH_CONNECTION and no SSH_TTY; its terminal makes it the person's, piped stdin or not.
+        for stdin in (None, ""):
+            with self.subTest(piped=stdin is not None):
+                self.write_user_adc()
+                result = run_with_tty([str(SHIMS / "gcloud"), "auth", "application-default", "login"],
+                                      input=stdin, env={**self.env, "SSH_CONNECTION": SSH_CONNECTION})
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertNotIn("REFUSED in an agent session", result.stderr)
                 self.assertNotIn(self.NOTICE, result.stderr)

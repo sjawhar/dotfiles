@@ -1314,7 +1314,9 @@ def dispatch_rows(cfg: DispatchConfig, user: str, since: datetime, until: dateti
                                f"spans more than its recent tail (~{LIVE_REPLAY_SAFE} events), so its Dispatch "
                                f"rows would be incomplete -- narrow the window to the last few minutes, or "
                                f"read older Dispatch history another way")
-        if earliest_t is None or earliest_t > since:
+        # A read that began at the log's start (after 0: a log no longer than the tail) reached
+        # everything there is, so its oldest event being inside the window leaves nothing out.
+        if after > 0 and (earliest_t is None or earliest_t > since):
             reached = iso(earliest_t) if earliest_t is not None else "nothing"
             raise RuntimeError(f"the Dispatch live socket's replay reached back only to {reached}, after the "
                                f"window start {iso(since)}: it serves only its recent tail (~{LIVE_REPLAY_SAFE} "

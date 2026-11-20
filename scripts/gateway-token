@@ -23,8 +23,8 @@
 #
 # Where it is used: the `apiKey: "!…"` of each gateway provider in a machine's omp
 # models.local.yml. omp runs such a command when a provider is first used, keeps the value in
-# memory, and runs it again on a 401 -- which is exactly the lifecycle of an hour-long token
-# (omp/AGENTS.md). Mint cost measured 2026-11-04: 0.017 s on sami-devbox (metadata), 0.46 s on
+# memory, and runs it again on a 401 -- which is exactly the lifecycle of an hour-long token.
+# Mint cost measured 2026-11-04: 0.017 s on sami-devbox (metadata), 0.46 s on
 # sami-rocqperf (federation plus generateIdToken), both well inside omp's 10 s `!command` limit.
 #
 # The token is printed and never written anywhere, so a reboot leaves nothing to put back and an

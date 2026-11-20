@@ -17,7 +17,7 @@ environment, not into the persistent eval kernel. Run it between two eval cells:
 
     # eval cell 1
     %load ~/.dotfiles/plugins/sjawhar/skills/reflect/scripts/experiments-readout.py
-    dump_turns_for_jev(session_dirs=[...], prompts=[...], out_path="turns.jsonl")
+    dump_turns_for_jev(session_dirs=[...], messages=["messages.jsonl"], out_path="turns.jsonl")
 
     # bash
     secret-run TYPESAFE_AI_API_KEY -- sh -c '

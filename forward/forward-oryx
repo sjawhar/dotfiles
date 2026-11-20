@@ -1,0 +1,102 @@
+#!/bin/bash
+set -uo pipefail
+
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ssh=/usr/bin/ssh
+
+if [[ -z "${TUNNEL_SERVICE_TOKEN_ID:-}" || -z "${TUNNEL_SERVICE_TOKEN_SECRET:-}" ]]; then
+    printf '%s\n' 'forward-oryx: no Cloudflare Access token in ~/.config/forward/tunnel-oryx.env; run bash ~/.dotfiles/installers/forward.sh daemon' >&2
+    exit 1
+fi
+
+runtime="${RUNTIME_DIRECTORY:?RUNTIME_DIRECTORY is required}"
+home="$runtime/home"
+bin="$runtime/bin"
+browser_refused="$runtime/browser-refused"
+
+setup_fail() {
+    local step="$1"
+    local path="$2"
+
+    printf 'forward-oryx: could not %s: %s\n' "$step" "$path" >&2
+    exit 1
+}
+
+rm -rf -- "$home" || setup_fail "remove runtime home" "$home"
+mkdir -p -- "$home" "$bin" || setup_fail "create runtime directories" "$runtime"
+rm -f -- "$browser_refused" || setup_fail "remove browser refusal marker" "$browser_refused"
+xdg_open_tmp="$(mktemp "$bin/.xdg-open.XXXXXX")" \
+    || setup_fail "create the xdg-open refusal script" "$bin"
+printf '#!/bin/bash\ntouch -- %q\nexit 1\n' "$browser_refused" > "$xdg_open_tmp" \
+    || setup_fail "write the xdg-open refusal script" "$xdg_open_tmp"
+chmod 700 -- "$xdg_open_tmp" \
+    || setup_fail "make the xdg-open refusal script executable" "$xdg_open_tmp"
+mv -f -- "$xdg_open_tmp" "$bin/xdg-open" \
+    || setup_fail "install the xdg-open refusal script" "$bin/xdg-open"
+
+daemon=""
+connection=""
+# shellcheck disable=SC2329
+stop_children() {
+    local child
+    for child in "$daemon" "$connection"; do
+        [[ -n "$child" ]] || continue
+        kill -TERM "$child" 2>/dev/null || true
+    done
+}
+trap 'stop_children; exit 143' TERM INT
+
+child_is_running() {
+    local stat
+    # The child can exit between the test and the read; that is "not running".
+    { stat="$(<"/proc/$1/stat")"; } 2>/dev/null || return 1
+    [[ "${stat##*) }" != Z* ]]
+}
+
+stop_child() {
+    local child="$1"
+    local deadline
+
+    kill -TERM "$child" 2>/dev/null || true
+    deadline=$((SECONDS + 5))
+    while child_is_running "$child"; do
+        if (( SECONDS >= deadline )); then
+            kill -KILL "$child" 2>/dev/null || true
+            break
+        fi
+        sleep 0.1
+    done
+    wait "$child" 2>/dev/null || true
+}
+
+env -u TUNNEL_SERVICE_TOKEN_ID -u TUNNEL_SERVICE_TOKEN_SECRET \
+    "$here/forward-daemon" --config "$here/config-daemon-oryx.toml" &
+daemon=$!
+
+env -u DISPLAY -u WAYLAND_DISPLAY -u BROWSER \
+    HOME="$home" \
+    PATH="$bin:/usr/local/bin:/usr/bin:/bin" \
+    "$ssh" -F "$here/forward-oryx.ssh-config" -N oryx </dev/null &
+connection=$!
+
+if wait -n -p exited "$daemon" "$connection"; then
+    status=0
+else
+    status=$?
+fi
+
+if [[ "$exited" == "$daemon" ]]; then
+    exited_name=daemon
+    other="$connection"
+else
+    exited_name=ssh
+    other="$daemon"
+fi
+
+printf 'forward-oryx: %s exited with status %s; stopping the other so systemd restarts both\n' \
+    "$exited_name" "$status" >&2
+if [[ -e "$browser_refused" ]]; then
+    printf '%s\n' 'forward-oryx: cloudflared asked for a browser sign-in, so Cloudflare Access refused or lacks the service token; no browser was opened; run bash ~/.dotfiles/installers/forward.sh daemon' >&2
+fi
+stop_child "$other"
+exit 1

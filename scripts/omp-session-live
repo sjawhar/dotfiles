@@ -8,10 +8,12 @@
 # been killed (00:37Z).
 #
 # An omp runs a session when its own command line names it (`--resume <id>` or a path ending in
-# `_<id>.jsonl`), or when it holds that transcript open FOR WRITING (a new session or one
-# resumed by a prefix). omp's helper processes (`__omp_worker_*`) are not sessions. A process
-# inside an agent box is seen by its command line; its descriptors are the box's.
-# OMP_SESSION_LIVE_PROC replaces /proc for the tests.
+# `_<id>.jsonl`), when it holds that transcript open FOR WRITING (a new session or one
+# resumed by a prefix), or when it is the omp that the session file of its agent box names (a box
+# started after dispatch://INFRA-1720; the end of this file). omp's helper processes
+# (`__omp_worker_*`) are not sessions. A process inside an agent box is seen by its command line
+# and its box's session file; its descriptors are the box's. OMP_SESSION_LIVE_PROC replaces /proc
+# and AGENTBOX_RUN_BASE the boxes' run directory for the tests.
 #
 # Only a writer runs a transcript. omp's session writer holds its file O_WRONLY|O_APPEND for its
 # life (flags 02102001 in /proc/<pid>/fdinfo/<fd> on every writer here), while an omp opens
@@ -77,6 +79,7 @@ else
 fi
 found=1
 pids=()
+declare -A printed=()
 for d in "$P"/[0-9]*; do
     c=""; read -r c 2>/dev/null <"$d/comm" || continue
     [[ "$c" == omp ]] && pids+=("${d##*/}")
@@ -156,6 +159,50 @@ for pid in ${pids[@]+"${pids[@]}"}; do
         if [[ -z "$seen" ]]; then how="its command line names $want"
         elif [[ -n "$inode" && $'\n'"$seen"$'\n' == *$'\n'"$inode"$'\n'* ]]; then how="it holds $file open in its box"; fi
     fi
-    if [[ -n "$how" ]]; then printf '%s\t%s\n' "$pid" "$how"; found=0; fi
+    if [[ -n "$how" ]]; then printf '%s\t%s\n' "$pid" "$how"; found=0; printed[$pid]=1; fi
+done
+
+# A session that runs in a box started after dispatch://INFRA-1720 is named by that box's session
+# file, whatever the box's command line names: a fresh `-- omp` box's command line names no id, so
+# this script called a live boxed session dead (dispatch://INFRA-1890), and each resume path that
+# asks it could start the session a second time. The box's omp writes the file in the box's
+# runtime dir, which the host keeps at $RUN_BASE/<box>/run-user (scripts/agentbox,
+# omp/extensions/session-env.ts). The box can write anything there, so only a regular file counts,
+# and only its version, a UUID, a pid and a path. The pid is the omp's in the box; what is printed
+# is the HOST's pid of that omp, the omp above whose cgroup names the box's container and whose
+# last NSpid is that pid, as box_holds finds a boxed omp. A box that does not run has no such
+# process, and its file names no live session.
+run_base="${AGENTBOX_RUN_BASE:-/run/user/$(id -u)/agentbox}"
+for f in "$run_base"/agentbox-*/run-user/agentbox-session; do
+    [[ -f "$f" && ! -L "$f" ]] || continue
+    version="" sid="" inpid="" sfile=""
+    while IFS= read -r line; do
+        case "$line" in
+            version=*) version="${line#version=}" ;;
+            session=*) sid="${line#session=}" ;;
+            pid=*) inpid="${line#pid=}" ;;
+            file=*) sfile="${line#file=}" ;;
+        esac
+    done < <(timeout 5 head -c 65536 -- "$f" 2>/dev/null | head -n 16)
+    [[ "$version" == 1 && "$sid" =~ ^${uuid}$ && "$inpid" =~ ^[1-9][0-9]{0,9}$ ]] || continue
+    if [[ -n "$file" ]]; then
+        [[ "$sfile" == /* && "$(realpath -m -- "$sfile")" == "$file" ]] || continue
+    else
+        [[ "$sid" == "$want"* ]] || continue
+    fi
+    box="${f%/run-user/agentbox-session}"
+    box="${box##*/}"
+    cid="$(timeout 10 docker inspect -f '{{.Id}}' "$box" 2>/dev/null)" || continue
+    [[ "$cid" =~ ^[0-9a-f]{64}$ ]] || continue
+    for pid in ${pids[@]+"${pids[@]}"}; do
+        [[ -z "${printed[$pid]:-}" ]] || continue
+        cg=""
+        { cg="$(<"$P/$pid/cgroup")"; } 2>/dev/null
+        [[ "$cg" == *"docker-$cid.scope"* ]] || continue
+        [[ "$(awk '/^NSpid:/ {print $NF}' "$P/$pid/status" 2>/dev/null)" == "$inpid" ]] || continue
+        printf '%s\t%s\n' "$pid" "the session file of box $box names $sid"
+        found=0
+        printed[$pid]=1
+    done
 done
 exit "$found"

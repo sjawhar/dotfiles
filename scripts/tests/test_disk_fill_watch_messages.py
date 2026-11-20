@@ -35,6 +35,9 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from disk_fill_watch_no_boxes import no_agent_boxes  # noqa: E402 - found through the path above
+
 
 SCRIPT = Path(
     os.environ.get("DISK_FILL_WATCH_SCRIPT") or Path(__file__).resolve().parents[1] / "disk-fill-watch"
@@ -171,6 +174,7 @@ class Harness(unittest.TestCase):
         original_time = WATCH.time.time
         WATCH.time.time = lambda: self.now
         self.addCleanup(setattr, WATCH.time, "time", original_time)
+        no_agent_boxes(self, WATCH)
 
     def fake_sample(self, seconds: float) -> tuple[list[dict], int]:
         self.sampled.append(seconds)
@@ -604,6 +608,7 @@ class ScratchEntryTest(unittest.TestCase):
         original_time = WATCH.time.time
         WATCH.time.time = lambda: self.now
         self.addCleanup(setattr, WATCH.time, "time", original_time)
+        no_agent_boxes(self, WATCH)
 
         def forget_live() -> None:
             WATCH.LIVE_SESSIONS.clear()

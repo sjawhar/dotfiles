@@ -1,10 +1,10 @@
-# Step 11: pushing and opening
+# Step 10: pushing and opening
 
 ## One line of work, one PR
 
-- Look for this session's PR first: `git branch -vv`, `gh pr view 2>/dev/null`, `gh pr list --author @me`. Fold same-line work in with `git push`, then `gh pr edit`. No sibling one-off PRs.
+- Look for this session's PR first: `git branch -vv`, `gh pr view`, `gh pr list --author @me`. Fold same-line work in with a push, then `gh pr edit`. No sibling one-off PRs.
 - Use `gh-stack` only for dependent work that lands as one reviewed unit. Keep an unmerged base small, merge it fast, and split off what does not need it.
-- Size the PR before review: split where each piece can be verified alone. Ship the pieces in dependency order and rebase the rest onto each merged one. A slice no caller reaches yet may merge on its own, if you ran the production path and it still behaves as before.
+- Size the PR before review: split where each piece can be verified alone. Ship the pieces in dependency order and rebase the rest onto each merged one. A slice no caller reaches yet may merge alone, if you ran the production path and it still behaves as before.
 - Fix correctness findings before merge. Push once per review round.
 - With no PR yet:
 
@@ -14,12 +14,13 @@
   gh pr list --head <name>     # read the URL here, not from the create output
   ```
 
+- From a jj workspace git's HEAD is detached, so `gh pr create` needs `--head <bookmark>`.
 - In a box or worktree that is not your shell's own, use `gh -R <owner>/<repo>`. Never export `GIT_DIR` or `GIT_WORK_TREE`.
 
 ## Which checks
 
 - Run the fast steps of the CI workflow that gates the changed paths: lint, type, package-local unit lanes. Add browser or e2e suites for a frontend. Skip the full matrix, deploys and image builds.
-- Scope: the changed packages AND every test file that imports a changed module:
+- Scope: the changed packages and every test file that imports a changed module:
 
   ```bash
   grep -rl '<module names>' tests | xargs pytest -q
@@ -35,15 +36,11 @@ env -i HOME="$HOME" USER="$USER" PATH="$PATH" \
   <command>
 ```
 
-- omp exports variables that a runner does not have, such as `SECRETSD_SESSION_TOKEN_FILE`. `env -u <VARIABLE> <command>` reproduces a failure that one of them hides.
-- Anything that touches AWS or Bedrock: add `AWS_EC2_METADATA_DISABLED=true`. Otherwise the devbox instance role signs the calls.
+- omp exports variables a CI runner does not have, such as `SECRETSD_SESSION_TOKEN_FILE`. `env -u <VARIABLE> <command>` reproduces a failure that one of them hides.
+- Anything that touches AWS or Bedrock: add `AWS_EC2_METADATA_DISABLED=true`, or the devbox instance role signs the calls.
 - After red CI, run the whole suite this way with `--no-fail-fast` before you push a fix.
 
 ## Labels
 
-- Never pass `--label` to `gh pr create`: a label at creation fires `opened` and `labeled` together and doubles each `labeled` workflow.
+- Never pass `--label` to `gh pr create`: a label at creation fires `opened` and `labeled` together and runs each `labeled` workflow twice.
 - Do not add labels that CI applies itself. Add a needed label only after the head's checks settle.
-
-## From a jj workspace
-
-The push leaves HEAD detached, so `gh pr create` without `--head` prints a jj hint and no URL.

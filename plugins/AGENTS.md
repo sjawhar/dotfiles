@@ -1,21 +1,21 @@
 # plugins
 
-Custom skills, agents, and commands, all under `sjawhar/`.
+Skills, agents and commands for Claude Code and omp. `sjawhar/` is Sami's plugin. `cursor-harvest/` holds a skill copied verbatim from a Cursor plugin: leave it as it is.
 
 ## Layout
 
-- **`sjawhar/.claude-plugin/plugin.json`** — plugin manifest (`name: sjawhar`).
-- **`sjawhar/skills/`** — skill directories, each with a `SKILL.md`.
-- **`sjawhar/agents/`** — subagent definitions (`*.md`).
-- **`sjawhar/commands/`** — slash-command definitions (`*.md`).
+- `sjawhar/.claude-plugin/plugin.json`: the plugin manifest. `.claude-plugin/marketplace.json` at the repository root declares the marketplace.
+- `sjawhar/skills/<name>/SKILL.md`, with optional `references/` and `scripts/`; `sjawhar/agents/*.md`; `sjawhar/commands/*.md`. Follow the frontmatter of the entries beside yours.
 
-## Conventions
+## Writing a skill
 
-- Add a skill as `sjawhar/skills/<name>/SKILL.md`; agents and commands as single `*.md` files in their respective dirs.
-- Follow the frontmatter/structure of existing entries in the same dir.
+- A skill here loads in every repository Sami works in, so it names no repository, single-repository path or project workflow. A project's rule goes in that project's `AGENTS.md` or `.claude/skills/`; point at it from here where that helps. A rule drawn from one repository's incident must read correctly with the repository's name removed.
+- A skill that names a customer goes in the private pool that `skills-sources.json` names, not here.
+- The `writing-agent-skills` skill has the authoring rules. Check a skill with `python3 plugins/sjawhar/skills/writing-agent-skills/scripts/check_skill.py plugins/sjawhar/skills/<name>`.
+- A skill's script tests sit beside its scripts: `uvx pytest plugins/sjawhar/skills/<name>/scripts`.
+- Publish as root `AGENTS.md`, "Publishing a change", says.
 
 ## How changes take effect
 
-Claude Code discovers this content through the marketplace plugin (declared at the repo root and registered once with `/plugin install sjawhar@sjawhar`); it watches these dirs live, so no symlinking is needed. oh-my-pi reads the same dirs through `skills-sources.json`.
-
-**Every consumer reads the working copy of this checkout, not main.** Claude Code's marketplace plugin and oh-my-pi's skills path both read `plugins/sjawhar/skills` here, so an agent sees a change the moment the file on disk changes -- and sees nothing when a commit lands on `main@origin` but this working copy still sits on an older base. Pushing a skill commit delivers it to other machines; delivering it to the agents on THIS machine means advancing the working copy onto it. `scripts/dotfiles-publish <commit>` leaves the working copy on top of the commit it pushes; for a commit someone else pushed, `scripts/dotfiles-sync local` moves the working copy onto main and keeps uncommitted edits. Both refuse a conflict before any file changes, which a bare `jj rebase` here does not (check `jj log -r 'main@origin ~ ::@'` is empty after). Measured 2026-09-12: the working copy parked five commits behind main served the pre-standard `product-demos` text to a judge agent for hours after the standard had been pushed, silently.
+- Claude Code reads the plugin through the marketplace (installed once with `/plugin install sjawhar@sjawhar`) and watches these directories live. omp reads them through `skills-sources.json`.
+- Both read this checkout's working copy, not `main`: a merged change reaches this machine's agents only when the working copy moves onto it (root `AGENTS.md`, "Publishing a change").

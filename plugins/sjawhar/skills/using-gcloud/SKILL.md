@@ -1,76 +1,56 @@
 ---
 name: using-gcloud
-description: Use when running gcloud compute ssh or scp against several VMs, or where other sessions also use gcloud. Use on the ssh error "No ED25519 host key is known for compute.<id> and you have requested strict checking" or "Host key verification failed". Use when gcloud fails with "Reauthentication failed. cannot prompt during non-interactive execution." Use when you need a new build or measurement VM, give a VM a public IP, or deploy a service that people or machines will reach. Use when a docker pull or push, a gcloud call or a client library is refused with PERMISSION_DENIED, "denied", 403, or a missing artifactregistry, storage or iam permission, and before asking any person for a grant or role. Use before you run docker login, set a git credential helper, or copy, mint or reuse any token or credential that belongs to another account.
+description: Use when a gcloud, az, registry or Google client call is refused (PERMISSION_DENIED, 403, denied, "Reauthentication failed"), before you mint, copy or reuse another account's credential, when you create a VM or expose a service, or on a gcloud compute ssh host-key error.
 ---
 
 # Using gcloud
 
-## Which identity gcloud uses
+## Which identity runs
 
-On an Azure VM enrolled in the box identity (`~/.dotfiles/installers/gcloud-box.sh`), gcloud acts as the service account `dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com`, in the active configuration `box` (project `autoformalization`). In an agent session, client libraries and Pulumi act as it too: the session sets `GOOGLE_APPLICATION_CREDENTIALS` to its keyless configuration `~/.config/gcloud/box_credential_config.json`. It needs no sign-in and does not expire. Do not unset that variable or point it at `application_default_credentials.json`: on sami-rocqperf that file has held a person's own login since 2026-11-01.
+- gcloud runs as the machine's own identity, configuration `box`, which needs no sign-in and does not expire; the header of `installers/gcloud-box.sh` says what it is on a Google VM and on an Azure VM.
+- Leave `GOOGLE_APPLICATION_CREDENTIALS`, the active configuration and `application_default_credentials.json` as they are: every session on the machine reads them, and on an Azure box that file can hold a person's login.
+- In an agent session `az` runs as the machine's Azure identity (`shims/az`, described in `shims/AGENTS.md`), which can manage and run commands on the VMs of resource group `sami`. Never point `AZURE_CONFIG_DIR` at `~/.azure` or run `az login` there: that is Sami's own login. Directory work (`az ad`, a role assignment by user name) needs a person: ask with `dispatch ask`.
 
-Use the box identity for reads and for your session's own work. When a step fails as the box with a permission error, take the first route below that fits; the aim is that no step needs a person's login (dispatch://INFRA-243's spec, "Admin logins leave the boxes", which Sami approved at [dispatch://INFRA-243/ask/3dd87e3f](https://dispatch.tail12ec1c.ts.net/issues/INFRA-243/asks/3dd87e3f-f6df-4d05-b077-44c3028fb20f)):
+## A permission error
 
-- **A production change** goes through its program's CI route: merge it to main, and the program's apply workflow applies it. Where the program's README names an apply from a session, run it as agent-infra's applier `infra-applier@theorem-agent-infra.iam.gserviceaccount.com`, impersonated from the box identity, with the two exports of agent-infra `bootstrap/README.md`, "Who applies":
-  `export CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=infra-applier@theorem-agent-infra.iam.gserviceaccount.com` and
-  `export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token --impersonate-service-account="$CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT")`.
-  A grant that the box or the applier lacks is a change in code: widen it there, so the next run needs no person.
-- **A step only a person can make** is on agent-infra's break-glass page, with that person's steps: <https://github.com/theorem-labs/agent-infra/blob/main/docs/break-glass.md>. Send that person a `dispatch ask` that names the step and cites that URL. Do not make the step yourself with any identity.
+Never move a person's credential to where a machine keeps it: a token minted from a person's login and given to `docker login`, a git credential helper or a kubectl context lands in a file every process on the host can read, and logs each later act as that person. Run as the account meant to hold the access, or impersonate it (`--impersonate-service-account`). Take the first route that fits:
 
-**Sami's own login** (sami@theorem.dev, gcloud configuration `theorem`) is allowed only under his standing permission ([dispatch://INFRA-6/ask/6c7b1e80](https://dispatch.tail12ec1c.ts.net/issues/INFRA-6/asks/6c7b1e80-176f-40e3-967e-e5d642d501ec)): for an apply that none of the routes above can make yet, select that configuration with `--configuration` on that one command. Cloud's own audit logs are the record of each use, so post no per-use note on Dispatch (Sami, dispatch://INFRA-6/comment/4c09bb49-ae93-4480-8acb-95adac673ab8). Never use it for a seed credential, a permission boundary or a new project: those are his own steps, on the break-glass page. Never select it by default: no exported `CLOUDSDK_ACTIVE_CONFIG_NAME`, `GCLOUD_ACCOUNT`, `CLOUDSDK_CORE_ACCOUNT` or `GOOGLE_APPLICATION_CREDENTIALS` that puts later commands under it. In an agent session `~/.dotfiles/shims/gcloud` refuses a call that names his account by `--account` or `CLOUDSDK_CORE_ACCOUNT` without that explicit `--configuration`, and its refusal names the box identity, the CI route, the applier and the break-glass page. Do not start `gcloud auth login`. Never change the active configuration or the ADC file: every session on the machine uses them.
+1. Reads and your session's own work: the box identity, with no other configuration or account selected.
+2. A production change: merge it to main, and the program's CI apply workflow applies it. A by-hand step that a program's README gives to agent-infra's applier runs as `infra-applier@theorem-agent-infra.iam.gserviceaccount.com`, impersonated from the box identity; agent-infra `monitoring/README.md`, "The applier's session, for other programs' pages", has the exports. A grant the box, a CI account or the applier lacks is a code change in agent-infra: widen it there.
+3. A step only a person can make is on agent-infra `docs/break-glass.md`, with that person's steps. Send that person a `dispatch ask` that names the step and cites the page; do not make the step with any identity.
+4. Sami's own login (configuration `theorem`) only for an apply none of the above can make yet: `--configuration theorem` on that one command. Never select it for later commands (`CLOUDSDK_ACTIVE_CONFIG_NAME`, `GCLOUD_ACCOUNT`, `CLOUDSDK_CORE_ACCOUNT`), and never use it for a seed credential, a permission boundary or a new project. Post no per-use note: Cloud audit logs record each use.
 
-**A refusal is a stop, not a prompt to borrow an identity.** Never move a person's credential to where a machine keeps it: minting a token from a person's login (`gcloud auth print-access-token` under a person's configuration) and feeding it to `docker login`, a git credential helper or a kubectl context writes that identity into a file every process on a shared host can read, and logs every later action as that person. Instead find the account that is meant to hold the access and run as it, or impersonate it (`--impersonate-service-account`). On 2026-10-31 an agent did exactly this on `linux28-agents-7` to get past a registry denial, and it had to be withdrawn.
+Refused by a registry or a shared environment: use an account that already has access, or copy the setup from a host that has it; do not ask a person for a role. A Google Cloud project a customer owns is theirs alone to grant; that customer's private skill (under `~/.dotfiles/.secrets/dotfiles/skills/`) lists the accounts that hold access.
 
-Refused by a registry or shared environment: use an account that already has access, or copy it from a host that has it; never ask a person, the list is settled. A Google Cloud project a customer owns is theirs alone to grant, so no one at Theorem can be asked for a role on it; the private skill for that customer's platform (`~/.dotfiles/.secrets/dotfiles/skills/`) lists the accounts that already hold access.
+## "Reauthentication failed"
 
-## Which identity az uses
+The box identity and the applier never expire, so this error means the call ran as a user login.
 
-In an agent session `az` runs as the machine's own Azure identity, not as Sami: `~/.dotfiles/shims/az` sets `AZURE_CONFIG_DIR=~/.azure-box-identity` when the caller set none (`shims/AGENTS.md`). That identity starts, stops, restarts and reads the VMs of resource group `sami` and runs `az vm run-command invoke` on them, so no az step needs his login.
+1. Run it again with no configuration or account selected. For an apply, use its CI route.
+2. For a build or measurement machine, use `az vm create` (resource group `sami`, location `westus2`): az runs as the machine identity.
+3. Do not run `gcloud auth login`, `gcloud auth application-default login` or `revoke`, or add `--update-adc`. If an apply under Sami's login (route 4) finds it expired, post the step on the open re-login ask (`dispatch search --query 'gcloud re-login'`), or open one.
 
-Never set `AZURE_CONFIG_DIR` to `~/.azure`, and never run `az login` there: that is Sami's own login, and a command under it is recorded as his act (dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec). Directory work (`az ad`, a role assignment by user name) is the one thing the machine identity cannot do; ask for it on Dispatch instead of borrowing his account.
+## A new VM or service
 
-## Expired login ("Reauthentication failed")
-
-The box identity and the applier need no sign-in and do not expire, so as either you do not see this error. If you see it, the call ran as a user login, not as the box:
-
-1. Run it again with no configuration or account selected, as the box. For an apply, impersonate the applier (above).
-2. For a build or measurement machine, use `az vm create` (resource group `sami`, location `westus2`): `az` runs as the machine's own identity and needs no daily login.
-3. Do not start `gcloud auth login`. If an apply that needs his login under his standing permission (above) finds it expired, post the step on the open re-login ask (`dispatch search --query 'gcloud re-login'`), or open one if none is open. A step only a person can make goes to that person as the `dispatch ask` above, citing the break-glass page.
-4. Do not run `gcloud auth application-default login` or `revoke`, and never add `--update-adc` to a login. Each writes or removes `application_default_credentials.json`, which every process outside an agent session reads; in an agent session `shims/gcloud` refuses all three on every route.
-
-## A new VM or service stays off the internet
-
-People, dev boxes, VMs, CI jobs and managed services reach each other over the VPN once they are enrolled in it, so a public address gives such a service no access it needs and exposes it to everyone.
-
-- Create a VM with no external address (`gcloud compute instances create … --no-address`, `az vm create … --public-ip-address ""`) and reach it over IAP (`--tunnel-through-iap`) or the VPN. The VM then needs Cloud NAT or Private Google Access for its own outbound traffic; check that the subnet has one before you create it, because a no-address VM with neither cannot reach apt, pip or a registry.
-- Give every new VM an owner: `gcloud compute instances create … --labels owner=<person>,stream=<stream>` (Sami's agents: `owner=sjawhar`). An organization policy in autoformalization and theorem-research refuses a VM create with no `owner` label (dispatch://INFRA-1033).
-- Taking the address off a VM that has one (`gcloud compute instances delete-access-config`) cuts every connection to that address, egress included. Do it in this order: prove IAP or VPN access to the VM, prove its outbound path, then delete the access config, then check access again.
-- Deploy a service that only your own people and machines call onto the VPN. Never `gcloud run deploy --allow-unauthenticated`, an `allUsers` IAM binding, an internet-facing load balancer, or a firewall rule that opens its port to `0.0.0.0/0`; a shared bearer token is not a substitute, because the port is still reachable by everyone.
-- Open a service to the internet only for a named caller outside the organization that cannot join the VPN, such as a webhook sender. Name that caller and the reason where the service is documented, so the next reader can check it.
-
-## A VM you create gets a run-time limit
-
-A VM left running bills until someone stops it, so give every VM you create for a while a limit at creation: `--max-run-duration=<D> --instance-termination-action=STOP` (add `--discard-local-ssds-at-termination-timestamp=true` with local SSD). Google stops it when the time runs out and keeps its disk; in an agent session `shims/gcloud` refuses an `instances create` without a limit.
-
-- To extend, start it again after it stops: the clock restarts at each start. `gcloud compute instances set-scheduling` changes the limit only while the VM is stopped.
-- A long-lived VM (a service, a dev box) is declared in code with an `owner=` label instead, not created by hand.
+- No external address: `gcloud compute instances create ... --no-address` or `az vm create ... --public-ip-address ""`; reach it over IAP (`--tunnel-through-iap`) or the VPN. First check that the subnet has Cloud NAT or Private Google Access, or the VM cannot reach apt, pip or a registry.
+- Label it `--labels owner=sjawhar,stream=<stream>`.
+- Removing a VM's external address (`gcloud compute instances delete-access-config`) also cuts its egress: prove IAP or VPN access and its outbound path, then remove it, then check access again.
+- Put a service that only our people and machines call on the VPN. No `gcloud run deploy --allow-unauthenticated`, `allUsers` binding, internet-facing load balancer or firewall rule open to `0.0.0.0/0`; a shared bearer token does not replace this. Open a service to the internet only for a named outside caller that cannot join the VPN, such as a webhook sender, and name that caller where the service is documented.
 
 ## Host keys: one gcloud ssh call at a time
 
-Each `gcloud compute ssh` or `scp` call rewrites all of `~/.ssh/google_compute_known_hosts` with no lock. Parallel calls remove each other's keys, also for other sessions on the machine.
+Each `gcloud compute ssh` or `scp` rewrites all of `~/.ssh/google_compute_known_hosts` with no lock, so parallel calls (`xargs -P`, `&`, a parallel loop) delete each other's keys, other sessions' included. A serial warm-up call does not prevent this.
 
-- Never run two such calls at the same time: no `xargs -P`, `&` or parallel loop. A serial warm-up call does not prevent the race.
+To run one command on many VMs:
 
-## Run one command on many VMs in parallel
-
-1. One VM at a time: `gcloud compute ssh <vm> --zone <zone> --project <project> --tunnel-through-iap --dry-run > <vm>.cmd`. This writes the host keys and saves the ssh command.
+1. One VM at a time: `gcloud compute ssh <vm> --zone <zone> --project <project> --tunnel-through-iap --dry-run > <vm>.cmd`. This writes the host key and saves the ssh command.
 2. In parallel: `eval "$(cat <vm>.cmd) -- '<command>'" &`, then `wait`. Plain `ssh` only reads the file.
 
 On "Permission denied (publickey)", run one real `gcloud compute ssh` to that VM to install your key, then repeat step 1.
 
-## Strict host key checking fails
+On "Host key verification failed" or "No ED25519 host key is known":
 
-1. Run the same `gcloud compute ssh` again, alone. It writes the keys again.
+1. Run the same `gcloud compute ssh` again, alone; it writes the keys again.
 2. If it fails again, compare the file's key with `gcloud compute instances get-guest-attributes <vm> --zone <zone> --query-path=hostkeys/`. If they differ, stop and send the user the VM name and both keys.
 
-Never remove `~/.ssh/google_compute_known_hosts`: it holds every session's keys. Never use `StrictHostKeyChecking=no` or `accept-new`: they stop the check that the VM is the right one.
+Never delete `~/.ssh/google_compute_known_hosts` (it holds every session's keys), and never use `StrictHostKeyChecking=no` or `accept-new`.

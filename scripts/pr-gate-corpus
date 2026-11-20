@@ -12,11 +12,12 @@ VS=$(grep -oP "^VS='\K.*(?=')" "$F"); POS=$(grep -oP "^POS='\K.*(?=')" "$F"); NE
 GR=$(grep -oP 'select\(\.b\|vs\|test\("\K\(\?i:verdict:.*?(?="\)\)\]\|sort_by\(\.t\)\|reverse)' "$F" | head -1 | sed 's/\\\\/\\/g')
 PL=$(grep -oP "^PL='\\K.*(?=')" "$F")
 SU=$(grep -oP "^SU='\\K.*(?=')" "$F")
-[ -n "$GR" ] && [ -n "$POS" ] && [ -n "$NEG" ] && [ -n "$VS" ] && [ -n "$PL" ] && [ -n "$SU" ] || { echo "could not extract matcher pieces from $F (GR=${#GR} POS=${#POS} NEG=${#NEG} VS=${#VS} PL=${#PL} SU=${#SU})"; exit 2; }
+CR=$(grep -oP "^CR='\\K.*(?=')" "$F")
+[ -n "$GR" ] && [ -n "$POS" ] && [ -n "$NEG" ] && [ -n "$VS" ] && [ -n "$PL" ] && [ -n "$SU" ] && [ -n "$CR" ] || { echo "could not extract matcher pieces from $F (GR=${#GR} POS=${#POS} NEG=${#NEG} VS=${#VS} PL=${#PL} SU=${#SU} CR=${#CR})"; exit 2; }
 fail=0; n=0
 # t <expected> <body>   expected = "g=<grammar> p=<positive> n=<negative> sha=<verdict sha (only when g=true) or ->"
 t() { local exp="$1" body="$2"; n=$((n+1))
-  got=$(jq -n --arg b "$body" --arg gr "$GR" --arg pos "$POS" --arg neg "$NEG" "$VS$PL$SU"'($b|vs) as $v | "g=\($v|test($gr)) p=\($v|test($pos)) n=\($v|test($neg)) sha=\(if ($v|test($gr)) then ($v|vsha($pos;$neg)|if . == "" then "-" else . end) else "-" end)"' -r)
+  got=$(jq -n --arg b "$body" --arg gr "$GR" --arg pos "$POS" --arg neg "$NEG" "$VS$CR$PL$SU"'($b|vs) as $v | "g=\($v|test($gr)) p=\($v|test($pos)) n=\($v|test($neg)) sha=\(if ($v|test($gr)) then ($v|vsha($pos;$neg)|if . == "" then "-" else . end) else "-" end)"' -r)
   if [ "$got" = "$exp" ]; then echo "PASS $got :: ${body:0:72}"; else echo "FAIL got [$got] want [$exp] :: ${body:0:72}"; fail=1; fi; }
 H=486fc48e0629a1b2c3d4e5f60718293a4b5c6d7e
 echo "== positives at head =="
@@ -55,7 +56,7 @@ t "g=false p=false n=false sha=-"        "@claude review  Delta since your verdi
 echo "== a later-line bare VERB <sha> is NOT a verdict (first-line rule; jq ^ is string start) =="
 t "g=false p=false n=false sha=-"        $'Some preamble line\nMERGE 486fc48e\nmore text'
 echo "== polarity is decided by the FIRST hit (legion#1430: an APPROVE recounting its earlier REQUEST_CHANGES) =="
-tp() { local exp="$1" body="$2"; n=$((n+1)); got=$(jq -n --arg b "$body" --arg pos "$POS" --arg neg "$NEG" "$VS$PL"'$b|vs|pol($pos;$neg)' -r)
+tp() { local exp="$1" body="$2"; n=$((n+1)); got=$(jq -n --arg b "$body" --arg pos "$POS" --arg neg "$NEG" "$VS$CR$PL"'$b|vs|pol($pos;$neg)' -r)
   if [ "$got" = "$exp" ]; then echo "PASS pol=$got :: ${body:0:72}"; else echo "FAIL pol got [$got] want [$exp] :: ${body:0:72}"; fail=1; fi; }
 tp pos  "Verdict: APPROVE at 2846a746 (round 4). My round-2 REQUEST_CHANGES at 11aa22bb is cleared: both findings fixed."
 tp neg  "VERDICT: REQUEST_CHANGES at 2846a746 - the round-3 APPROVE at 11aa22bb is withdrawn; the guard still fires on the move-back"
@@ -70,7 +71,7 @@ t "g=true p=false n=true sha=4f659f925529e430a0497de212dbaec240397ee1" "Verdict:
 tp none "Verdict: DOES NOT BLOCK at 4f659f925529e430a0497de212dbaec240397ee1 (UNPROVEN CLAIMS: 5, none blocking). This supersedes the BLOCKS verdict in 5861618968."
 echo "== supersession across artifacts: a later DOES NOT BLOCK retracts the SAME author's BLOCKS at the SAME head, and nothing else =="
 # ts <expected> <json array of {t,u,b}>   expected = green | blocked | neutral, the polarity stage's three outcomes
-ts() { local exp="$1" arts="$2"; n=$((n+1)); got=$(jq -n --argjson a "$arts" --arg pos "$POS" --arg neg "$NEG" "$VS$PL$SU"'$a|gate($pos;$neg)|if .negt!="" and (.post=="" or .negt>.post) then "blocked" elif .negt=="" and .post=="" then "neutral" else "green" end' -r)
+ts() { local exp="$1" arts="$2"; n=$((n+1)); got=$(jq -n --argjson a "$arts" --arg pos "$POS" --arg neg "$NEG" "$VS$CR$PL$SU"'$a|gate($pos;$neg)|if .negt!="" and (.post=="" or .negt>.post) then "blocked" elif .negt=="" and .post=="" then "neutral" else "green" end' -r)
   if [ "$got" = "$exp" ]; then echo "PASS seq=$got :: $(jq -r '[.[]|"\(.u):\(.b[0:28])"]|join(" | ")' <<<"$arts")"; else echo "FAIL seq got [$got] want [$exp] :: $arts"; fail=1; fi; }
 B="Verdict: BLOCKS at $H (UNPROVEN CLAIMS: 7, 1 blocking)"
 D="Verdict: DOES NOT BLOCK at $H (UNPROVEN CLAIMS: 5, none blocking). This supersedes the BLOCKS verdict above."
@@ -87,6 +88,40 @@ ts green   "[{\"t\":\"2026-09-28T00:10:00Z\",\"u\":\"reviewer-a\",\"b\":\"VERDIC
 # still retracts that author's BLOCKS at the head.
 ts green   "[{\"t\":\"2026-09-28T01:15:00Z\",\"u\":\"oracle\",\"b\":\"Verdict: BLOCKS at f2314fb2 (1 blocking)\"},{\"t\":\"2026-09-28T01:36:00Z\",\"u\":\"oracle\",\"b\":\"delta only: fda41a10 -> f2314fb2. Verdict: DOES NOT BLOCK at f2314fb2\"}]"
 ts blocked "[{\"t\":\"2026-09-28T00:10:00Z\",\"u\":\"coordinator\",\"b\":\"$A\"},{\"t\":\"2026-09-28T00:53:00Z\",\"u\":\"reviewer-a\",\"b\":\"VERDICT: REQUEST_CHANGES at $H - two claims disproved\"}]"
+echo "== the CI review App's review: its markers give the verdict sha, its review state the polarity, not its prose (agent-infra#4625) =="
+# ci-review-body's re-review prose names the head reviewed BEFORE ("I last reviewed `2d93fe8a`, approved it"): the verdict-line
+# scan read that as the verdict sha at a head the App had approved, and the same opening read a REQUEST_CHANGES re-review as positive.
+NEW=5435e98fa1017b28e1dd4c9e13b6dd316f6f7ac1 OLD=2d93fe8a83314fbad365a3f3442ff6d81f1ac7ac CD=cd539dfe7ce0042eba001fbe0e321a23d29d7b90 OLDER=313745f4b141625999897f5ccced8dae8bfb6259
+# app <reviewed head> <blocking JSON array> <prose> [review state]: the body as ci-review-body prints it, then the
+# `[review state <state> at <commit_id>]` suffix pr-gate's rs appends to a native review (no state: a comment quoting the body)
+app() { printf '<!-- ci-review -->\n<!-- ci-review-verdict {"head":"%s","blocking":%s,"person":["1"],"missing":[]} -->\n<sub>Claude wrote this review of `%s` against `review.md`. It can be wrong. Each push replaces it.</sub>\n\n%s\n\n<!-- ci-review-head %s -->\n%s' "$1" "$2" "$1" "$3" "$1" "${4:+ [review state $4 at $1]}"; }
+PA="I last reviewed \`${OLD:0:8}\`, approved it, and made no request. I read \`since-last-review.diff\` for \`${NEW:0:8}\`."
+PC="I last reviewed \`${CD:0:8}\` and requested changes. Both findings are fixed at \`${OLD:0:8}\`."
+PN="I last reviewed \`${OLD:0:8}\` and approved it. **What to fix:** the doc comment still gives the old rules."
+t "g=true p=true n=false sha=$NEW"     "$(app "$NEW" '[]' "$PA" APPROVED)"
+t "g=true p=true n=false sha=$OLD"     "$(app "$OLD" '[]' "$PC" APPROVED)"
+t "g=true p=true n=true sha=$NEW"      "$(app "$NEW" '["2"]' "$PN" REQUEST_CHANGES)"
+# A marker counts only at the start of a line: quoted in a code span or a '>' quote, it asserts nothing.
+t "g=true p=true n=false sha=486fc48e" "VERDICT: APPROVE at 486fc48e. The App's last line, \`<!-- ci-review-head $NEW -->\`, is quoted here."
+t "g=true p=true n=false sha=486fc48e" "$(printf 'VERDICT: APPROVE at 486fc48e\n> <!-- ci-review-head %s -->' "$NEW")"
+# Polarity is the review state the App posted. An APPROVED whose marker lists a blocking check is not the App's approval (it
+# never posts one); a body with no state (a comment quoting the App's review, or a dismissed review) neither approves nor rejects.
+tp neg  "$(app "$NEW" '["2"]' "$PN" REQUEST_CHANGES)"
+tp pos  "$(app "$NEW" '[]' "$PA" APPROVED)"
+tp neg  "$(app "$NEW" '["2"]' "$PA" APPROVED)"
+tp none "$(app "$NEW" '[]' "$PA")"
+tp none "$(app "$NEW" '["2"]' "$PN")"
+# tv <expected> <head> <json array of {t,u,b}>   expected = the polarity outcome (as ts) and whether the newest verdict's sha
+# (pr-gate's `last`) covers the head; at not-at-head the gate falls to its PR-own diff carry check
+tv() { local exp="$1" hd="$2" arts="$3"; n=$((n+1)); got=$(jq -n -r --argjson a "$arts" --arg h "$hd" --arg gr "$GR" --arg pos "$POS" --arg neg "$NEG" "$VS$CR$PL$SU"'($a|gate($pos;$neg)|if .negt!="" and (.post=="" or .negt>.post) then "blocked" elif .negt=="" and .post=="" then "neutral" else "green" end) + " " + ([$a[]|select(.b|vs|test($gr))]|sort_by(.t)|last|(.b // "")|vs|vsha($pos;$neg)|. as $s|if $s == "" then "no-sha" elif ($h|startswith($s)) then "at-head" else "not-at-head" end)')
+  if [ "$got" = "$exp" ]; then echo "PASS tv=$got :: $(jq -r '[.[]|"\(.t[11:16]) \(.b|scan("ci-review-head ([0-9a-f]{8})")[0]) \(.b|scan("review state ([A-Z_]+)")[0] // "-")"]|join(" | ")' <<<"$arts")"; else echo "FAIL tv got [$got] want [$exp] :: $(jq -c '[.[]|.b[-90:]]' <<<"$arts")"; fail=1; fi; }
+# appseq <body>...: the App's reviews at 01:24, 01:28 and 01:51, as on #4625
+appseq() { local ts=(2026-11-19T01:24:11Z 2026-11-19T01:28:21Z 2026-11-19T01:51:02Z) i=0 b; for b in "$@"; do jq -nc --arg t "${ts[$i]}" --arg b "$b" '{t:$t,u:"ci-review[bot]",b:$b}'; i=$((i+1)); done | jq -sc .; }
+RC1=$(app "$CD" '["2"]' "I last reviewed head \`${OLDER:0:8}\` and approved it. **What to fix:** the doc comment still gives the old rules." REQUEST_CHANGES)
+AP2=$(app "$OLD" '[]' "$PC" APPROVED)
+tv "green at-head"     "$NEW" "$(appseq "$RC1" "$AP2" "$(app "$NEW" '[]' "$PA" APPROVED)")"
+tv "green not-at-head" "$NEW" "$(appseq "$RC1" "$AP2")"
+tv "blocked at-head"   "$NEW" "$(appseq "$RC1" "$AP2" "$(app "$NEW" '["2"]' "$PN" REQUEST_CHANGES)")"
 echo "== check-run aggregation reads the WHOLE list, not a page (#20057: 198 runs, one verdict line per page) =="
 CSQ=$(grep -oP "^CSQ='\K.*(?=')" "$F"); [ -n "$CSQ" ] || { echo "could not extract CSQ from $F"; exit 1; }
 # tc <expected> <jq program building the slurped check-run array>

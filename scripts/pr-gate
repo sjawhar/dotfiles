@@ -170,11 +170,23 @@ fi
 # is now NOT green: read it. `\**` admits a bold verdict line on both sides.
 NEG='(?i)(request[_ ]changes|changes requested|do not merge) +at +[0-9a-f]|verdict:? *\**(request[_ ]changes|changes requested|changes\b|do not merge|fail\b|block|hold\b|reject|not ready)'
 POS='(?i)approve|accept(ed)? +at +[0-9a-f]|merge +at|lgtm|verdict:? *\**(approve|accept|merge|ship|clean)|^[ \t]*\**(merge|approve|accept(ed)?)(-with-nits)?\**:? +(at +)?[0-9a-f]{7,40}|^reviewed `?[0-9a-f]{7,40}`? \(`?[0-9a-f]{40}`?\): \**clean, no findings'
-# POLARITY IS DECIDED BY THE FIRST HIT. An APPROVE whose body recounts its own earlier "REQUEST_CHANGES at <sha>" (every
-# multi-round re-cite does) matched the negative set by substring and read as the latest rejection (legion#1430; the
-# queue's own #20293 body, 2026-09-26). Same rule as the sha: the verdict comes first, history later. An artifact is
-# negative if its first NEG hit precedes its first POS hit (or POS is absent), positive the other way round.
-PL='def pol($pos; $neg): (. as $v | ([$v|match($pos; "i")][0].offset // null) as $p | ([$v|match($neg; "i")][0].offset // null) as $n | if $n != null and ($p == null or $n < $p) then "neg" elif $p != null then "pos" else "none" end);'
+# THE CI REVIEW APP'S REVIEW IS READ FROM ITS MARKERS, NOT ITS PROSE. Its body (agent-infra's .github/scripts/ci-review-body)
+# has line 2 `<!-- ci-review-verdict {"head":"<sha>","blocking":[..],"person":[..],"missing":[..]} -->` and a last line
+# `<!-- ci-review-head <sha> -->`, and the App posts APPROVE only when blocking and missing are empty and it read the whole PR,
+# else REQUEST_CHANGES. A re-review's prose names the head reviewed BEFORE ("I last reviewed `2d93fe8a`, approved it"), so the
+# verdict-line scan below read that old head and the gate printed 'PR-own diff CHANGED' at a head the App had approved
+# (agent-infra#4625 at 5435e98f, 2026-11-19), and the same "approved it" read a REQUEST_CHANGES re-review as a positive. For an
+# artifact with either marker at the START of a line (one quoted in a code span or a '>' quote asserts nothing): its verdict sha
+# is the verdict marker's head, else the head marker's (the App's commit_id names the same head); its polarity is the review
+# state it posted (rs's suffix), an APPROVED whose marker lists a blocking or missing check reads negative (the App never
+# posts one), and no state (a comment quoting the App's review, or a dismissed review) reads neither. Other artifacts: below.
+CR='def cimark: [split("\n")[] | capture("^<!-- ci-review-verdict (?<j>\\{.*\\}) -->").j | (try fromjson catch null) | objects | select(.head | type == "string" and test("^[0-9a-f]{40}$"))] | first; def cihead: (cimark | .head?) // ([split("\n")[] | capture("^<!-- ci-review-head (?<h>[0-9a-f]{40}) -->").h] | first); def cipol: if cihead == null then null elif test("\\[review state REQUEST_CHANGES at [0-9a-f]{40}\\]$") then "neg" elif test("\\[review state APPROVED at [0-9a-f]{40}\\]$") then (if [cimark | .blocking[]?, .missing[]?] | length > 0 then "neg" else "pos" end) else "none" end;'
+# POLARITY IS DECIDED BY THE FIRST HIT (for an artifact without the CI review markers above). An APPROVE whose body recounts
+# its own earlier "REQUEST_CHANGES at <sha>" (every multi-round re-cite does) matched the negative set by substring and read
+# as the latest rejection (legion#1430; the queue's own #20293 body, 2026-09-26). Same rule as the sha: the verdict comes
+# first, history later. An artifact is negative if its first NEG hit precedes its first POS hit (or POS is absent), positive
+# the other way round.
+PL='def pol($pos; $neg): cipol // (. as $v | ([$v|match($pos; "i")][0].offset // null) as $p | ([$v|match($neg; "i")][0].offset // null) as $n | if $n != null and ($p == null or $n < $p) then "neg" elif $p != null then "pos" else "none" end);'
 # SUPERSESSION BY THE SAME AUTHOR AT THE SAME HEAD (the queue's decision on agent-c#20410, logged on AGENTC-1070, 2026-09-28).
 # The queue's oracle posts `Verdict: BLOCKS at <sha>` and, after re-judging the SAME head, `Verdict: DOES NOT BLOCK at <sha>`.
 # The second is verdict-bearing (it starts "Verdict:") but was in NEITHER polarity set, so the BLOCKS stood as the latest
@@ -183,10 +195,11 @@ PL='def pol($pos; $neg): (. as $v | ([$v|match($pos; "i")][0].offset // null) as
 # clears ANOTHER author's rejection (one reviewer cannot clear another's, #20200's shape), and one with nothing of its own
 # to retract is neutral, so it falls through to the NEITHER-set read below. An APPROVE keeps superseding globally as before.
 # Same head = the two artifacts' verdict shas agree on their first seven characters (either may be the short form).
-SU='def vsha($pos; $neg): gsub("[0-9a-f]{41,}";" ") | . as $b | ([split("\n")[] | select(test($pos; "i") or test($neg; "i") or test("(?i)verdict:"))] | first) as $line | (if $line != null then (([$line|scan("(?i)\\bat +\\**`?((?=[0-9a-f]*[a-f])[0-9a-f]{7,40})\\b")]|first|.[0]?) // ([$line|scan("\\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\\b")]|first)) else null end) // ([$b|scan("\\[review state [A-Z_]+ at ([0-9a-f]{40})\\]")]|first|.[0]?) // ([$b|scan("\\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\\b")]|first) // ""; def dnbfirst($pos; $neg): (. as $v | ([$v|match("verdict:? *\\**does +not +block"; "i")][0].offset // null) as $d | ([$v|match($neg; "i")][0].offset // null) as $n | ([$v|match($pos; "i")][0].offset // null) as $p | $d != null and ($n == null or $d < $n) and ($p == null or $d < $p)); def samehead($a; $b): ($a != "" and $b != "" and (($a|startswith($b[0:7])) or ($b|startswith($a[0:7])))); def gate($pos; $neg): [.[] | (.b|vs) as $v | {t, u, sha:($v|vsha($pos;$neg)), pol:(if ($v|dnbfirst($pos;$neg)) then "dnb" else ($v|pol($pos;$neg)) end)}] as $vs | ($vs|map(if .pol=="neg" then . as $a | .retracted = any($vs[]; .pol=="dnb" and .u==$a.u and .t>$a.t and samehead(.sha; $a.sha)) elif .pol=="dnb" then . as $d | .retracts = any($vs[]; .pol=="neg" and .u==$d.u and .t<$d.t and samehead(.sha; $d.sha)) else . end)) as $m | {negt:([$m[]|select(.pol=="neg" and (.retracted|not))]|sort_by(.t)|last|.t // ""), post:([$m[]|select(.pol=="pos" or (.pol=="dnb" and .retracts))]|sort_by(.t)|last|.t // "")};'
-# The newest verdict-bearing artifact's VERDICT SHA is read from its VERDICT LINE: the first line hitting the positive or
-# negative set or `verdict:`, taking the hex after 'at' on it, else that line's first letter-bearing hex of 7-40, else a
-# native review's own commit_id (the `[review state ... at <sha>]` suffix rs appends), else the body's first. A verdict line
+SU='def vsha($pos; $neg): cihead // (gsub("[0-9a-f]{41,}";" ") | . as $b | ([split("\n")[] | select(test($pos; "i") or test($neg; "i") or test("(?i)verdict:"))] | first) as $line | (if $line != null then (([$line|scan("(?i)\\bat +\\**`?((?=[0-9a-f]*[a-f])[0-9a-f]{7,40})\\b")]|first|.[0]?) // ([$line|scan("\\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\\b")]|first)) else null end) // ([$b|scan("\\[review state [A-Z_]+ at ([0-9a-f]{40})\\]")]|first|.[0]?) // ([$b|scan("\\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\\b")]|first) // ""); def dnbfirst($pos; $neg): (. as $v | ([$v|match("verdict:? *\\**does +not +block"; "i")][0].offset // null) as $d | ([$v|match($neg; "i")][0].offset // null) as $n | ([$v|match($pos; "i")][0].offset // null) as $p | $d != null and ($n == null or $d < $n) and ($p == null or $d < $p)); def samehead($a; $b): ($a != "" and $b != "" and (($a|startswith($b[0:7])) or ($b|startswith($a[0:7])))); def gate($pos; $neg): [.[] | (.b|vs) as $v | {t, u, sha:($v|vsha($pos;$neg)), pol:(if ($v|cipol) == null and ($v|dnbfirst($pos;$neg)) then "dnb" else ($v|pol($pos;$neg)) end)}] as $vs | ($vs|map(if .pol=="neg" then . as $a | .retracted = any($vs[]; .pol=="dnb" and .u==$a.u and .t>$a.t and samehead(.sha; $a.sha)) elif .pol=="dnb" then . as $d | .retracts = any($vs[]; .pol=="neg" and .u==$d.u and .t<$d.t and samehead(.sha; $d.sha)) else . end)) as $m | {negt:([$m[]|select(.pol=="neg" and (.retracted|not))]|sort_by(.t)|last|.t // ""), post:([$m[]|select(.pol=="pos" or (.pol=="dnb" and .retracts))]|sort_by(.t)|last|.t // "")};'
+# The newest verdict-bearing artifact's VERDICT SHA is its CI review marker's head where it has one (CR above), else is read
+# from its VERDICT LINE: the first line hitting the positive or negative set or `verdict:`, taking the hex after 'at' on it,
+# else that line's first letter-bearing hex of 7-40, else a native review's own commit_id (the `[review state ... at <sha>]`
+# suffix rs appends), else the body's first. A verdict line
 # naming no sha ('**Decision: APPROVE.**') under a header naming the old head first ('`ac451216` -> `8d371b2f`') read as a
 # verdict at the old head (claude[bot]'s resumed review on agent-c#22468, 2026-10-15). The same `vsha` feeds the carry
 # check below and the same-head supersession above (one definition). A delta
@@ -197,8 +210,8 @@ SU='def vsha($pos; $neg): gsub("[0-9a-f]{41,}";" ") | . as $b | ([split("\n")[] 
 # (df0e9892, not in agent-c), so the carry compared against a foreign sha and read a false CHANGED (2026-09-26 13:31Z).
 # Strip hex runs of 41+ first: a 64-hex image digest (sha256:556b68...) otherwise yields its first 40 digits as a
 # bogus "verdict sha", the compare 404s, and a PR whose verdicts all hold reports NOT GREEN (sjawhar/legion#1371).
-last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS$PL$SU"'[.[]|select(.b|vs|test("(?i:verdict:|approve at|approved at|accept at|accepted at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b|(?i)^[ \\t]*\\**(merge|approve|accept(ed)?)(-with-nits)?\\**:? +(at +)?[0-9a-f]{7,40}|^Reviewed `?[0-9a-f]{7,40}`? \\(`?[0-9a-f]{40}`?\\): \\**clean, no findings"))]|sort_by(.t)|last|(.b // "")|vs|vsha($pos;$neg)')
-gate=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS$PL$SU"'gate($pos;$neg)|"\(.negt)\t\(.post)"')
+last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS$CR$PL$SU"'[.[]|select(.b|vs|test("(?i:verdict:|approve at|approved at|accept at|accepted at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b|(?i)^[ \\t]*\\**(merge|approve|accept(ed)?)(-with-nits)?\\**:? +(at +)?[0-9a-f]{7,40}|^Reviewed `?[0-9a-f]{7,40}`? \\(`?[0-9a-f]{40}`?\\): \\**clean, no findings"))]|sort_by(.t)|last|(.b // "")|vs|vsha($pos;$neg)')
+gate=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS$CR$PL$SU"'gate($pos;$neg)|"\(.negt)\t\(.post)"')
 negt=${gate%%$'\t'*}; post=${gate#*$'\t'}
 if [ -n "$negt" ] && { [ -z "$post" ] || [[ "$negt" > "$post" ]]; }; then echo "  !! LATEST verdict is a CHANGE REQUEST / REJECTION (${negt:0:16}), not superseded by a later clean APPROVE - needs a superseding APPROVE/MERGE at the head, or an explicit documented override (#20188)"; fail=1; fi
 if [ -n "$vr" ] && [ -z "$negt" ] && [ -z "$post" ]; then echo "  !! verdict grammar found but its polarity is in NEITHER set (not APPROVE/MERGE/LGTM/clean, not a rejection) - READ it; PASS alone is a review half or a tester run, not a merge authorization (#20200, #20291)"; fail=1; fi
@@ -207,7 +220,7 @@ if [ -n "$last" ] && [[ "$head" != "$last"* ]]; then
   base=$(jq -r .base <<<"$pr"); w=$(mktemp -d)
   api "repos/$repo/compare/$base...$last" --jq '.files[]|"\(.filename)\t\(.additions)\t\(.deletions)\t\(.patch // "" | split("\n") | map(select(test("^[+-]"))) | sort | join("\n") | @json)"' | sort > "$w/last.tsv" || true
   api "repos/$repo/compare/$base...$head" --jq '.files[]|"\(.filename)\t\(.additions)\t\(.deletions)\t\(.patch // "" | split("\n") | map(select(test("^[+-]"))) | sort | join("\n") | @json)"' | sort > "$w/head.tsv" || true
-  # Per file: the SORTED +/- lines, as running-the-merge-queue's verdict row specifies. Raw patch text
+  # Per file: the SORTED +/- lines, so a clean rebase compares equal. Raw patch text
   # carries @@ offsets and context lines, and git re-aligns a hunk when main moves beside it, so a clean
   # rebase read CHANGED with no content difference (#20149, 2026-09-25).
   # The compare API silently caps .files at 300 (the gh pr view --json files 100-cap's bigger sibling,

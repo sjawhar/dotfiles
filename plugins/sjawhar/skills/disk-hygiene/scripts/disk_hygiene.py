@@ -363,7 +363,10 @@ def _nvme_boxes_root() -> Path:
     """Where agentbox puts box trees on a machine with the big disk (scripts/agentbox, BOXES).
 
     It is `/mnt/nvme/<user>/agentbox/boxes` there and `~/boxes` elsewhere, so both are looked at
-    everywhere: the one that does not exist on this machine simply holds nothing."""
+    everywhere: the one that does not exist on this machine simply holds nothing. AGENTBOX_BOXES
+    names it, as it does for agentbox itself."""
+    if os.environ.get("AGENTBOX_BOXES"):
+        return Path(os.environ["AGENTBOX_BOXES"])
     return Path("/mnt/nvme") / getpass.getuser() / "agentbox" / "boxes"
 
 
@@ -2091,7 +2094,8 @@ def main() -> None:
     p.add_argument("--trunk", default="trunk()")
     p.add_argument("--max-depth", type=int, default=WALK_DEPTH)
     p.add_argument("--box-dir", default="auto",
-                   help="where absence can be judged: auto (inside an agentbox, its own ~/boxes/<host> dir; "
+                   help="where absence can be judged: auto (inside an agentbox, its own tree: "
+                        "<AGENTBOX_BOXES, else /mnt/nvme/<user>/agentbox/boxes, else ~/boxes>/<host>; "
                         "on the host, everywhere), none (host semantics), or a directory")
     p = sub.add_parser("plan")
     p.add_argument("--inventory")

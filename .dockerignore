@@ -5,9 +5,6 @@
 !installers/
 !AGENTS.md
 
-!devpod/entrypoint.sh
-!devpod/proxy.sh
-
 !.bashrc
 !.gitconfig
 !.jjconfig.toml

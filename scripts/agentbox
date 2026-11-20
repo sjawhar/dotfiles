@@ -46,20 +46,18 @@
 # Each <repo> is a canonical checkout under ~/src. The box holds a git clone of
 # its own of each, from the canonical checkout's origin, at <boxes>/<box>/<repo>
 # — /mnt/nvme/<user>/agentbox/boxes on a machine with that disk, else ~/boxes
-# (BOXES below) — and works in the first. At exit a clone holding nothing its
-# remote lacks is removed with the box; a clone with uncommitted changes or
-# commits no remote has keeps <boxes>/<box> in place, named on the pane, for its
-# owner to push or remove. omp flags pass straight through after `--`.
+# (BOXES below) — and works in the first. The end of a box deletes everything in
+# it, its clones too, whatever they hold: a session pushes what it wants kept
+# before it ends (dispatch://INFRA-1720). omp flags pass straight through after `--`.
 #
 # Every box leaves a RECORD of its own beside its image, <boxes>/../disks/<box>.info:
-# `box=`, `session=` (the owning omp session), `created=` and `command=`, written
-# when the box is made and removed with the image, so a sweep over what a crash
-# left behind can say whose an image is without asking anybody. And a box that
-# RESUMES a session takes its predecessor away: once the new box's session has
-# registered on Envoy, `agentbox reap-previous` (started by `new`, detached, log
-# in ~/.cache/omp/agentbox/reap-<box>.log) removes that session's older boxes on
-# this host, keeping any one that still has a container, holds work no remote
-# has, or cannot be read, with one line saying which test it was.
+# `box=`, `session=` (the owning omp session), `created=`, `command=` and its
+# launcher's pid, written when the box is made and removed with the image. Every
+# `agentbox new` starts `agentbox collect` (detached, one at a time, log
+# ~/.cache/omp/agentbox/collect.log), which deletes what any box left when its
+# launcher died: a box with no container or an exited one, whose launcher is not
+# running, whose newest file is over an hour old and in which no process stands,
+# holds a file open or runs its program.
 #
 # A session whose work is NOT a checkout — a lane's scratch tree, a directory of
 # worktrees, a coordination root — names it with --dir instead of a repo
@@ -98,12 +96,14 @@
 # within 15 min when nothing renews it. When the broker refuses renew as not live, the launcher
 # enrolls the key the box holds again (reenroll_if_not_live). A failed attempt keeps the key, and
 # the launcher tries again later.
-# close_box revokes a box's own enrollment at once (unenroll_box). It gives a session's
-# enrollment to a detached waiter, which ends it after a grace unless another box of the session
-# uses it. A box started while the host's helper holds no live launcher credential gets no
-# identity at all (no key, no enrollment.pending). Its agents use secretsd, and `new` says so
-# (broker_ready). The same holds for a box whose first enrollment fails: enroll_failed removes
-# its key.
+# close_box ends the box's enrollments (unenroll_box). It revokes the box's own recorded
+# enrollment at once. An enroll call whose outcome is not known can have made an enrollment with
+# an id that the host does not have. A detached process gets that id from the broker and revokes
+# it. A session's enrollments go to a detached waiter, which ends them after a grace unless
+# another box of the session uses them. A box started while the host's helper holds no live
+# launcher credential gets no identity at all (no key, no enrollment.pending). Its agents use
+# secretsd, and `new` says so (broker_ready). The same holds for a box whose first enrollment
+# fails: enroll_failed removes its key.
 set -euo pipefail
 
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
@@ -137,11 +137,8 @@ fi
 # (dispatch://INFRA-1192). WHAT IT COSTS: a local SSD is EMPTY after a machine stop, and a raid0
 # of them is gone if one member fails. Nothing durable may live here. A box's disk image holds
 # only the box's private $HOME, its /tmp and its clones, all three of which already die with the
-# box (agentbox/AGENTS.md), and the box cache holds only build caches; the box TREES, the clone
-# templates and the host's record of a box's home (box_home_carry) stay on /mnt/nvme. The one
-# thing lost that a stop did not already take: the image of a box kept in place because a clone
-# in it held unpushed work (close_box), which a stop would take with the machine's uptime
-# anyway.
+# box (agentbox/AGENTS.md), and the box cache holds only build caches; the box TREES and the clone
+# templates stay on /mnt/nvme. Nothing is lost that a stop did not already take.
 # Only a real mount counts: a /mnt/scratch that is a plain directory of the root disk would put
 # every box image on a 484 GiB filesystem, under the 500 GiB admission floor, and no box would
 # start at all. AGENTBOX_SCRATCH names another root and skips that test; a machine with no such
@@ -255,6 +252,8 @@ fi
 #     session=01a18385-f8c8-74a9-b6ff-694fb5fe87a7   (empty until the box's omp reveals it)
 #     created=2026-11-04T20:31:07Z
 #     command=omp --resume /home/sami/.omp/.../_01a18385….jsonl
+#     launcher=1234567                                (the `agentbox new` that runs the box)
+#     launcher_start=98765432                         (its start time, field 22 of its stat)
 #
 # It is NOT inside $BOXES/<box>, although that is "the box's directory": from open_box_disk on,
 # that directory is the mount point of the box's own filesystem, so everything written through it
@@ -266,23 +265,40 @@ fi
 BOX_RECORDS="${AGENTBOX_RECORDS:-$BOX_DISKS}"
 box_record() { echo "$BOX_RECORDS/$1.info"; }
 
-# box_record_write BOX SID CMD…: the record, at creation. SID is empty for a box that starts a
-# new session (omp has not told anybody its id yet); box_record_session fills it in once it has.
-# A record that cannot be written is one line on stderr and never a failed launch.
+# proc_start STAT_DIR: the start time of the process whose /proc directory is STAT_DIR (field 22 of
+# its stat, after the command name, which can hold spaces and parentheses). Status 1 when gone.
+proc_start() {
+    local s f=()
+    s="$(cat "$1/stat" 2>/dev/null)" || return 1
+    read -r -a f <<<"${s##*) }"
+    [[ "${f[19]:-}" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "${f[19]}"
+}
+
+# box_record_write BOX SID CMD…: the record, at creation, written by the launcher itself. SID is
+# empty for a box that starts a new session (omp has not told anybody its id yet);
+# box_record_session fills it in once it has. The launcher's pid and start time let the collector
+# tell a box whose launcher still works on it from one whose launcher died (cmd_collect); a pid
+# used again later has another start time. A record that cannot be written is one line on stderr
+# and never a failed launch.
 box_record_write() {
-    local box="$1" sid="$2" rec
+    local box="$1" sid="$2" rec start me=$BASHPID
     shift 2
     rec="$(box_record "$box")"
     # Beside the image, so the record exists exactly where images do: the directory is NOT made
     # here, because `open_box_disk` deliberately leaves it absent for a box with no disk limit
     # (`--disk 0`), and such a box has no image to orphan.
     [[ -d "${rec%/*}" ]] || return 0
+    # $BASHPID read here, not inside the $(…), which is a process of its own.
+    start="$(proc_start "/proc/$me")" || start=""
     # %q keeps the command on one line whatever it holds, and keeps it runnable.
     {
         printf 'box=%s\n' "$box"
         printf 'session=%s\n' "$sid"
         printf 'created=%s\n' "$(date -u +%FT%TZ)"
         printf 'command=%s\n' "$(printf '%q ' "$@")"
+        printf 'launcher=%s\n' "$me"
+        printf 'launcher_start=%s\n' "$start"
     } >"$rec" 2>/dev/null || echo "agentbox: could not write $box's record at $rec" >&2
     return 0
 }
@@ -331,9 +347,9 @@ record_box_exit() {
     # command is not omp that can be a multi-line docker error -- which, written through, breaks
     # every reader of this file. Only a UUID is a session id; anything else is no session.
     [[ "$sid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || sid=""
-    # Written at most once per box. The launcher, close_box, the reaper and the sweep each try,
-    # because any one of them may be the only one that runs; the marker is what keeps the tally
-    # one row per box. It sits beside the box record, so it goes when the record goes.
+    # Written at most once per box. The launcher, close_box and the collector each try, because
+    # any one of them may be the only one that runs; the marker is what keeps the tally one row
+    # per box. It sits beside the box record, so it goes when the record goes (close_box_disk).
     marker="$(box_record "$box").exit"
     [[ -e "$marker" ]] && return 0
     # Without --rm the container is still there after it ends, so docker can be asked what
@@ -368,23 +384,6 @@ record_box_exit() {
     return 0
 }
 
-# sweep_exited_boxes: remove agentbox containers that ended more than SWEEP_EXITED_AFTER ago and
-# whose box is gone, recording each first. Without --rm an exited container is new state on this
-# machine, and a reaper that never runs must not be able to accumulate them. A container whose
-# box directory or record still exists is left alone: that is the reaper's to judge, not this.
-SWEEP_EXITED_AFTER="${AGENTBOX_SWEEP_EXITED_AFTER:-6h}"
-sweep_exited_boxes() {
-    local c swept=0
-    while read -r c; do
-        [[ -n "$c" ]] || continue
-        [[ -e "$(box_record "$c")" || -d "$BOXES/$c" ]] && continue
-        record_box_exit "$c" "" ""
-        docker rm "$c" >/dev/null 2>&1 && swept=$((swept + 1))
-    done < <(docker ps -a --filter 'name=^agentbox-' --filter status=exited \
-        --filter "until=$SWEEP_EXITED_AFTER" --format '{{.Names}}' 2>/dev/null)
-    (( swept )) && echo "agentbox: swept $swept exited container(s) older than $SWEEP_EXITED_AFTER"
-    return 0
-}
 EMBED_NAME=omp-embed
 EMBED_PORT="${OMP_EMBED_PORT:-8087}"
 IMDS_PORT="${AGENTBOX_IMDS_PORT:-8169}"
@@ -396,7 +395,8 @@ IMDS_PORT="${AGENTBOX_IMDS_PORT:-8169}"
 ENVOY_PORT="${AGENTBOX_ENVOY_PORT:-9020}"
 UID_="$(id -u)"
 # AGENTBOX_RUN_BASE: the tests' own tree, and it reaches a detached child that runs this script
-# again (the unenroll waiter's `session-live-box`), which a shell variable would not.
+# again (the collector, `agentbox collect`, which `agentbox new` starts), which a shell variable
+# would not.
 RUN_BASE="${AGENTBOX_RUN_BASE:-/run/user/$UID_/agentbox}"
 # The relayed session bus, in its own dir so a box sees the socket socat
 # recreates after a unit restart.
@@ -579,18 +579,29 @@ box_cache_mounts() {
         -v "$cache/cargo-git:$HOME/.cargo/git"
 }
 
+# remove_paths_command PATH…: the command line that removes each PATH, a read-only tree included,
+# for a line that says a removal failed.
+remove_paths_command() {
+    local q=() p
+    for p in "$@"; do q+=("$(printf '%q' "$p")"); done
+    echo "chmod -R u+w ${q[*]}; rm -rf ${q[*]}"
+}
+
 # Sami 2026-11-04: agent clutter must be cleaned up. A box's cache goes with its container,
-# and only once docker confirms that container is gone: a live box keeps writing into it.
+# and only once docker confirms that container is gone: a live box keeps writing into it. A cache
+# that cannot go is a failed removal, said as one with the command that completes it, never as a
+# cache kept, and status 1 (dispatch://INFRA-1720).
 close_box_cache() {
-    local box="$1" cache="$BOX_CACHE_ROOT/$1" names
-    [[ -d "$cache" ]] || return 0
+    local box="$1" cache="$BOX_CACHE_ROOT/$1" names remove
+    [[ -e "$cache" || -L "$cache" ]] || return 0
+    remove="$(remove_paths_command "$cache")"
     if ! names="$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)"; then
-        echo "agentbox: cannot confirm $box is removed; its cache $cache is kept" >&2
-        return 0
+        echo "agentbox: removing $box's cache $cache failed: docker could not say whether its container is gone; once it is, remove the cache with: $remove" >&2
+        return 1
     fi
     if [[ -n "$names" ]]; then
-        echo "agentbox: $box still exists; its cache $cache is kept" >&2
-        return 0
+        echo "agentbox: removing $box's cache $cache failed: its container still exists; remove both with: docker rm -fv $box; $remove" >&2
+        return 1
     fi
     # A Go module cache is mode 0444 by design, and `rm -rf` cannot delete a read-only file in
     # a read-only directory: it fails per entry and the tree stays. Measured 2026-11-06: twelve
@@ -598,12 +609,13 @@ close_box_cache() {
     # ends in a run of `rm: cannot remove '.../go-mod/...': Permission denied`. Make the tree
     # writable first, then remove, then CHECK -- `rm -rf` reports failure per file but the
     # caller never sees which, and a teardown that half-worked must not read as success
-    # (ORCH and TAIL, dispatch://INFRA-586).
+    # (ORCH and TAIL, dispatch://INFRA-586). Its status is not this function's: under set -e a
+    # failed rm ended the whole close, and every step after it did not run.
     chmod -R u+w "${cache:?}" 2> /dev/null || true
-    rm -rf "${cache:?}"
-    if [[ -d "$cache" ]]; then
-        echo "agentbox: $box's cache $cache did not go; it is left for the box-health owner" >&2
-        return 0
+    rm -rf "${cache:?}" || true
+    if [[ -e "$cache" || -L "$cache" ]]; then
+        echo "agentbox: removing $box's cache $cache failed; remove what is left with: $remove" >&2
+        return 1
     fi
 }
 
@@ -803,14 +815,21 @@ add_box_dir() {
 # started with --disk 0 has neither and this is a no-op, as it is for a box whose launcher never
 # got as far as the mount.
 close_box_disk() {
-    local box="$1" img="$BOX_DISKS/$1.img"
+    local box="$1" img="$BOX_DISKS/$1.img" rec p left=()
+    rec="$(box_record "$box")"
     if mountpoint -q "$BOXES/$box" 2>/dev/null; then
-        sudo -n umount "$BOXES/$box" \
-            || { echo "agentbox: could not unmount $BOXES/$box; its disk image $img is left in place (sudo umount '$BOXES/$box' && rm -f '$img')" >&2; return 1; }
+        sudo -n umount "$BOXES/$box" || {
+            echo "agentbox: removing $box's disk image $img failed: $BOXES/$box would not unmount; remove it with: sudo umount $(printf '%q' "$BOXES/$box") && $(remove_paths_command "$img" "$rec" "$rec.exit")" >&2
+            return 1
+        }
     fi
-    # The record goes with the image it describes: a record left on disk means an image left on
-    # disk, which is what a sweep over this directory reads.
-    rm -f "$img" "$(box_record "$box")"
+    # The record and its `.exit` marker (record_box_exit) go with the image they describe: a
+    # record left on disk means an image left on disk, which is what the collector reads.
+    rm -f "$img" "$rec" "$rec.exit" || true
+    for p in "$img" "$rec" "$rec.exit"; do [[ -e "$p" || -L "$p" ]] && left+=("$p"); done
+    (( ${#left[@]} )) || return 0
+    echo "agentbox: removing $box's disk image and record (${left[*]}) failed; remove what is left with: $(remove_paths_command "${left[@]}")" >&2
+    return 1
 }
 
 # Whether a new box can get a broker identity: the client installed and the helper holding a live
@@ -844,7 +863,8 @@ box_keydir() { echo "$RUN_BASE/$1/agent-secrets"; }
 # The box's key dir is the box's to write too (keygen writes key.pem there as the box's user), so
 # the host keeps its own files beside it, in $RUN_BASE/<box>, which no box's own mounts reach (the
 # one exception is under box_keydir): each enroll attempt's error (enroll.attempt-error) and the
-# enrollment id close_box revokes (enrollment-id).
+# enrollment id that close_box revokes (enrollment-id). An enroll call whose outcome is not known
+# leaves no file there: the launcher keeps its identity in memory (ENROLL_OPEN).
 # What agentbox itself puts in the key dir is written to a temp file in $RUN_BASE/<box> and
 # renamed into place. The rename replaces whatever the box left at the last name (a symlink
 # included) instead of following it, but it follows every directory above that name: a link at
@@ -953,8 +973,17 @@ wait_for_running() {
 # it is the box's own (no session id, no host key for the session, or the 409 fallback, which
 # still passes --session-id); ENROLLED_ID is the id the last enrollment got back. ENROLL_ERROR is
 # why the last key step or enroll call failed, and after enroll_failed the reason it recorded.
+# ENROLL_OPEN holds the identity of each enroll call whose outcome is not known: the broker can
+# have made an enrollment for it, with an id the host does not have. An entry is one string of
+# three words, `<kind> <runtime id> <thumbprint>`, as they were at that call. The kind is
+# `session` when ENROLLED_SKD was set and `own` when it was empty. enroll_attempts adds an
+# identity once, and removes its entries when a later call for the same runtime id and
+# thumbprint records an enrollment id. At the close, unenroll_box ends the enrollment of each
+# entry: a detached process gets its id from the broker and revokes it (for a session's entry,
+# only when the session did not come back).
 ENROLLED_BOX="" ENROLLED_SID="" ENROLLED_RUNTIME="" ENROLLED_TP="" ENROLLED_SKD="" ENROLLED_ID=""
 ENROLL_ERROR=""
+ENROLL_OPEN=()
 
 # enroll_key BOX SID: give the box the key it enrolls with, and set ENROLLED_SID,
 # ENROLLED_RUNTIME, ENROLLED_TP and ENROLLED_SKD for it. A box whose omp session id is known
@@ -998,18 +1027,52 @@ enroll_key() {
     ENROLLED_SID="$sid" ENROLLED_RUNTIME="$runtime" ENROLLED_TP="$tp" ENROLLED_SKD="$skd"
 }
 
+# enroll_open_add: add the identity of the enroll call just made to ENROLL_OPEN, unless it is
+# there already. It reads the ENROLLED_* globals, so it runs before anything changes them.
+enroll_open_add() {
+    local kind=own entry e
+    [[ -z "$ENROLLED_SKD" ]] || kind=session
+    entry="$kind $ENROLLED_RUNTIME $ENROLLED_TP"
+    for e in ${ENROLL_OPEN[@]+"${ENROLL_OPEN[@]}"}; do
+        [[ "$e" != "$entry" ]] || return 0
+    done
+    ENROLL_OPEN+=("$entry")
+}
+
+# enroll_open_settle: remove from ENROLL_OPEN every entry with the runtime id and the thumbprint
+# of the enroll call that just recorded an enrollment id.
+enroll_open_settle() {
+    local e unsettled=()
+    for e in ${ENROLL_OPEN[@]+"${ENROLL_OPEN[@]}"}; do
+        [[ "${e#* }" == "$ENROLLED_RUNTIME $ENROLLED_TP" ]] || unsettled+=("$e")
+    done
+    ENROLL_OPEN=(${unsettled[@]+"${unsettled[@]}"})
+}
+
 # enroll_attempts BOX ATTEMPTS [fallback]: the broker call of an enrollment, for the key the box
 # holds, as ENROLLED_RUNTIME, ENROLLED_TP and ENROLLED_SID name it. The enrollment is made from the
 # host with the launcher credential, which no box can read, and the client writes the enrollment
 # id beside the key. Up to ATTEMPTS attempts 3 s apart, each one call (two with the 409 fallback
 # below), with the enrollment.pending marker renewed before each call: from the legion #1589
 # release a client in the box waits on a marker younger than 160 s, so it stays fresh for exactly
-# as long as the launcher is still working, however slow the broker. Success records the
-# enrollment on the host, sets ENROLLED_BOX and ENROLLED_ID, and removes the marker and every
-# error file. A failure leaves the marker for its caller to end, with the reason in ENROLL_ERROR.
-# `fallback` allows the 409 fallback below.
+# as long as the launcher is still working, however slow the broker. No retry starts once
+# cmd_new's HUP, TERM or INT trap has set `interrupted`. The 409 fallback call is not a retry: it
+# is part of its attempt. Success records the enrollment on the host, sets ENROLLED_BOX and
+# ENROLLED_ID, and removes the marker and every error file. A failure leaves the marker for its
+# caller to end, with the reason in ENROLL_ERROR. `fallback` allows the 409 fallback below.
+# Each call also keeps ENROLL_OPEN up to date. A call that records an enrollment id removes the
+# entries of its runtime id and thumbprint: under one launcher credential and one runtime id the
+# broker gives a key the id of its live enrollment, so the id that the host recorded is that of
+# any live enrollment an earlier call made under that credential. A call that exits non-zero,
+# with a line that starts with one of these two prefixes, made no enrollment and adds nothing:
+#   `agent-secrets enroll: ENROLL_FAILED: `
+#   `agent-secrets enroll: DRAINING: `
+# Only the code in that place counts. The same word in other text of the error does not count.
+# Every other call adds its identity: exit 0 with no id recorded, any other code
+# (ENROLL_OUTCOME_UNKNOWN), no answer from the helper, a reply that the client could not read, an
+# id that it could not write, and a signal.
 enroll_attempts() {
-    local box="$1" attempts="$2" fallback="${3:-}" keydir errfile eid attempt=1 args
+    local box="$1" attempts="$2" fallback="${3:-}" keydir errfile eid err attempt=1 args
     keydir="$(box_keydir "$box")"
     errfile="$RUN_BASE/$box/enroll.attempt-error"
     while :; do
@@ -1023,6 +1086,7 @@ enroll_attempts() {
             agent-secrets "${args[@]}" 2>"$errfile")"; then
             if [[ -z "$eid" || -L "$keydir/enrollment" || ! -s "$keydir/enrollment" ]]; then
                 ENROLL_ERROR="agent-secrets enroll gave no enrollment id, or left no plain, non-empty enrollment file in $keydir (it printed '$eid')"
+                enroll_open_add
                 return 1
             fi
             printf '%s\n' "$eid" >"$RUN_BASE/$box/enrollment-id"
@@ -1041,9 +1105,16 @@ enroll_attempts() {
                 rm -f "$RUN_BASE/$box/enrollment-session"
             fi
             rm -f "$keydir/enrollment.pending" "$keydir/enrollment.error" "$errfile"
+            enroll_open_settle
             ENROLLED_BOX="$box" ENROLLED_ID="$eid"
             return 0
         fi
+        # A missing file (its redirect failed) reads as empty. Under set -e, `$(<file)` of a
+        # missing file ends the launcher, even on the left of `||`.
+        err=""
+        [[ ! -f "$errfile" ]] || err="$(<"$errfile")"
+        [[ $'\n'"$err" == *$'\n''agent-secrets enroll: ENROLL_FAILED: '* \
+            || $'\n'"$err" == *$'\n''agent-secrets enroll: DRAINING: '* ]] || enroll_open_add
         # A live enrollment of this session under a key the host no longer holds — its key dir
         # went with a reboot while the old lease still ran — refuses every attempt with the same
         # 409 until that lease lapses, up to 15 minutes. Rather than leave the box with no
@@ -1051,19 +1122,27 @@ enroll_attempts() {
         # accepted; the session gets its continuity back at its next box. The fallback call is
         # part of the same attempt, made at once: the 409 is the broker's answer, not an outage to
         # wait out, and a re-enrollment pass has one attempt only.
-        if [[ -n "$fallback" && -n "$ENROLLED_SKD" && "$(<"$errfile")" == *ALREADY_ENROLLED* ]]; then
+        if [[ -n "$fallback" && -n "$ENROLLED_SKD" && "$err" == *ALREADY_ENROLLED* ]]; then
             echo "agentbox: the broker still holds a live enrollment for session $ENROLLED_SID under a key this host does not have; $box enrolls under its own name and its pending broker cards will not follow the session" >&2
             ENROLLED_SKD="" ENROLLED_RUNTIME="$box"
             continue
         fi
+        # No retry once cmd_new's HUP, TERM or INT trap has set `interrupted` (unset for any other
+        # caller): the box is ending. The test comes before the 3 s wait and again after it,
+        # because a signal that comes during the sleep runs its trap only when the sleep ends.
         (( attempt < attempts )) || break
-        (( attempt += 1 ))
+        [[ "${interrupted:-0}" == 0 ]] || break
         sleep 3
+        [[ "${interrupted:-0}" == 0 ]] || break
+        (( attempt += 1 ))
     done
-    if (( attempts > 1 )); then
-        ENROLL_ERROR="agent-secrets enroll failed $attempts times; last: $(<"$errfile")"
+    if (( attempt < attempts )); then
+        # The loop stopped early: the launcher was interrupted.
+        ENROLL_ERROR="agent-secrets enroll failed $attempt of $attempts attempts, and the launcher was interrupted, so it made no more; last: $err"
+    elif (( attempts > 1 )); then
+        ENROLL_ERROR="agent-secrets enroll failed $attempts times; last: $err"
     else
-        ENROLL_ERROR="agent-secrets enroll failed: $(<"$errfile")"
+        ENROLL_ERROR="agent-secrets enroll failed: $err"
     fi
     return 1
 }
@@ -1191,8 +1270,11 @@ REENROLL_BACKOFF=30 REENROLL_AT=0
 reenroll_if_not_live() {
     local box="$1" keydir old delay ok=0
     # No new attempt once cmd_new's HUP, TERM or INT trap has set `interrupted`: the box is
-    # ending, and an attempt would cost a helper call, up to about 60 s of its close, and for a
-    # box with no session id an enrollment that close_box then revokes at once.
+    # ending. With the pinned helper one attempt can take about 23 s of the close (the helper's
+    # 20 s bound and the client's own wait), and a cancelled `agentbox move` sends SIGKILL 30 s
+    # after TERM (move_to_cancel_start). For a box with no session id the attempt can also make
+    # an enrollment that close_box then revokes at once. enroll_attempts makes no retry then
+    # either: the ten attempts of enroll_box can take about four minutes.
     [[ "${interrupted:-0}" == 0 ]] || return 0
     [[ "$ENROLLED_BOX" == "$box" ]] || return 0
     keydir="$(box_keydir "$box")"
@@ -1230,10 +1312,14 @@ reenroll_if_not_live() {
 # acts at once, as in the blocking `wait`; the loop goes on while the child lives. `wait -n` with
 # ids needs bash 5.1 (the hosts run 5.2). Returns once the child has exited; `wait "$child"`
 # still returns the child's own status afterwards.
+# After reenroll_if_not_live the pass checks the child again, before it waits. A child that
+# ended during the pass's enroll call is already reaped: `wait -n` with its pid then writes
+# "no such job" (bash 5.2.15) and waits for all of the 10 s.
 box_wait() {
     local box="$1" child="$2" sleep_pid
     while kill -0 "$child" 2>/dev/null; do
         reenroll_if_not_live "$box"
+        kill -0 "$child" 2>/dev/null || break
         sleep 10 &
         sleep_pid=$!
         wait -n "$child" "$sleep_pid" || true
@@ -1242,18 +1328,24 @@ box_wait() {
     done
 }
 
-# Enroll a box from `new` once it is up, then start its renew: for omp once its session id is
-# known (omp opens its session file 4–10 s after start, before any tool can run), so the
-# enrollment carries the id the broker wakes on a decision; any other command at once; after
-# 120 s of running without a session id (an omp --no-session run) without one. The deadline
-# starts once the box is Running, so a box that was slow to start still enrolls with its id. The
-# enrollment.pending marker is renewed on every pass of both waits, so it stays inside the
-# client's 160 s trust window however long the box takes. A box that never runs, or ends first,
-# ends in enroll_failed too.
+# Enroll a box from `new` once it is up, then start its renew: for omp once its session file names
+# its session (box_session_id; the box's omp writes it at its start, fresh or resumed, before any
+# tool can run), so the enrollment carries the id the broker wakes on a decision and its grants
+# follow the session to its next box (dispatch://INFRA-1167); any other command at once; after
+# 120 s of running with no session file (an omp --no-session run, a box started from a MAIN
+# checkout, a profile with `.no-shared-setup`) under the box's name. Before dispatch://INFRA-1720
+# the id came from a transcript omp held open, which a fresh session has none of until its first
+# reply, so two fresh boxes enrolled under their box names on 2026-11-14
+# (dispatch://INFRA-3462/comment/7b61823d). The deadline starts once the box is Running, so a box
+# that was slow to start still enrolls with its id. The enrollment.pending marker is renewed on
+# every pass of both waits, so it stays inside the client's 160 s trust window however long the
+# box takes. A box that never runs, or ends first, ends in enroll_failed too. ENROLL_SESSION_WAIT
+# is those 120 s (the spec's figure; scripts/tests/test_agentbox_enroll.py pins it).
+ENROLL_SESSION_WAIT=120
 enroll_when_up() {
     local box="$1" child="$2" cmd="$3" sid="" deadline
     wait_for_running "$box" "$child" || { enroll_failed "$box" "$box never reached Running; not enrolled"; return 1; }
-    deadline=$(( SECONDS + 120 ))
+    deadline=$(( SECONDS + ENROLL_SESSION_WAIT ))
     while kill -0 "$child" 2>/dev/null; do
         put_keyfile "$box" enrollment.pending ""
         [[ "$cmd" == omp ]] && sid="$(box_session_id "$box")"
@@ -1272,76 +1364,317 @@ enroll_when_up() {
 # anyway, so this only decides how much of that window a session that has really ended keeps.
 AGENTBOX_UNENROLL_GRACE="${AGENTBOX_UNENROLL_GRACE:-180}"
 
-# Revoke a box's enrollment and every grant under it: the id the host recorded at enrollment,
-# never the box-writable copy. Idempotent on the broker; a failure is noted, and the lease the
-# box stopped renewing lapses within 15 minutes.
-# A SESSION's enrollment (enroll_box, when the box had an omp session id) is not this box's to
-# end: revoking it ends the id every box of the session signs with. The broker keeps the
-# session's pending requests and grants dormant for its carry (12 h by default) and hands them to
-# the session's next enrollment (broker enroll.go endEnrollment, adopt), but a move must keep the
-# id itself. So it goes to a detached waiter that gives the session its grace to come back in
-# another box and ends the enrollment only if none did. Detached because close_box runs in the
-# pane the respawn is taking back, and nothing may wait here.
+# unenroll_box BOX: at the close of the box, end each enrollment the box can hold at the broker,
+# and every grant under it. It has two sources. One is the id that the host recorded at
+# enrollment ($RUN_BASE/<box>/enrollment-id), never the box-writable copy. The other is the
+# launcher's ENROLL_OPEN: the enroll calls whose outcome is not known. A process that did not
+# enroll the box (the reaper, for example) has an empty ENROLL_OPEN, so for it only the
+# recorded id counts.
+#   - The box's own recorded enrollment (no enrollment-session): one revoke, at once. A failure
+#     is only noted. The lease that the box stopped renewing lapses within 15 minutes. When
+#     enrollment-session is there but gives no session id, the recorded id can be a session's, so
+#     it is not revoked: one line on stderr, and the lease ends it.
+#   - The box's own open entries (kind `own`): one detached process, with no grace
+#     (unenroll_learn_each). For each entry, it learns the id and revokes it.
+#   - The session's recorded enrollment and the session's open entries (kind `session`): one
+#     detached waiter (unenroll_session_wait), below.
+# A detached process holds none of the caller's pipes. Its stdin is /dev/null, and its output
+# goes to $RUN_BASE/session-keys/unenroll.log. close_box runs in the pane that the respawn takes
+# back, and nothing may wait there. A detached process runs the text of its functions
+# (unenroll_fns), which unenroll_box gives to `bash -c`, and reads no file of the checkout: the
+# checkout can be gone when the waiter wakes. A tester's real-box run starts its boxes from clones
+# of its own (`DOTFILES_DIR=<clone> <clone>/scripts/agentbox new`) and removes the clones once its
+# boxes have closed. A waiter that ran <clone>/scripts/agentbox for its test 2 found no file there,
+# exited 127 and left the session's enrollments to their lease (8 times on sami-devbox on 2026-11-16
+# and 2026-11-17). No copy of this file alone could answer either: it sources
+# agent-secrets/broker-url.sh from the checkout as it loads.
 #
-# The waiter has TWO tests, because the first one alone is blind to the box that enrolled
-# BEFORE this one. `owner` holds the name of the last box that enrolled for the session, so
-# when a DUPLICATE box of a live session ends, owner still names the duplicate and the waiter
-# reads that as "nobody came back" - at 20:17Z on 2026-11-04 it ended the enrollment of a
-# session that was running the whole time in its ORIGINAL box, which lost its broker identity
-# three minutes after the duplicate closed and noticed 25 minutes later, when its last cached
-# GitHub token expired. The enrollment is the SESSION's (runtime id `session-<id>`), not the
-# box's, so any live box of that session is using it. The second test asks exactly that
-# (`session-live-box`, below), at wake time rather than now, since a box can come up during the
-# grace.
+# The learn call (unenroll_learn) gets the id of an open entry from the broker. It is the enroll
+# call of the entry: the same runtime id and thumbprint, and no session id. While an enrollment
+# of that runtime id and key is live under the launcher credential that the helper signs with,
+# the broker gives back its id, whatever the session id (broker enroll.go recoverConflict; the
+# helper signs with a person's sign-in when it has one, and with the machine login otherwise).
+# When none is live, the broker makes a new enrollment. That enrollment names no session, and the
+# broker moves a session's grants only to an enrollment that names the session (adopt). So a learn
+# call cannot take the grants of a live box. The close writes no record of a learned id. It only
+# revokes the id (unenroll_revoke).
+#
+# A SESSION's enrollment is not this box's to end: revoking it ends the id every box of the
+# session signs with. The broker keeps the session's pending requests and grants dormant for its
+# carry (12 h by default) and hands them to the session's next enrollment (broker enroll.go
+# endEnrollment, adopt), but a move must keep the id itself. So the waiter gives the session its
+# grace to come back in another box, and ends the enrollments only if none did.
+#
+# The waiter has THREE tests. The first one alone is blind to the box that enrolled BEFORE this
+# one. Test 1 reads `owner`, the name of the last box that enrolled for the session.
+# When a DUPLICATE box of a live session ends, owner still names the duplicate, and test 1 alone
+# reads that as "nobody came back". It then ends the enrollment of the session's ORIGINAL box,
+# which still runs. The enrollment is the SESSION's (runtime id `session-<id>`), not the box's,
+# so any live box of that session uses it. Test 2 asks exactly that (session_live_box, below),
+# at wake time and not now, because a box can come up during the grace. The waiter ends the
+# enrollments only on the explicit answer "no other box is live" (`none`). When it cannot read
+# test 2, it leaves them alone.
+# When the box recorded a session enrollment, test 1 passes while owner names this box. When the
+# box recorded none (its enroll calls for the session came back open), owner names an earlier box
+# of the session, or nothing. So test 1 then passes while owner is what it was at the close. A box
+# that enrolls for the session during the grace writes its own name there.
+# Tests 1 and 2 see a box only once its enroll call has succeeded. A box that is still enrolling,
+# as under a slow broker, writes neither owner nor enrollment-session yet, but its enroll_key has
+# touched the session's key dir before its first call. Test 3 passes while the key dir's mtime is
+# not later than the close, whose time unenroll_box gives the waiter.
 unenroll_box() {
-    local box="$1" eid sid="" skd
-    [[ -s "$RUN_BASE/$box/enrollment-id" ]] || return 0
-    eid="$(<"$RUN_BASE/$box/enrollment-id")"
-    if [[ -s "$RUN_BASE/$box/enrollment-session" ]]; then
-        sid="$(<"$RUN_BASE/$box/enrollment-session")"
+    local box="$1" eid="" sid="" skd owner fns e own=() ses=() closed
+    # The close's time for the waiter's test 3, in nanoseconds. A value that is not a number
+    # makes the waiter leave everything alone.
+    closed="$(date +%s%N 2>/dev/null)" || closed=""
+    # The read builtin, not `$(<file)`: under `set -e`, `$(<file)` of a file that cannot be opened
+    # ends close_box or reap_box, and another close of the box can remove the file at any time. A
+    # file that is missing or cannot be read reads as empty.
+    read -r eid 2>/dev/null <"$RUN_BASE/$box/enrollment-id" || true
+    if [[ -n "$eid" ]]; then
+        read -r sid 2>/dev/null <"$RUN_BASE/$box/enrollment-session" || true
+        if [[ -z "$sid" && -e "$RUN_BASE/$box/enrollment-session" ]]; then
+            echo "agentbox: cannot read $RUN_BASE/$box/enrollment-session; enrollment $eid of $box can be a session's, so it is left to end with its lease (15 min)" >&2
+            eid=""
+        fi
     fi
-    if [[ -z "$sid" ]]; then
+    if [[ -n "$eid" && -z "$sid" ]]; then
         AGENT_SECRETS_URL="$AGENT_SECRETS_URL" agent-secrets unenroll --helper --enrollment "$eid" \
             || echo "agentbox: unenroll $box ($eid) failed; the broker drops it when its lease lapses (15 min)" >&2
+        eid=""
+    fi
+    for e in ${ENROLL_OPEN[@]+"${ENROLL_OPEN[@]}"}; do
+        case "$e" in
+            "own "*) own+=("$e") ;;
+            "session "*) ses+=("$e") ;;
+        esac
+    done
+    [[ -n "$sid" ]] || (( ${#own[@]} + ${#ses[@]} )) || return 0
+    mkdir -p -m 700 "$RUN_BASE/session-keys" || true
+    fns="$(unenroll_fns)"
+    # `8>&-`: each child is detached and outlives the caller, and fd 8 is the collector's lock
+    # (cmd_collect). A waiter that inherited it held the lock through its whole grace, and every
+    # collector started meanwhile ended "another collector runs" (Proof1720, 2026-11-16 18:39Z).
+    if (( ${#own[@]} )); then
+        setsid env AGENT_SECRETS_URL="$AGENT_SECRETS_URL" \
+            bash -c "$fns"$'\n''unenroll_learn_each "$@"' agentbox-unenroll "$RUN_BASE" "$box" "${own[@]}" \
+            </dev/null >>"$RUN_BASE/session-keys/unenroll.log" 2>&1 8>&- &
+    fi
+    if [[ -n "$sid" ]]; then
+        skd="$(session_keydir "$sid")"
+        owner="$box"
+    elif (( ${#ses[@]} )); then
+        # The entry is `session session-<sid> <thumbprint>`.
+        sid="${ses[0]#session session-}"
+        sid="${sid%% *}"
+        skd="$(session_keydir "$sid")"
+        owner="$(cat "$skd/owner" 2>/dev/null || true)"
+    else
         return 0
     fi
-    skd="$(session_keydir "$sid")"
-    setsid env AGENT_SECRETS_URL="$AGENT_SECRETS_URL" bash -c '
-        sleep "$1"
-        [[ "$(cat "$2/owner" 2>/dev/null)" == "$3" ]] || {
-            echo "$(date -u +%FT%TZ) $3: session $4 came back in $(cat "$2/owner" 2>/dev/null); enrollment $5 left alone"
-            exit 0
-        }
-        if live="$("$6" session-live-box "$4" "$3" 2>/dev/null)" && [[ -n "$live" ]]; then
-            echo "$(date -u +%FT%TZ) $3: session $4 is live in box $live; enrollment $5 left alone"
-            exit 0
-        fi
-        rm -rf "${2:?}"
-        echo "$(date -u +%FT%TZ) $3: session $4 did not come back; ending enrollment $5"
-        agent-secrets unenroll --helper --enrollment "$5" \
-            || echo "$(date -u +%FT%TZ) $3: unenroll $5 failed; the broker drops it when its lease lapses (15 min)"
-    ' agentbox-unenroll "$AGENTBOX_UNENROLL_GRACE" "$skd" "$box" "$sid" "$eid" \
-        "$DOTFILES_DIR/scripts/agentbox" \
-        </dev/null >>"$RUN_BASE/session-keys/unenroll.log" 2>&1 &
+    setsid env AGENT_SECRETS_URL="$AGENT_SECRETS_URL" \
+        bash -c "$fns"$'\n''unenroll_session_wait "$@"' agentbox-unenroll \
+        "$AGENTBOX_UNENROLL_GRACE" "$RUN_BASE" "$skd" "$box" "$sid" "$owner" "$eid" "$closed" \
+        ${ses[@]+"${ses[@]}"} \
+        </dev/null >>"$RUN_BASE/session-keys/unenroll.log" 2>&1 8>&- &
     return 0
 }
 
-# session_live_box SID EXCEPT: the name of a box other than EXCEPT that enrolled for session SID
-# and whose container still exists, or nothing. The run directory of every box holds the session
-# it enrolled for (`enrollment-session`, written by enroll_box) and is removed with the box, so
-# this is the host's own record of who is using the session's broker identity.
+# unenroll_fns: the text of the functions that unenroll_box's detached processes run, and of the
+# globals they read. Every function of this script that one of them calls must be in it, since the
+# process has nothing else: a call of any other fails with status 127 there, and a test such as
+# `if <function> …` reads that as false (for session_live_box, as a box it did not see). A global
+# it reads and does not set is empty there: box_session_read tests the id with `=~ $BOX_SID_RE`,
+# and against an empty pattern every string matches. scripts/tests/test_agentbox_enroll.py checks
+# that the text calls no other function of this script and reads no other global of it.
+unenroll_fns() {
+    declare -f unenroll_revoke unenroll_learn unenroll_learn_each unenroll_session_wait session_live_box \
+        box_session_read box_file_lines box_run_user
+    declare -p BOX_SID_RE
+}
+
+# unenroll_revoke BOX WHAT ID: revoke enrollment ID of BOX. WHAT names where the id comes from:
+# `recorded`, or `runtime id <id>` for an id that a learn call got. A failure with a stderr line
+# that starts with `agent-secrets unenroll: UNENROLL_FAILED: ` is a known outcome: nothing was
+# revoked. After any other failure the outcome is not known, so the revoke runs once more at
+# once, and only once. The helper takes the broker's 404 as done, so a revoke of an ended
+# enrollment succeeds. Each client call writes one line to stdout, after the UTC time: the box,
+# the id, WHAT and the result. Status 0 when the broker revoked the enrollment, else 1.
+# unenroll_box runs this in a detached process (no `set -e`, no globals), and a direct call works
+# too.
+unenroll_revoke() {
+    local box="$1" what="$2" eid="$3" err rc try
+    for try in 1 2; do
+        rc=0
+        err="$(agent-secrets unenroll --helper --enrollment "$eid" 2>&1 >/dev/null)" || rc=$?
+        if (( rc == 0 )); then
+            echo "$(date -u +%FT%TZ) $box: enrollment $eid ($what) revoked"
+            return 0
+        fi
+        if [[ $'\n'"$err" == *$'\n''agent-secrets unenroll: UNENROLL_FAILED: '* ]]; then
+            echo "$(date -u +%FT%TZ) $box: enrollment $eid ($what) not revoked: agent-secrets unenroll exited $rc: ${err//$'\n'/ }; it lapses at the end of its lease (15 min)"
+            return 1
+        fi
+        if (( try == 1 )); then
+            echo "$(date -u +%FT%TZ) $box: enrollment $eid ($what): the outcome of the revoke is not known: agent-secrets unenroll exited $rc: ${err//$'\n'/ }; revoking once more"
+        else
+            echo "$(date -u +%FT%TZ) $box: enrollment $eid ($what): the outcome of the revoke is not known: agent-secrets unenroll exited $rc: ${err//$'\n'/ }; if it is live, it lapses at the end of its lease (15 min)"
+        fi
+    done
+    return 1
+}
+
+# unenroll_learn RUN_BASE BOX ENTRY: get the enrollment id of one open entry of BOX from the
+# broker, and revoke that id (unenroll_revoke). ENTRY is `<kind> <runtime id> <thumbprint>`
+# (ENROLL_OPEN). The learn call is `agent-secrets enroll --helper` with the entry's runtime id and
+# thumbprint, and with no --session-id (unenroll_box tells why). Its key dir is a new
+# RUN_BASE/learn.XXXXXX, not the box's key dir: the box can make that one unwritable, and the
+# close removes it. The client writes `enrollment` there, and this removes the dir after the call.
+# No walker of RUN_BASE takes the dir for a box: session_live_box reads only a dir that holds
+# enrollment-session. When the client exits 0 and prints an id, that id is revoked. Any other end
+# writes one line to stdout: the box, the entry and the client's stderr. An enrollment, if the
+# attempt made one, then ends with its lease. Status 0 when the id was revoked, else 1.
+unenroll_learn() {
+    local run_base="$1" box="$2" entry="$3" runtime tp dir eid err rc=0
+    read -r _ runtime tp <<<"$entry"
+    if ! dir="$(mktemp -d "$run_base/learn.XXXXXX" 2>&1)"; then
+        echo "$(date -u +%FT%TZ) $box: open attempt '$entry' not learned: no key dir for the learn call ($dir); an enrollment, if the attempt made one, ends with its lease (15 min)"
+        return 1
+    fi
+    eid="$(AGENT_SECRETS_KEY_DIR="$dir" agent-secrets enroll --helper --runtime-id "$runtime" \
+        --thumbprint "$tp" 2>"$dir/error")" || rc=$?
+    err="$(cat "$dir/error" 2>/dev/null || true)"
+    rm -rf -- "$dir"
+    eid="${eid//[[:space:]]/}"
+    if (( rc == 0 )) && [[ -n "$eid" ]]; then
+        unenroll_revoke "$box" "runtime id $runtime" "$eid" || return 1
+        return 0
+    fi
+    echo "$(date -u +%FT%TZ) $box: open attempt '$entry' not learned: agent-secrets enroll exited $rc and printed '$eid': ${err//$'\n'/ }; an enrollment, if the attempt made one, ends with its lease (15 min)"
+    return 1
+}
+
+# unenroll_learn_each RUN_BASE BOX ENTRY...: for each open ENTRY of BOX, of either kind, learn
+# its id and revoke it (unenroll_learn). The detached process for the box's own entries runs it,
+# and so does the session waiter for the session's entries. Status 0.
+unenroll_learn_each() {
+    local run_base="$1" box="$2" e
+    shift 2
+    for e in "$@"; do
+        unenroll_learn "$run_base" "$box" "$e" || true
+    done
+    return 0
+}
+
+# unenroll_session_wait GRACE RUN_BASE SKD BOX SID OWNER EID CLOSED ENTRY...: the session waiter
+# (unenroll_box). After GRACE seconds it runs the three tests. Test 1: SKD/owner still reads OWNER.
+# Test 2: session_live_box SID BOX, with RUN_BASE, returns 1 and prints `none`, which is its answer
+# "no other box of the session is live". Test 3: SKD's mtime is not later than CLOSED, the close's
+# time in nanoseconds; a missing SKD passes, since a box that enrolls for the session makes it
+# again. Each other answer stops the waiter, and one line names the recorded id EID (or `none`) and
+# each open ENTRY, all left alone:
+#   - Test 1 fails, or session_live_box returns 0 and prints a box name: the session is live.
+#   - Any other answer of session_live_box: test 2 could not be read, as status 2 (it could not
+#     look). The waiter takes no other status or output for one of the two answers. The line also
+#     names the status and the output, and says that an enrollment that no box renews ends with
+#     its lease (15 min). SKD stays.
+#   - Test 3 fails: a box started to enroll for the session after the close. SKD stays.
+#   - CLOSED is not a number, or SKD is there and its mtime cannot be read: test 3 could not be
+#     read. The line says so, and that the enrollments end with their lease. SKD stays.
+# The waiter must not guess "none": the session's recorded id is the id of every box of the
+# session, and a learn call with the session's key gets the id of the live enrollment back
+# (unenroll_box). When all three tests pass, it removes SKD, the session's key dir, and writes one
+# line. Then it revokes EID, when there is one (unenroll_revoke), and learns and revokes each
+# ENTRY (unenroll_learn_each).
+unenroll_session_wait() {
+    local grace="$1" run_base="$2" skd="$3" box="$4" sid="$5" owner="$6" eid="$7" closed="$8"
+    local now live rc mtime="" open=""
+    shift 8
+    if (( $# )); then
+        printf -v open '%s; ' "$@"
+        open=", and the enrollment of each open attempt: ${open%; }"
+    fi
+    sleep "$grace"
+    now="$(cat "$skd/owner" 2>/dev/null || true)"
+    if [[ "$now" != "$owner" ]]; then
+        echo "$(date -u +%FT%TZ) $box: session $sid came back in $now; enrollment ${eid:-none} left alone$open"
+        return 0
+    fi
+    rc=0
+    # session_live_box walks RUN_BASE, which a detached waiter has only as its argument.
+    live="$(RUN_BASE="$run_base" session_live_box "$sid" "$box" 2>/dev/null)" || rc=$?
+    if (( rc == 0 )) && [[ -n "$live" ]]; then
+        echo "$(date -u +%FT%TZ) $box: session $sid is live in box $live; enrollment ${eid:-none} left alone$open"
+        return 0
+    fi
+    if (( rc != 1 )) || [[ "$live" != none ]]; then
+        echo "$(date -u +%FT%TZ) $box: session $sid: test 2 could not be read (session_live_box returned $rc and printed '${live//$'\n'/ }'), so an enrollment that no box renews ends with its lease (15 min); enrollment ${eid:-none} left alone$open"
+        return 0
+    fi
+    [[ ! -e "$skd" ]] || mtime="$(stat -c %.9Y -- "$skd" 2>/dev/null || true)"
+    if [[ ! "$closed" =~ ^[0-9]+$ ]] || [[ -e "$skd" && ! "$mtime" =~ ^[0-9]+\.[0-9]{9}$ ]]; then
+        echo "$(date -u +%FT%TZ) $box: session $sid: test 3 could not be read (the close's time '$closed', the key dir's mtime '$mtime'), so an enrollment that no box renews ends with its lease (15 min); enrollment ${eid:-none} left alone$open"
+        return 0
+    fi
+    if [[ -n "$mtime" ]] && (( 10#${mtime/./} > 10#$closed )); then
+        echo "$(date -u +%FT%TZ) $box: session $sid: its key dir changed after the close, as when a box starts to enroll for the session; enrollment ${eid:-none} left alone$open"
+        return 0
+    fi
+    rm -rf "${skd:?}"
+    echo "$(date -u +%FT%TZ) $box: session $sid did not come back; ending enrollment ${eid:-none}$open"
+    [[ -z "$eid" ]] || unenroll_revoke "$box" recorded "$eid" || true
+    unenroll_learn_each "$run_base" "$box" "$@"
+    return 0
+}
+
+# session_live_box SID EXCEPT: whether session SID is live in a box other than EXCEPT. A box is
+# live when it enrolled for SID, or its omp's session file names SID, and its container still
+# exists. The run directory of every box holds the session it enrolled for (`enrollment-session`,
+# written by enroll_box) and is removed with the box, so this is the host's own record of who is
+# using the session's broker identity. A box that is still enrolling has no `enrollment-session`
+# yet, and with a broker slower than the waiter's grace the waiter ended the session's enrollment
+# while that box enrolled, which then enrolled again for the carry alone
+# (dispatch://INFRA-1720/comment/4fab10d7). Its omp writes the session file before the launcher
+# enrolls it (enroll_when_up waits for that file), so the file counts too (box_session_read).
+# A `docker ps` that fails does not mean "no container" (close_box_cache and the collector read
+# it the same way). An `enrollment-session` that is there but cannot be read does not mean
+# "another session" either. It has three answers:
+#   - Status 0 and the name of a live box.
+#   - Status 1 and `none`: no box of SID other than EXCEPT is live.
+#   - Status 2 and no output: no answer. SID is empty, or the walk found no live box but could not
+#     ask docker about a box of SID, or could not read a box's `enrollment-session`.
+#     A live box gives status 0 also after such a failure.
+# The answer "none" is the word, not the status alone, so that no other end of the call reads as
+# it. The walk uses no `$(<file)` (a file that cannot be opened ends the script) and no fork whose
+# failure it does not test, so a box it cannot read does not hide a live box after it. The unenroll
+# waiter runs it from the text it carries (unenroll_fns), so each function of this script it calls
+# must be in that text too.
 session_live_box() {
-    local sid="$1" except="${2:-}" d box
-    [[ -n "$sid" && -d "$RUN_BASE" ]] || return 1
+    local sid="$1" except="${2:-}" d box s names cannot=0
+    [[ -n "$sid" ]] || return 2
+    # With no box dir, or no RUN_BASE, the pattern stays as it is, and the `-s` test skips it.
     for d in "$RUN_BASE"/*/; do
-        box="$(basename "$d")"
+        box="${d%/}"
+        box="${box##*/}"
         [[ "$box" == "$except" || "$box" == session-keys ]] && continue
-        [[ -s "$d/enrollment-session" ]] || continue
-        [[ "$(<"$d/enrollment-session")" == "$sid" ]] || continue
-        [[ -n "$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)" ]] || continue
+        s=""
+        if [[ -s "$d/enrollment-session" ]] && ! read -r s 2>/dev/null <"$d/enrollment-session"; then
+            # Gone: the box closed during the walk. Still there: it cannot be read.
+            [[ ! -e "$d/enrollment-session" ]] || cannot=1
+            s=""
+        fi
+        if [[ "$s" != "$sid" ]] && box_session_read "$box"; then s="$BOX_SESSION_SID"; fi
+        [[ "$s" == "$sid" ]] || continue
+        if ! names="$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)"; then
+            cannot=1
+            continue
+        fi
+        [[ -n "$names" ]] || continue
         printf '%s\n' "$box"
         return 0
     done
+    (( cannot )) && return 2
+    echo none
     return 1
 }
 
@@ -1689,15 +2022,11 @@ ensure_forward_channels() {
 # 2026-11-02 every route to it from a box failed and two lanes waited on it - the box's own
 # loopback, the box network's gateway, docker0's 172.17.0.1, and the tailnet (`tailscale serve`'s
 # :8449 listener is bound to the tailscale0 device, so a packet from a box bridge never reaches
-# it). 5432 is the Cloud SQL Auth Proxy to agents-postgres
-# (omp/cloud-sql-proxy-agents-postgres.service): omp's session store writes a session's transcript
-# to the omp_sessions database through it (dispatch://INFRA-1192), and the DSN names 127.0.0.1:5432,
-# so the relay has to put the listener back on that exact address for one DSN to serve the host and
-# every box. The instance takes no raw TCP from here at all - measured 2026-11-04, its public
-# 136.117.143.83 and its private 10.54.0.8 both refuse 5432 and 6432 from the host and from inside a
-# box - so the proxy, and this relay, are the whole route. AGENTBOX_LOOPBACK_PORTS (space-separated
-# ports) replaces the list.
-read -r -a LOOPBACK_SERVICE_PORTS <<<"${AGENTBOX_LOOPBACK_PORTS-5005 5432}"
+# it). The database proxy on 5432 (omp/cloud-sql-proxy-agents-postgres.service) is not relayed:
+# agentbox has no route to omp's session database, and a box resumes a session only from its
+# transcript file (Sami, dispatch://INFRA-1720/ask/16322992). AGENTBOX_LOOPBACK_PORTS
+# (space-separated ports) replaces the list.
+read -r -a LOOPBACK_SERVICE_PORTS <<<"${AGENTBOX_LOOPBACK_PORTS-5005}"
 LOOPBACK_SERVICES=()
 loopback_services() {
     LOOPBACK_SERVICES=()
@@ -1787,11 +2116,26 @@ ensure_forwarders() {
     if "$DOTFILES_DIR/scripts/on-google-vm" 2>/dev/null; then
         # Google's metadata server refuses a Host header naming the relay, so a byte relay will
         # not do: scripts/agentbox-gce-metadata-relay rewrites it.
-        local relay="$DOTFILES_DIR/scripts/agentbox-gce-metadata-relay"
-        if systemctl --user is-active --quiet agentbox-imds \
-            && ! systemctl --user show -p ExecStart --value agentbox-imds 2>/dev/null | grep -qF "$relay"; then
-            systemctl --user stop agentbox-imds 2>/dev/null || true
+        #
+        # This one unit serves every box on the machine, so it runs the installed dotfiles' relay
+        # ($HOME/.dotfiles), never the relay of the checkout a launch runs from. A launch from a
+        # scratch clone used to stop it and start it from that clone; the clone was then deleted,
+        # and every box's relay ran a deleted script from 19:20Z on 2026-11-16 to 00:57:43Z
+        # (Proof1720, INFRA-1720). A relay running from anywhere else goes back onto the installed
+        # one. A machine with no installed relay keeps a running relay as it is, and starts this
+        # checkout's only when none runs.
+        local own="$DOTFILES_DIR/scripts/agentbox-gce-metadata-relay"
+        local relay="$HOME/.dotfiles/scripts/agentbox-gce-metadata-relay"
+        if [[ -f "$relay" ]]; then
+            if systemctl --user is-active --quiet agentbox-imds \
+                && ! systemctl --user show -p ExecStart --value agentbox-imds 2>/dev/null | grep -qF "$relay"; then
+                systemctl --user stop agentbox-imds 2>/dev/null || true
+            fi
+        else
+            relay="$own"
         fi
+        [[ "$(readlink -f "$relay")" == "$(readlink -f "$own")" ]] \
+            || echo "agentbox: agentbox-imds, the metadata relay every box shares, runs $relay, not this checkout's" >&2
         start_unit agentbox-imds python3 "$relay" "$NETWORK_GATEWAY" "$IMDS_PORT" "$NETWORK_SUBNET" || true
         wait_for bash -c "ss -ltn 'sport = :$IMDS_PORT' | grep -q '$NETWORK_GATEWAY:$IMDS_PORT'" \
             || die "forwarder agentbox-imds did not bind $NETWORK_GATEWAY:$IMDS_PORT (journalctl --user -u agentbox-imds)"
@@ -1898,13 +2242,10 @@ mount_args() {
     # limit of any kind here: a home path outside the allow-list is silently writable
     # (agentbox/AGENTS.md) and /tmp is where every tool puts its scratch. Docker nests binds by
     # destination, so every allow-listed path below still mounts on top of this $HOME, and the
-    # startup prunes exact host mountpoints before assigning private home directories.
+    # startup prunes exact host mountpoints before assigning private home directories. Both go
+    # with the box, and a new box starts with neither of an earlier box's (dispatch://INFRA-1720).
     mkdir -p "$BOXES/$box/home" "$BOXES/$box/tmp"
     chmod 1777 "$BOXES/$box/tmp"
-    # When the box started, so close_box can tell what the session wrote in its home from what the
-    # launch put there, and what the session's last box left in its home (box_home_carry).
-    : >"$BOXES/$box/.started"
-    seed_box_home "$box"
     local docker_source="${DOCKER_CONFIG:-$HOME/.docker}"
     local docker_snapshot="$BOXES/$box/docker-config" docker_links="$BOXES/$box/docker-binds"
     "$DOTFILES_DIR/scripts/agentbox-docker-snapshot" "$docker_source" "$docker_snapshot" "$docker_links" || return 1
@@ -2035,20 +2376,17 @@ mount_args() {
     # and so an in-box fetch, when the host had none, lands in the host's cache.
     mkdir -p -m 700 "/run/user/$UID_/envoy"
     a+=(-v "/run/user/$UID_/envoy:/run/user/$UID_/envoy")
-    # The verified-grader stream's gateway key and the omp session-store DSN are shared writable.
-    # The DSN (scripts/omp-session-dsn, dispatch://INFRA-1192) is the machine's, not the box's: it
-    # names the machine's IAM database user and no password, and the proxy it points at is the
-    # host's, relayed in on the same address (LOOPBACK_SERVICE_PORTS). A named --dir already
-    # supplies the same destination, so avoid a duplicate bind. Directories show atomic refreshes.
+    # The verified-grader stream's gateway key is shared writable. A named --dir already supplies
+    # the same destination, so avoid a duplicate bind. A directory shows an atomic refresh.
+    # Nothing of omp's session database is bound: no connection file, no proxy, no store setting,
+    # so a box resumes a session only from its transcript file (dispatch://INFRA-1720/ask/16322992).
     # /run/user/<uid>/ossv-box was here until 2026-11-04 and is not any more: the gateway providers
     # mint this machine's identity token per call through the metadata relay a box already has
     # (scripts/gateway-token), so there is no gateway credential file for a box to read
     # (dispatch://INFRA-993/comment/be112388).
-    mkdir -p -m 700 "/run/user/$UID_/verified-grader" "/run/user/$UID_/omp-session-sql"
-    local key_dir
-    for key_dir in "/run/user/$UID_/verified-grader" "/run/user/$UID_/omp-session-sql"; do
-        box_dir_named "$key_dir" || a+=(-v "$key_dir:$key_dir")
-    done
+    mkdir -p -m 700 "/run/user/$UID_/verified-grader"
+    box_dir_named "/run/user/$UID_/verified-grader" \
+        || a+=(-v "/run/user/$UID_/verified-grader:/run/user/$UID_/verified-grader")
     # The shared ssh identity bin/ossv-vm uses to reach the gateway VM, where the host has it:
     # without it `ossv-vm` in a box cannot reach that VM at all (agentvm, 2026-11-03). A box is
     # for segregation, not for keeping a session from what its host gives it (Sami,
@@ -2210,63 +2548,64 @@ session_env() {
     printf '%s\n' "${e[@]}"
 }
 
-# The session id of the omp running in a box: the file it holds open,
-# ~/.omp/agent/sessions/<dir>/<ts>_<id>.jsonl, read from its fd table (omp
-# exports OMP_SESSION_ID to its children, not itself) - or, when none is open
-# (idle after a resume or a full-file rewrite), the newest session file of the
-# box's own directory under <boxes>, which omp keys by cwd and whose box name is
-# never reused. A box working in a host directory (--dir) has no such fallback,
-# on purpose: omp keys that directory by the path, which the host and every
-# other box naming it share, so its newest file is very often another session's
-# - measured 2026-11-01, where a glob by working directory answered with a live
-# HOST session's id for both test boxes. Acting on that id would notify the
-# wrong session on `agentbox restart` and release ANOTHER session's knives
-# claims at close, so an empty answer is the right one. Empty also until a
-# session has materialized, and for a --no-session run.
+# The files a box's runner and its omp leave for the host, in the box's runtime directory
+# (/run/user/<uid> in the box, $RUN_BASE/<box>/run-user here; mount_args), which the box's end
+# deletes (dispatch://INFRA-1720):
+#   agentbox-session  the session the box's omp runs, written by omp/extensions/session-env.ts in
+#                     the omp whose parent is the runner, at its start, at once after /new,
+#                     /resume, /fork and /branch, and within 10 s of any other change: four lines,
+#                     `version=1`, `pid=<its pid in the box>`, `session=<id>`, `file=<transcript>`,
+#                     replaced whole by a rename;
+#   agentbox-runner   written by scripts/agentbox-run.ts at its start (`version=1`): a box with
+#                     none runs a runner older than this change, which answers no restart;
+#   agentbox-restart  the runner's answer to each restart request, one line each, ending
+#                     ` [request <id>]` for the request a caller left in agentbox-restart.d
+#                     (restart_request, restart_answer).
+# The box can write anything there, so the host takes each only when it is a regular file, and
+# from the session file only a UUID, a pid and an absolute path.
+box_run_user() { echo "$RUN_BASE/$1/run-user"; }
+BOX_SID_RE='^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+
+# box_file_lines FILE: the first lines of FILE when it is a regular file and not a link, nothing
+# otherwise. A box can put a FIFO or a link where a file was between the test and the read, so the
+# read is bounded both in time and in size.
+box_file_lines() {
+    [[ -f "$1" && ! -L "$1" ]] || return 0
+    timeout 5 head -c 65536 -- "$1" 2>/dev/null | head -n 16 || true
+}
+
+# box_session_read BOX: BOX_SESSION_SID, BOX_SESSION_PID and BOX_SESSION_FILE from BOX's session
+# file. Status 1, with all three empty, when the box names no session.
+BOX_SESSION_SID="" BOX_SESSION_PID="" BOX_SESSION_FILE=""
+box_session_read() {
+    local line version="" sid="" pid="" file=""
+    BOX_SESSION_SID="" BOX_SESSION_PID="" BOX_SESSION_FILE=""
+    while IFS= read -r line; do
+        case "$line" in
+            version=*) version="${line#version=}" ;;
+            pid=*) pid="${line#pid=}" ;;
+            session=*) sid="${line#session=}" ;;
+            file=*) file="${line#file=}" ;;
+        esac
+    done < <(box_file_lines "$(box_run_user "$1")/agentbox-session")
+    [[ "$version" == 1 && "$sid" =~ $BOX_SID_RE ]] || return 1
+    [[ "$pid" =~ ^[1-9][0-9]{0,9}$ ]] || pid=""
+    [[ "$file" == /* ]] || file=""
+    BOX_SESSION_SID="$sid" BOX_SESSION_PID="$pid" BOX_SESSION_FILE="$file"
+}
+
+# The session id of the omp running in a box, from the box's session file and nothing else: no
+# `docker exec`, no launch line, no directory. Each of those was a guess at what omp does, and each
+# was blind to a session started fresh until its first reply and to every session under omp's
+# database store, which writes no transcript: on 2026-11-08 13 of 70 live boxes carried no
+# `--resume`, and `agentbox restart <id>` answered `no running box matches` for a live box at
+# 02:03:36Z (dispatch://INFRA-1720). Empty for a box started before this change (its omp writes no
+# such file), for a profile that opts out of the shared extensions (`.no-shared-setup`), for a
+# --no-session run, and for a box whose command is not omp. Callers run under set -e, so this
+# succeeds, empty, then.
 box_session_id() {
-    local sid
-    # Only a transcript held for WRITING names this box's session. omp's session writer holds
-    # its own file O_WRONLY|O_APPEND for its life, while an omp opens ANOTHER session's
-    # transcript read-only whenever a tool reads one -- which is why `omp-session-live` reads
-    # the access mode too. Without that filter this answered with a session that merely passed
-    # through: on 2026-11-08 the grading lane's box reported 01a1b8ff, a live session working
-    # in /mnt/nvme/sami/gate-runs, and `agentbox sh <that id>` then ran a command in the
-    # GRADING lane's box. For restart that is a hang-up of the wrong lane, and at close it is
-    # another session's knives claims released.
-    sid="$(docker exec "$1" sh -c '
-        for p in $(pgrep -x omp); do
-            for fd in /proc/$p/fd/*; do
-                case "$(readlink "$fd" 2>/dev/null)" in
-                    *.jsonl) ;;
-                    *) continue ;;
-                esac
-                flags=$(sed -n "s/^flags:[[:space:]]*//p" "/proc/$p/fdinfo/${fd##*/}" 2>/dev/null)
-                [ -n "$flags" ] || continue
-                # O_WRONLY (1) or O_RDWR (2) in the low two bits: a reader has neither.
-                [ $(( 0$flags & 3 )) -ne 0 ] || continue
-                readlink "$fd" 2>/dev/null
-            done
-        done | sed -n "s#.*/\\.omp/agent/sessions/[^/]*/[0-9T:-]*Z_\\([0-9a-f-]\\{36\\}\\)\\.jsonl\$#\\1#p" | head -1' 2>/dev/null || true)"
-    [[ -n "$sid" ]] && { echo "$sid"; return 0; }
-    # The launch line the runner logged for this box. Under the SQL session store omp holds no
-    # transcript open at all, so the scan above now answers empty for EVERY box -- 0 of 12 host
-    # omp processes held one when measured on 2026-11-08 -- and with only the cwd fallback left,
-    # `agentbox restart|sh|grow <session id>` could not find a live, healthy box: the grading
-    # lane's at 02:03Z and the librarian's at 02:35Z, each with its omp alive and its cgroup
-    # naming the box (dispatch://INFRA-1720). This route is safe where the cwd glob is not,
-    # because it is not a guess from a shared directory: a resume names its own session in its
-    # own argv, so the id belongs to the omp this box started. A box launched with a brief and
-    # never resumed carries no id here and still answers empty.
-    local launched
-    launched="$(sed -n 's/.*: omp started ([^)]*): .*--resume \([^ ]*\).*/\1/p' \
-        "$HOME/.cache/omp/agentbox/$1.log" 2>/dev/null | tail -1 || true)"
-    # Either a bare id or a transcript path, whose own file name carries the id.
-    sid="$(sed -n 's#^\([0-9a-f-]\{36\}\)$#\1#p; s#.*Z_\([0-9a-f-]\{36\}\)\.jsonl$#\1#p' <<<"$launched" | tail -1)"
-    [[ -n "$sid" ]] && { echo "$sid"; return 0; }
-    # Callers run under set -e: this must succeed, empty, while no file exists.
-    local files
-    files="$(ls -t "$HOME/.omp/agent/sessions/-boxes-$1-"*/*.jsonl 2>/dev/null || true)"
-    sed -n '1s#.*Z_\([0-9a-f-]\{36\}\)\.jsonl$#\1#p' <<<"$files"
+    box_session_read "$1" || return 0
+    printf '%s\n' "$BOX_SESSION_SID"
 }
 
 # A clone and the close-phase knives run in their own session (`setsid`): the
@@ -2562,162 +2901,6 @@ clone_checkout() {
     fi
 }
 
-# What a box's clone holds that its remote does not, as one line, empty when nothing: uncommitted
-# changes, tracked or untracked, and each branch, stash or detached HEAD with commits no
-# remote-tracking ref reaches. A clone the launcher never finished checking out holds nothing; one git
-# cannot read says so, and close_box keeps it like any other.
-unpushed_work() {
-    local ws="$1" status ref found=()
-    git -C "$ws" rev-parse --verify --quiet HEAD >/dev/null || return 0
-    if ! status="$(git -C "$ws" status --porcelain 2>&1)"; then
-        echo "a checkout git cannot read: ${status%%$'\n'*}"
-        return 0
-    fi
-    if [[ -n "$status" ]]; then found+=("$(wc -l <<<"$status") uncommitted paths"); fi
-    if ! git -C "$ws" symbolic-ref --quiet HEAD >/dev/null && [[ -n "$(git -C "$ws" rev-list -1 HEAD --not --remotes)" ]]; then
-        found+=("a detached HEAD")
-    fi
-    while read -r ref; do
-        if [[ -n "$(git -C "$ws" rev-list -1 "$ref" --not --remotes)" ]]; then found+=("${ref#refs/heads/}"); fi
-    done < <(git -C "$ws" for-each-ref --format='%(refname)' refs/heads refs/stash)
-    if (( ${#found[@]} )); then echo "${found[*]}"; fi
-    return 0
-}
-
-# $HOME in a box is $BOXES/<box>/home on the host, so every file a session writes in its home and
-# not under a --dir path lives there and dies with the box. `agentbox move --self` on sami-devbox
-# removed box agentbox-74a3ddaacbdc with its home at 17:22Z, and PEER's WAKE-peer-01a13837.md and
-# .leanperf.md, written minutes before, went with it (2026-11-03). So a home with files NEWER than
-# the box's start is never removed unseen: they are copied under BOX_HOMES, keyed by the session,
-# and the next box of that session (a rebox, a resume) starts with them in place. A copy that is
-# too big or that fails keeps the whole box directory instead.
-BOX_HOMES="${AGENTBOX_BOX_HOMES:-${XDG_STATE_HOME:-$HOME/.local/state}/agentbox/box-homes}"
-BOX_HOME_CARRY_BYTES="${AGENTBOX_BOX_HOME_CARRY_BYTES:-2000000000}"
-
-# box_home_is_credential PATH: true when PATH, relative to the box home as `find .` prints it, is a
-# live credential store. A carry copies a box home into $BOX_HOMES, which outlives the box and the
-# session, so a token copied there is a long-lived secret nobody is watching: the 2026-11-03 and
-# 11-04 snapshots held gcloud refresh and access tokens and a docker `auth` line, under a tree that
-# was world-readable until an SRE set it 0700 (INFRA-6). The list is explicit on purpose -- each
-# entry is a file format that holds a usable token -- with two short patterns standing in for whole
-# credential trees: a *token*/*credential* basename anywhere under .config, and a gcloud or docker
-# store wherever a session put one (the 11-04 snapshot's gcloud store was under
-# scratch/<peer>/agentbox-gcloud-session/gcloud/, not in .config at all). Everything else is carried
-# as before; a session's notes are the point of the carry.
-box_home_is_credential() {
-    local p="${1#./}" base
-    case "$p" in
-        .netrc|*/.netrc) return 0 ;;
-        .kube/config|*/.kube/config) return 0 ;;
-        .docker/config.json|*/.docker/config.json) return 0 ;;
-        .azure/msal_token_cache*|*/.azure/msal_token_cache*) return 0 ;;
-        .azure/accessTokens.json|*/.azure/accessTokens.json) return 0 ;;
-        */legacy_credentials/*) return 0 ;;
-        .config/gh/hosts.yml|.config/gh-*/hosts.yml|*/.config/gh/hosts.yml|*/.config/gh-*/hosts.yml) return 0 ;;
-    esac
-    base="${p##*/}"
-    case "$base" in
-        credentials.db|access_tokens.db|application_default_credentials.json) return 0 ;;
-    esac
-    # The documented pattern: under .config, a name that says token or credential.
-    case "$p" in
-        .config/*|*/.config/*)
-            case "${base,,}" in *token*|*credential*) return 0 ;; esac
-            ;;
-    esac
-    return 1
-}
-
-# A session id, and nothing else, may become a directory name under $BOX_HOMES. A caller once
-# passed docker's stderr ("OCI runtime exec failed: ..."), which became a directory of its own
-# there, and the five sessions whose homes landed under it never got them back on a rebox, since
-# seed_box_home looks under the real id. A value that is not a UUID is dropped, and the carry is
-# keyed by the box instead: still on disk, still findable, just not attributed to a session.
-BOX_SID_RE='^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
-
-# box_home_carry BOX SID: copy what the session wrote in BOX's home; prints the directory it wrote,
-# or nothing when the home holds no new file. Status 1 when the home must be kept in place.
-box_home_carry() {
-    local box="$1" sid="${2:-}" list dest bytes n
-    if [[ -n "$sid" && ! "$sid" =~ $BOX_SID_RE ]]; then
-        echo "agentbox: the session id given for $box is not a UUID (${#sid} characters); this carry is keyed by the box" >&2
-        sid=
-    fi
-    local home="$BOXES/$box/home" stamp="$BOXES/$box/.started"
-    [[ -d "$home" ]] || return 0
-    list="$(mktemp)" || return 1
-    if [[ -e "$stamp" ]]; then
-        (cd "$home" && find . -newer "$stamp" \( -type f -o -type l \) -print0 >"$list")
-    else
-        # A box from before the stamp: everything in its home counts as the session's.
-        (cd "$home" && find . \( -type f -o -type l \) -print0 >"$list")
-    fi
-    if [[ ! -s "$list" ]]; then rm -f "$list"; return 0; fi
-    # A credential store is never carried; its NAME (never its contents) goes in the summary.
-    local keep path skipped=()
-    keep="$(mktemp)" || { rm -f "$list"; return 1; }
-    while IFS= read -r -d '' path; do
-        if box_home_is_credential "$path"; then
-            skipped+=("${path#./}")
-        else
-            printf '%s\0' "$path" >>"$keep"
-        fi
-    done <"$list"
-    rm -f "$list"
-    list="$keep"
-    if (( ${#skipped[@]} )); then
-        echo "agentbox: ${#skipped[@]} credential file(s) in $home are NOT carried: ${skipped[*]}" >&2
-    fi
-    if [[ ! -s "$list" ]]; then rm -f "$list"; return 0; fi
-    n="$(tr -dc '\0' <"$list" | wc -c)"
-    # -B1, never -b: `du -b` is --apparent-size, which counts a sparse file's holes.
-    bytes="$(cd "$home" && xargs -0r du -scB1 <"$list" 2>/dev/null | awk '$2 == "total" { print $1 }')"
-    if [[ -n "$bytes" ]] && (( bytes > BOX_HOME_CARRY_BYTES )); then
-        rm -f "$list"
-        echo "agentbox: $home holds $(numfmt --to=iec "$bytes") written since the box started, over the $(numfmt --to=iec "$BOX_HOME_CARRY_BYTES") a close copies; $BOXES/$box is left in place for its owner" >&2
-        return 1
-    fi
-    dest="$BOX_HOMES/${sid:-$box}/$box-$(date -u +%Y%m%dT%H%M%SZ)"
-    # 0700 for the root and every directory under it: a carry holds a session's private files.
-    # tar, not `cp -a --parents`: cp recreates each parent with the SOURCE's mode, so a
-    # read-only directory -- Go's module cache is 0555 throughout -- cannot then receive the file
-    # under it, and the whole carry fails. On 2026-11-07 that happened twice, at 15:19:26Z and
-    # 17:25:54Z, each time leaving a box behind with part of its home copied. tar applies a
-    # directory's permissions after writing its contents, which is the case cp gets wrong, and
-    # preserves modes, symlinks and sparse files the same way.
-    if ! (umask 077; mkdir -p "$dest") || ! chmod 700 "$BOX_HOMES" "$BOX_HOMES/${sid:-$box}" "$dest" \
-        || ! (cd "$home" && tar --null --no-recursion -T "$list" -cf - 2>/dev/null) \
-             | (cd "$dest" && tar -xf - 2>/dev/null); then
-        rm -f "$list"
-        echo "agentbox: could not copy what $home holds to $dest; $BOXES/$box is left in place for its owner" >&2
-        return 1
-    fi
-    rm -f "$list"
-    echo "agentbox: $n file(s) the session wrote in its box home are kept in $dest" >&2
-    printf '%s\n' "$dest"
-    return 0
-}
-
-# seed_box_home BOX: put what the session's last box left in its home (box_home_carry) into the new
-# box's home, so a rebox keeps it. BOX_SEED_SID names the session; without it nothing is seeded. A
-# file the new home has already is NOT replaced, and the carried copy stays on disk.
-seed_box_home() {
-    local box="$1" last sid="${BOX_SEED_SID:-}"
-    if [[ -n "$sid" && ! "$sid" =~ $BOX_SID_RE ]]; then
-        echo "agentbox: BOX_SEED_SID is not a UUID (${#sid} characters); nothing is seeded into $box" >&2
-        return 0
-    fi
-    [[ -n "$sid" && -d "$BOX_HOMES/$sid" ]] || return 0
-    last="$(find "$BOX_HOMES/$sid" -mindepth 1 -maxdepth 1 -type d -printf '%T@\t%p\n' 2>/dev/null | sort -rn | head -1 | cut -f2-)"
-    [[ -n "$last" ]] || return 0
-    if cp -a -n "$last/." "$BOXES/$box/home/" 2>/dev/null; then
-        echo "agentbox: what this session's last box left in its home is in this box's home ($last)" >&2
-    else
-        echo "agentbox: could not put $last into $BOXES/$box/home; those files are still in $last" >&2
-    fi
-    return 0
-}
-
 # box_reclaim BOX: drop the page cache a running box's cgroup holds, just before agentbox stops
 # the box. sami-devbox's 7.0 kernel lacks upstream f6988c90671e: a cgroup that dies holding many
 # page-cache inodes has every one of them switched to another writeback context, one at a time,
@@ -2749,15 +2932,20 @@ box_reclaim() {
     return 0
 }
 
-# Everything the box made goes: the knives claims its session holds, then the directory. The
-# container must be gone first — it holds the mounts, and docker recreates a removed mountpoint
-# root-owned. The work in a clone is its agent's to push or remove (Sami, AGENTC-1420, 2026-10-02:
-# "Just tell the agents to migrate off of the JJ workspaces, and then they can handle it"), and
-# nothing is saved for it; a clone holding work its remote does not have keeps the whole box
-# directory in place, named on the pane, so nothing is discarded unseen.
+# THE END OF A BOX DELETES EVERYTHING IN IT (Sami, dispatch://INFRA-1720/ask/16322992): its
+# container with its anonymous volumes (the inner Docker store at /var/lib/docker), its clones,
+# whatever they hold, its home, its image, its cache, its runtime directory, its record and the
+# record's `.exit` marker, and its tmux relay unit. Nothing is copied out of it and nothing is kept
+# for anybody: a session pushes what it wants kept before it ends. Until dispatch://INFRA-1720 a
+# close copied the files a session wrote in its home to ~/.local/state/agentbox/box-homes/, put them
+# into the session's next box, and kept the whole box directory when a clone held work no remote
+# had or the copy failed; a container removed without `-v` left its volume behind. The one thing
+# that stays is agentbox's own log of the end, the row record_box_exit appends to
+# agentbox-exits.tsv. Only a removal that fails is said, with the command that completes it. The
+# container must be gone first: it holds the mounts, and docker recreates a removed mountpoint
+# root-owned.
 close_box() {
-    local box="$1" sid="$2" repo ws work kept=0 _
-    shift 2
+    local box="$1" sid="$2" _
     # Without --rm the container does not disappear on its own, so the wait is for it to STOP,
     # not to vanish. A container that is already gone (an older box, a forced removal) leaves
     # the loop at once.
@@ -2771,12 +2959,12 @@ close_box() {
         # reclaimed before the container goes or every umount on the machine queues behind it.
         echo "agentbox: $box is still running after 60s; removing it" >&2
         box_reclaim "$box"
-        docker rm -f "$box" >/dev/null 2>&1 || true
+        docker rm -fv "$box" >/dev/null 2>&1 || echo "agentbox: removing $box's container failed; remove it with: docker rm -fv $box" >&2
     elif docker inspect "$box" >/dev/null 2>&1; then
         # Exited, and without --rm it is still there with its status readable. Write the row
         # before removing it; record_box_exit is a no-op when the launcher already wrote one.
         record_box_exit "$box" "$sid" ""
-        docker rm "$box" >/dev/null 2>&1 || true
+        docker rm -v "$box" >/dev/null 2>&1 || echo "agentbox: removing $box's container failed; remove it with: docker rm -v $box" >&2
     fi
     # An omp in the box may have queued this pane for the attention cockpit, and
     # its own shutdown drop died with the container. The launcher runs in the same
@@ -2787,193 +2975,466 @@ close_box() {
     # The container is gone: nothing inside can use the key any more, and the broker must not
     # accept it either. Before the rm -rf below, which takes the key dir with it.
     unenroll_box "$box"
-    close_box_cache "$box"
+    # A removal that fails says so with its command (status 1) and the close goes on: every step
+    # after it still runs.
+    close_box_cache "$box" || true
     finish_knives_claims "$sid"
-    for repo in "$@"; do
-        ws="$BOXES/$box/$repo"
-        [[ -d "$ws/.git" ]] || continue
-        work="$(unpushed_work "$ws")"
-        if [[ -n "$work" ]]; then
-            echo "agentbox: $ws holds work its remote does not have ($work); $BOXES/$box is left in place for its owner to push or remove" >&2
-            if mountpoint -q "$BOXES/$box" 2>/dev/null; then
-                echo "agentbox: that directory is the box's own filesystem; release it with: sudo umount '$BOXES/$box' && rm -f '$BOX_DISKS/$box.img'" >&2
-            fi
-            kept=1
-        fi
-    done
-    # What the session wrote in its box home, before anything is removed.
-    box_home_carry "$box" "$sid" >/dev/null || kept=1
     stop_tmux_forwarder "$box"
-    rm -rf "${RUN_BASE:?}/$box"
+    close_box_run_dir "$box" || true
     # The box's own filesystem takes everything in it (close_box_disk), leaving the mountpoint
-    # for the rm below; a box with no disk limit has no image and the rm does all of it. A
-    # filesystem that will not unmount keeps its directory, with the command that frees it.
-    if (( ! kept )) && close_box_disk "$box"; then
-        rm -rf "${BOXES:?}/$box"
-    fi
+    # for the rm below; a box with no disk limit has no image and the rm does all of it.
+    close_box_dir "$box"
 }
 
-# THE PREDECESSOR GOES WHEN THE NEW BOX IS UP. A session that is resumed - a move, a re-box, a
-# restarter's respawn, a tmux restore after a reboot - gets a NEW box every time, and its old
-# box's image stays on disk whenever the old launcher did not get to run close_box: the machine
-# went down under it, its pane was killed, it was killed. At 20:05Z on 2026-11-04 that was 103
-# images and 416.2 GiB on this host, each one belonging to a session alive in a new box, one
-# session having left two of them in a day. Nothing ever removed them, because nothing knew
-# whose they were; the record above is what makes them nameable and this is what collects them.
-#
-# The care close_box takes, with one deliberate difference and the reason for it:
-#   - a box whose container still exists, in any state, is never touched;
-#   - a clone holding work no remote has keeps the whole box, named in the log;
-#   - what the session wrote in the old box's home is carried out first (box_home_carry), and a
-#     carry that cannot be made keeps the box;
-#   - the knives claims are NOT released. close_box releases the claims of the session whose box
-#     it closes; here that session is ALIVE in the new box and holds those same claims - knives
-#     keys a claim by session id and the box and the host share one state file
-#     (agentbox/AGENTS.md), so `knives finish` as that id would take a live session's branches
-#     away from it. The predecessor holds no claim of its own.
-# Everything else is close_box's own path: unenroll_box, close_box_cache, the runtime dir, then
-# close_box_disk and the directory. Anything that cannot be shown safe keeps the box and says in
-# one line which test it was.
-REAP_LOG_DIR="${AGENTBOX_REAP_LOG_DIR:-$HOME/.cache/omp/agentbox}"
-# How long the reaper waits for the new box's session to register before it gives up and removes
-# nothing: the wake's own ceiling (MOVE_WAKE_TOTAL, defined below this line and read the same
-# way) and the same registration test.
-REAP_WAIT_TOTAL="${AGENTBOX_REAP_WAIT_TOTAL:-${AGENTBOX_WAKE_TOTAL:-7200}}"
-REAP_WAIT_STEP="${AGENTBOX_REAP_WAIT_STEP:-10}"
-# How long the one privileged step of a removal, the loop mount of an image that is not
-# mounted, may take before the box is kept instead.
-REAP_MOUNT_WAIT="${AGENTBOX_REAP_MOUNT_WAIT:-60}"
-
-reap_say() { echo "$(date -u +%FT%TZ) agentbox reap: $*"; }
-
-# box_predecessors SID KEEP: every box of SID on this host except KEEP, oldest first, from the
-# records. A box from before records exist names no session and is never reaped: a sweep with a
-# person in it is the only thing that can place those.
-box_predecessors() {
-    local sid="$1" keep="$2" rec box
-    [[ -n "$sid" && -d "$BOX_RECORDS" ]] || return 0
-    for rec in "$BOX_RECORDS"/*.info; do
-        [[ -f "$rec" ]] || continue
-        box="$(basename "$rec" .info)"
-        [[ "$box" == "$keep" ]] && continue
-        [[ "$(box_record_get "$box" session)" == "$sid" ]] || continue
-        printf '%s\t%s\n' "$(box_record_get "$box" created)" "$box"
-    done | sort | cut -f2
+# close_box_run_dir BOX: $RUN_BASE/<box>, the box's runtime directory and enrollment files. One
+# that will not go is said with the command that removes it. Status 1 then.
+close_box_run_dir() {
+    local dir="${RUN_BASE:?}/$1"
+    rm -rf "$dir" || true
+    [[ -e "$dir" || -L "$dir" ]] || return 0
+    echo "agentbox: removing $1's runtime directory $dir failed; remove what is left with: $(remove_paths_command "$dir")" >&2
+    return 1
 }
 
-# reap_box BOX SID: remove the predecessor BOX of session SID, or keep it and say why. Status 1
-# when it is kept.
-reap_box() {
-    local box="$1" sid="$2" names ws work found=() mounted_here=0 img="$BOX_DISKS/$1.img" freed=""
-    if [[ ! -e "$img" && ! -d "$BOXES/$box" ]]; then
-        rm -f "$(box_record "$box")"
-        reap_say "$box has no image and no directory; its record is removed"
-        return 0
-    fi
-    # A LIVE container means the box may still be in use: never touched, never killed. An exited
-    # one is the case this function exists for since --rm was dropped: its status is read, the
-    # tally row is written, and then it is removed. Before that change an exited container could
-    # not be seen here at all, which is why a launcher that died left no record.
-    if ! names="$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)"; then
-        reap_say "$box kept: docker could not be asked whether its container is gone"
-        return 1
-    fi
-    if [[ -n "$names" ]]; then
-        if [[ "$(docker inspect -f '{{.State.Status}}' "$box" 2>/dev/null)" != exited ]]; then
-            reap_say "$box kept: its container is not exited"
-            return 1
-        fi
-        record_box_exit "$box" "$sid" ""
-        if ! docker rm "$box" >/dev/null 2>&1; then
-            reap_say "$box kept: its exited container could not be removed"
-            return 1
-        fi
-        reap_say "$box: its exited container was recorded and removed"
-    fi
-    # Its clones and its home are inside its own filesystem, so an image that is not mounted
-    # (the usual state after a reboot) is mounted here to be read. Read-write: a carry copies
-    # out of it, and ext4 recovers its journal at mount either way. Bounded: on 2026-11-04 this
-    # machine spent 74 minutes with a mount of a box image stuck in uninterruptible sleep, and
-    # a collector of old boxes must not be the thing that waits in it.
-    if [[ -e "$img" ]] && ! mountpoint -q "$BOXES/$box" 2>/dev/null; then
-        mkdir -p "$BOXES/$box" 2>/dev/null || true
-        if ! timeout "$REAP_MOUNT_WAIT" sudo -n mount -o loop,noatime "$img" "$BOXES/$box" 2>/dev/null; then
-            reap_say "$box kept: its image $img could not be mounted within ${REAP_MOUNT_WAIT}s, so its clones could not be checked"
-            return 1
-        fi
-        mounted_here=1
-    fi
-    for ws in "$BOXES/$box"/*/; do
-        ws="${ws%/}"
-        [[ -d "$ws/.git" ]] || continue
-        work="$(unpushed_work "$ws")"
-        [[ -n "$work" ]] && found+=("$ws ($work)")
+# close_box_dir BOX: the box's filesystem and image (close_box_disk), then its directory. A
+# filesystem that will not unmount, or a tree that will not go (a read-only directory a session
+# made), is said with the command that completes the removal. Status 1 then.
+close_box_dir() {
+    local box="$1"
+    close_box_disk "$box" || return 1
+    [[ -e "$BOXES/$box" ]] || return 0
+    rm -rf "${BOXES:?}/$box" 2>/dev/null || { chmod -R u+w "${BOXES:?}/$box" 2>/dev/null; rm -rf "${BOXES:?}/$box" 2>/dev/null; } || true
+    [[ ! -e "$BOXES/$box" ]] && return 0
+    echo "agentbox: removing $BOXES/$box failed; remove what is left with: chmod -R u+w '$BOXES/$box' && rm -rf '$BOXES/$box'" >&2
+    return 1
+}
+
+# THE COLLECTOR deletes what a box left when its launcher died (dispatch://INFRA-1720, R8): a
+# launcher killed by SIGKILL, a pane killed, a machine that went down. Such a box never runs
+# close_box. Before this change it was deleted only when a later box of the same session started
+# (`agentbox reap-previous`), and kept when a clone in it held work no remote had. Each
+# `agentbox new` now starts the collector, detached and one at a time (a lock), and it deletes
+# every box it finds that nothing uses. It finds boxes only by names of the form agentbox-<12 hex>:
+# under its own roots, the box tree (BOXES), the records and images (BOX_RECORDS, BOX_DISKS), the
+# caches (BOX_CACHE_ROOT) and $RUN_BASE, where some boxes leave their run dir and nothing else (9
+# of 288 on sami-devbox at 2026-11-15T21:28Z); and in Docker, the exited containers, which can
+# outlive everything else of a box (a `docker rm` that failed, files a person removed) and hold
+# its inner Docker store in their anonymous volume. It deletes a box, in every place the box left
+# (those roots, its exited container with its volumes, its tmux relay unit agentbox-tmux-<box>),
+# when all of these hold:
+#   - it has no container, or an exited one (docker that cannot be asked keeps it);
+#   - its launcher is not running: the record's launcher pid with the same start time. A record
+#     without one (every box started before this change) counts as a launcher that is not running;
+#   - the newest of its files under those roots is more than an hour old: a box being made has no
+#     container for minutes while its clones are made, and one being closed has none while its
+#     launcher still works. With no file under the roots, its container ended more than an hour
+#     ago (`.State.FinishedAt`); an end time docker does not give keeps it;
+#   - no process has its working directory, a file it holds open or the program it runs under the
+#     box's directory or its $RUN_BASE/<box>, except the box's own tmux relay unit, which outlives
+#     a launcher that died.
+# What it cannot read is no answer: an age walk find could not finish, a process of this user whose
+# working directory it cannot read (but a container's and the user's systemd manager, which it
+# names; collect_read_cwds), or a walk of the processes that found none stops it removing
+# the box that pass. Two exceptions in the age walk, each named in the pass: a directory another
+# user owns and this user may not open is left out of the age, and a directory this user owns whose
+# own mode shuts it out (a test's fixture) is opened once no process stands in the box, and read
+# (collect_box). Each box it does not remove gets one line naming why and the command that
+# removes it (collect_not_removed), and a removal that fails one line naming what is still there
+# and that command; no line says a box was kept (dispatch://INFRA-1720, R8).
+# Before it deletes $RUN_BASE/<box>, which holds the box's enrollment files, it runs unenroll_box
+# for that box as close_box does: the box's own recorded enrollment is revoked at once, and a
+# session's goes to #66's session waiter. With an `enrollment-session` that cannot be read the
+# recorded id is left to its lease. The collector holds none of a launcher's open enroll calls.
+# It touches nothing under $RUN_BASE, in Docker or in systemd that is not such a box: the session
+# bus relay `bus`, the session keys `session-keys` with `unenroll.log`, and the key dirs of #66's
+# learn calls (`learn.*`) are not boxes. It mounts nothing: with nothing kept, nothing in an image
+# needs reading. A mounted image is unmounted first (close_box_disk). It never releases knives
+# claims: those belong to the session, which can be alive in another box.
+COLLECT_LOG_DIR="${AGENTBOX_COLLECT_LOG_DIR:-$HOME/.cache/omp/agentbox}"
+COLLECT_AGE_MIN=60
+collect_say() { echo "$(date -u +%FT%TZ) agentbox collect: $*"; }
+
+# collect_candidates: each box name with an entry under the collector's roots, an exited container
+# of that name, or a tmux relay unit of that name (agentbox-tmux-<box>), once. A unit can be all
+# that a box left: on sami-devbox 15 ran from 5-12 Nov to 2026-11-16, for boxes with nothing else.
+collect_candidates() {
+    local p n
+    {
+        for p in "$BOXES"/agentbox-* "$BOX_DISKS"/agentbox-*.img "$BOX_RECORDS"/agentbox-*.info \
+            "$BOX_RECORDS"/agentbox-*.info.exit "$BOX_CACHE_ROOT"/agentbox-* "$RUN_BASE"/agentbox-*; do
+            [[ -e "$p" || -L "$p" ]] || continue
+            n="${p##*/}"
+            n="${n%.exit}"
+            n="${n%.info}"
+            n="${n%.img}"
+            printf '%s\n' "$n"
+        done
+        docker ps -a --filter name='^agentbox-' --filter status=exited --format '{{.Names}}' 2>/dev/null || true
+        systemctl --user list-units --all --plain --no-legend 'agentbox-tmux-agentbox-*' 2>/dev/null \
+            | sed -n 's/^agentbox-tmux-\(agentbox-[0-9a-f]\{12\}\)\.service .*/\1/p' || true
+    } | grep -E '^agentbox-[0-9a-f]{12}$' | sort -u || true
+}
+
+# collect_paths BOX: each place under the collector's roots that BOX left.
+collect_paths() {
+    local p
+    for p in "$BOXES/$1" "$BOX_DISKS/$1.img" "$(box_record "$1")" "$(box_record "$1").exit" \
+        "$BOX_CACHE_ROOT/$1" "$RUN_BASE/$1"; do
+        [[ -e "$p" || -L "$p" ]] && printf '%s\n' "$p"
     done
-    if (( ${#found[@]} )); then
-        reap_say "$box kept: it holds work no remote has: ${found[*]}"
-        (( mounted_here )) && sudo -n umount "$BOXES/$box" 2>/dev/null
-        return 1
-    fi
-    # What the session wrote in that box's home, kept for it under BOX_HOMES exactly as a close
-    # would keep it; a carry that cannot be made keeps the whole box.
-    if ! box_home_carry "$box" "$sid" >/dev/null; then
-        reap_say "$box kept: what its home holds could not be carried out (above)"
-        (( mounted_here )) && sudo -n umount "$BOXES/$box" 2>/dev/null
-        return 1
-    fi
-    # What the host actually gets back: the image's allocated blocks, not its sparse size.
-    freed="$(du -B1 -s "$img" 2>/dev/null | cut -f1)"
-    unenroll_box "$box"
-    close_box_cache "$box"
-    rm -rf "${RUN_BASE:?}/$box"
-    if ! close_box_disk "$box"; then
-        reap_say "$box kept: its filesystem would not unmount (above)"
-        return 1
-    fi
-    rm -rf "${BOXES:?}/$box"
-    reap_say "$box removed: the predecessor of $sid, $( [[ -n "$freed" ]] && numfmt --to=iec "$freed" || echo "its image") freed"
     return 0
 }
 
-# cmd_reap SID BOX SINCE: run detached by the launcher of BOX once its omp has said which session
-# it is. It waits for that session to REGISTER on Envoy - move_wake's own test, so a box that
-# never comes up removes nothing - and then collects the session's older boxes on this host.
-cmd_reap() {
-    local sid="$1" box="$2" since="${3:-0}" waited=0 p kept=0 n=0
-    [[ -n "$sid" && -n "$box" ]] || die "usage: agentbox reap-previous <session-id> <box> [since-ms]"
-    while :; do
-        box_registered "$sid" "$since" && break
-        if (( waited >= REAP_WAIT_TOTAL )); then
-            reap_say "$sid did not register on Envoy within ${REAP_WAIT_TOTAL}s; no box of this session was removed"
-            return 1
-        fi
-        sleep "$REAP_WAIT_STEP"
-        waited=$((waited + REAP_WAIT_STEP))
-    done
-    while read -r p; do
-        [[ -n "$p" ]] || continue
-        n=$((n + 1))
-        reap_box "$p" "$sid" || kept=1
-    done < <(box_predecessors "$sid" "$box")
-    (( n )) || reap_say "$sid has no older box on this host; nothing to remove"
-    # The reaper is the one thing that already runs after every box with a predecessor, so it is
-    # where the sweep belongs: no new unit, which this machine does not take.
-    sweep_exited_boxes
-    return "$kept"
+# collect_launcher BOX: the pid of BOX's launcher while it runs, as its record names it.
+collect_launcher() {
+    local pid start now
+    pid="$(box_record_get "$1" launcher)"
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    now="$(proc_start "$PROC/$pid")" || return 1
+    start="$(box_record_get "$1" launcher_start)"
+    [[ -z "$start" || "$start" == "$now" ]] || return 1
+    printf '%s\n' "$pid"
 }
 
-# reap_start BOX SID SINCE: the reaper, detached from the launcher's pane and its signals, with
-# its own log beside the box's. TMUX_PANE is dropped: close_box's attention step must never run
-# for the live pane from here.
-reap_start() {
-    local box="$1" sid="$2" since="$3"
-    # Nothing to collect, nothing to start: a session's FIRST box is the common case, and a
-    # reaper of its own per box would poll Envoy and the process census for two hours for
-    # nothing (this host runs ~110 boxes). The records are read once, here.
-    [[ -n "$(box_predecessors "$sid" "$box")" ]] || return 0
-    mkdir -p "$REAP_LOG_DIR" 2>/dev/null || return 0
-    ( env -u TMUX_PANE setsid "$DOTFILES_DIR/scripts/agentbox" reap-previous "$sid" "$box" "$since" \
-        >>"$REAP_LOG_DIR/reap-$box.log" 2>&1 & ) &
+# Where every process the collector can see stands and what it holds: "<pid>\t<kind>\t<path>" for its
+# working directory (cwd), each file it holds open (fd) and the program it runs (exe), read with two
+# `find`s (a readlink per process is thousands of forks on a loaded host). A process of another user
+# whose links this user cannot read (root's, or a box's under its own uid range) is not one that can
+# hold a box's host directory as this user. On sami-devbox, 2026-11-17, the walk read 10,504 fd and
+# exe links of this user in 0.1 s, and none was under a box (a box's own processes run under its
+# own uid range, and the host's relays hold sockets).
+#
+# A process of this user whose cwd the kernel refuses (ptrace access mode READ, which the fd and exe
+# links share) to every reader without CAP_SYS_PTRACE is one of these. In a pid namespace below the
+# reader's, it is a container's: its cwd is in its own mount namespace, where a box's host directory
+# exists only in that box's own container, which keeps the box while it runs. The user's systemd
+# manager, known by its own cgroup (user@<uid>.service/init.scope, which /proc shows anyone), stands
+# in `/` and holds CAP_WAKE_ALARM. Those two are not counted, and each pass names them
+# (COLLECT_CWDS_HIDDEN): on sami-devbox the manager and a kind cluster's metrics-server are always
+# there, and counting them kept all 59 leftovers on 2026-11-16. Any other hidden process of this user
+# can stand in a box's directory (a `newgrp docker` shell has other gids, a program with file
+# capabilities holds capabilities the user lacks), so COLLECT_CWDS_UNREAD says which it is, and the
+# collector removes no box that pass. A walk that found no process at all saw nothing (the
+# collector's own process is always one), and says so the same way. One limit stays: a process that
+# is not dumpable (a setgid program, gpg-agent, forward) has a /proc entry root owns, so it is taken
+# for another user's and not counted.
+COLLECT_CWDS=()
+COLLECT_CWDS_UNREAD=""
+COLLECT_CWDS_HIDDEN=()
+collect_read_cwds() {
+    local p owner cwd me n=0 self why path kind
+    COLLECT_CWDS=() COLLECT_CWDS_UNREAD="" COLLECT_CWDS_HIDDEN=()
+    me="$(id -u)"
+    self="$(collect_status /proc/self/status)"
+    while IFS=$'\t' read -r p owner cwd; do
+        n=$((n + 1))
+        p="${p%/cwd}"
+        p="${p##*/}"
+        if [[ -z "$cwd" ]]; then
+            # Gone since the walk listed it: it stands nowhere.
+            if [[ "$owner" == "$me" && -e "$PROC/$p" ]]; then
+                why="$(collect_hidden_why "$(collect_status "$PROC/$p/status")" "$self")"
+                if [[ "$why" == "it is in another pid namespace" ]]; then
+                    COLLECT_CWDS_HIDDEN+=("process $p ($why)")
+                elif [[ "$(cat "$PROC/$p/cgroup" 2>/dev/null)" == "0::/user.slice/user-$me.slice/user@$me.service/init.scope" ]]; then
+                    COLLECT_CWDS_HIDDEN+=("process $p (it is this user's systemd manager)")
+                else
+                    COLLECT_CWDS_UNREAD="process $p's working directory could not be read (${why:-the kernel gave no reason the collector can name})"
+                fi
+            fi
+            continue
+        fi
+        COLLECT_CWDS+=("$p"$'\t'cwd$'\t'"$cwd")
+    done < <(find "$PROC"/[0-9]*/cwd -maxdepth 0 -printf '%p\t%U\t%l\n' 2>/dev/null || true)
+    (( n )) || COLLECT_CWDS_UNREAD="the walk of $PROC found no process"
+    # A link the kernel refuses reads empty and is left out: its process is the cwd walk's to judge.
+    while IFS=$'\t' read -r p path; do
+        [[ "$path" == /* ]] || continue
+        kind=fd
+        [[ "$p" == */exe ]] && kind=exe
+        p="${p#"$PROC"/}"
+        p="${p%%/*}"
+        COLLECT_CWDS+=("$p"$'\t'"$kind"$'\t'"${path% (deleted)}")
+    done < <(find "$PROC"/[0-9]*/fd "$PROC"/[0-9]*/exe -maxdepth 1 -printf '%p\t%l\n' 2>/dev/null || true)
+}
+
+# collect_unreadable_owner PATH: the uid that owns PATH when that is not this user, for a path find
+# said this user may not read; status 1 when this user owns it or it cannot be looked at.
+collect_unreadable_owner() {
+    local owner
+    owner="$(find "$1" -maxdepth 0 -printf '%p\t%U\t%m\n' 2>/dev/null | cut -f2)"
+    [[ "$owner" =~ ^[0-9]+$ && "$owner" != "$(id -u)" ]] || return 1
+    printf '%s\n' "$owner"
+}
+
+# collect_shut_dir PATH: status 0 when PATH, a path find said this user may not read, is a directory
+# this user owns whose own mode denies it read or search, or an entry of one. find names a directory
+# of mode 000, 100 or 111 itself, and each entry of one of mode 400 or 600, which it may list but not
+# enter.
+collect_shut_dir() {
+    local d me
+    me="$(id -u)"
+    for d in "$1" "${1%/*}"; do
+        [[ -n "$(find "$d" -maxdepth 0 -type d -user "$me" ! -perm -u+rx -print 2>/dev/null)" ]] && return 0
+    done
+    return 1
+}
+
+# collect_open_own PATH...: give this user read and search on each directory under the PATHs that it
+# owns and whose own mode denies it either, and print how many it opened. find runs chmod on a
+# directory before it reads it, so a directory shut inside another is opened in the same walk.
+# Another user's directory is never touched.
+collect_open_own() {
+    local n
+    n="$(find "$@" -type d -user "$(id -u)" ! -perm -u+rx -exec chmod u+rx {} \; -printf . 2>/dev/null)" || true
+    printf '%s\n' "${#n}"
+}
+
+# collect_status FILE: a /proc/<pid>/status (world-readable) as `<uid×4>|<gid×4>|<CapPrm>|<pid
+# namespaces>`: the four uids and gids (real, effective, saved, filesystem), the permitted
+# capabilities in hex, and how many pid namespaces deep the process is (NSpid's count). Nothing
+# when the file cannot be read.
+collect_status() {
+    awk '/^Uid:/ { u = $2 " " $3 " " $4 " " $5 } /^Gid:/ { g = $2 " " $3 " " $4 " " $5 }
+         /^CapPrm:/ { c = $2 } /^NSpid:/ { n = NF - 1 }
+         END { if (u != "" && g != "" && c != "" && n != "") print u "|" g "|" c "|" n }' "$1" 2>/dev/null || true
+}
+
+# collect_hidden_why TARGET SELF: the reason the kernel refuses the reader SELF the cwd of the process
+# TARGET (both collect_status lines), or nothing when none of its rules applies (__ptrace_may_access
+# and cap_ptrace_access_check, mode READ): a target in a pid namespace below the reader's is a
+# container's (asked first, since a container's process also has ids and capabilities of its own);
+# the target's real, effective and saved uid must each be the reader's filesystem uid, and the same
+# for gids; and its permitted capabilities must be a subset of the reader's.
+collect_hidden_why() {
+    local tu tg tc tn su sg sc sn a b c _
+    [[ -n "$1" && -n "$2" ]] || return 0
+    IFS='|' read -r tu tg tc tn <<<"$1"
+    IFS='|' read -r su sg sc sn <<<"$2"
+    if (( tn > sn )); then echo "it is in another pid namespace"; return 0; fi
+    read -r a b c _ <<<"$tu"
+    [[ "$a" == "${su##* }" && "$b" == "${su##* }" && "$c" == "${su##* }" ]] || { echo "its ids are not all this user's"; return 0; }
+    read -r a b c _ <<<"$tg"
+    [[ "$a" == "${sg##* }" && "$b" == "${sg##* }" && "$c" == "${sg##* }" ]] || { echo "its ids are not all this user's"; return 0; }
+    [[ "$tc" =~ ^[0-9a-f]{1,16}$ && "$sc" =~ ^[0-9a-f]{1,16}$ ]] || return 0
+    if (( (16#$tc & ~16#$sc) != 0 )); then echo "it holds a capability this user lacks"; fi
+}
+
+# collect_holder BOX: "<pid>\t<what>" for a process whose working directory, an open file or the
+# program it runs is under BOX's directory or run dir, other than its own tmux relay unit's.
+collect_holder() {
+    local e pid kind path
+    for e in ${COLLECT_CWDS[@]+"${COLLECT_CWDS[@]}"}; do
+        IFS=$'\t' read -r pid kind path <<<"$e"
+        [[ -n "$path" ]] || continue
+        move_within "$path" "$BOXES/$1" || move_within "$path" "$RUN_BASE/$1" || continue
+        grep -qsF "agentbox-tmux-$1.service" "$PROC/$pid/cgroup" && continue
+        case "$kind" in
+            fd) printf '%s\tholds a file in it open\n' "$pid" ;;
+            exe) printf '%s\truns a program from it\n' "$pid" ;;
+            *) printf '%s\thas its working directory in it\n' "$pid" ;;
+        esac
+        return 0
+    done
+    return 1
+}
+
+# collect_in_use BOX CONTAINER: status 0, after the line that says BOX is not removed, when a process
+# stands in BOX (collect_holder) or the walk of the processes cannot tell (COLLECT_CWDS_UNREAD).
+collect_in_use() {
+    local pid
+    if [[ -n "$COLLECT_CWDS_UNREAD" ]]; then
+        collect_not_removed "$1" "$2" "cannot tell whether a process stands in it: $COLLECT_CWDS_UNREAD"
+        return 0
+    fi
+    if pid="$(collect_holder "$1")"; then
+        collect_not_removed "$1" "$2" "process ${pid%%$'\t'*} ${pid#*$'\t'}"
+        return 0
+    fi
+    return 1
+}
+
+# box_remove_command BOX [CONTAINER]: the command line that removes what is left of BOX: its
+# container with its volumes when CONTAINER is not empty, its tmux relay unit, its filesystem when
+# mounted, and each place under the collector's roots. A line that says BOX was not removed names it,
+# never a line that says BOX was kept (dispatch://INFRA-1720).
+box_remove_command() {
+    local box="$1" cmd=() paths=() line="" c
+    [[ -n "${2:-}" ]] && cmd+=("docker rm -fv $box")
+    cmd+=("systemctl --user stop agentbox-tmux-$box")
+    if mountpoint -q "$BOXES/$box" 2>/dev/null; then cmd+=("sudo umount $(printf '%q' "$BOXES/$box")"); fi
+    mapfile -t paths < <(collect_paths "$box")
+    (( ${#paths[@]} )) && cmd+=("$(remove_paths_command "${paths[@]}")")
+    for c in "${cmd[@]}"; do line+="${line:+; }$c"; done
+    echo "$line"
+}
+
+# collect_not_removed BOX CONTAINER REASON: the collector's one line for a box it does not remove
+# this pass, with why and the command that removes it.
+collect_not_removed() {
+    collect_say "$1 not removed: $3; remove it with: $(box_remove_command "$1" "$2")"
+}
+
+# collect_box BOX: delete BOX in every place it left, or say why it was not removed and the command
+# that removes it. Status 1 when it stays.
+collect_box() {
+    local box="$1" names state pid out rc young paths=() failed=0 left=() line owner unread shut hidden=() opened=""
+    local denied="find: '(.+)': Permission denied$"
+    if ! names="$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)"; then
+        collect_not_removed "$box" "unknown" "docker could not be asked whether it has a container"
+        return 1
+    fi
+    if [[ -n "$names" ]]; then
+        state="$(docker inspect -f '{{.State.Status}}' "$box" 2>/dev/null)" || state=""
+        if [[ "$state" != exited ]]; then
+            collect_not_removed "$box" "$names" "its container is ${state:-in a state docker did not give}"
+            return 1
+        fi
+    fi
+    if pid="$(collect_launcher "$box")"; then
+        collect_not_removed "$box" "$names" "its launcher, pid $pid, runs"
+        return 1
+    fi
+    mapfile -t paths < <(collect_paths "$box")
+    if (( ${#paths[@]} )); then
+        # Every file of it, and one find cannot read is no proof the box is old, with two named
+        # exceptions. Every box that ran holds run-user/runc, the state directory runc makes at
+        # container start, root's and mode 1700, which find may not open. The age is for files this
+        # user is still making, and nothing under a directory another user owns and this user may
+        # not open is that: such a directory is left out (collect_unreadable_owner), and the pass
+        # names it. And tests leave directories that shut their own owner out by mode: a
+        # permission-error test's `<tmp>/.tmpXXXXXX/parent/leaf`, an ask gate test's
+        # `zzprobe-*/sessions/ses-1/askgate-verdicts-v*`. agentbox-6524e39d61ae on sami-devbox held
+        # 61 of mode 000 in its /tmp, all its user's, and was kept as "cannot tell how old its files
+        # are" from its session's death on 2026-11-12 until it was removed by hand. A denial at such
+        # a directory or at an entry of one (collect_shut_dir) makes the collector, once no process
+        # stands in the box (collect_in_use), give this user back read and search on every such
+        # directory of the box (collect_open_own), say how many, and read the age again. Any other
+        # error keeps the box: a directory of this user's that it may read and find still may not,
+        # and one the collector could not open, included. Each young path comes tagged, so an error
+        # line is never taken for one.
+        while :; do
+            rc=0
+            out="$(LC_ALL=C find "${paths[@]}" -mmin "-$COLLECT_AGE_MIN" -printf 'young\t%p\n' -quit 2>&1)" || rc=$?
+            young="$(sed -n 's/^young\t//p' <<<"$out" | head -n 1)"
+            if [[ -n "$young" ]]; then
+                collect_not_removed "$box" "$names" "$young is younger than $COLLECT_AGE_MIN minutes"
+                return 1
+            fi
+            (( rc )) || break
+            unread="" shut=0 hidden=()
+            while IFS= read -r line; do
+                [[ -n "$line" ]] || continue
+                if [[ "$line" =~ $denied ]]; then
+                    if owner="$(collect_unreadable_owner "${BASH_REMATCH[1]}")"; then
+                        hidden+=("${BASH_REMATCH[1]} (uid $owner)")
+                        continue
+                    fi
+                    if [[ -z "$opened" ]] && collect_shut_dir "${BASH_REMATCH[1]}"; then
+                        shut=1
+                        continue
+                    fi
+                fi
+                unread="$line"
+                break
+            done <<<"$out"
+            if [[ -z "$unread" ]] && (( shut )); then
+                collect_in_use "$box" "$names" && return 1
+                opened="$(collect_open_own "${paths[@]}")"
+                collect_say "$box: opened $opened of its directories whose own mode shut this user out"
+                continue
+            fi
+            if [[ -n "$unread" || ${#hidden[@]} -eq 0 ]]; then
+                collect_not_removed "$box" "$names" "cannot tell how old its files are: ${unread:-find exited $rc}"
+                return 1
+            fi
+            collect_say "$box: not counted in its age, since another user owns it and this user may not read it: ${hidden[*]}"
+            break
+        done
+    elif [[ -n "$names" ]]; then
+        # Nothing of it under the roots: the hour is the container's own, from its end.
+        local finished ended
+        finished="$(docker inspect -f '{{.State.FinishedAt}}' "$box" 2>/dev/null)" || finished=""
+        if ! ended="$(date -u -d "$finished" +%s 2>/dev/null)" || [[ -z "$finished" ]]; then
+            collect_not_removed "$box" "$names" "docker gave no end time for its container ('$finished')"
+            return 1
+        fi
+        if (( $(date -u +%s) - ended < COLLECT_AGE_MIN * 60 )); then
+            collect_not_removed "$box" "$names" "its container ended at $finished, less than $COLLECT_AGE_MIN minutes ago"
+            return 1
+        fi
+    else
+        # Nothing of it under the roots and no container: all that can be left is its tmux relay
+        # unit, which outlives a launcher that died. ensure_tmux_forwarder makes $RUN_BASE/<box>
+        # before it starts the unit, so a box being made has files and never reaches here.
+        if [[ -n "$(systemctl --user list-units --all --plain --no-legend "agentbox-tmux-$box.service" 2>/dev/null)" ]]; then
+            stop_tmux_forwarder "$box"
+            collect_say "$box removed (its tmux relay unit was all that was left of it)"
+        fi
+        return 0
+    fi
+    collect_in_use "$box" "$names" && return 1
+    if [[ -n "$names" ]]; then
+        record_box_exit "$box" "$(box_record_get "$box" session)" ""
+        if ! docker rm -v "$box" >/dev/null 2>&1; then
+            collect_say "removing $box failed: its exited container could not be removed; remove it with: $(box_remove_command "$box" "$names")"
+            return 1
+        fi
+    fi
+    stop_tmux_forwarder "$box"
+    unenroll_box "$box"
+    close_box_cache "$box" || failed=1
+    close_box_run_dir "$box" || failed=1
+    close_box_dir "$box" || failed=1
+    if (( failed )); then
+        mapfile -t left < <(collect_paths "$box")
+        collect_say "removing $box failed: ${left[*]:-a place above} is still there; remove it with: $(box_remove_command "$box")"
+        return 1
+    fi
+    collect_say "$box removed"
+}
+
+# cmd_collect: `agentbox collect`, which collect_start runs. One at a time: a collector that finds
+# another running ends at once, since the one that runs looks at every box.
+cmd_collect() {
+    local box n=0
+    mkdir -p "$COLLECT_LOG_DIR" || die "cannot make $COLLECT_LOG_DIR for the collector's lock"
+    exec 8>>"$COLLECT_LOG_DIR/collect.lock"
+    if ! flock -n 8; then
+        collect_say "another collector runs; this one ends"
+        return 0
+    fi
+    collect_read_cwds
+    if (( ${#COLLECT_CWDS_HIDDEN[@]} )); then
+        local IFS=';'
+        collect_say "not counted, since the kernel shows where they stand to no reader without CAP_SYS_PTRACE: ${COLLECT_CWDS_HIDDEN[*]}" | sed 's/;/; /g'
+        unset IFS
+    fi
+    local boxes=()
+    mapfile -t boxes < <(collect_candidates)
+    for box in ${boxes[@]+"${boxes[@]}"}; do
+        n=$((n + 1))
+        collect_box "$box" </dev/null || true
+    done
+    collect_say "$n box(es) looked at"
+    return 0
+}
+
+# collect_start: the collector, detached from the launcher's pane and its signals, logging to
+# $COLLECT_LOG_DIR/collect.log. TMUX_PANE is dropped: close_box's attention step must never run for
+# the live pane from there. It runs from a private copy of this file, as `agentbox new` and a
+# move's relauncher do, and the copy removes itself as it starts (AGENTBOX_SELF_COPY): a publish
+# replaces this file while the collector runs, and bash reads a script by byte offset.
+collect_start() {
+    local copy
+    mkdir -p "$COLLECT_LOG_DIR" 2>/dev/null || return 0
+    copy="$(mktemp "${TMPDIR:-/tmp}/agentbox-collect-XXXXXX" 2>/dev/null)" || return 0
+    if ! { cat "$DOTFILES_DIR/scripts/agentbox" >"$copy" && chmod +x "$copy"; } 2>/dev/null; then
+        rm -f "$copy"
+        return 0
+    fi
+    ( env -u TMUX_PANE AGENTBOX_SELF_COPY="$copy" setsid "$copy" collect \
+        </dev/null >>"$COLLECT_LOG_DIR/collect.log" 2>&1 & ) &
     return 0
 }
 
@@ -3110,6 +3571,7 @@ cmd_new() {
     # own agent-session sees only the box's processes. On 2026-11-03 tmux-resurrect-omp started
     # 15 live boxed sessions a second time, each in a new box (scripts/omp-session-live; it waits
     # up to 60 s for an omp a hang-up is ending, as after a move's respawn).
+    local resume_sid=""
     if [[ "$1" == omp ]]; then
         local a prev="" resume_target="" live
         for a in "$@"; do
@@ -3118,11 +3580,12 @@ cmd_new() {
             case "$a" in --resume=*|--session=*) resume_target="${a#*=}" ;; esac
             prev="$a"
         done
-        # The session this box resumes: its last box's home comes with it (seed_box_home).
+        # The session this box resumes, for its record.
         if [[ -n "$resume_target" ]]; then
-            BOX_SEED_SID="$(basename "$resume_target")"
-            BOX_SEED_SID="${BOX_SEED_SID%.jsonl}"
-            BOX_SEED_SID="${BOX_SEED_SID##*_}"
+            resume_sid="$(basename "$resume_target")"
+            resume_sid="${resume_sid%.jsonl}"
+            resume_sid="${resume_sid##*_}"
+            [[ "$resume_sid" =~ $BOX_SID_RE ]] || resume_sid=""
         fi
         if [[ -n "$resume_target" ]] \
             && live="$("$DOTFILES_DIR/scripts/omp-session-live" --wait "${AGENT_SESSION_LIVE_WAIT:-60}" "$resume_target")"; then
@@ -3159,7 +3622,7 @@ cmd_new() {
     # which inherits EXIT traps in bash.
     local launcher_pid=$BASHPID
     # shellcheck disable=SC2064
-    trap "[[ \$BASHPID == $launcher_pid ]] && close_box '$box' '' $(printf '%q ' "${box_repos[@]}")" EXIT
+    trap "[[ \$BASHPID == $launcher_pid ]] && close_box '$box' ''" EXIT
     # A pane kill or TERM lands here; the trap forwards a hangup into the box
     # (--init delivers it to the command), --rm fires, close runs. Before the
     # box exists it is remembered instead and honoured once the clone returns.
@@ -3176,13 +3639,12 @@ cmd_new() {
     # that fails from here on takes it away with the image. After open_box_disk, since the
     # record lives in the images directory that step makes, and a box with no image gets none.
     # The session is known already when this launch resumes one; otherwise box_record_session
-    # fills it in once the box's omp says which session it is. box_started_ms is what the
-    # predecessor reaper measures registration against - the box's start, not the reaper's,
-    # since a session can register before the launcher gets its id.
-    local box_started_ms
-    box_started_ms="$(date +%s%3N)"
+    # fills it in once the box's omp says which session it is. The record names this launcher,
+    # which the collector reads; the collector starts here, for every box, and deletes what any
+    # box left when its launcher died (cmd_collect).
     open_box_disk "$box"
-    box_record_write "$box" "${BOX_SEED_SID:-}" "$@"
+    box_record_write "$box" "$resume_sid" "$@"
+    collect_start
     # Every repo is cloned at once, each in a subshell that ignores the hangup and TERM/INT: the
     # launcher acts on those itself, once every clone has returned, and the clones' git runs detached
     # (see `detached`). A trapped signal ends `wait` early with 128+n while the clone still runs, so a
@@ -3258,21 +3720,15 @@ cmd_new() {
         [[ -n "$sid" ]] && break
         sleep 2
     done
-    # Now the box's record names its session, and the session's OLDER boxes on this host can go:
-    # a detached reaper waits for this session to register on Envoy and then collects them
-    # (cmd_reap). It outlives nothing - it is the launcher's own session id, removing boxes that
-    # hold no container - and it removes nothing at all if this box never comes up.
+    # Now the box's record names its session.
     if [[ -n "$sid" ]]; then
         box_record_session "$box" "$sid"
-        reap_start "$box" "$sid" "$box_started_ms"
     fi
     # A box with a broker identity is waited for by box_wait, which goes on enrolling it again
-    # while it runs and returns once the child has exited. Its last attempt comes before
-    # close_box below, which revokes the last enrollment id the host recorded. An attempt that the
-    # helper reports as failed can still make an enrollment at the broker, which the host has no
-    # record of; that one lapses at the end of its lease (agentbox/AGENTS.md). A box with none
-    # goes straight to the wait below. An interrupted wait re-waits: the first return after a
-    # signal carries 128+sig, the child's real status arrives once it is reaped.
+    # while it runs and returns once the child has exited. A box with none goes straight to the
+    # wait below. The last attempt comes before close_box below, which ends every enrollment the
+    # box can hold (unenroll_box). An interrupted wait re-waits: the first return after a signal
+    # carries 128+sig, the child's real status arrives once it is reaped.
     if [[ "$ENROLLED_BOX" == "$box" ]]; then box_wait "$box" "$child"; fi
     while :; do
         if wait "$child"; then rc=0; else rc=$?; fi
@@ -3290,12 +3746,12 @@ cmd_new() {
     trap - TERM INT EXIT
     trap '' HUP
     exec > >(while IFS= read -r line; do printf '%s\n' "$line" 2>/dev/null || :; done) 2>&1
-    close_box "$box" "$sid" "${box_repos[@]}"
+    close_box "$box" "$sid"
     exit "$rc"
 }
 
-# The box a target names: a running box (exact name or unique prefix), or the
-# omp session id (or prefix) of the omp running in one.
+# The box a target names: a running box (exact name or unique prefix), or the session id (or
+# prefix) that a running box's session file names (box_session_id).
 resolve_box() {
     local target="$1" b matches=()
     mapfile -t matches < <(docker ps --filter name='^agentbox-' --format '{{.Names}}' | grep -E "^(agentbox-)?${target}" || true)
@@ -3306,10 +3762,17 @@ resolve_box() {
     return 1
 }
 
+# Why TARGET names no running box, for the commands that take one. A session id finds only a box
+# started after dispatch://INFRA-1720, whose omp writes its session file: the bare `no running box
+# matches` it answered before sent nobody to the box that runs the session.
+no_box_reason() {
+    echo "no running box matches $1: no box is named so, and no running box's session file names that session. A box started before this change (dispatch://INFRA-1720) runs a runner older than this change, whose omp writes no session file, so it cannot be found by its session id: find it with \`agentbox ls\`, and in it run \`agentbox move --self\`, which moves the session into a new box"
+}
+
 cmd_grow() {
     (( $# == 2 )) || die "usage: agentbox grow <box|session-id> SIZE"
     local box img loop mounted old
-    box="$(resolve_box "$1")" || die "no running box matches $1"
+    box="$(resolve_box "$1")" || die "$(no_box_reason "$1")"
     [[ "$box" =~ ^agentbox-[a-zA-Z0-9-]+$ ]] || die "invalid box name $box"
     img="$BOX_DISKS/$box.img"
     [[ -f "$img" && ! -L "$img" ]] || die "$box has no disk image at $img"
@@ -3340,7 +3803,7 @@ cmd_sh() {
     [[ -n "$target" ]] || die "box name or session id required"
     shift
     local box wdir
-    box="$(resolve_box "$target")" || die "no running box matches $target"
+    box="$(resolve_box "$target")" || die "$(no_box_reason "$target")"
     wdir="$(docker inspect -f '{{.Config.WorkingDir}}' "$box")"
     local tty=(-i)
     [[ -t 0 && -t 1 ]] && tty=(-it)
@@ -3369,11 +3832,12 @@ cmd_rebuild() {
 # root-owned lost+found, before open_box_disk gave that one to the user).
 dir_size() { du -sh --one-file-system "$1" 2>/dev/null | cut -f1 || true; }
 
-# Running boxes, then anything a box left on disk and nothing is using: a tree kept at close for
-# unpushed work, or one whose launcher was killed before it could close (the trap cannot run on a
-# SIGKILL, and a reboot drops the loop mount while the image keeps its contents). Nothing is
-# removed here - the tree may hold an agent's only copy of its work - so each one is named with
-# the command that frees it.
+# Running boxes, then any box tree with no container: one whose launcher was killed before it
+# could close (the trap cannot run on a SIGKILL, and a reboot drops the loop mount while the image
+# keeps its contents), or one a close could not remove. `agentbox collect`, which every
+# `agentbox new` starts, deletes such a tree once it is an hour old and nothing uses it
+# (dispatch://INFRA-1720); nothing is removed here, and each one is named with the command that
+# frees it now.
 cmd_ls() {
     docker ps --filter name='^agentbox-' --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
     local running box dir img left=()
@@ -3405,15 +3869,151 @@ box_runner_pid() {
 
 RESTART_NOTICE='agentbox: a restart of your omp is pending (new omp/plugins on the host). Finish the current step and start no new subagents or long jobs. When `read proc://` lists none of your jobs or services still running, run `agentbox restart` from your bash tool: omp quits gracefully and relaunches in this same box with --resume of this session; the box, its workspace and /tmp stay, supervised processes only if started with persist. If you are idle, do it now.'
 
+# How long a restart command waits for the runner's answer to its signal, and how long the host's
+# --now waits for the relaunched omp to report its session. The runner answers in its signal
+# handler, before it stops omp, so 15 s leaves room for a host at load; omp reports its session
+# at its start, which can take a minute on a loaded host.
+RESTART_ANSWER_WAIT="${AGENTBOX_RESTART_ANSWER_WAIT:-15}"
+RESTART_REPORT_WAIT="${AGENTBOX_RESTART_REPORT_WAIT:-120}"
+
+# restart_request DIR: an empty request file in DIR/agentbox-restart.d, named by a fresh id, for the
+# runner to answer under (agentbox-run.ts); prints the id. A signal carries no sender and two can
+# arrive as one, so a caller that took the first line after its own offset could read another
+# caller's `started` as its own; the runner ends each answer with ` [request <id>]` instead.
+# On the host DIR is the box's own runtime directory, where the box can put a link at any name, so
+# the request goes only into a real directory, and only as a new file (noclobber: not through a
+# link at the request's name either).
+restart_request() {
+    local dir="$1/agentbox-restart.d" id
+    id="$(date -u +%Y%m%dT%H%M%S%N)-$$-$RANDOM"
+    [[ -L "$dir" ]] && return 1
+    { mkdir -p "$dir" && [[ -d "$dir" && ! -L "$dir" ]] && (set -C; : >"$dir/$id"); } 2>/dev/null || return 1
+    printf '%s\n' "$id"
+}
+
+# restart_answer FILE ID: the runner's answer to request ID, the line of FILE that ends
+# ` [request ID]`, within RESTART_ANSWER_WAIT seconds, as `<word> <text>` (the runner's time and
+# the request dropped). Status 1 when none, and the request is then withdrawn, so a runner that
+# answers late cannot take it for a later caller's.
+restart_answer() {
+    local file="$1" id="$2" end=$((SECONDS + RESTART_ANSWER_WAIT)) tag=" [request $2]" line
+    while :; do
+        if [[ -f "$file" && ! -L "$file" ]]; then
+            line="$(timeout 5 tail -c 1048576 -- "$file" 2>/dev/null | grep -aF -- "$tag" | tail -n 1)"
+            if [[ "$line" == *"$tag" ]]; then
+                line="${line%"$tag"}"
+                printf '%s\n' "${line#* }"
+                return 0
+            fi
+        fi
+        if (( SECONDS >= end )); then
+            rm -f -- "${file%/*}/agentbox-restart.d/$id"
+            return 1
+        fi
+        sleep 0.5
+    done
+}
+
+# The restart of the omp in this box, from its own bash tool. omp's bash tool has a builtin kill
+# that refuses the shell's ancestors - the runner is one - so the signal is sent from here, a real
+# process. Every outcome but a restart that started exits 1 with its reason: on 2026-11-08 the
+# in-box command printed nothing and exited 0 while the runner wrote "this box has no session yet;
+# omp left running, restart not performed" only to its log (agentbox-cc8efa00f4da, twice). On a
+# restart that started the command ends with omp, which the runner hangs up, and the wake notice
+# tells the resumed session that it came back.
+restart_in_box() {
+    local run_user="${XDG_RUNTIME_DIR:-/run/user/$UID_}" answers request line
+    answers="$run_user/agentbox-restart"
+    # A subagent's bash tool reaches the same omp as its parent's, so a restart there would hang up
+    # the session in the middle of the subagent's own work. The test `agentbox finish` uses: a
+    # subagent's own transcript does not end in `_<session id>.jsonl`.
+    if [[ -n "${PI_SESSION_FILE:-}" && "${PI_SESSION_FILE##*/}" != *_"${OMP_SESSION_ID:-}".jsonl ]]; then
+        die "a subagent cannot restart its session's omp; tell the session to run 'agentbox restart' when the subagent is done. Nothing was restarted."
+    fi
+    [[ -n "$(box_file_lines "$run_user/agentbox-runner")" ]] \
+        || die "this box's runner is older than this change (dispatch://INFRA-1720) and cannot say whether it restarted, so no signal was sent. Run \`agentbox move --self\` from this bash tool: it moves this session into a new box, which restarts in place."
+    request="$(restart_request "$run_user")" \
+        || die "could not write a restart request in $run_user/agentbox-restart.d; nothing was restarted"
+    kill -USR1 "$AGENTBOX_RUNNER_PID" || { rm -f -- "$run_user/agentbox-restart.d/$request"; die "could not signal the runner (pid $AGENTBOX_RUNNER_PID); nothing was restarted"; }
+    line="$(restart_answer "$answers" "$request")" \
+        || die "the runner gave no answer within ${RESTART_ANSWER_WAIT}s, so the restart may not have happened; its log is ~/.cache/omp/agentbox/${AGENTBOX_BOX:-<box>}.log"
+    [[ "${line%% *}" == started ]] || die "the runner did not restart: ${line#* }"
+    echo "agentbox: ${line#* }"
+    return 0
+}
+
+# restart_box BOX NOW: one box from the host, saying what happened. Status 0 when it restarted (or
+# its session was told to), 1 with the reason on stderr when it did not.
+restart_box() {
+    local box="$1" now="$2" run_user answers request line old_pid end log last
+    if [[ -z "$(box_runner_pid "$box")" ]]; then
+        echo "agentbox: $box does not run omp under the runner (scripts/agentbox-run.ts), so nothing can restart it in place; quit its session and resume it with \`omp --resume\`" >&2
+        return 1
+    fi
+    run_user="$(box_run_user "$box")"
+    # A runner older than this change writes no version, answers no signal, and resumes a session
+    # it guessed from open files: no signal is sent to it at all.
+    if [[ -z "$(box_file_lines "$run_user/agentbox-runner")" ]]; then
+        echo "agentbox: $box runs a runner older than this change (dispatch://INFRA-1720), which cannot say whether it restarted, so no signal was sent; its session moves to a new box, which restarts in place, with \`agentbox move --self\` run in its own bash tool" >&2
+        return 1
+    fi
+    if [[ "$now" == true ]]; then
+        answers="$run_user/agentbox-restart"
+        if ! request="$(restart_request "$run_user")"; then
+            echo "agentbox: $box: could not write a restart request in $run_user/agentbox-restart.d; nothing was restarted" >&2
+            return 1
+        fi
+        box_session_read "$box" || true
+        old_pid="$BOX_SESSION_PID"
+        # pid 1 (docker-init) forwards the signal to the runner.
+        docker kill -s USR1 "$box" >/dev/null || { rm -f -- "$run_user/agentbox-restart.d/$request"; echo "agentbox: $box: docker could not send it SIGUSR1; nothing was restarted" >&2; return 1; }
+        if ! line="$(restart_answer "$answers" "$request")"; then
+            echo "agentbox: $box: the runner gave no answer within ${RESTART_ANSWER_WAIT}s, so the restart may not have happened; its log is ~/.cache/omp/agentbox/$box.log" >&2
+            return 1
+        fi
+        if [[ "${line%% *}" != started ]]; then
+            echo "agentbox: $box: the runner did not restart: ${line#* }" >&2
+            return 1
+        fi
+        echo "agentbox: $box: ${line#* }"
+        end=$((SECONDS + RESTART_REPORT_WAIT))
+        while :; do
+            if box_session_read "$box" && [[ -n "$BOX_SESSION_PID" && "$BOX_SESSION_PID" != "$old_pid" ]]; then
+                echo "agentbox: $box: omp came back (pid $BOX_SESSION_PID in the box) on session $BOX_SESSION_SID"
+                return 0
+            fi
+            (( SECONDS < end )) || break
+            sleep 1
+        done
+        log="$HOME/.cache/omp/agentbox/$box.log"
+        last="$(tail -n 1 "$log" 2>/dev/null || true)"
+        echo "agentbox: $box: the relaunched omp did not report its session within ${RESTART_REPORT_WAIT}s; the box's last log line ($log): ${last:-none}" >&2
+        return 1
+    fi
+    if ! box_session_read "$box"; then
+        echo "agentbox: $box: its session is not known: no session file at $run_user/agentbox-session, so no session can be told to restart. omp writes it at its start; retry, or use --now" >&2
+        return 1
+    fi
+    # The path the box's runner would resume, tested in the box, where a --no-host-writes box's
+    # transcripts live at the same path as nowhere on the host.
+    if [[ -z "$BOX_SESSION_FILE" ]] || ! docker exec --user ubuntu "$box" test -f "$BOX_SESSION_FILE" 2>/dev/null; then
+        echo "agentbox: $box: the transcript of session $BOX_SESSION_SID, ${BOX_SESSION_FILE:-(none recorded)}, is not a regular file in the box, so a restart could not resume it; nothing was sent" >&2
+        return 1
+    fi
+    if ! envoy_send_text "$BOX_SESSION_SID" "$RESTART_NOTICE" >/dev/null; then
+        echo "agentbox: $box: envoy send to $BOX_SESSION_SID failed; the session was not told to restart" >&2
+        return 1
+    fi
+    echo "agentbox: $box (session $BOX_SESSION_SID) notified; it restarts when it reaches a safe point"
+}
+
 cmd_restart() {
-    # Inside a box this is the agent's own trigger. omp's bash tool has a
-    # builtin kill that refuses the shell's ancestors - the runner is one - so
-    # the signal is sent from here, a real process.
     if [[ -n "${AGENTBOX_RUNNER_PID:-}" ]]; then
         (( $# == 0 )) || die "inside a box, agentbox restart takes no arguments: it restarts this session"
-        exec kill -USR1 "$AGENTBOX_RUNNER_PID"
+        restart_in_box
+        return 0
     fi
-    local now=false all=false t targets=() boxes=() box sid
+    local now=false all=false t targets=() boxes=() box rc=0
     for t in "$@"; do
         case "$t" in
             --now) now=true ;;
@@ -3427,26 +4027,13 @@ cmd_restart() {
     else
         (( ${#targets[@]} )) || die "usage: agentbox restart <box|session-id>… | --all [--now]"
         for t in "${targets[@]}"; do
-            box="$(resolve_box "$t")" || die "no running box matches $t"
-            boxes+=("$box")
+            if box="$(resolve_box "$t")"; then boxes+=("$box"); else echo "agentbox: $(no_box_reason "$t")" >&2; rc=1; fi
         done
     fi
-    for box in "${boxes[@]}"; do
-        if [[ -z "$(box_runner_pid "$box")" ]]; then
-            echo "agentbox: $box does not run omp under the runner; quit it and relaunch with --resume instead" >&2
-            continue
-        fi
-        if $now; then
-            # pid 1 (docker-init) forwards the signal to the runner.
-            docker kill -s USR1 "$box" >/dev/null
-            echo "agentbox: $box restarting now"
-            continue
-        fi
-        sid="$(box_session_id "$box")"
-        [[ -n "$sid" ]] || { echo "agentbox: $box: omp holds no session file open right now; retry, or use --now" >&2; continue; }
-        envoy_send_text "$sid" "$RESTART_NOTICE" >/dev/null || die "envoy send to $sid failed"
-        echo "agentbox: $box (session $sid) notified; it restarts when it reaches a safe point"
+    for box in ${boxes[@]+"${boxes[@]}"}; do
+        restart_box "$box" "$now" || rc=1
     done
+    return "$rc"
 }
 
 # ── move: the sessions already running on this host (dispatch://INFRA-702) ───────────────────
@@ -4175,7 +4762,7 @@ move_record_file() {
     if [[ -z "$file" && -n "$pid" && "$pid" != "$row_pid" ]]; then
         file="$(move_transcript "$pid" "$sid" 2>/dev/null || true)"
     fi
-    # A path the sweep deleted (move_transcript's last source) has nothing left to read.
+    # A path that cannot be read (a record file of the listing that went since) gives nothing.
     [[ -n "$file" && -r "$file" ]] && printf '%s\n' "$file"
     return 0
 }
@@ -4588,12 +5175,14 @@ move_env_pane() {
 }
 
 # The variables of an omp's environment that decide where its session lives: the profile, the
-# agent and config directories, the session directory, the session storage and its SQL DSN file,
-# and the XDG roots omp puts its data and state under. A moved session's box gets each one the
-# omp had, through `-e`, since the caller's environment never reaches a box: METARQ
-# (01a170d9, 2026-11-02) ran with OMP_PROFILE=pbc and its box's omp started without it.
+# agent and config directories, the session directory, and the XDG roots omp puts its data and
+# state under. A moved session's box gets each one the omp had, through `-e`, since the caller's
+# environment never reaches a box: METARQ (01a170d9, 2026-11-02) ran with OMP_PROFILE=pbc and its
+# box's omp started without it. omp's session-store setting and its database connection file are
+# not among them: agentbox gives a box no session-store setting, so a box resumes a session only
+# from its transcript file (dispatch://INFRA-1720/ask/16322992).
 MOVE_SESSION_ENV=(OMP_PROFILE PI_PROFILE PI_CONFIG_DIR PI_CODING_AGENT_DIR PI_CODING_AGENT_SESSION_DIR
-    OMP_SESSION_STORAGE OMP_SESSION_SQL_DSN_FILE XDG_DATA_HOME XDG_STATE_HOME XDG_CONFIG_HOME)
+    XDG_DATA_HOME XDG_STATE_HOME XDG_CONFIG_HOME)
 
 # move_session_env PID: `-e` and `NAME=VALUE`, one per line, for each of those the omp has set.
 move_session_env() {
@@ -4633,12 +5222,12 @@ move_agent_dir() {
 # session>/<stamp>_01a170d9-….jsonl`), so the id found nothing, in the box or on the host, and the
 # moved session ended. In order: the file named `_<SID>.jsonl` the omp holds open under a
 # `sessions` directory; its own `--resume` argument when that is such a file; the one file of that
-# name under the agent directory its environment selects; else the path the session sweep
-# (dispatch://OSSV-240, `omp-session-sql-sweep.timer`) recorded when it imported the file into
-# Postgres and deleted it, since it deletes a transcript idle for 6 hours even while its omp
-# still runs, and omp resumes such a session by that full path from the table
-# (dispatch://INFRA-754). Nothing, when none of them answers.
-MOVE_SWEEP_RECORD="${AGENTBOX_SWEEP_RECORD:-$HOME/.local/share/omp-session-sql/deleted.tsv}"
+# name under the agent directory its environment selects. Nothing, when none of them answers, and
+# nothing when the one chosen is not a regular file (a dangling symlink, a directory, a path with
+# no file), because a relaunch of a path that is gone ends the box, and the end of a box deletes
+# everything in it (dispatch://INFRA-1720). There is no route through omp's session database: a
+# transcript the database's import sweep took is a session no move can resume.
+move_transcript_take() { [[ -f "$1" ]] && printf '%s\n' "$1"; }
 # Set by a command that asks about many sessions (move_to_index_transcripts): a directory holding
 # one walk of each agent directory, which move_transcript then reads instead of walking again.
 MOVE_DEEP_INDEX_DIR=""
@@ -4712,11 +5301,11 @@ move_transcript() {
     # Any path, not only one under a `sessions/` directory: an archived transcript is open at its
     # target under /mnt/durable/<user>/omp-sessions-moved (SPEEDCOACH's 01a16c67, 2026-11-03).
     link="$(find "$PROC/$pid/fd" -maxdepth 1 -type l -lname "/*_${sid}.jsonl" -printf '%l\n' -quit 2>/dev/null || true)"
-    if [[ -n "$link" ]]; then printf '%s\n' "$link"; return 0; fi
+    if [[ -n "$link" ]]; then move_transcript_take "$link"; return; fi
     # A subagent's transcript it holds open is `<own transcript without .jsonl>/<name>.jsonl`:
     # an idle lead holds only those (01a15237, 2026-11-03).
     link="$(find "$PROC/$pid/fd" -maxdepth 1 -type l -lname "/*_${sid}/*.jsonl" -printf '%l\n' -quit 2>/dev/null || true)"
-    if [[ -n "$link" && -e "${link%/*}.jsonl" ]]; then printf '%s\n' "${link%/*}.jsonl"; return 0; fi
+    if [[ -n "$link" && -e "${link%/*}.jsonl" ]]; then move_transcript_take "${link%/*}.jsonl"; return; fi
     while IFS= read -r -d '' arg; do
         if [[ "$arg" == /*_"$sid".jsonl && -f "$arg" ]]; then printf '%s\n' "$arg"; return 0; fi
     done < <(cat "$PROC/$pid/cmdline" 2>/dev/null || true)
@@ -4734,7 +5323,7 @@ move_transcript() {
         bucket="${bucket//\//-}"
         found=()
         for link in "$dir/$bucket"/*_"$sid".jsonl; do [[ -e "$link" || -L "$link" ]] && found+=("$link"); done
-        if (( ${#found[@]} == 1 )); then printf '%s\n' "${found[0]}"; return 0; fi
+        if (( ${#found[@]} == 1 )); then move_transcript_take "${found[0]}"; return; fi
     fi
     if [[ -n "$MOVE_DEEP_INDEX_DIR" ]]; then
         # One listing of the buckets for every session a run asks about, kept in a file that the
@@ -4755,12 +5344,7 @@ move_transcript() {
     else
         mapfile -t found < <(find "$dir" -mindepth 2 -maxdepth 3 -name "*_${sid}.jsonl" 2>/dev/null)
     fi
-    if (( ${#found[@]} == 1 )); then printf '%s\n' "${found[0]}"; return 0; fi
-    if [[ -r "$MOVE_SWEEP_RECORD" ]]; then
-        # Column 1 of deleted.tsv is the deleted file's path; the last row for the id wins.
-        link="$(awk -F'\t' -v s="_${sid}.jsonl" 'length($1) > length(s) && substr($1, length($1) - length(s) + 1) == s { p = $1 } END { print p }' "$MOVE_SWEEP_RECORD" 2>/dev/null || true)"
-        if [[ -n "$link" && ! -e "$link" ]]; then printf '%s\n' "$link"; return 0; fi
-    fi
+    if (( ${#found[@]} == 1 )); then move_transcript_take "${found[0]}"; return; fi
     return 1
 }
 
@@ -4774,7 +5358,7 @@ move_resume_check() {
     shift 2
     MOVE_RESUME="" MOVE_RESUME_WHY=""
     if ! path="$(move_transcript "$pid" "$sid")"; then
-        MOVE_RESUME_WHY="no transcript of session $sid can be read (no open file, no --resume path, no single *_${sid}.jsonl under $(move_agent_dir "$pid")/sessions), so the box could not resume it"
+        MOVE_RESUME_WHY="no transcript of session $sid can be read (no open file, no --resume path, no single *_${sid}.jsonl under $(move_agent_dir "$pid")/sessions, or the one found is not a regular file), so the box could not resume it"
         return 1
     fi
     real="$(readlink -f "$path" 2>/dev/null || echo "$path")"
@@ -5254,7 +5838,7 @@ move_hand_off() {
     # at 08:29:05Z, both logged "hung up; waiting for its teardown", and this file was rewritten
     # at 08:30:17Z by a publish. Both were inside the sleep loop; neither logged another line,
     # and the loop always logs on exit. Two leads sat at a shell with their omp hung up until a
-    # person respawned their panes. The copy is removed when the relauncher ends.
+    # person respawned their panes.
     #
     # By absolute path, not $0: the relauncher outlives a caller that was started by a relative
     # path from a directory the pane is about to leave.
@@ -5264,9 +5848,11 @@ move_hand_off() {
         rm -f "$run_copy"
         return 1
     }
-    # The wrapper RUNS the copy rather than exec-ing it, and removes it on the way out: `exec`
-    # replaces the shell, which discards the trap and leaks the copy (measured).  Its own script
-    # text is an argument to `bash -c`, so the wrapper itself is in memory.
+    # The copy runs with AGENTBOX_SELF_COPY naming it, and removes that file as it starts (the
+    # preamble at the end of this file), as `agentbox new`'s own copy does: bash reads it through a
+    # descriptor it holds open. Before, an EXIT trap of a wrapper shell removed it, and a SIGKILL
+    # of the relauncher runs no trap, so a killed relauncher left the copy in $TMPDIR
+    # (dispatch://INFRA-1720/comment/4fab10d7).
     #
     # `--fork` IS WHAT MAKES THE RELAUNCHER SURVIVE THE HANG-UP IT PERFORMS, and without it this
     # strands the session it is moving. Measured 2026-11-05 over 32 observations on two omp
@@ -5278,8 +5864,7 @@ move_hand_off() {
     # BASELINE were stranded at 08:27:25Z and 08:29:05Z: each relauncher hung its omp up and was
     # dead ~2 s later, three minutes before the publish I first blamed. The sibling `move --to`
     # path already used --fork for a different symptom of the same thing (line ~7785).
-    setsid --fork bash -c 'c="$1"; shift; trap '"'"'rm -f "$c"'"'"' EXIT; "$@"' _ "$run_copy" \
-        "$run_copy" move --relaunch "$@" </dev/null >>"$log" 2>&1 &
+    setsid --fork env AGENTBOX_SELF_COPY="$run_copy" "$run_copy" move --relaunch "$@" </dev/null >>"$log" 2>&1 &
     local child=$!
     # It must be RUNNING before this says so: LANE-C's `move --self` returned 0 twice and nothing
     # ever moved (2026-11-03). The relauncher's first line is its own; waiting for the log to grow
@@ -5785,6 +6370,11 @@ move_self_in_box() {
     [[ -n "$pane" ]] || die "this box has no TMUX_PANE, so it cannot respawn its own pane; run the line above from a host session"
     if [[ -n "${own:-}" ]]; then move_orphans_gate "$own" "$$" "$dry" || die "nothing was hung up: $MOVE_ORPHANS_WHY"; fi
     if [[ "$dry" == true ]]; then return 0; fi
+    # The chosen transcript must be a regular file before the pane respawns, since a /move not yet
+    # written down or a rename leaves the session's own word for its file pointing at nothing, and
+    # resuming a path that is gone ends the new box (dispatch://INFRA-1720). After the dry run,
+    # which stops nothing and only prints the plan.
+    [[ -f "$resume" ]] || die "the transcript of session $sid, $resume, is not a regular file, so a new box could not resume it; nothing was hung up"
     # MOVE_SPEC_KEEP_GONE: the paths are the HOST's, and a box sees only what it was given. A
     # re-box exists to ADD a path, so testing existence in the box's own namespace dropped
     # exactly the new one ("a box may not be given it": LINUX-1301 and
@@ -6549,35 +7139,6 @@ move_to_target_worktrees() {
     return 1
 }
 
-# move_to_mcp_logins TARGET: the MCP servers this machine's omp holds an OAuth login for and TARGET's
-# does not, one server URL per line. omp keeps those logins in each machine's own
-# ~/.omp/agent/agent.db, which every box on that machine binds, so a session moved to a machine
-# without one loses the server: it answers HTTP 401 when the session starts and its tools never
-# mount (the chief of staff's Slack tools after its move to sami-devbox, 2026-11-03). Only the
-# credential names are read, never their data. A login stays per machine: two machines refreshing
-# copies of one rotating refresh token would revoke each other's, so the remedy is one sign-in on
-# the target, which every box there then shares.
-MCP_LOGINS_SQL="select distinct provider from auth_credentials where provider like 'mcp_oauth:%' and disabled_cause is null"
-move_to_mcp_logins() {
-    local target="$1" here there
-    here="$(sqlite3 -readonly "$HOME/.omp/agent/agent.db" "$MCP_LOGINS_SQL" 2>/dev/null)" || return 0
-    [[ -n "$here" ]] || return 0
-    # A target whose agent.db cannot be read holds no login a session could use there.
-    there="$(move_remote "$target" "sqlite3 -readonly \"\$HOME/.omp/agent/agent.db\" $(printf '%q' "$MCP_LOGINS_SQL")" </dev/null 2>/dev/null)" || there=""
-    comm -23 <(sort -u <<<"$here") <(sort -u <<<"$there") | sed 's/^mcp_oauth:profile:[^:]*://; s/^mcp_oauth://'
-}
-
-# move_to_warn_mcp_logins TARGET: say on stderr which MCP servers a session moved to TARGET will not
-# reach for want of a login there, and the one step that fixes it. A warning, not a refusal: the
-# session still moves, and once someone signs in on TARGET the session gets the server back when
-# it restarts or runs `/mcp reconnect <server>`.
-move_to_warn_mcp_logins() {
-    local target="$1" missing
-    missing="$(move_to_mcp_logins "$target")"
-    [[ -n "$missing" ]] || return 0
-    echo "agentbox: warning: omp on $target holds no login for the MCP server(s) $(tr '\n' ' ' <<<"$missing")- a session moved there gets none of their tools until someone signs in on $target once: start omp there and run \`/mcp reauth <server>\` (every box on $target shares that login)" >&2
-}
-
 # move_to_dests_writable TARGET: every path the copy writes on the target must be writable by the
 # move's user: the path itself when it exists, else its nearest existing ancestor. An EMPTY
 # directory owned by root there is what docker leaves when a box is started with a --dir that did
@@ -6675,8 +7236,7 @@ move_to_src_trees() {
 # move_to_transcript_paths PATH: "mirror\t<path>" for what a session's transcript is on disk: the
 # file, its own directory (the path without `.jsonl`: its subagents' transcripts, and the
 # marker's place), and what a symlink among them points at, since an archived transcript stays
-# behind a symlink to /mnt/durable. A transcript the session sweep took has no file and is read
-# from Postgres on the target as here.
+# behind a symlink to /mnt/durable.
 move_to_transcript_paths() {
     local t="$1" p real link
     for p in "$t" "${t%.jsonl}"; do
@@ -7087,6 +7647,25 @@ move_to_fg() {
     rc=$?
     MOVE_TO_CHILD=""
     return "$rc"
+}
+
+# The first git on PATH that is not shims/git (its header names git-worktree-shim), as shims/git's
+# own real_git finds it; else plain `git`. A move pushes a tree's commits to the same tree on another
+# box over ssh (`<user>@<host>:<path>`), never to GitHub, so the shims' public-push leak-term check
+# does not apply; through the shim the ssh URL reads as of unknown visibility and the push would be
+# scanned and could be refused. The push already runs with --no-verify, so no leak check ran before.
+move_real_git() {
+    local IFS=':' dir candidate header
+    for dir in $PATH; do
+        candidate="$dir/git"
+        [[ -f "$candidate" && -x "$candidate" ]] || continue
+        header=""
+        IFS= read -r -n 512 -d '' header < "$candidate" || true
+        [[ "$header" == *git-worktree-shim* ]] && continue
+        printf '%s\n' "$candidate"
+        return
+    done
+    printf 'git\n'
 }
 
 # One rsync of a move. A file that the session writes while the copy walks it is normal - a
@@ -7889,7 +8468,7 @@ move_to_git_native_prepush() {
         fi
         if (( ${#refs[@]} == 0 )); then
             "$log" "the branches of $common are on $target already ($((SECONDS - start))s)"
-        elif GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" move_to_fg git --git-dir="$common" push --quiet --no-verify \
+        elif GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" move_to_fg "$(move_real_git)" --git-dir="$common" push --quiet --no-verify \
             "$MOVE_TO_USER@$target:$common" "${refs[@]}" >/dev/null 2>&1; then
             "$log" "pushed ${#refs[@]} branch(es) of $common before the hang-up ($((SECONDS - start))s)"
             mkdir -p "${stamp%/*}" && : >"$stamp"
@@ -7925,7 +8504,7 @@ move_to_git_native_push() {
         if move_commit_on_origin "$w" "$head" \
             && move_remote "$target" "git --git-dir=$(printf '%q' "$common") fetch --quiet --no-write-fetch-head origin $(printf '%q' "$head"):$(printf '%q' "$tag")" </dev/null; then
             :
-        elif ! GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" move_to_fg git -C "$w" push --quiet --no-verify \
+        elif ! GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" move_to_fg "$(move_real_git)" -C "$w" push --quiet --no-verify \
             "$MOVE_TO_USER@$target:$common" "+HEAD:$tag" 2>&1; then
             MOVE_TO_WHY="git push of $w to $target:$common failed"
             return 1
@@ -8030,9 +8609,9 @@ move_to_cancel_start() {
             # The box the launcher made, if it got that far: an agentbox container whose command
             # names this session (its `omp --resume <path>`), and the name the launcher recorded.
             for c in $(docker ps -a --filter "name=^agentbox-" --format "{{.Names}}" 2>/dev/null); do
-                docker inspect -f "{{json .Config.Cmd}}" "$c" 2>/dev/null | grep -q "$sid" && docker rm -f "$c" >/dev/null 2>&1
+                docker inspect -f "{{json .Config.Cmd}}" "$c" 2>/dev/null | grep -q "$sid" && docker rm -fv "$c" >/dev/null 2>&1
             done
-            [ -n "$box" ] && docker rm -f "$box" >/dev/null 2>&1
+            [ -n "$box" ] && docker rm -fv "$box" >/dev/null 2>&1
             n=0
             while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$n" -lt 30 ]; do sleep 1; n=$((n + 1)); done
             if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -8590,7 +9169,6 @@ cmd_move_to() {
     move_to_or_would() { if $dry; then would+=("$1"); else die "no move to $target; nothing was hung up: $1"; fi; }
     move_step "asking $target: ready, halts, the same sessions there"
     move_to_preflight "$target" "${MOVE_TO_GROUP[@]}" || move_to_or_would "$MOVE_TO_WHY"
-    move_to_warn_mcp_logins "$target"
     local copy="" cwds=() tpaths="" t
     for s in "${MOVE_TO_GROUP[@]}"; do
         copy+="${MT_COPY[$s]}"$'\n'
@@ -8700,6 +9278,7 @@ move_to_in_box() {
     fi
     [[ -n "$resume" || "${PI_SESSION_FILE:-}" != *_"$sid".jsonl ]] || resume="$PI_SESSION_FILE"
     [[ -n "$resume" ]] || die "no transcript of session $sid can be read here; nothing was hung up"
+    [[ -f "$resume" ]] || die "the transcript of session $sid, $resume, is not a regular file, so $target could not resume it; nothing was hung up"
     # Where omp will resume: the transcript header's cwd, not this shell's (move_to_member).
     local hc
     hc="$(move_transcript_cwd "$resume")" && cwd="$hc"
@@ -9787,10 +10366,10 @@ check_durable
 check_compute_inventory
 if top="$(git rev-parse --show-toplevel 2>/dev/null)" && [ ! -e "$top/.jj" ]; then ok "cwd is a git clone of its own"; else fail "cwd is not a git clone of its own (cwd-dependent: run doctor from your checkout, not /tmp)"; fi
 out="$(gh api user 2>&1)"; case "$out" in *"Resource not accessible by integration"*) ok "gh runs as an App (never the user)";; *) fail "gh api user: $(echo "$out" | head -1) (cwd-dependent: the shim routes by repository, so run doctor from your workspace)";; esac
-# `gh auth status` is answered by shims/gh, which reports the App routing instead of a user
-# login; a bare gh with no login says "not logged into any GitHub hosts". Either answer is
-# this check passing - what it refuses is a user login inside the box.
-gs="$(gh auth status 2>&1)"; case "$gs" in *"own login is not used"*|*"not logged"*) ok "gh auth: no user login";; *) fail "gh auth status shows a login: $(head -1 <<<"$gs")";; esac
+# `gh auth status` in a box reads the agent config directory (scripts/gh-agent-config), whose only
+# login is a placeholder GitHub refuses; a bare gh with no login says "not logged into any GitHub
+# hosts". Either answer is this check passing - what it refuses is a user login inside the box.
+gs="$(gh auth status 2>&1)"; case "$gs" in *"no-user-login-in-agent-sessions"*|*"not logged"*) ok "gh auth: no user login";; *) fail "gh auth status shows a login: $(head -1 <<<"$gs")";; esac
 # The public-text leak check `shims/gh` demands before `gh pr edit|create|comment`. A box that
 # cannot reach it refuses every public text write, which is a box no lead can work in; it needs
 # BOTH the writable config pointer and the script it names, on shared host storage.
@@ -9865,12 +10444,13 @@ exit $fails
 # directories.
 remove_doctor_box() {
     local box="$1"
-    docker rm -f "$box" >/dev/null 2>&1 || true
+    docker rm -fv "$box" >/dev/null 2>&1 || true
     unenroll_box "$box"
-    close_box_cache "$box"
+    # Each removal that fails says so with its command (status 1), and the rest still runs.
+    close_box_cache "$box" || true
     stop_tmux_forwarder "$box"
-    rm -rf "${RUN_BASE:?}/$box"
-    if close_box_disk "$box"; then rm -rf "${BOXES:?}/$box"; fi
+    close_box_run_dir "$box" || true
+    close_box_dir "$box" || true
 }
 
 # The box's host-dependent answers against this host's own (PROBE_FUNCS, @probe lines). Only a
@@ -10051,10 +10631,10 @@ cmd_doctor_here() {
 # the watcher's log said they were restarted (LANE-C, 2026-11-05).
 #
 # So the protection lives HERE rather than in each caller: no entry, pane or watcher has to know
-# about it, and there is no second mechanism to keep in step. AGENTBOX_SELF_COPY both carries
-# the copy's path for the cleanup and stops a second re-exec. A copy that cannot be made is not
-# fatal: the launch goes on from the live file, as before, since refusing to start a session is
-# worse than the hazard.
+# about it, and there is no second mechanism to keep in step. AGENTBOX_SELF_COPY names the copy,
+# and the copy removes that file as it starts (below). The variable also stops a second re-exec.
+# A copy that cannot be made is not fatal: the launch goes on from the live file, as before, since
+# refusing to start a session is worse than the hazard.
 if [[ "${1:-}" == new && -z "${AGENTBOX_SELF_COPY:-}" ]]; then
     _self_copy="$(mktemp "${TMPDIR:-/tmp}/agentbox-self-XXXXXX" 2>/dev/null || true)"
     if [[ -n "$_self_copy" ]] \
@@ -10065,8 +10645,12 @@ if [[ "${1:-}" == new && -z "${AGENTBOX_SELF_COPY:-}" ]]; then
     [[ -z "$_self_copy" ]] || rm -f "$_self_copy"
     echo "agentbox: could not copy itself to run from; continuing from $(readlink -f "${BASH_SOURCE[0]}"), which a dotfiles publish can kill mid-launch" >&2
 fi
-# Running FROM the copy: take it away when this launch ends, whichever way it ends.
-[[ -z "${AGENTBOX_SELF_COPY:-}" ]] || trap 'rm -f "$AGENTBOX_SELF_COPY"' EXIT
+# Running FROM the copy: remove the copy now. Bash reads this script through a descriptor that it
+# holds open, so the launch runs on without the file. No signal after this line can leave the copy.
+# The same holds for a move's relauncher and the collector, which run from copies of their own
+# (move_hand_off, collect_start). The name is dropped with the file, so a child that runs
+# `agentbox new` makes a copy of its own rather than take this one's as done.
+[[ -z "${AGENTBOX_SELF_COPY:-}" ]] || { rm -f "$AGENTBOX_SELF_COPY"; unset AGENTBOX_SELF_COPY; }
 
 case "${1:-}" in
     new)     shift; cmd_new "$@" ;;
@@ -10077,10 +10661,8 @@ case "${1:-}" in
     rebuild) cmd_rebuild ;;
     restart) shift; cmd_restart "$@" ;;
     finish)  shift; cmd_finish "$@" ;;
-    # Started by `new` itself, detached, once its box names a session (reap_start).
-    reap-previous) shift; cmd_reap "$@" ;;
-    # Asked by the unenroll waiter (unenroll_box) three minutes after a box closes.
-    session-live-box) shift; session_live_box "$@" ;;
+    # Started by `new` itself, detached, for every box (collect_start).
+    collect) shift; cmd_collect "$@" ;;
     move)    shift; cmd_move "$@" ;;
     # The usage block at the top of this file, which every command above is listed in: a
     # command missing from this case would otherwise print its own documentation as the usage.

@@ -1,5 +1,5 @@
-# Oryx's forward pair rides forward-tunnel@oryx on the laptop through
-# Cloudflare Access. This file is the reference for every config-serve-*.toml:
+# Oryx's forward pair rides forward-oryx on the laptop through Cloudflare
+# Access. This file is the reference for every config-serve-*.toml:
 # the fields are explained here once, and the other pairs say only how they
 # differ.
 #

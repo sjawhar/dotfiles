@@ -23,7 +23,7 @@
 #                          every parent process runs pi-legion-envoy with
 #                          sjawhar/legion#1249 (LEGION-225) — the leftover
 #                          registration of a finished task subagent, whose
-#                          inbox still wakes that parked subagent. Once that
+#                          inbox still wakes that finished subagent. Once that
 #                          release is installed everywhere, make untitled rows
 #                          the default and drop the flag.
 #   envoy config-path — print the envoy.json envoy reads (below)
@@ -40,6 +40,15 @@
 # `envoy notify` is that send, for the timers that post such notices: an envoy
 # from before it answers `notify` as an unknown command, exits nonzero and sends
 # nothing, so a caller needs no probe for it.
+#
+# A send counts as delivered only when the listener answers 200. A publish to a
+# role that no live session holds is answered 202: the listener keeps the copy
+# for the role's next holder for one hour (cybermonklabs/legion#4079), so no
+# session has the message now. send, notify and broadcast exit 1 on that 202, as
+# they do on a 404, so a caller's fallback or retry still runs; the error names
+# the status and the listener's answer. A direct send that the listener stores is
+# answered 200, for a live session and for one that is away alike, so it is not
+# affected (sendHandler, packages/envoy/cmd/listener/api.go in that repository).
 #
 # The message body of `send`, `notify` and `broadcast` comes either from the
 # command line or from `--message-file <path>` — `-` for stdin, the spelling
@@ -552,13 +561,23 @@ _envoy_send() {
     fi
 
     resolve_listener
-    local out
+    local out status
+    # -w appends the HTTP status as the last line, so the answer decides and not curl's exit
+    # alone: --fail-with-body fails only a 4xx or 5xx, and a 202 is a 2xx (the header above).
     out=$(listener_curl -sS --fail-with-body --max-time "$ENVOY_MAX_TIME" -X POST "$LISTENER_URL$endpoint" \
         -H "Content-Type: application/json" \
+        -w '\n%{http_code}' \
         -d "$payload" 2>&1) || {
         echo "error: Envoy at $LISTENER_URL failed POST $endpoint: $out" >&2
         return 1
     }
+    status="${out##*$'\n'}"
+    out="${out%$'\n'*}"
+    out="${out%$'\n'}"
+    if [ "$status" != 200 ]; then
+        echo "error: Envoy at $LISTENER_URL answered POST $endpoint with HTTP $status, not 200, so no session took the message: $out" >&2
+        return 1
+    fi
     printf '%s\n' "$out"
 }
 

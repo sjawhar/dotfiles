@@ -79,7 +79,7 @@ ensure_link "${DOTFILES_DIR}/omp/extensions/running-script-guard.ts" "${OMP_AGEN
 ensure_link "${DOTFILES_DIR}/omp/extensions/decision-review-gate.ts" "${OMP_AGENT_DIR}/extensions/decision-review-gate.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/path-guard.ts" "${OMP_AGENT_DIR}/extensions/path-guard.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/span-account.ts" "${OMP_AGENT_DIR}/extensions/span-account.ts"
-# The experiments extension: four session features, each behind its own gate (omp/AGENTS.md).
+# The experiments extension: several session features, each behind its own gate (omp/extensions/experiments/index.ts).
 # Only the entry is linked; its sibling modules resolve from the link's real path.
 ensure_link "${DOTFILES_DIR}/omp/extensions/experiments/index.ts" "${OMP_AGENT_DIR}/extensions/experiments.ts"
 ensure_link "${DOTFILES_DIR}/omp/plugins" "${HOME}/.omp/plugins"
@@ -207,11 +207,12 @@ install_marketplace_plugin() {
 # theorem-labs/verification-skills: the agent-skills catalog. All four of its plugins are installed
 # because the fleet uses skills from each: validation-loop (verification); designing-tasks and
 # running-task-qa (tasks); running-heavy-jobs, which sends heavy work to the cluster
-# (dispatch://INFRA-898), and maintaining-prover-forks (engineering); calling-the-model-gateway and
-# setting-up-a-dev-box-for-agents (dev-infra). Taking fewer would drop skills in daily use. Five
-# skills of the same daily work are not in this catalog: verification-before-completion is a skill
-# of the superpowers plugin, and opening-a-pr, landing-a-pr, finding-dropped-work and
-# using-transcript-store are this repository's own skills, in plugins/sjawhar/skills/.
+# (dispatch://INFRA-898), maintaining-prover-forks and using-transcript-store (engineering);
+# calling-the-model-gateway and setting-up-a-dev-box-for-agents (dev-infra). Taking fewer would
+# drop skills in daily use. Four skills of the same daily work are not in this catalog:
+# verification-before-completion is a skill of the superpowers plugin, and opening-a-pr,
+# landing-a-pr and finding-dropped-work are this repository's own skills, in
+# plugins/sjawhar/skills/.
 #
 # The catalog was renamed `verification-skills` -> `agent-skills` and the single `verification-skills`
 # plugin split into three on 2026-11-07, which broke the install outright: `omp plugin marketplace

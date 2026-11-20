@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""The laptop's Cloudflare SSH hosts and their forward set."""
+"""The laptop's Cloudflare SSH hosts."""
 
 from __future__ import annotations
 
 import ipaddress
 import os
-import re
 import subprocess
 import tempfile
 import unittest
@@ -15,10 +14,6 @@ from pathlib import Path
 DOTFILES = Path(__file__).resolve().parents[2]
 SSH = Path("/usr/bin/ssh")
 SSH_CONFIG = DOTFILES / "laptop" / "ssh-config"
-
-
-def normalized_forward(value: str) -> str:
-    return re.sub(r"\[([^\]]+)\]", r"\1", value)
 
 
 class OryxSshHosts(unittest.TestCase):
@@ -60,38 +55,13 @@ class OryxSshHosts(unittest.TestCase):
         self.assertEqual(len(values["controlpath"]), 1)
         self.assertTrue(values["controlpath"][0].endswith("/.ssh/sockets/agent@oryx.thecybermonk.com-22"))
 
-    def test_oryx_tunnel_has_only_the_required_forwards(self) -> None:
-        values = self.ssh_g("oryx-tunnel")
-        self.assertEqual(values["hostname"], ["oryx.thecybermonk.com"])
-        self.assertEqual(values["controlmaster"], ["false"])
-        self.assertEqual(values["identitiesonly"], ["yes"])
-        self.assertEqual(len(values["identityfile"]), 1)
-        self.assertTrue(values["identityfile"][0].endswith("/.ssh/oryx-tunnel"))
-        self.assertEqual(values["forwardagent"], ["no"])
-        self.assertEqual(values["exitonforwardfailure"], ["yes"])
-        self.assertEqual(values["serveraliveinterval"], ["15"])
-        self.assertEqual(values["serveralivecountmax"], ["4"])
-        self.assertEqual(values["identityagent"], ["none"])
-        self.assertNotIn("controlpath", values)
-        remote = [normalized_forward(value) for value in values.get("remoteforward", [])]
-        local = [normalized_forward(value) for value in values.get("localforward", [])]
-        self.assertCountEqual(
-            remote,
-            [
-                "127.0.0.1:12800 127.0.0.1:12800",
-                "127.0.0.1:12803 127.0.0.1:12803",
-                "127.0.0.1:12804 127.0.0.1:12804",
-                "127.0.0.1:12806 127.0.0.1:12806",
-            ],
-        )
-        self.assertCountEqual(
-            local,
-            [
-                "127.0.0.1:12801 127.0.0.1:12801",
-                "127.0.0.1:12802 127.0.0.1:12802",
-                "127.0.0.1:12805 127.0.0.1:12805",
-            ],
-        )
+    def test_oryx_host_lines_are_exactly_oryx_and_oryx_ssm(self) -> None:
+        oryx_host_lines = [
+            line
+            for line in SSH_CONFIG.read_text(encoding="utf-8").splitlines()
+            if line.startswith("Host ") and "oryx" in line
+        ]
+        self.assertEqual(oryx_host_lines, ["Host oryx", "Host oryx-ssm"])
 
     def test_no_host_resolves_to_the_oryx_tailnet(self) -> None:
         hosts = [

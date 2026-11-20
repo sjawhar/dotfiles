@@ -79,10 +79,12 @@ class BoxReclaim(unittest.TestCase):
 
     def test_every_stop_agentbox_drives_reclaims_first(self) -> None:
         """The launcher's hang-up and TERM traps, close_box's forced removal and a move's hang-up of
-        a boxed session each call box_reclaim right before they stop the container."""
+        a boxed session each call box_reclaim right before they stop the container. close_box's
+        forced removal takes the container's anonymous volumes with it (`rm -fv`): the end of a box
+        deletes everything in it (dispatch://INFRA-1720)."""
         text = AGENTBOX.read_text(encoding="utf-8")
         for stop in ('box_reclaim "$box"; docker kill -s SIGHUP "$box"',
-                     'box_reclaim "$box"\n        docker rm -f "$box"',
+                     'box_reclaim "$box"\n        docker rm -fv "$box"',
                      'box_reclaim "${boxes[i]}"\n            docker kill -s SIGHUP "${boxes[i]}"'):
             self.assertIn(stop, text)
 

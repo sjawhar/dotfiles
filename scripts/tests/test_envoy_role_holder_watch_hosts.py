@@ -7,7 +7,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from test_envoy_role_holder_watch_tuning import Box, HOLDER, RunEnvoy, WATCH
+from test_envoy_role_holder_watch_tuning import Box, HOLDER, RunEnvoy, WATCH, suppression
 
 
 class HostWatchTest(Box):
@@ -71,7 +71,8 @@ class HostWatchTest(Box):
         self.assertEqual(self.data()["incidents"], {})
 
     def test_a_suppressed_role_does_not_pay_for_registry_or_ssh_reads(self):
-        self.write_state({"node-envprobe-a1-1": self.role(host="sami-rocqperf")})
+        self.enterContext(patch.object(WATCH, "SUPPRESSIONS", (suppression(self.now + 86400),)))
+        self.write_state({"probe-1": self.role(host="sami-rocqperf")})
         with patch.object(RunEnvoy, "registry", side_effect=AssertionError("unneeded registry read")):
             self.period()
         self.assertEqual(RunEnvoy.sent, [])
