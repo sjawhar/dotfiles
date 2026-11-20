@@ -1728,18 +1728,18 @@ class GhLeakTerms(unittest.TestCase):
             self.assert_sent(self.run_gh([*argv, TEXT]), [*argv, TEXT])
 
     def test_a_remote_is_read_by_the_url_gh_reads(self) -> None:
-        # gh 2.98.0 reads a remote by its fetch URL, and by its push URL only where the fetch URL names no repository
-        # (context.TranslateRemotes); a remote with no network host it drops. The tester measured
-        # (dispatch://INFRA-3365, review round 11): with a path or a file:// remote beside
+        # gh 2.98.0 reads a remote by its fetch URL, and by its push URL only where the fetch URL gives no repository
+        # (context.TranslateRemotes, ghrepo.FromURL: a host, and a path of two parts); a remote that gives none it
+        # drops. The tester measured (dispatch://INFRA-3365, review round 11): with a path or a file:// remote beside
         # github.com/theorem-labs/agent-infra, `gh pr comment 1` went to that repository, and with only a path remote
-        # gh sent nothing. The check reads a URL as git does (url_is_local_not_ssh: no `:`, a `/` before the first `:`,
-        # or the file scheme) and reads each remote so (gh_remotes), in the plain case and for the base repositories.
-        # Given the knives ygo-fork list and theorem-labs/ygo private, each checkout here whose remotes have no network
-        # host but github.com is in the plain case: the clean comment that names that repository with -R, which holds
-        # `theorem-labs`, goes out, and so does one with a term. A fetch URL on another host, beside a path too, is not:
-        # the term is refused, and the refusal names the remote. In every checkout a clean comment to a public
-        # repository goes out. Until that round every fetch and push URL was read, so a path remote, or a push URL of
-        # `DISABLE`, refused the clean -R comment.
+        # gh sent nothing. The check reads each remote so (gh_remotes), in the plain case and for the base
+        # repositories. Given the knives ygo-fork list and theorem-labs/ygo private, each checkout here whose remotes
+        # give gh no repository but github.com's is in the plain case: the clean comment that names that repository
+        # with -R, which holds `theorem-labs`, goes out, and so does one with a term. A fetch URL on another host,
+        # beside a path too, is not, and neither is `./a:b`, which gh reads as scp-like, a/b on the host `.` (review
+        # round 12): the term is refused, and the refusal names the remote. In every checkout a clean comment to a
+        # public repository goes out. Until round 11 every fetch and push URL was read, so a path remote, or a push URL
+        # of `DISABLE`, refused the clean -R comment.
         env = self.ygo_fork()
         self.answer(YGO, "private")
         store = str(self.tmp / "store.git")
@@ -1750,7 +1750,7 @@ class GhLeakTerms(unittest.TestCase):
             ("file:// only", [("origin", f"file://{store}")], "", ""),
             ("a bundle", [("origin", "store.bundle")], "", ""),
             ("../local-store.git", [("origin", "../local-store.git")], "", ""),
-            ("./a:b", [("origin", "./a:b")], "", ""),
+            ("./a:b", [("origin", "./a:b")], "", "origin"),
             ("a path beside the github.com remote", [("origin", store), ("upstream", github)], "", ""),
             ("a github.com remote whose push URL is DISABLE", [("origin", github)], "DISABLE", ""),
             ("a github.com remote whose push URL is on ghe.example.com", [("origin", github)], f"{ghe}.git", ""),
@@ -1948,12 +1948,13 @@ class GhLeakTerms(unittest.TestCase):
         # The check reads each form gh 2.98.0 writes its aliases in (gh_aliases). A config.yml gh does not write, which
         # the reader does not read, leaves a call that may run one of its aliases read whole, with one target read as
         # public: its arguments, the files and standard input they name, and that alias's own entry in config.yml, from
-        # its key to the next key, never another alias's (review round 11 of dispatch://INFRA-3365). So an alias whose
-        # own entry holds a listed term is refused, though it names a private repository, and the refusal says the
-        # check cannot read gh's aliases exactly; the same alias with no term goes out. The forms: a folded `>` scalar,
-        # a value continued on a more-indented line, an anchor, an escape yaml.v3 does not write (gh then refuses its
-        # config), an aliases key given twice, and a key indented below an alias's empty value, a mapping that gh does
-        # not read as an alias and the reader leaves unread.
+        # its key to the next key, read loosely, so that a text that only looks like its key inside another alias's
+        # value is read too (review rounds 11 and 12 of dispatch://INFRA-3365). So an alias whose own entry holds a
+        # listed term is refused, though it names a private repository, and the refusal says the check cannot read gh's
+        # aliases exactly; the same alias with no term goes out. The forms: a folded `>` scalar, a value continued on a
+        # more-indented line, an anchor, an escape yaml.v3 does not write (gh then refuses its config), an aliases key
+        # given twice, and a key indented below an alias's empty value, a mapping that gh does not read as an alias and
+        # the reader leaves unread.
         unread = "read as public, since the check cannot read gh's aliases exactly"
         for number, (row, aliases) in enumerate((
                 ("a folded > scalar", "\n    more: >-\n        issue comment 1 -R o/priv\n        --body {body}"),
@@ -1975,10 +1976,10 @@ class GhLeakTerms(unittest.TestCase):
                 env = self.gh_config(f"clean-{number}", None, gh_config_yml(aliases.replace("{body}", "clean")))
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(["more"], env=env), ["more"])
-        # Only that alias's own entry is read, with the call's own arguments: beside the folded alias `pc`, whose entry
-        # holds a term and which is refused, `co 1` goes out (until review round 11 it was refused for `pc`'s term);
-        # `prc`, whose entry holds none, is refused for a term in its arguments; and `pr view 1` and `nosuch 1`, whose
-        # words are no key there, go out.
+        # Only that alias's own entry is read, and the entry of each alias it runs (none here), with the call's own
+        # arguments: beside the folded alias `pc`, whose entry holds a term and which is refused, `co 1` goes out (until
+        # review round 11 it was refused for `pc`'s term); `prc`, whose entry holds none, is refused for a term in its
+        # arguments; and `pr view 1` and `nosuch 1`, whose words are no key there, go out.
         folded = self.gh_config("folded", None, gh_config_yml(
             "\n    co: pr checkout\n    prc: >-\n        pr comment 1 -R o/priv\n"
             f"    pc: >-\n        pr comment 1 -R o/priv --body {CANARY}"))
@@ -2061,7 +2062,8 @@ class GhLeakTerms(unittest.TestCase):
         # block scalar, `|4-` where it starts with a space; an alias named `aliases` or `hosts` among them. So such an
         # alias whose expansion sends a listed term to a private repository goes out, and the same alias to a public
         # one is refused for it, its target named. The escapes decode: the term spelled with `\x`, `\u` and `\U` is
-        # refused.
+        # refused. The line separator stays, without the blanks after it: the refusal shows the body as `#TERM\u2028x`,
+        # which with the blanks kept would be a body `#TERM\u2028` and a word `x`.
         words = " ".join(["word"] * 40)
         spelled = "\\x%02X\\u%04X\\U%08X%s" % (ord(CANARY[0]), ord(CANARY[1]), ord(CANARY[2]), CANARY[3:])
         rows = (
@@ -2084,6 +2086,8 @@ class GhLeakTerms(unittest.TestCase):
             ("flow, double-quoted, a line break", ' {pc: "issue create -R {repo} --title x\\n--body {body}"}'),
             ("flow, beside aliases named aliases and hosts",
              " {aliases: pr list, pc: issue comment 1 -R {repo} --body {body}, hosts: auth status}"))
+        # The line each refusal shows, where it tells how the value was read.
+        shown = {"block, single-quoted, a line separator": f"#{CANARY}\u2028x"}
         for number, (row, aliases) in enumerate(rows):
             for repository in (PRIVATE, PUBLIC):
                 text = (aliases.replace("{repo}", repository).replace("{words}", words).replace("{body}", CANARY)
@@ -2095,8 +2099,10 @@ class GhLeakTerms(unittest.TestCase):
                         self.assert_sent(self.run_gh(["pc"], env=env), ["pc"])
                         continue
                     refused = self.run_gh(["pc"], env=env)
-                    self.assert_refused(refused, "--body", CANARY)
+                    line = self.assert_refused(refused, "--body", CANARY)
                     self.assertIn(f"to {PUBLIC} (public):", refused.stderr.decode())
+                    if row in shown:
+                        self.assertEqual(line, shown[row])
 
     def test_a_call_through_an_alias_is_judged_by_that_alias_alone(self) -> None:
         # Until review round 11 of dispatch://INFRA-3365 one alias that held a listed term refused every call through
@@ -2124,6 +2130,171 @@ class GhLeakTerms(unittest.TestCase):
                 refused = self.run_gh([name], env=env)
                 self.assert_refused(refused, "--body", CANARY, line=1)
                 self.assertIn(f"to {PUBLIC} (public):", refused.stderr.decode())
+
+    def test_each_key_form_gh_writes_unquoted_is_read_exactly(self) -> None:
+        # `gh alias set` writes a key unquoted wherever yaml.v3 reads it as a plain scalar, and the reader reads each so
+        # (gh_yaml_plain): a key with a `:` inside, or that begins with `?`, `:` or `-` before a character that is no
+        # blank (`pr:mine`, `?mine`, `-x`, `:x`, `a::b`, `x:y:z`; in flow form `-x`), and after a `? ` a key longer
+        # than 128 bytes, its value on the next line after a `:`, or after a ` :` in flow form. Each config here holds
+        # the lines `gh alias set` wrote in a scratch GH_CONFIG_DIR (dispatch://INFRA-3365, review round 12, measured
+        # 2026-11-20), with `pc`, an issue comment that sends a listed term, beside such a key. `pc` to a private
+        # repository goes out, and to a public one is refused, its target named. Until that round the reader read none
+        # of these keys, so each left every call through an alias read whole, as public, and `pc` to the private
+        # repository was refused.
+        long = "a" * 129
+        pc = f"pc: issue comment 1 -R {{repo}} --body {CANARY}"
+        rows = (
+            ("pr:mine", f"\n    co: pr checkout\n    pr:mine: pr list --author @me\n    {pc}"),
+            ("?mine", f"\n    co: pr checkout\n    ?mine: pr list --author @me\n    {pc}"),
+            ("-x", f"\n    co: pr checkout\n    -x: pr list --author @me\n    {pc}"),
+            ("a::b", f"\n    co: pr checkout\n    a::b: pr list --author @me\n    {pc}"),
+            (":x and x:y:z",
+             f"\n    co: pr checkout\n    :x: pr list --author @me\n    x:y:z: pr list --author @me\n    {pc}"),
+            ("a key past 128 bytes", f"\n    co: pr checkout\n    ? {long}\n    : pr list --author @me\n    {pc}"),
+            ("a key past 128 bytes, its value a |- block",
+             f"\n    co: pr checkout\n    ? {long}\n    : |-\n        issue create --title x\n        --body y\n    {pc}"),
+            ("-x, in flow form", f" {{-x: pr list --author @me, {pc}}}"),
+            ("a key past 128 bytes, in flow form", f" {{? {long} : pr list --author @me, {pc}}}"))
+        for number, (row, aliases) in enumerate(rows):
+            for repository in (PRIVATE, PUBLIC):
+                env = self.gh_config(f"key-{number}-{repository.replace('/', '-')}", None,
+                                     gh_config_yml(aliases.replace("{repo}", repository)))
+                with self.subTest(row=row, repository=repository):
+                    self.setUp_calls()
+                    if repository == PRIVATE:
+                        self.assert_sent(self.run_gh(["pc"], env=env), ["pc"])
+                        continue
+                    refused = self.run_gh(["pc"], env=env)
+                    self.assert_refused(refused, "--body", CANARY, line=1)
+                    self.assertIn(f"to {PUBLIC} (public):", refused.stderr.decode())
+
+    def test_a_file_an_alias_beside_a_key_with_a_colon_names_is_read(self) -> None:
+        # The reviewer's measurement (dispatch://INFRA-3365, review round 12): from a checkout of a private repository,
+        # gh wrote `pr:mine`, `note: pr comment -R o/pub --body-file NOTES.md` and `b: browse`, and NOTES.md holds a
+        # listed term, which `note 1` sends to the public repository. Until that round the reader did not read
+        # `pr:mine`, so `note 1` was read whole, by its own words and not by the file its alias names, and went out.
+        # It is refused, judged by the public repository, with the `pr:mine` line and without it.
+        self.remotes(("origin", PRIVATE))
+        self.file("NOTES.md", TEXT)
+        note = f"\n    note: pr comment -R {PUBLIC} --body-file NOTES.md\n    b: browse"
+        for row, aliases in (("with pr:mine", f"\n    co: pr checkout\n    pr:mine: pr list --author @me{note}"),
+                             ("without pr:mine", f"\n    co: pr checkout{note}")):
+            env = self.gh_config(row.replace(" ", "-").replace(":", "-"), None, gh_config_yml(aliases))
+            with self.subTest(row=row):
+                self.setUp_calls()
+                refused = self.run_gh(["note", "1"], env=env)
+                self.assert_refused(refused, "--body-file NOTES.md", line=1)
+                self.assertIn(f"gh pr comment to {PUBLIC} (public):", refused.stderr.decode())
+
+    def test_the_files_and_standard_input_an_unread_alias_names_are_read(self) -> None:
+        # A config.yml gh does not write (here, folded `>-` aliases) leaves a call through one of its aliases read
+        # whole, as public (gh_unread_alias_check), and each file and standard input that the alias's entry names is
+        # read too, through the text reader every call's texts go through, and the entry of each alias it runs: `note`
+        # names NOTES.md, `b` runs `note`, the alias keyed after a `? ` past 128 bytes names NOTES.md too, `folded` and
+        # `quoted` name `my notes.md` in shell quotes, in a folded and in a double-quoted value, `stdin` names standard
+        # input, and `pipe` a named pipe, which the check cannot read. A term in the file or on standard input is
+        # refused, a clean one goes out, and `pipe` is refused, the refusal saying why. Until review round 12 of
+        # dispatch://INFRA-3365 none of them was read, and each call went out.
+        os.mkfifo(self.work / "pipe")
+        long = "a" * 129
+        env = self.gh_config("expansion", None, gh_config_yml(
+            "\n    co: pr checkout\n    note: >-\n        pr comment 1 -R o/priv\n        --body-file NOTES.md"
+            "\n    b: note\n    stdin: >-\n        pr comment 1 -R o/priv --body-file -"
+            f"\n    pipe: >-\n        pr comment 1 -R o/priv --body-file pipe\n    ? {long}\n    : >-"
+            "\n        pr comment 1 -R o/priv --body-file NOTES.md"
+            "\n    folded: >-\n        pr comment 1 -R o/priv --body-file 'my notes.md'"
+            "\n    quoted: \"pr comment 1 -R o/priv --body-file 'my notes.md'\""))
+        unread = "read as public, since the check cannot read gh's aliases exactly"
+        for text in (TEXT, CLEAN):
+            self.file("NOTES.md", text)
+            self.file("my notes.md", text)
+            for name, stdin, field in (("note", b"", "--body-file NOTES.md"), ("b", b"", "--body-file NOTES.md"),
+                                       (long, b"", "--body-file NOTES.md"),
+                                       ("folded", b"", "--body-file my notes.md"),
+                                       ("quoted", b"", "--body-file my notes.md"),
+                                       ("stdin", text.encode(), "--body-file - (standard input)")):
+                with self.subTest(call=name[:20], term=text == TEXT):
+                    self.setUp_calls()
+                    result = self.run_gh([name], stdin, env=env)
+                    if text == CLEAN:
+                        self.assert_sent(result, [name], stdin)
+                        continue
+                    self.assert_refused(result, field, line=1)
+                    self.assertIn(f"gh {name} to what the gh alias {name} runs, {unread}", result.stderr.decode())
+        with self.subTest(call="pipe"):
+            self.setUp_calls()
+            refused = self.run_gh(["pipe"], env=env)
+            stderr = refused.stderr.decode()
+            self.assertEqual(refused.returncode, 2, stderr)
+            self.assertEqual(self.gh_calls(), [])
+            self.assertIn(": cannot read --body-file pipe: a pipe or a device, which the check cannot read", stderr)
+
+    def test_a_directory_or_a_glob_through_an_unread_alias_is_a_word(self) -> None:
+        # Through an alias of a config.yml gh does not write, a call's words are read as every command reads them
+        # (gh_alias_files), so a word may name a file: the check keeps `-`, standard input, and a path to anything but
+        # a directory, reads a regular file, refuses a pipe, and expands no glob. From a checkout with a `docs/`
+        # directory: `b docs`, `b .`, `co docs` and `co --body '*'`, none holding a listed term, go out; until review
+        # round 12 of dispatch://INFRA-3365 each was refused, `docs` being a directory the check cannot read, and `*`
+        # read as every file of the directory. A bare argument that names a clean file goes out. `g` runs `gist
+        # create`, which reads a bare argument as a file, so `g notes.md` with a term in the file is refused; and a
+        # body file that is a pipe, `--body-file <(…)`, is refused, the refusal saying why.
+        (self.work / "docs").mkdir()
+        self.file("notes.md", CLEAN)
+        env = self.gh_config("words", None, gh_config_yml(
+            "\n    co: pr checkout\n    b: browse\n    g: >-\n        gist create"))
+        for argv in (["b", "docs"], ["b", "."], ["co", "docs"], ["co", "--body", "*"], ["b", "notes.md"]):
+            with self.subTest(call=" ".join(argv)):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=env), argv)
+        self.file("notes.md", TEXT)
+        with self.subTest(call="g notes.md", term=True):
+            self.setUp_calls()
+            refused = self.run_gh(["g", "notes.md"], env=env)
+            self.assert_refused(refused, "argument 1 notes.md", line=1)
+            self.assertIn("gh g to what the gh alias g runs, read as public", refused.stderr.decode())
+        with self.subTest(call="co --body-file <(…)"):
+            self.setUp_calls()
+            result = subprocess.run(["bash", "-c", '"$GH" co --body-file <(printf %s "$BODY")'],
+                                    env={**env, "GH": str(GH), "BODY": TEXT}, cwd=self.work, stdin=subprocess.DEVNULL,
+                                    capture_output=True, timeout=240, check=False)
+            stderr = result.stderr.decode("utf-8", "replace")
+            self.assertEqual(result.returncode, 2, stderr)
+            self.assertEqual(self.gh_calls(), [])
+            self.assertRegex(stderr, r": cannot read --body-file /dev/fd/\d+: a pipe or a device, which the check cannot "
+                                     "read")
+
+    def test_a_remote_is_read_by_gh_s_own_rule_for_its_url(self) -> None:
+        # gh 2.98.0 takes a remote's repository from its fetch URL, else from its push URL, by git.ParseURL and
+        # ghrepo.FromURL: there must be a host, and a path of exactly two parts. That rule is not git's. Measured with
+        # the real gh (`gh browse -n`, dispatch://INFRA-3365, review round 12): `file://github.com/O/R.git` is
+        # github.com's O/R; a fetch URL `https::https://…`, whose scheme no `//` follows, has no host, so gh takes the
+        # push URL; and `./a:b`, a path for git, is scp-like for gh, a/b on the host `.`, so the remote is not on
+        # github.com. So a comment with a term is refused: by the public theorem-labs/ygo beside a private fork, by the
+        # public push URL, and outside the plain case for `./a:b`, though it names a private repository. The same
+        # comments with no term go out. Until that round the check read a remote by git's local-path rule, and each
+        # comment with a term went out.
+        self.answer(YGO, "public")
+        for form, remotes, push, argv, shown in (
+                ("file://github.com beside the private fork",
+                 (("origin", f"file://github.com/{YGO}.git"), ("fork", f"https://github.com/{PRIVATE}.git")), "",
+                 ["pr", "comment", "1", "--body"], "remote origin (public)"),
+                ("https::https:// fetching, pushing to a public repository",
+                 (("origin", f"https::https://github.com/{PRIVATE}.git"),), f"https://github.com/{PUBLIC}.git",
+                 ["pr", "comment", "1", "--body"], "remote origin (public)"),
+                ("./a:b fetching, pushing to a public repository", (("origin", "./a:b"),),
+                 f"https://github.com/{PUBLIC}.git", ["pr", "comment", "1", "-R", PRIVATE, "--body"],
+                 "since the remote origin (./a:b) is not on github.com")):
+            self.checkout(*remotes)
+            if push:
+                self.git("remote", "set-url", "--push", "origin", push)
+            with self.subTest(form=form):
+                self.setUp_calls()
+                refused = self.run_gh([*argv, TEXT])
+                self.assert_refused(refused, "--body")
+                self.assertIn(shown, refused.stderr.decode())
+            with self.subTest(form=form, control="no term"):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh([*argv, CLEAN]), [*argv, CLEAN])
 
     def test_a_config_line_outside_the_aliases_changes_nothing(self) -> None:
         # A line of config.yml outside its aliases changes neither how the aliases are read nor the plain case. These

@@ -2436,8 +2436,10 @@ def gh_config_directory(environment: Mapping[str, str]) -> Path:
 
 def gh_loose_key(name: str) -> re.Pattern[str]:
     """A key NAME in gh's config, read loosely: at a line's start or after a `{` or a `,`, in quotes or not, with its
-    `:`. Group 1 is what stands before it: "" at a line's start, else the `{` or the `,`."""
-    return re.compile(rf"""(^|[{{,])[ \t]*["']?{re.escape(name)}["']?[ \t]*:""", re.MULTILINE)
+    `:`, or after a `? `, as yaml.v3 writes a key longer than 128 bytes, with its `:` on that line or at the next line's
+    start. Group 1 is what stands before it: "" at a line's start, else the `{` or the `,`."""
+    key = rf"""["']?{re.escape(name)}["']?[ \t]*"""
+    return re.compile(rf"(^|[{{,])[ \t]*(?:\?[ \t]+{key}(?:\n[ \t]*)?|{key}):", re.MULTILINE)
 
 
 def gh_root_keys(lines: Sequence[str], name: str) -> list[int]:
@@ -2517,54 +2519,60 @@ def gh_yaml_quoted(line: str, start: int) -> tuple[str, int] | None:
     return None
 
 
+# yaml.v3's indicators (scannerc.go, yaml_parser_fetch_next_token): no plain scalar begins with one, but with `-`, and
+# outside a flow mapping with `?` or `:`, before a character that is neither a blank nor a line's end (gh_yaml_plain).
+GH_YAML_INDICATORS = "-?:,[]{}#&*!|>'\"%@`"
+
+
 def gh_yaml_key(line: str, start: int, flow: bool = False) -> tuple[str, int] | None:
-    """The key that starts at LINE[START], plain or quoted (gh_yaml_quoted), and the index after its `:`, which a blank
-    or the line's end follows, when the simple readers read it (gh_aliases, gh_config_condition); FLOW for a key of a
-    flow mapping, where a plain key holds no `,`, `[`, `]`, `{` or `}`. None for any other."""
-    if line[start:start + 1] in ("'", '"'):
-        found = gh_yaml_quoted(line, start)
-        if found is None:
-            return None
-        key, index = found
-    else:
-        plain = re.compile(r"[^\s:#'\"{}\[\],&*!|>%@`?-][^:,{}\[\]]*" if flow else
-                           r"[^\s:#'\"{}\[\],&*!|>%@`?-][^:]*").match(line, start)
-        if plain is None or re.search(rf"[ \t]#|[{GH_YAML_OTHER_BREAKS}{GH_YAML_BREAKS}]", plain[0]):
-            return None
-        key, index = plain[0].rstrip(" \t"), plain.end()
-    colon = re.compile(r"[ \t]*:(?=[ \t]|$)").match(line, index)
-    return None if colon is None else (key, colon.end())
+    """The key that starts at LINE[START], plain (gh_yaml_plain, FLOW for a key of a flow mapping) or quoted
+    (gh_yaml_quoted), and the index after its `:`, which a blank or the line's end follows, when the simple readers
+    read it (gh_aliases, gh_config_condition). None for any other."""
+    found = gh_yaml_quoted(line, start) if line[start:start + 1] in ("'", '"') else gh_yaml_plain(line, start, flow)
+    colon = None if found is None else re.compile(r"[ \t]*:(?=[ \t]|$)").match(line, found[1])
+    return None if found is None or colon is None else (found[0], colon.end())
 
 
 def gh_yaml_plain(line: str, start: int, flow: bool = False) -> tuple[str, int] | None:
-    """The plain scalar from LINE[START] as yaml.v3 reads one that ends on its line, and the index of its end: up to a
-    ` #` comment or the line's end, or in a flow mapping (FLOW) to its `,` or `}`, without the blanks around it. None
-    for one yaml.v3 does not read so: one that begins with an indicator (`-`, `?` or `:` before a blank, or one of
-    ``,[]{}#&*!|>'"%@` ``), that holds `: ` or a line break, and in a flow mapping one that holds a comment."""
-    stop = re.compile(r"[,{}\[\]]").search(line, start) if flow else None
-    end = len(line) if stop is None else stop.start()
-    comment = re.compile(r"[ \t]#").search(line, start, end)
-    if comment is not None and flow:
+    """The plain scalar that starts at LINE[START] as yaml.v3 scans one that ends on its line (scannerc.go,
+    yaml_parser_fetch_next_token and yaml_parser_scan_plain_scalar), a key's or a value's, and the index after its last
+    character. It begins with any character but a blank and the indicators (GH_YAML_INDICATORS); with `-` before a
+    character that is neither a blank nor the line's end; and outside a flow mapping (FLOW) with `?` or `:` before one.
+    It ends at a `:` before a blank or the line's end, at a `#` after a blank, which begins a comment, in a flow mapping
+    at any of `,?[]{}`, or at the line's end, the blanks before its end not its own. So `gh alias set` writes the keys
+    `pr:mine`, `?mine`, `-x`, `:x`, `a::b`, `x:y:z`, `x]` and `a#b` unquoted in block form, and `-x` in flow form
+    (measured 2026-11-20 with gh 2.98.0). None for one that does not begin so, and for one that a line break other than
+    the newline (GH_YAML_OTHER_BREAKS, GH_YAML_BREAKS) continues on another line."""
+    breaks = GH_YAML_OTHER_BREAKS + GH_YAML_BREAKS
+    first, following = line[start:start + 1], line[start + 1:start + 2]
+    if not first or first in f" \t{breaks}" or first in GH_YAML_INDICATORS and (
+            following in f" \t{breaks}" or first not in ("-" if flow else "-?:")):
         return None
-    value = line[start:end if comment is None else comment.start()].strip(" \t")
-    if (not value or value[0] in ",[]{}#&*!|>'\"%@`" or re.match(r"[-?:](?:[ \t]|$)", value)
-            or re.search(rf":(?:[ \t]|$)|[{GH_YAML_OTHER_BREAKS}{GH_YAML_BREAKS}]", value)):
-        return None
-    return value, end
+    index = end = start
+    while index < len(line):
+        character = line[index]
+        if character in " \t":
+            index = gh_blanks_end(line, index)
+            if index == len(line) or line[index] == "#":
+                break
+            continue
+        if character in breaks:
+            return None
+        if character == ":" and line[index + 1:index + 2] in ("", " ", "\t", *breaks) or flow and character in ",?[]{}":
+            break
+        index = end = index + 1
+    return line[start:end], end
 
 
 def gh_yaml_value(line: str, start: int) -> str | None:
     """The value that follows a key's `:` at LINE[START] in a block mapping, on its line, as yaml.v3 reads it: "" for
-    none, a null; a quoted scalar (gh_yaml_quoted) followed by nothing but a comment; or a plain scalar (gh_yaml_plain).
-    None for any other: a block scalar, a flow node, an anchor, an alias, a tag."""
+    none, a null; or a quoted (gh_yaml_quoted) or plain (gh_yaml_plain) scalar followed by nothing but a comment. None
+    for any other: a block scalar, a flow node, an anchor, an alias, a tag."""
     start = gh_blanks_end(line, start)
     if start == len(line) or line[start] == "#":
         return ""
-    if line[start] in "'\"":
-        found = gh_yaml_quoted(line, start)
-        return found[0] if found and re.fullmatch(r"(?:[ \t]+#.*)?[ \t]*", line[found[1]:]) else None
-    plain = gh_yaml_plain(line, start)
-    return None if plain is None else plain[0]
+    found = gh_yaml_quoted(line, start) if line[start] in "'\"" else gh_yaml_plain(line, start)
+    return found[0] if found and re.fullmatch(r"(?:[ \t]+#.*)?[ \t]*", line[found[1]:]) else None
 
 
 def gh_yaml_literal(lines: Sequence[str], number: int, header: str, column: int) -> tuple[str, int] | None:
@@ -2620,13 +2628,16 @@ def gh_yaml_literal(lines: Sequence[str], number: int, header: str, column: int)
 def gh_yaml_flow(line: str, start: int) -> tuple[dict[str, str], int] | None:
     """The flow mapping from LINE[START], its `{`, to its `}` on the same line, as yaml.v3 reads one gh 2.98.0 writes
     (`aliases: {co: pr checkout, nt: "issue create\\n--body x"}` once `gh alias delete` removed the last alias,
-    measured 2026-11-20), and the index after its `}`: each key plain or quoted, each value one too, or none. A key
-    given twice keeps its first value, as gh reads it. None for any other."""
+    measured 2026-11-20), and the index after its `}`: each key plain or quoted, after a `? ` where it is longer than
+    yaml.v3's simple keys, 128 bytes (`{? KEY : VALUE}`, as gh writes it), and each value plain or quoted, or none. A
+    key given twice keeps its first value, as gh reads it. None for any other."""
     entries: dict[str, str] = {}
     index = gh_blanks_end(line, start + 1)
     if line[index:index + 1] == "}":
         return entries, index + 1
     while True:
+        if line[index:index + 2] in ("? ", "?\t"):
+            index = gh_blanks_end(line, index + 1)
         key = gh_yaml_key(line, index, flow=True)
         if key is None:
             return None
@@ -2694,7 +2705,8 @@ class GhAliases:
         `,` the next `,`, `}` or `]` outside quotes and brackets (gh_flow_end); None when NAME is no key there. The
         aliases are what follows each aliases key (KEYS), up to the next line at column 0 that is neither blank nor a
         comment, past it while a `{` or a `[` is still open. Loose, since a call it takes for an alias is only read
-        whole, with that text and never another alias's."""
+        whole: a text that only looks like NAME's key inside another alias's value (`x: "… notes,more: y"` for `more`)
+        is read too, so a call can be refused for that alias's text, and never goes out with less read."""
         entries: list[str] = []
         for start in self.keys:
             section = [self.lines[start].partition(":")[2]]
@@ -2722,14 +2734,16 @@ def gh_aliases(path: Path) -> GhAliases:
     with `gh alias set` and `gh alias delete`): one `aliases` key at the root, at column 0, its value a block mapping,
     each key at one indentation, or a flow mapping on its line (gh_yaml_flow), which gh writes once `gh alias delete`
     removed the last alias; each key and value plain (gh_yaml_plain) or quoted (gh_yaml_quoted, yaml.v3's escapes
-    included), and in a block mapping a value of several lines a `|` block scalar (gh_yaml_literal). gh reads each alias
-    of these forms as the reader does. Any other config.yml, which gh does not write, is not read (GhAliases.expansions
-    None): a folded `>` scalar, an anchor, an alias or a tag, an escape yaml.v3 does not write, a key indented
-    otherwise than the first, an aliases key given twice. A config.yml that cannot be read holds no alias: gh does not
-    start with it, so it sends nothing. Until review round 10 of dispatch://INFRA-3365 a YAML reader read every form,
-    and refused a call whose config held a line it did not follow, such as `editor: ?x`, however clean the call; until
-    its round 11 the reader read a block alias of one line alone, and judged every call that may run an alias by the
-    text of every alias."""
+    included), a key longer than yaml.v3's simple keys (128 bytes) after a `? `, and in a block mapping a value of
+    several lines a `|` block scalar (gh_yaml_literal). gh reads each alias of these forms as the reader does. Any other
+    config.yml, which gh does not write, is not read (GhAliases.expansions None): a folded `>` scalar, an anchor, an
+    alias or a tag, an escape yaml.v3 does not write, a key indented otherwise than the first, an aliases key given
+    twice. A config.yml that cannot be read holds no alias: gh does not start with it, so it sends nothing. Until review
+    round 10 of dispatch://INFRA-3365 a YAML reader read every form, and refused a call whose config held a line it did
+    not follow, such as `editor: ?x`, however clean the call; until its round 11 the reader read a block alias of one
+    line alone, and judged every call that may run an alias by the text of every alias; until its round 12 it read no
+    key that gh writes unquoted with a `:` inside (`pr:mine`) or a `?`, `:` or `-` first, nor one after a `? `, so
+    such a key left every call through an alias read whole (gh_unread_alias_check)."""
     try:
         lines = newline_lines(path.read_bytes().decode("utf-8").removeprefix("\ufeff"))
     except (OSError, UnicodeDecodeError):
@@ -2761,8 +2775,6 @@ def gh_aliases(path: Path) -> GhAliases:
             number += 1
             continue
         column = len(line) - len(line.lstrip(" "))
-        if line[column] == "\t":
-            return unread(f"line {number + 1} is indented with a tab")
         if not column:
             break
         # A key indented otherwise than the first is no alias: one more indented is a mapping in an alias's empty
@@ -2771,21 +2783,29 @@ def gh_aliases(path: Path) -> GhAliases:
         if column != indent:
             return unread(f"line {number + 1} is indented otherwise than the aliases")
         key = gh_yaml_key(line, column)
-        if key is None:
-            return unread(f"line {number + 1} holds no alias key the check reads")
-        header = line[key[1]:].strip(" \t")
+        if key is not None:
+            name, row, at = key[0], number, key[1]
+        else:
+            # A key longer than yaml.v3's simple keys, 128 bytes, which gh writes as `? KEY`, then `: VALUE` on the next
+            # line at the key's indentation.
+            name = gh_yaml_value(line, column + 1) if line[column:column + 2] in ("? ", "?\t") else None
+            after = lines[number + 1] if number + 1 < len(lines) else ""
+            if not name or not re.match(rf" {{{column}}}:(?:[ \t]|$)", after):
+                return unread(f"line {number + 1} holds no alias key the check reads")
+            row, at = number + 1, column + 1
+        header = lines[row][at:].strip(" \t")
         if header.startswith("|"):
-            literal = gh_yaml_literal(lines, number, header, column)
+            literal = gh_yaml_literal(lines, row, header, column)
             if literal is None:
-                return unread(f"line {number + 1} holds a block scalar the check does not read")
+                return unread(f"line {row + 1} holds a block scalar the check does not read")
             value, number = literal
         else:
-            value = gh_yaml_value(line, key[1])
+            value = gh_yaml_value(lines[row], at)
             if value is None:
-                return unread(f"line {number + 1} holds a value the check does not read")
-            number += 1
+                return unread(f"line {row + 1} holds a value the check does not read")
+            number = row + 1
         if value:
-            expansions.setdefault(key[0], value)
+            expansions.setdefault(name, value)
     return GhAliases(path, expansions)
 
 
@@ -3261,10 +3281,12 @@ def gh_plain_case(environment: Mapping[str, str]) -> str | None:
     1. Every host gh's config lists is github.com (gh_config_condition).
     2. GH_HOST is unset, or names github.com as gh_host reads a host, as it reads --hostname: in any letter case, and
        `api.github.com` too, which go-gh's auth.NormalizeHostname makes github.com.
-    3. Every remote of this directory gh may send a call to is on github.com (gh_remotes: its fetch URL, or where git
-       reads that as a path, its push URL), read as GitHub's through scripts/github-repo-visibility --slug
-       (gh_repository, which reads an ssh alias as git's ssh does). A remote with no network host counts for nothing, as
-       for gh, and so do a checkout with no remotes and a directory in no git repository.
+    3. Every remote of this directory that gh keeps (gh_remotes: by the repository of its fetch URL, else of its push
+       URL, each read as gh 2.98.0 reads a remote's URL) is on github.com, as gh takes the repository's host, an ssh
+       host resolved through scripts/github-repo-visibility (gh_repository), which reads an ssh alias as git's ssh
+       does. A remote whose URLs give gh no repository counts for nothing, as for gh, and so do a checkout with no
+       remotes and a directory in no git repository; a remote gh keeps on another host, `./a:b` on the host `.`
+       included, takes the call out of the plain case, though gh then drops it too.
 
     In the plain case gh_reach reads where the call goes as main read it, a name with no host on github.com; outside
     it gh_check reads a call that holds a listed term as going to one target read as public. gh_check reads these
@@ -3278,11 +3300,10 @@ def gh_plain_case(environment: Mapping[str, str]) -> str | None:
     condition = gh_config_condition(gh_config_directory(environment))
     if condition is not None:
         return condition
-    for name, url, _ in gh_remotes():
-        repository = gh_repository(url)
-        if not repository:
-            reading = "is not on github.com" if repository is None else "is not one the check reads as github.com's"
-            return f"the remote {name} ({url}) {reading}"
+    for remote in gh_remotes():
+        if remote.host != "github.com":
+            reading = "is not on github.com" if remote.host else "is not one the check reads as github.com's"
+            return f"the remote {remote.name} ({remote.url}) {reading}"
     return None
 
 
@@ -4010,28 +4031,108 @@ def gh_repository_address(value: str) -> tuple[str, str]:
     return "github.com", f"https://github.com/{value}"
 
 
-def gh_url_is_local(url: str) -> bool:
-    """Whether git reads a remote's URL as a path on this machine, which names no network host: git's
-    url_is_local_not_ssh (connect.c), a URL with no `:` or with a `/` before its first `:` (`./a:b`), and a URL in the
-    `file` scheme. A bundle is read from a path."""
-    colon, slash = url.find(":"), url.find("/")
-    return colon < 0 or 0 <= slash < colon or url[:colon].lower() == "file"
+# The schemes gh 2.98.0's git.ParseURL reads a remote's URL in (git/url.go, isPossibleProtocol), each with its `:`, in
+# lower case: any other URL that holds a `:` and no `\` is scp-like, `[USER@]HOST:PATH`, and read as `ssh://` and the
+# URL with its first `:` a `/`.
+GH_GIT_SCHEMES = ("ssh:", "git+ssh:", "git:", "http:", "git+https:", "https:", "ftp:", "ftps:", "file:")
+
+
+def gh_go_unescape(text: str, host: bool = False) -> str | None:
+    """TEXT with its %-escapes decoded as Go's net/url unescape decodes a path, a user or, for HOST, a host; None where
+    it refuses: a `%` before anything but two hex digits, and in a host an escape of an ASCII character but `%25`, or an
+    ASCII character a host does not hold (shouldEscape)."""
+    if re.search(r"%(?![0-9A-Fa-f]{2})", text) or host and (
+            re.search(r"%(?!25)[0-7][0-9A-Fa-f]", text)
+            or re.search(r"""[^A-Za-z0-9\-._~!$&'()*+,;=:\[\]<>"%\u0080-\U0010ffff]""", text)):
+        return None
+    return urllib.parse.unquote(text, errors="surrogateescape")
+
+
+def gh_git_url(url: str) -> tuple[str, str, str] | None:
+    """(scheme, host, path) of a remote's URL as gh 2.98.0 reads it (git/url.go ParseURL): an scp-like URL made
+    `ssh://` (GH_GIT_SCHEMES), then read by Go's url.Parse; the scheme in lower case, `git+https` and `git+ssh` as
+    `https` and `ssh`; the host as url.URL.Hostname gives it, with no port and no brackets, "" for none, as in a URL
+    whose scheme no `//` follows (`https::https://…`); and the path with its escapes decoded (gh_go_unescape). None where
+    url.Parse refuses the URL, after which gh drops it: a control character, a `:` first, a port that is not digits, a
+    `[` with no `]`, a user or a host it does not take, a bad escape. So `./a:b` is `ssh://./a/b`, on the host `.`."""
+    if not url.startswith(GH_GIT_SCHEMES) and ":" in url and "\\" not in url:
+        url = "ssh://" + url.replace(":", "/", 1)
+    url, _, fragment = url.partition("#")
+    if re.search(r"[\x00-\x1f\x7f]", url) or url.startswith(":") or gh_go_unescape(fragment) is None:
+        return None
+    found = re.match(r"[A-Za-z][A-Za-z0-9+.-]*(?=:)", url)
+    scheme = found[0].lower() if found else ""
+    scheme = {"git+https": "https", "git+ssh": "ssh"}.get(scheme, scheme)
+    rest = (url[found.end() + 1:] if found else url).partition("?")[0]
+    if not rest.startswith("/"):
+        if scheme:
+            return scheme, "", ""
+        if ":" in rest.partition("/")[0]:
+            return None
+    host: str | None = ""
+    if (scheme or not rest.startswith("///")) and rest.startswith("//"):
+        authority, slash, rest = rest[2:].partition("/")
+        rest = slash + rest
+        user, at, host = authority.rpartition("@")
+        port = host[host.rfind("]") + 1:] if host.startswith("[") else host[host.rfind(":"):] if ":" in host else ""
+        if (host.startswith("[") and "]" not in host or not re.fullmatch(r"(?::[0-9]*)?", port)
+                or at and (re.search(r"[^A-Za-z0-9\-._:~!$&'()*+,;=%@]", user)
+                           or any(gh_go_unescape(part) is None for part in user.split(":", 1)))):
+            return None
+        host = gh_go_unescape(host.removesuffix(port), host=True)
+    path = gh_go_unescape(rest)
+    if host is None or path is None:
+        return None
+    return scheme, host[1:-1] if host.startswith("[") and host.endswith("]") else host, path
+
+
+def gh_remote_repository(url: str) -> tuple[str, str, str] | None:
+    """(scheme, host, OWNER/NAME) of the repository gh 2.98.0 takes from a remote's URL, read by gh_git_url
+    (ghrepo.FromURL): there is a host, and the path has exactly two parts once the `/`s at either end are trimmed; the
+    name is without its `.git`, and the host as normalizeHostname makes it, without a `www.` it begins with, in lower
+    case. None for any other URL, from which gh takes no repository: a local path, `file:///…`, a bundle, a path of one
+    part or of three."""
+    parsed = gh_git_url(url)
+    if parsed is None or not parsed[1]:
+        return None
+    scheme, host, path = parsed
+    parts = path.strip("/").split("/", 2)
+    if len(parts) != 2:
+        return None
+    return scheme, host.removeprefix("www.").lower(), f"{parts[0]}/{parts[1].removesuffix('.git')}"
+
+
+@dataclass(frozen=True)
+class GhRemote:
+    """A remote of this directory that gh 2.98.0 keeps (gh_remotes): NAME; URL, the fetch or push URL gh takes its
+    repository from, as git lists it; HOST, that repository's host as gh takes it, an ssh host resolved as
+    scripts/github-repo-visibility resolves it (github.com for one it reads as GitHub's, "" for one it cannot read);
+    REPOSITORY, its OWNER/NAME as ghrepo.FromURL gives it; and RESOLVED, its `gh-resolved`, which `gh repo set-default`
+    writes: `base`, the remote itself; an `OWNER/REPO` gh takes in its place; or "" for none."""
+
+    name: str
+    url: str
+    host: str
+    repository: str
+    resolved: str
 
 
 @lru_cache(maxsize=1)
-def gh_remotes() -> tuple[tuple[str, str, str], ...]:
-    """(name, URL, RESOLVED) of each remote of this directory that gh 2.98.0 may send a call to, in the order git lists
-    them. URL is the one gh reads (context.TranslateRemotes): the remote's fetch URL, or where git reads that as a path
-    (gh_url_is_local), from which gh takes no repository, the remote's push URL, the last `git remote -v` lists. A
-    remote whose push URL is a path too, or that has none, names no network host, and gh drops it, so it is left out:
-    measured by the reviewer of dispatch://INFRA-3365, gh dropped a path origin beside a github.com upstream, and with
-    only a path sent nothing. A push URL beside a fetch URL that is no path counts for nothing, `DISABLE` included: with
-    a fetch URL on github.com and a push URL on ghe.example.com gh sent a call to api.github.com. Until that review's
-    round 11 every fetch and push URL was read, so a path remote, or a push URL of `DISABLE`, took a checkout out of the
-    plain case (gh_plain_case).
-    RESOLVED is the remote's `gh-resolved`, which `gh repo set-default` writes: `base`, the remote itself; an
-    `OWNER/REPO` gh takes in its place; or "" for none. A `gh-resolved` value counts only on a remote kept here, as gh
-    attaches each to the remote of its name. Read once: gh_bases and gh_plain_case both take them."""
+def gh_remotes() -> tuple[GhRemote, ...]:
+    """Each remote of this directory that gh 2.98.0 keeps, in the order git lists them, read as gh reads it
+    (git.Client.Remotes, then context.TranslateRemotes): by the repository of its fetch URL (gh_remote_repository), else
+    of its push URL, the last `git remote -v` lists; a remote whose URLs give none gh drops, and so does the check. So
+    a remote that fetches from a local path, `file:///…` or a bundle, and pushes to github.com, is the push URL's
+    repository, while `file://github.com/o/r.git` is github.com's o/r and `./a:b`, scp-like for gh, is a/b on the host
+    `.` (measured 2026-11-20 with gh 2.98.0: `gh browse -n` asked api.github.com for theorem-labs/ygo, and connected to
+    the host `.` beside a push URL on sjawhar/dotfiles). A push URL beside a fetch URL that gives a repository counts
+    for nothing, `DISABLE` included. gh resolves the host of an ssh URL with `ssh -G` (ssh.NewTranslator); the check
+    reads it through scripts/github-repo-visibility (gh_repository), which resolves it as git's ssh does. A
+    `gh-resolved` value counts only on a remote kept here, as gh attaches each to the remote of its name. Until review
+    round 11 of dispatch://INFRA-3365 every fetch and push URL was read, so a path remote, or a push URL of `DISABLE`,
+    took a checkout out of the plain case (gh_plain_case); until its round 12 a URL git reads as a path gave no
+    repository, so `file://github.com/o/r.git` counted for nothing and `./a:b` was read by its push URL. Read once:
+    gh_bases and gh_plain_case both take them."""
     def git(*arguments: str) -> list[str]:
         try:
             completed = subprocess.run(["git", *arguments], stdin=subprocess.DEVNULL, capture_output=True, text=True,
@@ -4040,30 +4141,35 @@ def gh_remotes() -> tuple[tuple[str, str, str], ...]:
             return []
         return completed.stdout.splitlines() if completed.returncode == 0 else []
 
-    fetch: dict[str, str] = {}
-    push: dict[str, str] = {}
+    urls: dict[str, dict[str, str]] = {}
     for line in git("remote", "-v"):
         name, _, rest = line.partition("\t")
         # A fetch line ends at its first ` (fetch)`, since a partial clone's filter follows it.
         if name and " (fetch)" in rest:
-            fetch[name] = rest.split(" (fetch)", 1)[0]
+            urls.setdefault(name, {})["fetch"] = rest.split(" (fetch)", 1)[0].strip()
         elif name and rest.endswith(" (push)"):
-            fetch.setdefault(name, "")
-            push[name] = rest.removesuffix(" (push)")
-    remotes: list[tuple[str, str]] = []
-    for name, url in fetch.items():
-        if gh_url_is_local(url):
-            url = push.get(name, "")
-        if url and not gh_url_is_local(url):
-            remotes.append((name, url))
-    names = {name for name, _ in remotes}
+            urls.setdefault(name, {})["push"] = rest.removesuffix(" (push)").strip()
+    kept: list[tuple[str, str, tuple[str, str, str]]] = []
+    for name, given in urls.items():
+        for url in (given.get("fetch", ""), given.get("push", "")):
+            repository = gh_remote_repository(url) if url else None
+            if repository is not None:
+                kept.append((name, url, repository))
+                break
+    names = {name for name, _, _ in kept}
     resolved: dict[str, str] = {}
     for line in git("config", "--get-regexp", r"^remote\..*\.gh-resolved$"):
         key, _, value = line.partition(" ")
         name = key.removeprefix("remote.").removesuffix(".gh-resolved")
         if name in names and value.strip():
             resolved[name] = value.strip()
-    return tuple((name, url, resolved.get(name, "")) for name, url in remotes)
+    remotes: list[GhRemote] = []
+    for name, url, (scheme, host, repository) in kept:
+        if scheme == "ssh" and host != "github.com":
+            slug = gh_repository(url)
+            host = "github.com" if slug else host if slug is None else ""
+        remotes.append(GhRemote(name, url, host, repository, resolved.get(name, "")))
+    return tuple(remotes)
 
 
 @lru_cache(maxsize=None)
@@ -4096,13 +4202,14 @@ class GhBase:
 
 
 def gh_bases(environment: Mapping[str, str], reads_gh_repo: bool) -> list[GhBase]:
-    """Each repository gh 2.98.0 may take as the base repository of a call that names none, as main read it: GH_REPO's
-    when that is set and the call reads it (READS_GH_REPO: a command with -R/--repo, whose cmdutil.EnableRepoOverride
-    reads GH_REPO, and the placeholders of `gh api`, whose PreRun does), else the remotes of this directory gh may send
-    a call to (gh_remotes: each by its fetch URL, or by its push URL where git reads the fetch URL as a path, and none
-    with no network host), those that `gh repo set-default` resolved (`gh-resolved`, context/context.go BaseRepo): the
+    """Each repository gh 2.98.0 may take as the base repository of a call that names none: GH_REPO's when that is set
+    and the call reads it (READS_GH_REPO: a command with -R/--repo, whose cmdutil.EnableRepoOverride reads GH_REPO, and
+    the placeholders of `gh api`, whose PreRun does), else the base repository as gh 2.98.0 takes it, from the remotes
+    gh_remotes keeps: those that `gh repo set-default` resolved (`gh-resolved`, context/context.go BaseRepo), the
     remote itself for `base`, else the `OWNER/REPO` it names; with none resolved, every remote, since gh takes the first
-    in its own order, or where it can prompt one of their network. In the plain case (gh_plain_case) every such remote
+    in its own order, or where it can prompt one of their network. A remote's repository is the one ghrepo.FromURL gave
+    (GhRemote.repository), on github.com read through its `https://github.com/OWNER/REPO` URL, so a remote
+    `file://github.com/o/r.git` is github.com's o/r, as gh takes it. In the plain case (gh_plain_case) every such remote
     is on github.com; outside it gh_check reads no base as a target. GH_REPO is `[HOST/]OWNER/REPO` or a URL
     (ghrepo.FromFullName, gh_repository_address), and a base on another host names a repository the check cannot read,
     read as public. `repo edit` and `repo fork` have no -R, so with no repository argument they edit or fork the
@@ -4114,14 +4221,15 @@ def gh_bases(environment: Mapping[str, str], reads_gh_repo: bool) -> list[GhBase
         host, url = gh_repository_address(value)
         return [GhBase("GH_REPO", value, url, gh_repository_on(host, url), host)]
     remotes = gh_remotes()
-    resolved = any(resolution for _, _, resolution in remotes)
+    resolved = any(remote.resolved for remote in remotes)
     bases: list[GhBase] = []
-    for remote, remote_url, resolution in remotes:
+    for remote in remotes:
         named: list[tuple[str, str, str]] = []
-        if not resolved or resolution == "base":
-            named.append((remote, "github.com", remote_url))
-        if resolution not in ("", "base"):
-            named.append((resolution, *gh_repository_address(resolution)))
+        if not resolved or remote.resolved == "base":
+            url = f"https://github.com/{remote.repository}" if remote.host == "github.com" else remote.url
+            named.append((remote.name, remote.host or GH_URL_HOST, url))
+        if remote.resolved not in ("", "base"):
+            named.append((remote.resolved, *gh_repository_address(remote.resolved)))
         for name, host, url in named:
             base = GhBase(f"remote {name}", f"remote {name}", url, gh_repository_on(host, url), host)
             if base not in bases:
@@ -4597,36 +4705,85 @@ def gh_refusal(name: str, reached: Sequence[GhTarget], matcher: TermMatcher | No
     return FOUND_EXIT if kept_findings else LIST_EXIT if list_problem else TEXT_EXIT
 
 
-def gh_alias_files(rest: Sequence[str]) -> list[GhText]:
+def gh_alias_words(text: str) -> list[list[str]]:
+    """The words of TEXT, an alias's raw entry in config.yml (GhAliases.entry), each way the check splits them, since it
+    does not read the entry as gh does: at each blank and each quote; as Python's shlex splits a shell line; and as it
+    splits the value quoted on the entry's first line (gh_yaml_quoted). So a quoted name that holds a blank is read
+    whole in a plain, a folded or a quoted value, and by its words alone in a quoted value of several lines."""
+    words = [[word for word in re.split(r"[\s'\"]+", text) if word]]
+    first = text.partition("\n")[0]
+    quoted = re.search(r":[ \t]+(?=['\"])", first)
+    decoded = gh_yaml_quoted(first, quoted.end()) if quoted else None
+    for line in (text, *(decoded[:1] if decoded else ())):
+        try:
+            words.append(shlex.split(line))
+        except ValueError:
+            continue
+    return words
+
+
+def gh_alias_files(word_lists: Sequence[Sequence[str]]) -> list[GhText]:
     """Each file and standard input a call through an alias of a config.yml gh_aliases does not read (GhUnreadAlias) may
-    send, REST being the arguments gh gives the alias: since what the alias runs is unknown, they are read as each
-    command of GH_TEXT_COMMANDS reads them (gh_walk, gh_texts), and each file one of those names is kept, once for each
-    path, when the path is `-`, standard input, or one that exists. gh refuses a call whose file it cannot open, and
-    for a command that reads no file there the path is only a word, which gh_unread_alias_check reads as one. Standard
-    input that a command reads where the call names no file (`gist create` with none, `workflow run --json`) is left
-    out: asking the shim for it would read a terminal until it ends."""
+    send, each of WORD_LISTS being the arguments gh gives the alias or one splitting of an entry it runs
+    (gh_alias_words). What the alias runs is unknown, so each list is read as each command of GH_TEXT_COMMANDS reads
+    it (gh_walk): the value of each option that names a file (gh_texts: --body-file, --input, -F k=@path, …), and each
+    bare argument, which `gist create` reads as a file. No word is glob-expanded. Each is kept once for each path when
+    it is `-`, standard input, or a path to anything but a directory, so gh_contents reads a regular file and refuses a
+    pipe or a device, as on every path. A directory, or a name that is nothing, gh cannot send as a file, and here it
+    is a word, read as one: so `b docs`, `b .` and `co docs` go out, and so does `--body '*'`. Standard input that a
+    command reads where the call names no file (`gist create` with none, `workflow run --json`) is left out: asking the
+    shim for it would read a terminal until it ends. Until review round 12 of dispatch://INFRA-3365 any path that
+    existed was kept and a bare argument was glob-expanded as `gist create` expands it, so `b docs` was refused for a
+    directory the check cannot read, and `--body '*'` read every file of the directory."""
     files: dict[str, GhText] = {}
-    for (group, sub), table in GH_TEXT_COMMANDS.items():
-        for piece in gh_texts(group, sub, gh_walk(rest, gh_options(table))):
-            if piece.path is not None and piece.detail and (piece.path == "-" or os.path.exists(piece.path)):
-                files.setdefault(piece.path, piece)
+    for words in word_lists:
+        for (group, sub), table in GH_TEXT_COMMANDS.items():
+            read = gh_walk(words, gh_options(table))
+            bare = [GhText(f"argument {number}", value, path=value) for number, value in
+                    enumerate((value for option, value in read if option is None), start=1) if value]
+            for piece in [*gh_texts(group, sub, [item for item in read if item[0] is not None]), *bare]:
+                if piece.path is None or not piece.detail or piece.path in files:
+                    continue
+                try:
+                    kept = piece.path == "-" or not stat.S_ISDIR(os.stat(piece.path).st_mode)
+                except (OSError, ValueError):
+                    kept = False
+                if kept:
+                    files[piece.path] = piece
     return list(files.values())
 
 
 def gh_unread_alias_check(arguments: Sequence[str], alias: GhUnreadAlias, environment: Mapping[str, str]) -> int:
     """gh_check of a call that may run ALIAS, an alias of a config.yml gh_aliases does not read, which gh does not write
     either: what the call runs, and where, is unknown, so the call is read whole, with one target read as public (no
-    repository, every list counting and no own name exempt, as for a raw GraphQL mutation): each of its ARGUMENTS, each
-    file and standard input they may name (gh_alias_files), read as gh_check reads a call's texts (gh_contents), and
-    the alias's own entry in config.yml (GhUnreadAlias.entry), never another alias's. A call none of whose texts holds a
-    listed term goes out. Until review round 10 of dispatch://INFRA-3365 such a call was refused whatever it held; until
-    its round 11 it was judged by the text of every alias, and a file or standard input it sent was not read."""
+    repository, every list counting and no own name exempt, as for a raw GraphQL mutation): each of its ARGUMENTS; the
+    alias's own entry in config.yml (GhUnreadAlias.entry), and the entry of each alias that a word of an entry read, or
+    two words (`pr say`), names, since gh runs one alias through another (`b: note`); and each file and standard input
+    those arguments and entries may name (gh_alias_words, gh_alias_files). Each is read as gh_check reads a call's texts
+    (gh_contents), so a file the check cannot read (a pipe, a device, one it may not open) refuses the call, and the
+    refusal says why. The entries are read loosely (GhAliases.entry): a text that only looks like a key inside another
+    alias's value is read too. A call none of whose texts holds a listed term, and every file of which was read, goes
+    out. Until review round 10 of dispatch://INFRA-3365 such a call was refused whatever it held; until its round 11 it
+    was judged by the text of every alias, and a file or standard input it sent was not read; until its round 12 the
+    files and standard input an entry named (`note: pr comment --body-file NOTES.md`) were not read, nor the entry of an
+    alias it runs."""
+    entries = {alias.name: alias.entry}
+    word_lists = [list(alias.rest)]
+    pending = [alias.entry]
+    while pending:
+        for words in gh_alias_words(pending.pop()):
+            word_lists.append(words)
+            for name in dict.fromkeys([*words, *map(" ".join, zip(words, words[1:]))]):
+                entry = None if name in entries else alias.aliases.entry(name)
+                if entry is not None:
+                    entries[name] = entry
+                    pending.append(entry)
     pieces = [GhText(f"argument {number}", text=value) for number, value in enumerate(arguments, start=1)]
-    texts = gh_contents([*pieces, *gh_alias_files(alias.rest)], environment)
+    texts = gh_contents([*pieces, *gh_alias_files(word_lists)], environment)
     if texts is None:
         return GH_STDIN_EXIT
     contents, unreadable = texts
-    contents.append((GhText(f"gh's alias {alias.name}", str(alias.aliases.path)), alias.entry))
+    contents += [(GhText(f"gh's alias {name}", str(alias.aliases.path)), entry) for name, entry in entries.items()]
     matcher, list_problem, findings = gh_terms(contents, lambda piece: False)
     target = GhTarget(f"what the gh alias {alias.name} runs, read as public, since the check cannot read gh's aliases "
                       f"exactly: {alias.aliases.problem}", "", True)
