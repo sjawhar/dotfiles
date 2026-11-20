@@ -589,19 +589,21 @@ use_session_config() { # ARGV
     # HOME had made, and judged a person's login by a configuration directory that was not the caller's. A copy of
     # another directory leaves this call on its own, as one that cannot be copied does.
     copied=""
-    IFS= read -r copied < "$target/$GCLOUD_SESSION_COPIED" 2> /dev/null || true
+    IFS= read -r copied 2> /dev/null < "$target/$GCLOUD_SESSION_COPIED" || true
     [[ "$copied" == "$origin" ]] || return 0
     export CLOUDSDK_CONFIG="$target"
 }
 
 # The account a configuration sets: the `account` line of its file in gcloud's configuration
-# directory, or nothing when the configuration or the line is missing.
+# directory, or nothing when the configuration or the line is missing. `2> /dev/null` comes before
+# the `<`, so a missing file prints nothing: the shell reports a failed redirect on the stderr it
+# has at that point.
 config_account() {
     local account="" line
     resolve_config_root
     while IFS= read -r line; do
         [[ "$line" =~ ^account[[:space:]]*=[[:space:]]*([^[:space:]]+) ]] && account="${BASH_REMATCH[1]}"
-    done < "${GCLOUD_CONFIG_ROOT}/configurations/config_$1" 2> /dev/null || true
+    done 2> /dev/null < "${GCLOUD_CONFIG_ROOT}/configurations/config_$1" || true
     printf '%s' "$account"
 }
 
@@ -615,7 +617,7 @@ config_impersonation() {
     resolve_config_root
     while IFS= read -r line; do
         [[ "$line" =~ ^impersonate_service_account[[:space:]]*=[[:space:]]*([^[:space:]]+) ]] && value="${BASH_REMATCH[1]}"
-    done < "${GCLOUD_CONFIG_ROOT}/configurations/config_$1" 2> /dev/null || true
+    done 2> /dev/null < "${GCLOUD_CONFIG_ROOT}/configurations/config_$1" || true
     printf '%s' "$value"
 }
 
