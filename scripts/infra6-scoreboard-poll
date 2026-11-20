@@ -14,7 +14,8 @@
 #                        the replies are free text, so adding them up is a judgment, not a parse.
 #   admin-paths          daily, at the 10:29Z tick: the five paths of dispatch://INFRA-243, read by
 #                        the method of the 2026-11-01T09:26Z reading, but the IAM reads run as
-#                        infra-applier@ and not as Sami's login.
+#                        legion-reader@ through gcloud-reader, and not as Sami's login or as any
+#                        account a box session can impersonate.
 #   acceptance           daily, at the 10:29Z tick: checks 1 and 6 of docs/specs/fleet.md
 #                        "Acceptance" are read here. Checks 2 to 5 need #fleet-alerts, which only
 #                        the session's Slack tool reads, so the wake message asks the session to
@@ -36,7 +37,7 @@ set -uo pipefail
 
 readonly INFRA_ROLE=${INFRA6_ROLE:-lead-infra}
 INFRA_SESSION=
-readonly APPLIER=infra-applier@theorem-agent-infra.iam.gserviceaccount.com
+readonly READER=legion-reader@theorem-agent-infra.iam.gserviceaccount.com
 readonly DEPLOY=serviceAccount:deploy@theorem-agent-infra.iam.gserviceaccount.com
 readonly BOX=serviceAccount:dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com
 state=${XDG_STATE_HOME:-$HOME/.local/state}/infra6-scoreboard-poll
@@ -193,9 +194,10 @@ admin_paths() {
 	else
 		echo "2 CLOSED: ~/.azure holds no Sami@Theorem.dev login"
 	fi
-	if ! roles=$(gcloud projects get-iam-policy theorem-agent-infra --impersonate-service-account="$APPLIER" \
+	if ! roles=$(GCLOUD_READER_REASON="INFRA-6: admin-paths read of theorem-agent-infra's IAM policy" \
+		gcloud-reader --as legion -- gcloud projects get-iam-policy theorem-agent-infra \
 		--flatten='bindings[].members' --filter="bindings.members:$DEPLOY" --format='value(bindings.role)' 2>/dev/null); then
-		echo "3 UNREAD: theorem-agent-infra's IAM policy could not be read as $APPLIER"
+		echo "3 UNREAD: theorem-agent-infra's IAM policy could not be read as $READER"
 		echo "4 UNREAD: same"
 	else
 		if grep -qx 'roles/iam.serviceAccountAdmin' <<<"$roles"; then
@@ -205,10 +207,11 @@ admin_paths() {
 			echo "4 OPEN: deploy@ holds $(grep -E '^roles/container\.(clusterAdmin|admin)$' <<<"$roles" | paste -sd,) on theorem-agent-infra (it can write a Deployment in dispatch)"; open=$((open + 1))
 		else echo "4 CLOSED: deploy@ holds no container admin role on theorem-agent-infra"; fi
 	fi
-	if ! members=$(gcloud secrets get-iam-policy github-settings-app --project theorem-agent-infra \
-		--impersonate-service-account="$APPLIER" --format=json 2>/dev/null |
+	if ! members=$(GCLOUD_READER_REASON="INFRA-6: admin-paths read of github-settings-app's IAM policy" \
+		gcloud-reader --as legion -- gcloud secrets get-iam-policy github-settings-app --project theorem-agent-infra \
+		--format=json 2>/dev/null |
 		jq -r '.bindings[]? | select(.role == "roles/secretmanager.secretAccessor") | .members[]'); then
-		echo "5 UNREAD: github-settings-app's IAM policy could not be read as $APPLIER"
+		echo "5 UNREAD: github-settings-app's IAM policy could not be read as $READER"
 	elif grep -qx "$BOX" <<<"$members"; then
 		echo "5 OPEN: the box identity reads github-settings-app"; open=$((open + 1))
 	else

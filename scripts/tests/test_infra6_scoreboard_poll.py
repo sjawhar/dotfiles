@@ -258,5 +258,66 @@ class EnvoyRoleSubcommand(unittest.TestCase):
         self.assertIn("/v1/roles/lead-infra", result.stderr)
 
 
+# The commands `daily` runs, each recorded with its arguments in $STUB_CALLS. gcloud-reader also
+# records the reason and the identity it was asked for, then runs what follows `--`, as
+# scripts/gcloud-reader does once the broker has given it a token.
+GCLOUD_READER_STUB = r"""
+printf 'gcloud-reader reason=%s %s\n' "${GCLOUD_READER_REASON-}" "$*" >>"$STUB_CALLS"
+[ "$1" = --as ] && [ "$3" = -- ] || exit 2
+shift 3
+exec "$@"
+"""
+
+GCLOUD_STUB = r"""
+printf 'gcloud %s\n' "$*" >>"$STUB_CALLS"
+case "$1 $2" in
+    "projects get-iam-policy") echo roles/viewer ;;
+    "secrets get-iam-policy") echo '{"bindings":[]}' ;;
+esac
+exit 0
+"""
+
+
+class DailyIAMReads(unittest.TestCase):
+    """The admin-paths IAM reads run as legion-reader@ through gcloud-reader, as no applier."""
+
+    def test_the_iam_reads_go_through_gcloud_reader_as_legion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = root / "bin"
+            calls = root / "calls.txt"
+            write_stub(bin_dir, "gcloud-reader", GCLOUD_READER_STUB)
+            write_stub(bin_dir, "gcloud", GCLOUD_STUB)
+            write_stub(bin_dir, "az", "exit 1")
+            write_stub(bin_dir, "dispatch", "echo 'Status: todo'")
+            env = dict(os.environ)
+            env.update(
+                PATH=f"{bin_dir}:{env['PATH']}",
+                STUB_CALLS=str(calls),
+                XDG_STATE_HOME=str(root / "state"),
+                HOME=str(root),
+            )
+            env.pop("GCLOUD_READER_REASON", None)
+
+            result = subprocess.run(
+                [str(POLL), "daily"], env=env, capture_output=True, text=True, check=False
+            )
+
+            recorded = calls.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            readers = [line for line in recorded if line.startswith("gcloud-reader ")]
+            for read in ("projects get-iam-policy theorem-agent-infra", "secrets get-iam-policy github-settings-app"):
+                matches = [line for line in readers if read in line]
+                self.assertEqual(len(matches), 1, f"{read}: {recorded}")
+                self.assertIn("--as legion -- gcloud ", matches[0])
+                self.assertIn("reason=INFRA-6", matches[0])
+            self.assertFalse(
+                [line for line in recorded if "--impersonate-service-account" in line],
+                recorded,
+            )
+            self.assertIn("admin-paths = ", result.stdout)
+            self.assertNotIn("UNREAD", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
