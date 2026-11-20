@@ -248,8 +248,11 @@ gh_shim_may_send_text() {
 # a block mapping, or follows the `{` or a `,` of the flow mapping gh writes once the last alias was
 # deleted (`aliases: {pr say: pr comment}`). Until 2026-11-17 `gh pr say 11 --body …` was a read
 # here, and its text went out unchecked; until review round 9 of dispatch://INFRA-3365 so was such
-# a call under a flow alias. A line that only looks like one starts the check, which finds no alias
-# and lets the call go.
+# a call under a flow alias. The check reads a block alias of one line exactly. It does not read a
+# flow alias, nor any other it cannot read exactly, so for a call that may run one it reads the call
+# whole: its arguments and the raw text of gh's aliases, with one target read as public. A listed
+# term in either is refused, and a call with none goes out. A line that only looks like an alias
+# starts the check, which finds no alias and lets the call go.
 gh_shim_has_nested_alias() {
     local config="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/config.yml" text pattern
     [[ -r "$config" ]] || return 1

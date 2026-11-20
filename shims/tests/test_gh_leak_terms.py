@@ -20,7 +20,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import time
 import unittest
 from collections.abc import Callable
 from pathlib import Path
@@ -62,9 +61,8 @@ GH_VERSION = 'version: "1"\n'
 GH_HOST_ENTRY = "    users:\n        x:\n            oauth_token: gho_fake\n    user: x\n    oauth_token: gho_fake\n"
 HOSTS_GHE = "ghe.example.com:\n" + GH_HOST_ENTRY
 HOSTS_GITHUB = "github.com:\n" + GH_HOST_ENTRY
-# The target of a repository on ghe.example.com, and of one on a host the check cannot read in gh's config.
+# The target of a repository on ghe.example.com, a host a call names itself.
 ON_GHE = "a repository on ghe.example.com, read as public"
-ON_UNREAD_HOST = "a repository on a host the check cannot read in gh's config, read as public"
 
 
 def gh_config_yml(aliases: str) -> str:
@@ -72,6 +70,13 @@ def gh_config_yml(aliases: str) -> str:
     return ("version: 1\ngit_protocol: https\neditor:\nprompt: enabled\nprefer_editor_prompt: disabled\npager:\n"
             f"aliases:{aliases}\nhttp_unix_socket:\nbrowser:\ncolor_labels: disabled\naccessible_colors: disabled\n"
             "accessible_prompter: disabled\nspinner: enabled\n")
+
+
+def gh_tester_config_yml(aliases: str) -> str:
+    """gh_config_yml with the tester's four lines outside the aliases, each one gh 2.98.0 wrote (dispatch://INFRA-3365,
+    review round 10): `editor: ?x`, a pager holding U+2028, `browser: 'a: b'` and `http_unix_socket: '#x'`."""
+    return (gh_config_yml(aliases).replace("editor:\n", "editor: ?x\n").replace("pager:\n", "pager: less\u2028-R\n")
+            .replace("browser:\n", "browser: 'a: b'\n").replace("http_unix_socket:\n", "http_unix_socket: '#x'\n"))
 
 
 FAKE_GH = r"""#!/bin/bash
@@ -1664,106 +1669,6 @@ class GhLeakTerms(unittest.TestCase):
             (directory / "hosts.yml").write_text(hosts, encoding="utf-8")
         return {**self.env, "GH_CONFIG_DIR": str(directory)}
 
-    def test_gh_api_goes_to_the_host_gh_s_config_names(self) -> None:
-        # With no --hostname and no GH_HOST, gh 2.98.0 sends a `gh api` call to the one host its config lists when it
-        # lists exactly one, else to github.com (go-gh v2.13.0 pkg/auth/auth.go defaultHost): the hosts of config.yml's
-        # `hosts:` key, which wins over hosts.yml (pkg/config/config.go load), else those of hosts.yml, each file read
-        # as YAML in whatever layout it has. The rows after the first are the tester's, each with the host gh 2.98.0
-        # went to, measured with fake tokens (dispatch://INFRA-3365, review round 8): a write with a listed term to a
-        # private repository, from a checkout of it, goes out where gh goes to github.com, and is refused as a
-        # repository on ghe.example.com, read as public, where gh goes there. Until review round 8 only the keys at
-        # column 0 of hosts.yml were read: six of the tester's rows went the other way, and the flow form's host was
-        # read as `{"ghe.example.com"`.
-        self.remotes(("origin", PRIVATE))
-        argv = ["api", f"repos/{PRIVATE}/issues", "-f", "title=t", "-f", f"body={TEXT}"]
-
-        def indented(text: str, by: str) -> str:
-            return "".join(by + line for line in text.splitlines(keepends=True))
-
-        def hosts_key(entry: str) -> str:
-            return GH_VERSION + "hosts:\n" + indented(entry, "    ")
-
-        def flow(name: str) -> str:
-            # The check reads only the keys; a quoted token value would trip the push's secret scan.
-            return '{"%s": {"users": {"x": {}}, "user": "x", "git_protocol": "https"}}\n' % name
-
-        ghe, github = HOSTS_GHE, HOSTS_GITHUB
-        to_ghe, to_github = "ghe.example.com", "github.com"
-        for number, (row, config, hosts, to) in enumerate((
-                ("hosts.yml lists only ghe.example.com", GH_VERSION, ghe, to_ghe),
-                ("config.yml hosts: key lists only ghe.example.com, no hosts.yml", hosts_key(ghe), None, to_ghe),
-                ("hosts.yml indented two spaces, only ghe.example.com", GH_VERSION, indented(ghe, "  "), to_ghe),
-                ("hosts.yml after a --- document start, only ghe.example.com", GH_VERSION, "---\n" + ghe, to_ghe),
-                ("hosts.yml with the host quoted, only ghe.example.com", GH_VERSION,
-                 '"ghe.example.com":\n' + GH_HOST_ENTRY, to_ghe),
-                ("hosts.yml in YAML flow form, only ghe.example.com", GH_VERSION, flow("ghe.example.com"), to_ghe),
-                ("config.yml hosts: ghe.example.com, hosts.yml github.com", hosts_key(ghe), github, to_ghe),
-                ("hosts.yml lists github.com and ghe.example.com", GH_VERSION, github + ghe, to_github),
-                ("hosts.yml lists github.com only", GH_VERSION, github, to_github),
-                ("hosts.yml in YAML flow form, github.com only", GH_VERSION, flow("github.com"), to_github),
-                ("hosts.yml after a --- document start, github.com only", GH_VERSION, "---\n" + github, to_github),
-                ("config.yml hosts: github.com, hosts.yml ghe.example.com", hosts_key(github), ghe, to_github))):
-            with self.subTest(row=row, gh_goes_to=to):
-                env = self.gh_config(f"row-{number}", hosts, config)
-                self.setUp_calls()
-                if to == "github.com":
-                    self.assert_sent(self.run_gh(argv, env=env), argv)
-                    continue
-                refused = self.run_gh(argv, env=env)
-                self.assert_refused(refused, "--raw-field body")
-                self.assertIn(f"to a repository on {to}, read as public:", refused.stderr.decode())
-        # Fail closed: where the check cannot be sure of the hosts gh reads, it reads the call as going to a host it
-        # cannot name, read as public, so the write is refused, also where gh goes to github.com: measured, gh reads
-        # only the first document of a hosts.yml, here github.com's, and goes to ghe.example.com past its anchor.
-        for number, (row, hosts) in enumerate((
-                ("hosts.yml lists github.com, then ghe.example.com in a second document", github + "---\n" + ghe),
-                ("hosts.yml lists only ghe.example.com, with an anchor", "ghe.example.com: &host\n" + GH_HOST_ENTRY))):
-            with self.subTest(row=row, control="the check cannot be sure of the hosts"):
-                env = self.gh_config(f"unread-{number}", hosts)
-                self.setUp_calls()
-                refused = self.run_gh(argv, env=env)
-                self.assert_refused(refused, "--raw-field body")
-                self.assertIn(f"to {ON_UNREAD_HOST}:", refused.stderr.decode())
-
-    def test_a_repository_named_without_a_host_goes_to_gh_s_default_host(self) -> None:
-        # gh 2.98.0 reads a repository named as `OWNER/REPO`, with no host, by -R, GH_REPO or a repository argument, as
-        # a repository on its default host (ghrepo.FromFullName; go-gh v2.13.0 auth.DefaultHost: GH_HOST, else the one
-        # host gh's config lists, else github.com). Measured 2026-11-20 with fake tokens: with hosts.yml listing only
-        # ghe.example.com, `pr comment 1 -R cli/cli`, `issue create -R cli/cli`, `GH_REPO=cli/cli pr comment 1` and
-        # `repo edit cli/cli` went to ghe.example.com, and with it listing only github.com to github.com. So a write
-        # with a listed term to a private repository named so is refused as a repository on ghe.example.com, read as
-        # public, where gh's config lists only that host, and goes out where it lists only github.com. With no
-        # repository named, gh goes by the remote's host (measured: to github.com), so the same write from the checkout
-        # of the private repository goes out. Where the check cannot read gh's config, the repository is on a host it
-        # cannot name, read as public. Until review round 8 of dispatch://INFRA-3365 such a name was github.com's
-        # whatever gh's config said.
-        self.remotes(("origin", PRIVATE))
-        ghe = self.gh_config("only-ghe", HOSTS_GHE)
-        github = self.gh_config("only-github", HOSTS_GITHUB)
-        for form, argv, extra, field in (
-                ("-R, pr comment", ["pr", "comment", "1", "-R", PRIVATE, "--body", TEXT], {}, "--body"),
-                ("-R, issue create", ["issue", "create", "-R", PRIVATE, "-t", "t", "--body", TEXT], {}, "--body"),
-                ("GH_REPO", ["pr", "comment", "1", "--body", TEXT], {"GH_REPO": PRIVATE}, "--body"),
-                ("a repository argument", ["repo", "edit", PRIVATE, "--description", TEXT], {}, "--description")):
-            with self.subTest(form=form, hosts_yml="only ghe.example.com"):
-                self.setUp_calls()
-                refused = self.run_gh(argv, env={**ghe, **extra})
-                self.assert_refused(refused, field)
-                self.assertIn(f"to {ON_GHE}:", refused.stderr.decode())
-            with self.subTest(form=form, hosts_yml="only github.com"):
-                self.setUp_calls()
-                self.assert_sent(self.run_gh(argv, env={**github, **extra}), argv)
-        with self.subTest(form="no repository named, from the checkout", hosts_yml="only ghe.example.com"):
-            argv = ["pr", "comment", "1", "--body", TEXT]
-            self.setUp_calls()
-            self.assert_sent(self.run_gh(argv, env=ghe), argv)
-        with self.subTest(form="-R, pr comment", control="hosts.yml lists only ghe.example.com, with an anchor"):
-            env = self.gh_config("anchor", "ghe.example.com: &host\n" + GH_HOST_ENTRY)
-            self.setUp_calls()
-            refused = self.run_gh(["pr", "comment", "1", "-R", PRIVATE, "--body", TEXT], env=env)
-            self.assert_refused(refused, "--body")
-            self.assertIn(f"to {ON_UNREAD_HOST}:", refused.stderr.decode())
-
     def checkout(self, *remotes: tuple[str, str], resolved: str = "") -> None:
         """Make the work directory a new checkout whose remotes are REMOTES, (name, URL) pairs, and whose origin's
         `gh-resolved` (`gh repo set-default`) is RESOLVED when given."""
@@ -1775,173 +1680,145 @@ class GhLeakTerms(unittest.TestCase):
         if resolved:
             subprocess.run([*git, "config", "remote.origin.gh-resolved", resolved], check=True, env=self.env)
 
-    def test_the_repository_gh_repo_set_default_names_is_on_its_remote_s_host(self) -> None:
-        # `gh repo set-default` can name a repository that is no remote's, as a remote's `gh-resolved` value
-        # (`OWNER/REPO`), and gh 2.98.0 takes that repository on the remote's host, not on its default host: measured
-        # 2026-11-20 with fake tokens, with hosts.yml listing only ghe.example.com, a checkout whose origin is
-        # github.com's and whose origin's `gh-resolved` is `other/repo` sent `pr comment 1` to github.com, and one whose
-        # origin is on ghe.example.com sent it there. So, gh's config listing only ghe.example.com, a write with a
-        # listed term goes out from a checkout whose github.com remote is resolved to a private repository, and is
-        # refused from one whose remote on ghe.example.com is, as a repository on ghe.example.com, read as public
-        # (gh_call_host, GH_GIVEN_REMOTE). Until review round 8 of dispatch://INFRA-3365 the value was github.com's
-        # whatever its remote, and the second write went out.
-        env = self.gh_config("only-ghe", HOSTS_GHE)
-        argv = ["pr", "comment", "1", "--body", TEXT]
-        for remote in ("https://github.com/o/fork.git", "https://ghe.example.com/o/fork.git"):
-            with self.subTest(remote=remote):
-                self.checkout(("origin", remote), resolved=PRIVATE)
-                self.setUp_calls()
-                if remote.startswith("https://github.com/"):
-                    self.assert_sent(self.run_gh(argv, env=env), argv)
-                    continue
-                refused = self.run_gh(argv, env=env)
-                self.assert_refused(refused, "--body")
-                self.assertIn(f"to {ON_GHE}:", refused.stderr.decode())
+    # --- the plain case: gh can send the call only where the call says (dispatch://INFRA-3365, review round 10) -----
 
-    def test_gh_takes_a_remote_on_a_host_gh_s_config_lists(self) -> None:
-        # gh 2.98.0 keeps a remote on github.com, on GH_HOST's host or on a host its config lists, and drops any other;
-        # where its config lists one host, it then keeps only the remotes on that host, when one is (gh_bases,
-        # gh_taken_remotes). Measured 2026-11-20 with fake tokens, `pr comment 1` from a checkout whose remotes are a
-        # repository on github.com and o/r on ghe.example.com, origin and upstream either way round: with hosts.yml
-        # listing only ghe.example.com gh went to ghe.example.com; listing both hosts, to the upstream's; listing only
-        # github.com, to github.com; and with o/r on ghe.example.com as the one remote and hosts.yml listing only
-        # github.com, gh refused the call, "none of the git remotes configured for this repository point to a known
-        # GitHub host", and sent nothing. An ssh remote on ghe.example.com was the same: gh went to it with hosts.yml
-        # listing only ghe.example.com, and to github.com with it listing only github.com. So a write with a listed
-        # term from a checkout whose other remote is a private repository on github.com is refused, as a repository
-        # on ghe.example.com, read as public, wherever gh may take the remote on ghe.example.com, and goes out where gh
-        # drops it. Listing both hosts, gh may take either remote, and the check keeps both. An ssh remote's host is
-        # read only by scripts/github-repo-visibility, which reads whether it is GitHub's, so one that is not is on a
-        # host the check cannot read, kept wherever gh may keep it: with hosts.yml listing only ghe.example.com, gh
-        # keeps it alone if it is on that host, else the github.com remote, and the check keeps both. Until review
-        # round 8 of dispatch://INFRA-3365 a remote was kept only where its URL was GitHub's, so these writes were
-        # judged by the private repository and went out, while gh sent them to ghe.example.com.
-        github, ghe, ssh = (f"https://github.com/{PRIVATE}.git", "https://ghe.example.com/o/r.git",
-                            "git@ghe.example.com:o/r.git")
-        unread_url = "a repository on a host the check cannot read in a URL that is not GitHub's, read as public"
-        argv = ["pr", "comment", "1", "--body", TEXT]
-        for number, (row, remotes, hosts, shown) in enumerate((
-                ("hosts.yml lists only ghe.example.com, its remote origin", (("origin", ghe), ("upstream", github)),
-                 HOSTS_GHE, ON_GHE),
-                ("hosts.yml lists only ghe.example.com, its remote upstream", (("origin", github), ("upstream", ghe)),
-                 HOSTS_GHE, ON_GHE),
-                ("hosts.yml lists github.com and ghe.example.com", (("origin", github), ("upstream", ghe)),
-                 HOSTS_GITHUB + HOSTS_GHE, ON_GHE),
-                ("hosts.yml lists only github.com", (("origin", github), ("upstream", ghe)), HOSTS_GITHUB, ""),
-                ("the ghe.example.com remote alone, hosts.yml listing only github.com", (("origin", ghe),),
-                 HOSTS_GITHUB, "no GitHub repository found for the call, read as public"),
-                ("hosts.yml with an anchor", (("origin", github), ("upstream", ghe)),
-                 "ghe.example.com: &host\n" + GH_HOST_ENTRY, ON_GHE),
-                ("an ssh remote, hosts.yml listing only ghe.example.com", (("origin", github), ("upstream", ssh)),
-                 HOSTS_GHE, unread_url),
-                ("an ssh remote, hosts.yml listing only github.com", (("origin", github), ("upstream", ssh)),
-                 HOSTS_GITHUB, ""))):
+    def test_outside_the_plain_case_a_call_holding_a_term_is_refused_and_names_why(self) -> None:
+        # The check reads where a call goes only in the plain case (scripts/leak-terms-check, gh_plain_case): every
+        # host gh's config lists is github.com, GH_HOST is unset or github.com, and every remote, fetch and push, is on
+        # github.com. Outside it a call that holds a listed term is one target read as public, so even a write to a
+        # private repository is refused, and the refusal names the condition; the same call with no term goes out.
+        # Each row breaks one condition: hosts.yml lists ghe.example.com; config.yml has a `hosts` key; hosts.yml is
+        # in a layout the check does not read (YAML flow form); GH_HOST is ghe.example.com; a remote is on
+        # ghe.example.com, or on www.ghe.example.com (the reviewer's, review round 10); a remote fetches from
+        # ghe.example.com and pushes to github.com. Until review round 10 the check copied how gh resolves a host, and
+        # each review found one more place where the copy differed from gh.
+        private, ghe, www = (f"https://github.com/{PRIVATE}.git", "https://ghe.example.com/o/r.git",
+                             "https://www.ghe.example.com/o/r.git")
+        hosts_key = GH_VERSION + "hosts:\n" + "".join("    " + line for line in HOSTS_GHE.splitlines(keepends=True))
+        # (row, the environment, the checkout's remotes, the origin's own push URL or "", the condition it names)
+        rows = (
+            ("hosts.yml lists ghe.example.com", self.gh_config("ghe", HOSTS_GHE), [("origin", private)], "",
+             "gh's config lists ghe.example.com"),
+            ("config.yml has a hosts key", self.gh_config("hosts-key", None, hosts_key), [("origin", private)], "",
+             "gh's config.yml has a hosts key"),
+            ("hosts.yml in YAML flow form", self.gh_config("flow", '{"ghe.example.com": {"user": "x"}}\n'),
+             [("origin", private)], "", "gh's hosts.yml is not in the layout the check reads"),
+            ("GH_HOST is ghe.example.com", {**self.env, "GH_HOST": "ghe.example.com"}, [("origin", private)], "",
+             "GH_HOST is ghe.example.com"),
+            ("a remote on ghe.example.com", self.env, [("origin", private), ("upstream", ghe)], "",
+             f"the remote upstream ({ghe}) is not on github.com"),
+            ("a remote on www.ghe.example.com", self.env, [("origin", www)], "",
+             f"the remote origin ({www}) is not on github.com"),
+            ("a remote fetching from ghe.example.com, pushing to github.com", self.env, [("origin", ghe)], private,
+             f"the remote origin ({ghe}) is not on github.com"))
+        argv = ["pr", "comment", "1", "-R", PRIVATE, "--body"]
+        for row, env, remotes, push, condition in rows:
+            self.checkout(*remotes)
+            if push:
+                self.git("remote", "set-url", "--push", "origin", push)
             with self.subTest(row=row):
-                self.checkout(*remotes)
-                env = self.gh_config(f"remotes-{number}", hosts)
+                self.setUp_calls()
+                refused = self.run_gh([*argv, TEXT], env=env)
+                self.assert_refused(refused, "--body")
+                self.assertIn(f"to wherever gh sends it, read as public, since {condition}", refused.stderr.decode())
+            with self.subTest(row=row, control="no term"):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh([*argv, CLEAN], env=env), [*argv, CLEAN])
+        # Control: in the plain case the same write goes out, judged by the private repository it names.
+        with self.subTest(control="the plain case"):
+            self.checkout(("origin", private))
+            self.setUp_calls()
+            self.assert_sent(self.run_gh([*argv, TEXT]), [*argv, TEXT])
+
+    def test_in_the_plain_case_a_write_is_judged_by_its_repository(self) -> None:
+        # Each machine here is in the plain case, so a write with a listed term to a private repository goes out, and
+        # the same write to a public one is refused for it: hosts.yml absent; holding only `{}`, which gh 2.98.0 writes
+        # once `gh auth logout` logged out of the last host, and then takes github.com (measured by the tester,
+        # dispatch://INFRA-3365, review round 10); listing github.com, its key plain as scripts/gh-agent-config writes
+        # it, or quoted; GH_HOST github.com in another letter case; and a directory in no git repository.
+        self.checkout(("origin", f"https://github.com/{PRIVATE}.git"))
+
+        def no_repository() -> dict[str, str]:
+            shutil.rmtree(self.work / ".git")
+            return {**self.env, "GIT_CEILING_DIRECTORIES": str(self.tmp)}
+
+        for row, make in (
+                ("no hosts.yml", lambda: self.gh_config("none", None)),
+                ("hosts.yml holds {}", lambda: self.gh_config("logged-out", "# gh auth logout\n{}\n")),
+                ("hosts.yml lists github.com", lambda: self.gh_config("github", HOSTS_GITHUB)),
+                ("hosts.yml lists github.com, quoted", lambda: self.gh_config("quoted", '"github.com":\n' + GH_HOST_ENTRY)),
+                ("GH_HOST is GitHub.COM", lambda: {**self.env, "GH_HOST": "GitHub.COM"}),
+                ("no git repository", no_repository)):
+            env = make()
+            argv = ["pr", "comment", "1", "-R", PRIVATE, "--body", TEXT]
+            with self.subTest(row=row, repository=PRIVATE):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=env), argv)
+            with self.subTest(row=row, repository=PUBLIC):
+                self.setUp_calls()
+                refused = self.run_gh(["pr", "comment", "1", "-R", PUBLIC, "--body", TEXT], env=env)
+                self.assert_refused(refused, "--body")
+                self.assertIn(f"to {PUBLIC} (public):", refused.stderr.decode())
+
+    def test_in_the_plain_case_gh_resolved_names_the_base_repository_as_main_reads_it(self) -> None:
+        # `gh repo set-default` writes a remote's `gh-resolved`: `base`, the remote itself, or the OWNER/REPO gh takes
+        # in its place. In the plain case, every remote on github.com, the check reads it as main read it: the
+        # resolved remotes, else every remote (gh_bases). So a write that names no repository goes out where the
+        # resolution names a private repository, and is refused where it names a public one, or where nothing is
+        # resolved and a remote is public.
+        argv = ["pr", "comment", "1", "--body", TEXT]
+        # (row, the remotes, the remote resolved and its gh-resolved, what the refusal shows, "" where it goes out)
+        for row, remotes, remote, resolution, shown in (
+                ("base on the private upstream", (("origin", PUBLIC), ("upstream", PRIVATE)), "upstream", "base", ""),
+                ("origin resolved to a private repository", (("origin", PUBLIC),), "origin", PRIVATE, ""),
+                ("origin resolved to a public repository", (("origin", PRIVATE),), "origin", PUBLIC,
+                 f"to remote {PUBLIC} (public):"),
+                ("nothing resolved, a remote public", (("origin", PRIVATE), ("upstream", PUBLIC)), "", "",
+                 "remote upstream (public)")):
+            self.remotes(*remotes)
+            if remote:
+                self.git("config", f"remote.{remote}.gh-resolved", resolution)
+            with self.subTest(row=row):
                 self.setUp_calls()
                 if not shown:
-                    self.assert_sent(self.run_gh(argv, env=env), argv)
+                    self.assert_sent(self.run_gh(argv), argv)
                     continue
-                refused = self.run_gh(argv, env=env)
+                refused = self.run_gh(argv)
                 self.assert_refused(refused, "--body")
                 self.assertIn(shown, refused.stderr.decode())
 
-    def test_gh_reads_gh_resolved_only_on_a_remote_its_host_filters_keep(self) -> None:
-        # gh 2.98.0 first keeps the remotes on the hosts it knows, then, where its default host is GH_HOST's or the one
-        # host its config lists, those on that host (pkg/cmd/factory/remote_resolver.go), and only then takes the
-        # remote `gh repo set-default` resolved among those left (context/context.go BaseRepo): a resolution on a
-        # remote gh dropped counts for nothing. These are the reviewer's rows (dispatch://INFRA-3365, review round 9),
-        # from a checkout whose origin, a private repository on github.com, has `gh-resolved` base, and whose upstream
-        # is ghe.example.com's o/pub, a name that on github.com is a public repository's. Measured 2026-11-20 with
-        # fake tokens, from that checkout with origin theorem-labs/agent-infra and upstream sjawhar/ygo, `gh api` run
-        # with `-X GET --verbose`:
-        # - hosts.yml listing only ghe.example.com: `api --hostname github.com 'repos/{owner}/{repo}/issues'` sent
-        #   "GET /repos/sjawhar/ygo/issues" to https://api.github.com, filled from the upstream, and `pr comment 1`
-        #   posted to "https://ghe.example.com/api/graphql"; without the `gh-resolved`, the same two;
-        # - hosts.yml listing only github.com: "GET /repos/theorem-labs/agent-infra/issues", filled from the origin,
-        #   and "https://api.github.com/graphql";
-        # - GH_HOST=ghe.example.com and hosts.yml listing only github.com: "GET /repos/sjawhar/ygo/issues", and
-        #   "https://ghe.example.com/api/graphql";
-        # - the upstream as the ssh URL git@ghe.example.com:sjawhar/ygo.git, hosts.yml listing only ghe.example.com:
-        #   "GET /repos/sjawhar/ygo/issues", and "https://ghe.example.com/api/graphql".
-        # So each write with a listed term is refused where gh drops the resolved origin, and goes out, to the private
-        # origin, where gh keeps it. scripts/github-repo-visibility reads only whether an ssh remote is GitHub's, so the
-        # check cannot tell whether that ssh upstream is on ghe.example.com, where gh keeps it alone, or elsewhere,
-        # where gh keeps the origin: it trusts no resolution, and keeps both. Until review round 9 the resolution was
-        # read before the host filters, and the rows that gh fills from the upstream or sends to ghe.example.com went
-        # out, judged by the private origin.
-        filled = "a repository filled in from remote upstream, which could not be read, read as public"
-        unread_url = "a repository on a host the check cannot read in a URL that is not GitHub's, read as public"
-        api = ["api", "--hostname", "github.com", "repos/{owner}/{repo}/issues", "-f", f"body={TEXT}"]
-        comment = ["pr", "comment", "1", "--body", TEXT]
-        only_ghe, only_github = self.gh_config("only-ghe", HOSTS_GHE), self.gh_config("only-github", HOSTS_GITHUB)
-        origin = ("origin", f"https://github.com/{PRIVATE}.git")
-        upstream = ("upstream", f"https://ghe.example.com/{PUBLIC}.git")
-        # (row, the upstream, the origin's gh-resolved, the environment, and the target the refusal of each call
-        # shows, "" where the call goes out)
-        for row, remote, resolved, env, api_shown, comment_shown in (
-                ("hosts.yml lists only ghe.example.com", upstream, "base", only_ghe, filled, ON_GHE),
-                ("control: no gh-resolved, hosts.yml lists only ghe.example.com", upstream, "", only_ghe, filled,
-                 ON_GHE),
-                ("control: hosts.yml lists only github.com, so gh keeps the origin", upstream, "base", only_github, "",
-                 ""),
-                ("GH_HOST=ghe.example.com, hosts.yml lists only github.com", upstream, "base",
-                 {**only_github, "GH_HOST": "ghe.example.com"}, filled, ON_GHE),
-                ("an ssh upstream, hosts.yml lists only ghe.example.com",
-                 ("upstream", f"git@ghe.example.com:{PUBLIC}.git"), "base", only_ghe, filled, unread_url)):
-            self.checkout(origin, remote, resolved=resolved)
-            for argv, field, shown in ((api, "--raw-field body", api_shown), (comment, "--body", comment_shown)):
-                with self.subTest(row=row, call=argv[0]):
-                    self.setUp_calls()
-                    if not shown:
-                        self.assert_sent(self.run_gh(argv, env=env), argv)
-                        continue
-                    refused = self.run_gh(argv, env=env)
-                    self.assert_refused(refused, field)
-                    self.assertIn(shown, refused.stderr.decode())
-
-    def test_the_host_of_branch_repo_gh_host_and_a_git_url_is_read_as_gh_reads_it(self) -> None:
-        # Each place the gate decides which host a call reaches reads that host through one function, gh_call_host.
-        # The decision points the other tests leave out, each with gh's config listing the host the row says:
-        # --branch-repo `OWNER/REPO`, on gh's default host (the issue's repository here named as
-        # `github.com/OWNER/REPO`, so only the branch's repository is on ghe.example.com); GH_HOST, which a call that is
-        # not `gh api` goes to as a whole (GH_GIVEN_CALL), here one that names no repository, from a checkout whose one
-        # remote is on github.com, which gh refuses: measured 2026-11-20 with fake tokens, `GH_HOST=ghe.example.com gh
-        # pr comment 1 --body x` with hosts.yml listing only github.com printed "none of the git remotes configured for
-        # this repository correspond to the GH_HOST environment variable" and sent nothing, and with
-        # GH_HOST=github.com posted to "https://api.github.com/graphql"; and -R as a git URL, on its own host (measured
-        # 2026-11-20 with fake tokens: `pr comment 1 -R git@ghe.example.com:cli/cli.git` went to ghe.example.com with
-        # hosts.yml listing only github.com), which only scripts/github-repo-visibility reads, so one that is not
-        # GitHub's is on a host the check cannot read. Each is refused where gh sends it to ghe.example.com, or for
-        # GH_HOST would, read as public, and goes out where gh sends it to the private repository on github.com. Until
-        # review round 9 of dispatch://INFRA-3365 the GH_HOST row named its repository with -R, which gh reads on
-        # GH_HOST's host anyway (GH_GIVEN_DEFAULT), so the row could not fail for GH_GIVEN_CALL.
+    def test_a_host_the_call_names_itself_is_that_host(self) -> None:
+        # In the plain case a repository named with no host is github.com's, and a host the call names itself is that
+        # host, read as public when it is not github.com (gh_repository_address): here --branch-repo `HOST/OWNER/REPO`,
+        # and -R as a git URL, which only scripts/github-repo-visibility reads, so one that is not GitHub's is on a host
+        # the check cannot read. Each is refused, and the same call naming github.com, where the repository is
+        # private, goes out; with no host, a public repository is refused and the private one goes out.
         self.checkout(("origin", f"https://github.com/{PRIVATE}.git"))
-        ghe = self.gh_config("only-ghe", HOSTS_GHE)
-        github = self.gh_config("only-github", HOSTS_GITHUB)
-        develop = ["issue", "develop", "1", "-R", f"github.com/{PRIVATE}", "--branch-repo", PRIVATE, "--name",
-                   f"fix-{CANARY}"]
-        comment = ["pr", "comment", "1", "--body", TEXT]
-        # (decision point, the call gh sends to ghe.example.com and its config, the field and the match its refusal
-        # names, the target it shows; the call gh sends to github.com and its config)
-        for point, refused_argv, refused_env, field, matched, shown, sent_argv, sent_env in (
-                ("--branch-repo", develop, ghe, "--name", CANARY, ON_GHE, develop, github),
-                ("GH_HOST", comment, {**github, "GH_HOST": "ghe.example.com"}, "--body", CANARY.upper(), ON_GHE,
-                 comment, {**github, "GH_HOST": "github.com"}),
-                ("-R as a git URL",
-                 ["pr", "comment", "1", "-R", f"git@ghe.example.com:{PRIVATE}.git", "--body", TEXT], github,
-                 "--body", CANARY.upper(),
-                 "a repository on a host the check cannot read in a URL that is not GitHub's, read as public",
-                 ["pr", "comment", "1", "-R", f"git@github.com:{PRIVATE}.git", "--body", TEXT], github)):
-            with self.subTest(point=point, gh_sends_to="ghe.example.com"):
+        unread_url = "a repository on a host the check cannot read in a URL that is not GitHub's, read as public"
+
+        def develop(branch_repository: str) -> list[str]:
+            return ["issue", "develop", "1", "-R", PRIVATE, "--branch-repo", branch_repository, "--name",
+                    f"fix-{CANARY}"]
+
+        def comment(repository: str) -> list[str]:
+            return ["pr", "comment", "1", "-R", repository, "--body", TEXT]
+
+        # (the name, the refused call and the field, match and target its refusal names, the call that goes out)
+        for name, refused_argv, field, matched, shown, sent_argv in (
+                ("--branch-repo HOST/OWNER/REPO", develop(f"ghe.example.com/{PRIVATE}"), "--name", CANARY, ON_GHE,
+                 develop(f"github.com/{PRIVATE}")),
+                ("-R as a git URL", comment(f"git@ghe.example.com:{PRIVATE}.git"), "--body", CANARY.upper(),
+                 unread_url, comment(f"git@github.com:{PRIVATE}.git")),
+                ("-R OWNER/REPO, with no host", comment(PUBLIC), "--body", CANARY.upper(), f"{PUBLIC} (public)",
+                 comment(PRIVATE))):
+            with self.subTest(name=name, verdict="refused"):
                 self.setUp_calls()
-                refused = self.run_gh(refused_argv, env=refused_env)
+                refused = self.run_gh(refused_argv)
                 self.assert_refused(refused, field, matched, line=1)
                 self.assertIn(f"{shown}:", refused.stderr.decode())
-            with self.subTest(point=point, gh_sends_to="github.com"):
+            with self.subTest(name=name, verdict="goes out"):
                 self.setUp_calls()
-                self.assert_sent(self.run_gh(sent_argv, env=sent_env), sent_argv)
+                self.assert_sent(self.run_gh(sent_argv), sent_argv)
 
     def test_a_repository_argument_on_another_host_is_read_as_public(self) -> None:
         # `repo edit HOST/OWNER/REPO` edits a repository on HOST, where gh sends the call, so it is read as public, as
@@ -1987,202 +1864,175 @@ class GhLeakTerms(unittest.TestCase):
                 self.assertIn("to remote origin (public):", refused.stderr.decode())
                 self.assertEqual(self.visibility_reads()[-1], f"repos/{PRIVATE}")
 
-    def test_a_gh_alias_is_read_in_every_form_gh_writes(self) -> None:
-        # gh 2.98.0 reads config.yml's `aliases` as a YAML mapping (go-gh's `cfg.Get(["aliases", NAME])`), and writes
-        # it in more than one form. Measured 2026-11-20 with `gh alias set` in a new GH_CONFIG_DIR, its term
-        # `globalterm`: after `gh config set prompt enabled` and `gh alias delete co`, `gh alias set prc 'pr comment
-        # --body globalterm'` wrote `aliases: {prc: pr comment --body globalterm}`, and a second alias of two lines
-        # went into that flow mapping as `nt: "issue create --title x\n--body globalterm"`; in a block mapping, `gh
-        # alias set nt "$(printf 'issue create --title x\n--body globalterm')"` wrote `nt: |-` over its two lines, a
-        # value whose first line starts with two blanks `|4-`, a value of 200 characters one plain line, a value with
-        # `: ` 'single-quoted' with `''`, and one with a tab "double-quoted" with `\t`; `gh alias list` read each
-        # back. Each is a row here: from a checkout of a public repository, the alias whose expansion holds the term is
-        # refused, and the same alias without it goes out. Until review round 9 of dispatch://INFRA-3365 an alias was
-        # read only from a line below `aliases:`, each value as one line, so the flow and `|-` rows went out.
-        self.remotes(("origin", PUBLIC))
-        words = " ".join(["word"] * 40)
-        # (row, the text after `aliases:` with {body} for the text the expansion sends, the call)
-        for number, (row, aliases, argv) in enumerate((
-                ("flow, after the last alias was deleted", " {prc: pr comment --body {body}}", ["prc", "1"]),
-                ("flow, a value of two lines", ' {prc: pr checkout, nt: "issue create --title x\\n--body {body}"}',
-                 ["nt"]),
-                ("block, |- over two lines", "\n    nt: |-\n        issue create --title x\n        --body {body}",
-                 ["nt"]),
-                ("block, |4- with a first line indented",
-                 "\n    lead: |4-\n          issue comment 1\n        --body {body}", ["lead"]),
-                ("block, a long plain value", f"\n    long: issue comment 1 --body '{words} {{body}}'", ["long"]),
-                ("block, single-quoted with ''", "\n    colon: 'issue comment 1 --body ''note: {body}'''", ["colon"]),
-                ("block, double-quoted with an escape", '\n    tab: "issue comment 1 --body\\t{body}"', ["tab"]))):
+    def test_a_gh_alias_the_check_cannot_read_exactly_is_read_whole(self) -> None:
+        # The check reads gh's aliases with a simple reader, a block alias of one line, its value plain or quoted
+        # (gh_aliases). gh 2.98.0 writes others too (measured 2026-11-20 with `gh alias set`): a flow mapping once `gh
+        # alias delete` removed the last alias, a `|-` block scalar for a value of several lines, and a double-quoted
+        # value with an escape. Where any alias is one the reader does not read exactly, a call that may run one is
+        # read whole, its arguments and the raw text of gh's aliases, with one target read as public (review round 10
+        # of dispatch://INFRA-3365). So an alias whose expansion holds a listed term is refused, though it names a
+        # private repository, and the refusal says the check cannot read gh's aliases exactly; the same alias with no
+        # term goes out. Until that round a YAML reader read each form, and refused a call it could not read.
+        unread = "read as public, since the check cannot read gh's aliases exactly"
+        for number, (row, aliases, name) in enumerate((
+                ("flow, after the last alias was deleted", " {prc: pr comment 1 -R o/priv --body {body}}", "prc"),
+                ("flow, a value of two lines",
+                 ' {prc: pr checkout, nt: "issue create -R o/priv --title x\\n--body {body}"}', "nt"),
+                ("block, |- over two lines",
+                 "\n    nt: |-\n        issue create -R o/priv --title x\n        --body {body}", "nt"),
+                ("block, double-quoted with an escape", '\n    tab: "issue comment 1 -R o/priv --body\\t{body}"', "tab"),
+                ("block, a value continued on a more-indented line",
+                 "\n    more: issue comment 1 -R o/priv\n        --body {body}", "more"))):
             with self.subTest(row=row):
                 env = self.gh_config(f"term-{number}", None, gh_config_yml(aliases.replace("{body}", CANARY)))
                 self.setUp_calls()
-                self.assert_refused(self.run_gh(argv, env=env), "--body", CANARY, line=1)
+                refused = self.run_gh([name], env=env)
+                self.assert_refused(refused, f"gh's aliases {env['GH_CONFIG_DIR']}/config.yml", CANARY)
+                self.assertIn(f"gh {name} to what the gh alias {name} runs, {unread}", refused.stderr.decode())
             with self.subTest(row=row, control="the same alias without the term"):
                 env = self.gh_config(f"clean-{number}", None, gh_config_yml(aliases.replace("{body}", "clean")))
                 self.setUp_calls()
+                self.assert_sent(self.run_gh([name], env=env), [name])
+        # The call's own arguments are read too, and a call whose words are no key of the aliases is no alias's. With
+        # flow aliases whose text holds no term, `prc` with a term in its arguments is refused, and `co` goes out;
+        # with flow aliases whose `pr say` holds a term, `co`, which may be any alias there, is refused, and `pr view`,
+        # `pr ready` and `nosuch`, whose words are no key there, go out.
+        clean = self.gh_config("flow-clean", None, gh_config_yml(" {prc: pr comment 1 -R o/priv, co: pr checkout}"))
+        termed = self.gh_config("flow-term", None, gh_config_yml(
+            f" {{co: pr checkout, pr say: pr comment 1 -R o/priv --body {CANARY}}}"))
+        with self.subTest(row="a term in the call's own arguments"):
+            self.setUp_calls()
+            refused = self.run_gh(["prc", "--body", TEXT], env=clean)
+            self.assert_refused(refused, "argument 3", line=1)
+            self.assertIn(f"gh prc to what the gh alias prc runs, {unread}", refused.stderr.decode())
+        with self.subTest(row="a call that may be an alias, a term in another alias"):
+            self.setUp_calls()
+            self.assert_refused(self.run_gh(["co", "1"], env=termed), f"gh's aliases {termed['GH_CONFIG_DIR']}/config.yml",
+                                CANARY)
+        for env, argv in ((clean, ["co", "1"]), (termed, ["pr", "view", "1"]), (termed, ["pr", "ready", "1"]),
+                          (termed, ["nosuch", "1"])):
+            with self.subTest(row="no term, or no alias", call=" ".join(argv), aliases=Path(env["GH_CONFIG_DIR"]).name):
+                self.setUp_calls()
                 self.assert_sent(self.run_gh(argv, env=env), argv)
 
-    def test_a_gh_alias_under_a_command_in_flow_form_is_read(self) -> None:
+    def test_a_gh_alias_under_a_command_in_flow_form_is_read_whole(self) -> None:
         # gh writes its aliases as a flow mapping once the last alias was deleted, and an alias under a command goes
         # there too. Measured 2026-11-20 with fake tokens: with config.yml holding `aliases: {pr say: pr comment}`,
         # `gh pr say 1 -R o/r --body x` posted to "https://api.github.com/graphql", as `gh pr comment` does, and so did
         # `issue say` under `{issue say: issue comment}`, `repo say` under `{"repo say": issue comment}` and `run say`
         # after another key. shims/gh starts the check for such a call only when gh_shim_has_nested_alias finds the
         # alias's key in config.yml (NestedAliases); until review round 9 of dispatch://INFRA-3365 it found only a key
-        # that starts an indented line, so these calls went to gh unread.
+        # that starts an indented line, so these calls went to gh unread. The check does not read a flow alias exactly,
+        # so it reads such a call whole, with one target read as public: a term in its arguments is refused, whatever
+        # repository it names, and the call with no term goes out.
         for number, (form, aliases) in enumerate((("flow", " {pr say: pr comment}"),
                                                   ("flow, quoted, after another key",
                                                    ' {prc: pr checkout, "pr say": pr comment}'))):
             env = self.gh_config(f"flow-nested-{number}", None, gh_config_yml(aliases))
-            with self.subTest(form=form):
-                self.setUp_calls()
-                self.assert_refused(self.run_gh(["pr", "say", "11", "-R", PUBLIC, "--body", TEXT], env=env), "--body")
-            with self.subTest(form=form, control="a private repository"):
-                argv = ["pr", "say", "11", "-R", PRIVATE, "--body", TEXT]
-                self.setUp_calls()
-                self.assert_sent(self.run_gh(argv, env=env), argv)
-
-    def test_a_call_that_may_run_an_alias_the_check_cannot_read_is_refused(self) -> None:
-        # Fail closed: where the call's first word may be a gh alias and the check cannot be sure of gh's aliases, it
-        # cannot tell what the call runs, and refuses it: `aliases` holds no mapping (go-gh's FindEntry reads the items
-        # of a sequence as keys and values too), a value the reader does not decode (a folded block scalar, an escape
-        # YAML does not define), and a config.yml that cannot be read. A word that is no alias of a config read for
-        # certain goes out as before, and so does a call whose first word is a gh command.
-        self.remotes(("origin", PUBLIC))
-        argv = ["prc", "1"]
-        for number, (row, aliases) in enumerate((
-                ("aliases holds a sequence", " [prc, pr comment --body x]"),
-                ("a folded block scalar", "\n    prc: >\n        pr comment --body x"),
-                ("an escape YAML does not define", '\n    prc: "pr comment --body \\q"'))):
-            with self.subTest(row=row):
-                env = self.gh_config(f"unread-{number}", None, gh_config_yml(aliases))
-                self.setUp_calls()
-                refused = self.run_gh(argv, env=env)
-                self.assertEqual(refused.returncode, 2, refused.stderr.decode())
-                self.assertEqual(self.gh_calls(), [])
-                self.assertIn("cannot read gh's aliases", refused.stderr.decode())
-                self.assertIn("nothing was sent", refused.stderr.decode())
-        with self.subTest(row="config.yml cannot be read"):
-            env = self.gh_config("directory", None)
-            (Path(env["GH_CONFIG_DIR"]) / "config.yml").unlink()
-            (Path(env["GH_CONFIG_DIR"]) / "config.yml").mkdir()
-            self.setUp_calls()
-            refused = self.run_gh(argv, env=env)
-            self.assertEqual(refused.returncode, 2, refused.stderr.decode())
-            self.assertEqual(self.gh_calls(), [])
-            self.assertIn("cannot read gh's aliases", refused.stderr.decode())
-        with self.subTest(control="a word that is no alias, in a config read for certain"):
-            env = self.gh_config("certain", None, gh_config_yml("\n    co: pr checkout"))
-            self.setUp_calls()
-            self.assert_sent(self.run_gh(["nosuch", "1"], env=env), ["nosuch", "1"])
-        with self.subTest(control="a gh command, with a folded alias in config.yml"):
-            env = self.gh_config("command", None, gh_config_yml("\n    prc: >\n        pr comment --body x"))
-            comment = ["pr", "comment", "1", "-R", PRIVATE, "--body", TEXT]
-            self.setUp_calls()
-            self.assert_sent(self.run_gh(comment, env=env), comment)
-
-    def check_seconds(self, argv: list[str], env: dict[str, str]) -> tuple[subprocess.CompletedProcess[bytes], float]:
-        """The check itself on ARGV, as the shim runs it, and the seconds it took; killed after 20."""
-        start = time.monotonic()
-        done = subprocess.run([str(CHECK), "gh", "--", *argv], env=env, cwd=self.work, stdin=subprocess.DEVNULL,
-                              capture_output=True, timeout=20, check=False)
-        return done, time.monotonic() - start
-
-    def test_a_config_line_with_a_long_run_of_blanks_is_read_at_once(self) -> None:
-        # The YAML reader matches each line in one way, however many blanks it holds (YAML_KEY): until review round 9
-        # of dispatch://INFRA-3365 a run of n blanks could be split in 2^(n-1) ways, and that review measured a gh call
-        # held 13.9 s by a config.yml whose plain value 26 blanks followed, and 30.4 s by a block-scalar alias line with
-        # 26 blanks inside it; the tester, 2.3 s for a clean `gh api` call whose hosts.yml ends with `a`, 22 blanks and
-        # `b`. Each row here has 40 blanks, and each call of the check returns in under 3 s, the tester's bound, with
-        # its verdict: a term is refused (3) and a clean text goes out (0). The check's own cost, mostly decrypting the
-        # list, measured 0.6 to 1.7 s per call on this shared pod; at 65dd9707 the calls with 24 blanks took 5.2 to
-        # 29.4 s, and each with 40 was killed after 30 s.
-        self.remotes(("origin", PUBLIC))
-        blanks = " " * 40
-        api = ["api", f"repos/{PUBLIC}/issues", "-f", "title={body}"]
-        # (row, hosts.yml, config.yml, the call, with {body} for the text it sends)
-        for number, (row, hosts, config, argv) in enumerate((
-                ("hosts.yml ends with a, 40 blanks and b", HOSTS_GITHUB + f"a{blanks}b\n", GH_VERSION, api),
-                ("config.yml: a plain value below its key, 40 blanks after it", None,
-                 GH_VERSION + f"pager:\n    less{blanks}\n", api),
-                ("config.yml: an alias line with 40 blanks inside it", None,
-                 gh_config_yml(f"\n    prc: |-\n        pr comment 1{blanks}--body {{body}}"), ["prc"]))):
-            env = self.gh_config(f"blanks-{number}", hosts, config.replace("{body}", CANARY))
-            with self.subTest(row=row, text="a term"):
-                done, seconds = self.check_seconds([word.replace("{body}", CANARY) for word in argv], env)
-                self.assertEqual(done.returncode, 3, done.stderr.decode())
-                self.assertLess(seconds, 3.0)
-            env = self.gh_config(f"blanks-clean-{number}", hosts, config.replace("{body}", "clean"))
-            with self.subTest(row=row, text="clean"):
-                done, seconds = self.check_seconds([word.replace("{body}", "clean") for word in argv], env)
-                self.assertEqual(done.returncode, 0, done.stderr.decode())
-                self.assertLess(seconds, 3.0)
-
-    def test_a_config_nested_deeper_than_the_reader_follows_is_one_it_cannot_read(self) -> None:
-        # The YAML reader follows a nested node by recursion, and a node nested deeper than Python's recursion limit
-        # lets it follow is a config it cannot read (YamlUnread), whose host is read as public: until review round 9
-        # of dispatch://INFRA-3365 the RecursionError escaped as a traceback, gh_check exited 1, and the shim refused
-        # every `gh api` write. The reviewer measured that go-gh reads a hosts.yml of 1200 nested block keys, as the
-        # host `k0`; the tester's rows add a block mapping nested 1500 deep, and a value that nests 5000 flow sequences.
-        for number, (row, hosts) in enumerate((
-                ("hosts.yml: 1200 nested block keys", "".join(" " * depth + f"k{depth}:\n" for depth in range(1200))),
-                ("hosts.yml: a block mapping nested 1500 deep",
-                 "".join(" " * depth + f"k{depth}:\n" for depth in range(1500))),
-                ("hosts.yml: a value that nests 5000 flow sequences",
-                 "github.com: " + "[" * 5000 + "]" * 5000 + "\n"))):
-            env = self.gh_config(f"deep-{number}", hosts)
-            with self.subTest(row=row, text="clean"):
-                argv = ["issue", "create", "-R", PUBLIC, "-t", "t", "--body", CLEAN]
+            for repository in (PUBLIC, PRIVATE):
+                with self.subTest(form=form, repository=repository):
+                    self.setUp_calls()
+                    refused = self.run_gh(["pr", "say", "11", "-R", repository, "--body", TEXT], env=env)
+                    self.assert_refused(refused, "argument 7", line=1)
+            with self.subTest(form=form, control="no term"):
+                argv = ["pr", "say", "11", "-R", PUBLIC, "--body", CLEAN]
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv, env=env), argv)
-            with self.subTest(row=row, text="clean", call="gh api"):
-                argv = ["api", f"repos/{PRIVATE}/issues", "-f", "title=t"]
+
+    def test_a_gh_alias_read_exactly_is_judged_by_where_it_goes(self) -> None:
+        # A block alias of one line, its value plain or quoted, is read exactly (gh_aliases) and judged by where its
+        # expansion goes, as before: measured 2026-11-20, `gh alias set` wrote a value of 200 characters as one plain
+        # line, and a value with `: ` 'single-quoted' with `''`. So such an alias whose expansion sends a listed term
+        # to a private repository goes out, and the same alias to a public one is refused.
+        words = " ".join(["word"] * 40)
+        for number, (row, alias) in enumerate((
+                ("a long plain value", "long: issue comment 1 -R {repo} --body '{words} {body}'"),
+                ("single-quoted with ''", "colon: 'issue comment 1 -R {repo} --body ''note: {body}'''"))):
+            name = alias.partition(":")[0]
+            for repository in (PRIVATE, PUBLIC):
+                text = "\n    " + alias.format(repo=repository, words=words, body=CANARY)
+                env = self.gh_config(f"exact-{number}-{repository.replace('/', '-')}", None, gh_config_yml(text))
+                with self.subTest(row=row, repository=repository):
+                    self.setUp_calls()
+                    if repository == PRIVATE:
+                        self.assert_sent(self.run_gh([name], env=env), [name])
+                        continue
+                    refused = self.run_gh([name], env=env)
+                    self.assert_refused(refused, "--body", CANARY, line=1)
+                    self.assertIn(f"to {PUBLIC} (public):", refused.stderr.decode())
+
+    def test_a_config_line_outside_the_aliases_changes_nothing(self) -> None:
+        # A line of config.yml outside its aliases changes neither how the aliases are read nor the plain case. These
+        # configs are ones gh 2.98.0 writes (the tester's, review round 10 of dispatch://INFRA-3365, finding 4): one
+        # with `editor: ?x`, one with a pager holding U+2028, and one with the tester's four lines. With the block
+        # aliases `co: pr checkout`, `pv: pr view`, `pc`, an internal comment that sends a listed term to a private
+        # repository, and `pr say`, which makes shims/gh hand every `gh pr …` call to the check, each call goes out:
+        # `pr view 1`, `pr ready 1`, `co 1`, `pv 1`, and `pc`, judged in the plain case by that repository. Until that
+        # round a YAML reader that did not follow such a line refused every call that might run an alias.
+        aliases = (f"\n    co: pr checkout\n    pv: pr view\n    pc: pr comment 1 -R {PRIVATE} --body 'see {CANARY}'"
+                   "\n    pr say: pr comment")
+        for number, (row, config) in enumerate((
+                ("editor: ?x", gh_config_yml(aliases).replace("editor:\n", "editor: ?x\n")),
+                ("a pager holding U+2028", gh_config_yml(aliases).replace("pager:\n", "pager: less\u2028-R\n")),
+                ("the tester's four lines", gh_tester_config_yml(aliases)))):
+            env = self.gh_config(f"outside-{number}", None, config)
+            for argv in (["pr", "view", "1"], ["pr", "ready", "1"], ["co", "1"], ["pv", "1"], ["pc"]):
+                with self.subTest(row=row, call=" ".join(argv)):
+                    self.setUp_calls()
+                    self.assert_sent(self.run_gh(argv, env=env), argv)
+
+    def test_in_an_agent_session_the_agent_config_directory_is_the_plain_case(self) -> None:
+        # In an agent's shell shims/gh points GH_CONFIG_DIR at the directory scripts/gh-agent-config makes: its hosts.yml
+        # lists `github.com:` alone, with a placeholder login, and its config.yml links to the user's, here one gh wrote
+        # with the tester's four lines and the aliases `co: pr checkout` and `pr say`, which makes shims/gh hand every
+        # `gh pr …` call to the check. That directory is the plain case (the tester's agent rows, review round 10 of
+        # dispatch://INFRA-3365): a comment with a term to a private repository goes out, the same comment to a public
+        # one is refused, and `pr view 1` and `co 1` go out.
+        user = self.tmp / "config" / "gh"
+        user.mkdir()
+        (user / "config.yml").write_text(gh_tester_config_yml("\n    co: pr checkout\n    pr say: pr comment"),
+                                         encoding="utf-8")
+        env = self.agent()
+        for argv in (["pr", "comment", "1", "-R", PRIVATE, "--body", TEXT], ["pr", "view", "1"], ["co", "1"]):
+            with self.subTest(call=" ".join(argv[:2])):
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv, env=env), argv)
-            with self.subTest(row=row, text="a term"):
-                self.setUp_calls()
-                refused = self.run_gh(["issue", "create", "-R", PUBLIC, "-t", "t", "--body", TEXT], env=env)
-                self.assert_refused(refused, "--body")
-                self.assertIn(f"to {ON_UNREAD_HOST}:", refused.stderr.decode())
-                self.assertNotIn("Traceback", refused.stderr.decode())
+        with self.subTest(call="pr comment, to a public repository"):
+            self.setUp_calls()
+            refused = self.run_gh(["pr", "comment", "1", "-R", PUBLIC, "--body", TEXT], env=env)
+            self.assert_refused(refused, "--body")
+            self.assertIn(f"to {PUBLIC} (public):", refused.stderr.decode())
+        agent = self.tmp / "config" / "gh-agent"
+        self.assertTrue((agent / "config.yml").samefile(user / "config.yml"))
+        self.assertTrue((agent / "hosts.yml").read_text(encoding="utf-8").startswith("github.com:\n"))
 
     def test_repo_create_makes_the_repository_on_the_host_of_its_name(self) -> None:
         # gh 2.98.0 makes a new repository on the host of its name (pkg/cmd/repo/create createFromScratch,
-        # createFromLocal): `HOST/OWNER/NAME` on HOST, `OWNER/NAME` (ghrepo.FromFullName) and a name with no `/` on
-        # its default host; and it asks for a --template repository, read the same way, on that one's host. Measured
+        # createFromLocal): `HOST/OWNER/NAME` on HOST, and in the plain case `OWNER/NAME` and a name with no `/` on
+        # github.com; and it asks for a --template repository, read the same way, on that one's host. Measured
         # 2026-11-20 with fake tokens: `repo create ghe.example.com/o/r --private --description x` with hosts.yml
-        # listing only github.com, and `repo create o/r --private --description x` with it listing only
-        # ghe.example.com, each first asked "https://ghe.example.com/api/v3/users/o", and the second with it listing
-        # only github.com "https://api.github.com/users/o"; `repo create r --private` with it listing only
-        # ghe.example.com posted to "https://ghe.example.com/api/graphql"; and `repo create github.com/o/r --private
-        # --template o/t` with it listing only ghe.example.com first posted to "https://ghe.example.com/api/graphql".
-        # A repository on another host is read as public, made private or not. Until review round 9 of
-        # dispatch://INFRA-3365 no host was read, and each refused row here went out as a private github.com one.
-        only_ghe, only_github = self.gh_config("only-ghe", HOSTS_GHE), self.gh_config("only-github", HOSTS_GITHUB)
+        # listing only github.com first asked "https://ghe.example.com/api/v3/users/o". A repository on another host
+        # is read as public, made private or not (gh_created). Until review round 9 of dispatch://INFRA-3365 no host
+        # was read, and each refused row here went out as a private github.com one.
         create = ["repo", "create"]
-        template = [*create, "github.com/o/r", "--private", "--template", f"o/t-{CANARY}"]
-        # (row, the call, its environment, the field and the match its refusal names and the target it shows, ""
-        # where it goes out)
-        for row, argv, env, field, matched, shown in (
+        template = [*create, "github.com/o/r", "--private", "--template"]
+        # (row, the call, the field and the match its refusal names and the target it shows, "" where it goes out)
+        for row, argv, field, matched, shown in (
                 ("HOST/OWNER/NAME on ghe.example.com", [*create, "ghe.example.com/o/r", "--private", "--description",
-                                                       TEXT], only_github, "--description", CANARY.upper(), ON_GHE),
-                ("OWNER/NAME, hosts.yml lists only ghe.example.com", [*create, "o/r", "--private", "--description",
-                                                                     TEXT], only_ghe, "--description", CANARY.upper(),
-                 ON_GHE),
-                ("NAME, hosts.yml lists only ghe.example.com", [*create, "r", "--private", "--description", TEXT],
-                 only_ghe, "--description", CANARY.upper(), ON_GHE),
-                ("control: OWNER/NAME, hosts.yml lists only github.com", [*create, "o/r", "--private",
-                                                                         "--description", TEXT], only_github, "", "",
-                 ""),
-                ("--template, hosts.yml lists only ghe.example.com", template, only_ghe, "--template", CANARY,
+                                                       TEXT], "--description", CANARY.upper(), ON_GHE),
+                ("control: OWNER/NAME, made private on github.com", [*create, "o/r", "--private", "--description",
+                                                                    TEXT], "", "", ""),
+                ("control: NAME, made private on github.com", [*create, "r", "--private", "--description", TEXT], "",
+                 "", ""),
+                ("--template on ghe.example.com", [*template, f"ghe.example.com/o/t-{CANARY}"], "--template", CANARY,
                  "the template repository on ghe.example.com, read as public"),
-                ("control: --template, hosts.yml lists only github.com", template, only_github, "", "", "")):
+                ("control: --template on github.com", [*template, f"o/t-{CANARY}"], "", "", "")):
             with self.subTest(row=row):
                 self.setUp_calls()
                 if not shown:
-                    self.assert_sent(self.run_gh(argv, env=env), argv)
+                    self.assert_sent(self.run_gh(argv), argv)
                     continue
-                refused = self.run_gh(argv, env=env)
+                refused = self.run_gh(argv)
                 self.assert_refused(refused, field, matched, line=1)
                 self.assertIn(shown, refused.stderr.decode())
 
