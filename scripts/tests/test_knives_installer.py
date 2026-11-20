@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """installers/knives.sh stops when the statements it migrated cannot be pushed.
 
-The installer's own comment: "a failure stops the install with knives' message".
-For an existing knives user, `knives ledger migrate` writes the statements and
-hands off a detached sweep; the installer's next `knives ledger sweep` can find
-that sweep holding the lock, answer `busy` and exit 0, so a push that fails is
-seen by nobody. These tests pin the interleaving that hides it: before the
-installer's `knives ledger sweep` starts, the `knives` on its PATH takes the
-ledger lock itself and holds it a moment, as a running sweep does, so that sweep
-always finds the lock held (it happens on its own in about two installs of five).
+The tests also read the message the installer prints when `knives ledger migrate`
+fails: one or two tests for each outcome of exit 3, and one for another status.
+
+In knives v5.0.0, migrate starts no sweep in the background. It sends the
+ledger entries that it wrote, and then it exits. Before the installer's
+`knives ledger sweep` starts, the `knives` on its PATH (the test shim) takes
+the ledger lock and holds it for HOLD_SECONDS. So that sweep always waits for
+the lock.
 
 Runs against the knives in KNIVES_BIN, else the pinned one mise resolves (never the
 shims/knives wrapper), and is skipped when that knives has no `knives ledger`. Two more
@@ -36,10 +36,9 @@ HOSTNAME = "installer-test"
 MACHINE = f"{HOSTNAME}-{Path('/etc/machine-id').read_text(encoding='utf-8')[:8]}"
 
 # Stands in for `knives`. Before `ledger sweep` runs, a background holder takes
-# the ledger lock, as a running sweep does, and keeps it for HOLD_SECONDS; the
+# the ledger lock, as a running sweep does, and keeps it for HOLD_SECONDS. The
 # shim execs the real binary only once the holder signals that it holds the lock,
-# so the sweep always finds it held. If the handed-off sweep still has the lock,
-# the holder waits for it first. With KNIVES_SHIM_SWEEP_DIES set, `ledger sweep`
+# so the sweep always finds it held. With KNIVES_SHIM_SWEEP_DIES set, `ledger sweep`
 # instead exits 101 with nothing on stdout, as a panicking knives does.
 # With KNIVES_SHIM_MIGRATE_DIES set, `ledger migrate` does the same.
 # Everything else runs the real binary at once.
@@ -135,7 +134,8 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
             ["bash", str(self.dotfiles / "installers" / "knives.sh")],
             capture_output=True, text=True, env=self.env, check=False,
         )
-        # Let the handed-off sweep finish before anything is counted.
+        # Wait until the ledger lock is free before the test counts anything. The shim's
+        # background holder can keep it after the installer exits, when the sweep did not wait.
         lock = self.config / "ledger.lock"
         for _ in range(600):
             if subprocess.run(["flock", "-n", str(lock), "true"], check=False).returncode == 0:
@@ -165,8 +165,8 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         # remote, and the installer stops with migrate's status and says what to run.
         self.assert_migrate_failed(result, "did not reach the ledger")
         self.assertIn("`knives ledger sweep` sends them", result.stderr, result.stdout + result.stderr)
-        self.assertEqual(self.statements_left(), 0, result.stdout)
-        self.assertEqual(self.refs_on_remote(), [], result.stdout)
+        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [], result.stdout + result.stderr)
 
         # When: the installer runs again, and the remote still refuses every push.
         result = self.install()
@@ -197,11 +197,11 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
 
         # Then: it succeeds, and the statement is on the remote, under this machine's ref.
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        # The installer's own sweep found the handed-off one holding the lock and
-        # waited for it, rather than leaving at once and hiding a failed push.
+        # The installer's own sweep found that the shim's holder had the ledger lock,
+        # and waited for it. So the interleaving under test happened.
         self.assertIn('"waited":', result.stderr, "the interleaving under test did not happen")
-        self.assertEqual(self.statements_left(), 0, result.stdout)
-        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout)
+        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
 
     def test_a_new_machine_that_cannot_reach_the_ledger_yet_still_installs(self) -> None:
         # Given: a machine with no knives history, whose git cannot reach the
