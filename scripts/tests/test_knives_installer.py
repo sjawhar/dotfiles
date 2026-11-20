@@ -15,12 +15,15 @@ tests pin the link to the registry's private part (repos.local.toml from the .se
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -401,6 +404,96 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         ledger = LEDGER_URL.removeprefix("https://github.com/")
         return self.config / "ledger-repositories" / f"{ledger.replace('/', '--')}.git"
 
+    def test_two_first_time_installs_join_the_ledger_one_at_a_time(self) -> None:
+        real_flock = shutil.which("flock", path="/usr/local/bin:/usr/bin:/bin")
+        if real_flock is None:
+            self.skipTest("needs flock: where it is absent (macOS), the installer takes no lock")
+        # A flock stub first on PATH runs the real flock. Before and after, it writes to the log
+        # the path of the file that its fd argument names: `ask <path>`, then `done <path>
+        # <exit status>`. The stub does not exec flock, and the lock stays on the open file of
+        # that fd after the stub exits.
+        log = self.root / "flock.log"
+        write_executable(
+            self.root / "bin" / "flock",
+            f'path="$(readlink "/proc/$$/fd/${{@: -1}}")" || path=unknown\n'
+            f'echo "ask $path" >>"{log}"\n'
+            f'"{real_flock}" "$@" && status=0 || status=$?\n'
+            f'echo "done $path $status" >>"{log}"\n'
+            'exit "$status"',
+        )
+        lock = self.config / "ledger-repositories.lock"
+        asked = f"ask {lock.resolve()}"
+        returned = f"done {lock.resolve()} "
+        got = f"{returned}0"
+        git_dir = self.ledger_git_dir()
+
+        def logged() -> list[str]:
+            return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+        # Given: a new machine, and another install that holds the lock the installer
+        # takes to join the ledger.
+        (self.config / "state.json").unlink()
+        holder = lock.open("w")
+        fcntl.flock(holder, fcntl.LOCK_EX)
+
+        # When: the installer starts, and asks flock for that lock.
+        installer = subprocess.Popen(
+            ["bash", str(self.dotfiles / "installers" / "knives.sh")],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=self.env,
+            start_new_session=True,
+        )
+        try:
+            for _ in range(1200):
+                if asked in logged() or installer.poll() is not None:
+                    break
+                time.sleep(0.05)
+
+            # Then: it asks for the lock.
+            if installer.poll() is not None:
+                stdout, stderr = installer.communicate()
+                self.fail("the installer ended and never waited for ledger-repositories.lock:\n" + stdout + stderr)
+            self.assertIn(asked, logged(), "the installer never asked flock for ledger-repositories.lock")
+
+            # When: the other install keeps the lock for 1 s more. The test cannot see when flock
+            # starts to wait, so it gives flock time to return. A flock that does not wait returns
+            # in that time: with `flock -n`, it returned 9 to 22 ms after the ask in 20 runs.
+            time.sleep(1)
+
+            # Then: flock has not returned, and the installer has made no git directory.
+            self.assertFalse(
+                any(line.startswith(returned) for line in logged()),
+                "flock returned while the other install held ledger-repositories.lock:\n" + "\n".join(logged()),
+            )
+            self.assertFalse(git_dir.exists(), "the installer made the git directory before it held the lock")
+
+            # When: the other install lets the lock go.
+            with log.open("a", encoding="utf-8") as log_file:
+                log_file.write("released\n")
+            holder.close()
+            stdout, stderr = installer.communicate(timeout=120)
+
+            # Then: flock got the lock only after the other install let it go, and the
+            # installer joins the ledger and succeeds.
+            self.assertEqual(installer.returncode, 0, stdout + stderr)
+            self.assertIn(got, logged(), "flock never got ledger-repositories.lock:\n" + "\n".join(logged()))
+            self.assertGreater(
+                logged().index(got), logged().index("released"),
+                "flock got ledger-repositories.lock before the other install let it go:\n" + "\n".join(logged()),
+            )
+            origin = subprocess.run(
+                ["git", "--git-dir", str(git_dir), "config", "remote.origin.url"],
+                capture_output=True, text=True, env=self.env, check=False,
+            )
+            self.assertEqual(origin.stdout.strip(), LEDGER_URL, stdout + stderr + origin.stderr)
+        finally:
+            # This block runs before tearDown, which deletes self.root. When the installer
+            # still runs, the test kills its whole process group before it lets the lock go.
+            # Else the subshell that waits in flock gets the lock and runs git in the deleted HOME.
+            if installer.poll() is None:
+                os.killpg(installer.pid, signal.SIGKILL)
+            installer.communicate(timeout=60)
+            holder.close()
+
     def test_a_git_directory_that_knives_makes_during_the_install_is_kept(self) -> None:
         real_git = shutil.which("git", path="/usr/local/bin:/usr/bin:/bin")
         self.assertIsNotNone(real_git, "needs git in /usr/local/bin, /usr/bin or /bin")
@@ -504,62 +597,74 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         )
         self.assertEqual(origin.stdout.strip(), LEDGER_URL, result.stdout + result.stderr + origin.stderr)
 
-    def test_a_machine_name_that_another_install_writes_at_the_same_time_is_kept(self) -> None:
-        real_git = shutil.which("git", path="/usr/local/bin:/usr/bin:/bin")
-        self.assertIsNotNone(real_git, "needs git in /usr/local/bin, /usr/bin or /bin")
-        git_dir = self.ledger_git_dir()
-        other = f"{HOSTNAME}-0000beef"
+    def ledger_config(self, *key: str) -> list[str]:
+        """What `git config <key...>` prints for the ledger's git directory, one value per line."""
+        return subprocess.run(
+            ["git", "--git-dir", str(self.ledger_git_dir()), "config", *key],
+            capture_output=True, text=True, env=self.env, check=False,
+        ).stdout.splitlines()
 
-        # Given: a new machine whose ledger git directory has an origin and core.bare false,
-        # but no knives.machine, as an earlier install can leave it.
+    def test_an_empty_directory_at_the_final_path_is_replaced_by_the_git_directory(self) -> None:
+        git_dir = self.ledger_git_dir()
+
+        # Given: a new machine with an empty directory at the path of the ledger's git directory.
         (self.config / "state.json").unlink()
-        git_dir.parent.mkdir(parents=True)
-        for args in (
-            ["init", "--quiet", "--bare", str(git_dir)],
-            [f"--git-dir={git_dir}", "config", "core.bare", "false"],
-            [f"--git-dir={git_dir}", "config", "core.worktree", str(self.config / "ledger")],
-            [f"--git-dir={git_dir}", "remote", "add", "origin", LEDGER_URL],
-        ):
-            subprocess.run([real_git, *args], check=True, env=self.env)
-        # A git stub first on PATH stands in for another install that writes knives.machine at
-        # the same time. git does not wait for a config lock that another git holds, so a write
-        # that finds the lock held fails. At the installer's write of knives.machine, the stub
-        # first writes a machine name of its own with the real git. Then it makes config.lock,
-        # as the other install does while it writes, and runs the installer's write. It removes
-        # the lock and exits with the status of that write. For every other call, the stub runs
-        # the real git.
-        lock = git_dir / "config.lock"
-        write_executable(
-            self.root / "bin" / "git",
-            f'if [ "$#" -eq 4 ] && [ "$1" = "--git-dir={git_dir}" ] && [ "$2 $3" = "config knives.machine" ]; then\n'
-            f'    "{real_git}" "$1" config knives.machine "{other}"\n'
-            f'    : >"{lock}"\n'
-            '    status=0\n'
-            f'    "{real_git}" "$@" || status=$?\n'
-            f'    rm -f "{lock}"\n'
-            '    exit "$status"\n'
-            'fi\n'
-            f'exec "{real_git}" "$@"',
-        )
+        git_dir.mkdir(parents=True)
 
         # When: the installer joins the machine.
         result = self.install()
 
-        # Then: the write of the installer failed, but the installer reads the name that the
-        # other install wrote and succeeds, with no git error about the lock. The git directory
-        # has that one machine name, and keeps its origin and core.bare false.
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn("could not lock config file", result.stderr, result.stdout + result.stderr)
+        # Then: it succeeds, and a git directory is in place of the empty directory. Its one
+        # origin is the ledger, core.bare is false, its work tree is the ledger root, and it
+        # names this machine. The installer deleted its scratch directory.
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertEqual(self.ledger_config("--get-all", "remote.origin.url"), [LEDGER_URL], output)
+        self.assertEqual(self.ledger_config("core.bare"), ["false"], output)
+        self.assertEqual(self.ledger_config("core.worktree"), [str(self.config / "ledger")], output)
+        self.assertEqual(self.ledger_config("--get-all", "knives.machine"), [MACHINE], output)
+        self.assertEqual(sorted(p.name for p in self.config.glob(".knives-installer-joining-*")), [], output)
 
-        def config(*key: str) -> list[str]:
+    def test_a_git_directory_with_no_origin_is_repaired_in_place(self) -> None:
+        git_dir = self.ledger_git_dir()
+        kept = f"refs/knives/{HOSTNAME}-0000cafe"
+        author = {
+            "GIT_AUTHOR_NAME": HOSTNAME, "GIT_AUTHOR_EMAIL": f"{HOSTNAME}@example.com",
+            "GIT_COMMITTER_NAME": HOSTNAME, "GIT_COMMITTER_EMAIL": f"{HOSTNAME}@example.com",
+        }
+
+        def git(*args: str) -> str:
             return subprocess.run(
-                [real_git, "--git-dir", str(git_dir), "config", *key],
-                capture_output=True, text=True, env=self.env, check=False,
-            ).stdout.split()
+                ["git", "--git-dir", str(git_dir), *args],
+                input="", capture_output=True, text=True, env={**self.env, **author}, check=True,
+            ).stdout.strip()
 
-        self.assertEqual(config("--get-all", "knives.machine"), [other], result.stdout + result.stderr)
-        self.assertEqual(config("--get-all", "remote.origin.url"), [LEDGER_URL], result.stdout + result.stderr)
-        self.assertEqual(config("core.bare"), ["false"], result.stdout + result.stderr)
+        # Given: a new machine whose ledger git directory is as an older installer leaves it when
+        # it stops after `git init --bare` on the final path: core.bare is true, and it has no
+        # work tree, no origin and no machine name. It holds a ledger commit under a ref of its
+        # own, which no sweep pushed, and a file that the test puts in it.
+        (self.config / "state.json").unlink()
+        git_dir.parent.mkdir(parents=True)
+        subprocess.run(["git", "init", "--quiet", "--bare", str(git_dir)], check=True, env=self.env)
+        commit = git("commit-tree", git("mktree"), "-m", "a ledger commit that no sweep pushed")
+        git("update-ref", kept, commit)
+        marker = git_dir / "installer-test-marker"
+        marker.write_text("kept\n", encoding="utf-8")
+
+        # When: the installer joins the machine.
+        result = self.install()
+
+        # Then: it succeeds, and the installer did not replace the git directory: the ref holds
+        # the same commit, and the file is there. The git directory now has the ledger as its
+        # one origin, core.bare false, the ledger root as its work tree, and one machine name.
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertEqual(git("rev-parse", kept), commit, output)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "kept\n", output)
+        self.assertEqual(self.ledger_config("--get-all", "remote.origin.url"), [LEDGER_URL], output)
+        self.assertEqual(self.ledger_config("core.bare"), ["false"], output)
+        self.assertEqual(self.ledger_config("core.worktree"), [str(self.config / "ledger")], output)
+        self.assertEqual(self.ledger_config("--get-all", "knives.machine"), [MACHINE], output)
 
     def test_two_spellings_of_one_ledger_make_one_git_directory(self) -> None:
         # Given: two forks naming the same ledger repository in different case,

@@ -80,65 +80,85 @@ jq -e '.repos | type == "array"' <<<"$repos_json" >/dev/null 2>&1 || {
 }
 ledgers="$(jq -r '[.repos[].ledger // empty] | unique | .[]' <<<"$repos_json")"
 
-# knives 5.0.0 and later joins a ledger that no git directory here reaches,
-# and a knives command can run at any time during this loop. knives reads
-# each directory in ledger-repositories as a git directory. When it finds one
-# with no origin, it does not join the ledger, and the command fails. So the
-# loop builds the git directory whole in a scratch directory and moves it
-# into ledger-repositories, as knives itself does. A knives command never
-# sees a half-built directory.
+# Two installs at once on one machine can write to one git config at once:
+# knives.machine, or the keys of a repair below. git does not wait for its
+# config lock, so one of the two writes can fail. To prevent this, the loop
+# runs under a lock on ledger-repositories.lock, and a second install waits
+# for the first. knives locks migrate and the sweep itself.
 #
-# Of two renames to one final path at once, only one can succeed. Of two
-# writes of knives.machine at once, one can fail, because git does not
-# wait for its config lock. The install whose write fails then reads the
-# value that the other install wrote, shows no git error, and does not
-# stop. So two installs at once on one machine need no lock here, and knives
-# itself locks migrate and the sweep. When another install or a knives
-# command put its git directory there first, the loop keeps that directory.
+# The lock does not cover knives itself. knives 5.0.0 and later joins a
+# ledger that no git directory here reaches, and a knives command can run at
+# any time during this loop. knives reads each directory in
+# ledger-repositories as a git directory. When it finds one with no origin,
+# it does not join the ledger, and the command fails. So the loop builds the
+# git directory whole in a scratch directory and moves it into
+# ledger-repositories, as knives itself does. A knives command never sees a
+# directory that the loop built only in part. Of two renames to one final
+# path at once, only one can succeed. When a knives command or another
+# install put its git directory there first, the loop keeps that directory.
 #
 # The scratch directory is in ~/.config/knives, beside ledger-repositories,
 # so the rename stays on one filesystem. The EXIT trap deletes it when the
 # subshell exits. A killed install (SIGKILL) can leave it, and knives never
 # reads it.
 #
-# A git directory that an earlier install made can have no knives.machine.
-# The loop gives it one.
-while IFS= read -r ledger; do
-    [[ -n "$ledger" ]] || continue
-    git_dir="$repositories/${ledger//\//--}.git"
-    if [[ ! -d "$git_dir" ]]; then
-        echo "knives: joining the ledger at $ledger"
-        (
-            scratch="$(mktemp -d "$HOME/.config/knives/.knives-installer-joining-XXXXXX")"
-            trap 'rm -rf -- "$scratch"' EXIT
-            made="$scratch/${git_dir##*/}"
-            git init --quiet --bare "$made"
-            git --git-dir="$made" config core.bare false
-            git --git-dir="$made" config core.worktree "$ledger_root"
-            git --git-dir="$made" remote add origin "https://github.com/$ledger"
-            git --git-dir="$made" config knives.machine "$machine"
-            # The target is ledger-repositories, not the final path. When a directory is at the
-            # final path, `mv "$made" "$git_dir"` moves the source into that directory and exits 0.
-            # With ledger-repositories as the target, mv renames the source to the final path,
-            # and the rename fails when a directory that is not empty is there. Then another
-            # process made that directory first. The loop keeps it and does not show mv's error.
-            if ! moved="$(mv "$made" "$repositories/" 2>&1)" && [[ ! -d "$git_dir" ]]; then
-                echo "knives: cannot move $made to $repositories/: $moved" >&2
-                exit 1
-            fi
-        )
-    fi
-    git --git-dir="$git_dir" config knives.machine >/dev/null || {
-        machine_status=0
-        machine_error="$(git --git-dir="$git_dir" config knives.machine "$machine" 2>&1)" || machine_status=$?
-        # git refuses the write while another install holds the config lock, and that install
-        # writes the key. So git's error is shown, and the install stops, only when no value is there.
-        if [[ $machine_status -ne 0 ]] && ! git --git-dir="$git_dir" config knives.machine >/dev/null; then
-            echo "$machine_error" >&2
-            exit "$machine_status"
+# The loop repairs these states at the final path, which an earlier install
+# can leave:
+#
+# - An empty directory. rmdir removes a directory only when it is empty.
+#   Then the loop builds the git directory as for an absent one.
+# - A git directory with no knives.machine. The loop gives it one.
+# - A git directory with no origin. An older version of this installer made
+#   the git directory in place, one key at a time, and that install can stop
+#   between two keys. That git directory can hold ledger commits that a
+#   sweep of knives 3.2.x could not push, so the loop never deletes or
+#   replaces it. The loop sets core.bare, core.worktree and the origin as
+#   knives does. It writes the origin last, after knives.machine. So a
+#   knives command that finds the origin also finds the other three keys.
+#
+# A git directory whose origin is another repository stays as it is, and
+# knives reports it. A file at the final path stops the install.
+#
+# The subshell holds the lock file open on fd 9. So the lock ends with the
+# loop, and the shell that sources this file keeps no extra fd. macOS has no
+# flock by default: where flock is absent, the loop runs with no lock.
+(
+    if command -v flock >/dev/null; then flock 9; fi
+    while IFS= read -r ledger; do
+        [[ -n "$ledger" ]] || continue
+        git_dir="$repositories/${ledger//\//--}.git"
+        rmdir -- "$git_dir" 2>/dev/null || true
+        if [[ ! -d "$git_dir" ]]; then
+            echo "knives: joining the ledger at $ledger"
+            (
+                scratch="$(mktemp -d "$HOME/.config/knives/.knives-installer-joining-XXXXXX")"
+                trap 'rm -rf -- "$scratch"' EXIT
+                made="$scratch/${git_dir##*/}"
+                git init --quiet --bare "$made"
+                git --git-dir="$made" config core.bare false
+                git --git-dir="$made" config core.worktree "$ledger_root"
+                git --git-dir="$made" remote add origin "https://github.com/$ledger"
+                git --git-dir="$made" config knives.machine "$machine"
+                # The target is ledger-repositories, not the final path. When a directory is at the
+                # final path, `mv "$made" "$git_dir"` moves the source into that directory and exits 0.
+                # With ledger-repositories as the target, mv renames the source to the final path,
+                # and the rename fails when a directory that is not empty is there. Then another
+                # process made that directory first. The loop keeps it and does not show mv's error.
+                if ! moved="$(mv "$made" "$repositories/" 2>&1)" && [[ ! -d "$git_dir" ]]; then
+                    echo "knives: cannot move $made to $repositories/: $moved" >&2
+                    exit 1
+                fi
+            )
         fi
-    }
-done <<<"$ledgers"
+        git --git-dir="$git_dir" config knives.machine >/dev/null ||
+            git --git-dir="$git_dir" config knives.machine "$machine"
+        if ! git --git-dir="$git_dir" config remote.origin.url >/dev/null; then
+            git --git-dir="$git_dir" config core.bare false
+            git --git-dir="$git_dir" config core.worktree "$ledger_root"
+            git --git-dir="$git_dir" config remote.origin.url "https://github.com/$ledger"
+        fi
+    done <<<"$ledgers"
+) 9>"$repositories.lock"
 
 # Move a ledger an older knives wrote to the upstream-named layout, then bring
 # in what other machines have pushed, so the first `knives notch` here reads
