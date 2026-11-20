@@ -199,7 +199,7 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         # The installer's own sweep found the handed-off one holding the lock and
         # waited for it, rather than leaving at once and hiding a failed push.
-        self.assertIn('"waited":', result.stdout, "the interleaving under test did not happen")
+        self.assertIn('"waited":', result.stderr, "the interleaving under test did not happen")
         self.assertEqual(self.statements_left(), 0, result.stdout)
         self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout)
 
@@ -217,7 +217,7 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         # Then: the sweep fails, but nothing written here is stranded, so the
         # install goes on and says how to sync once git can reach GitHub.
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('"unsent":0', result.stdout.replace(" ", ""), result.stdout)
+        self.assertIn('"unsent":0', result.stderr.replace(" ", ""), result.stdout + result.stderr)
         self.assertIn("gh auth login", result.stderr)
         self.assertTrue((self.config / "ledger-repositories" / "trajectory-labs-pbc--knives-ledger.git").is_dir())
 

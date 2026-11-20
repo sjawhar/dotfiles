@@ -101,15 +101,23 @@ done <<<"$ledgers"
 # directories made above. Both are no-ops when there is nothing to do, so
 # every install runs them.
 #
-# A failed migrate stops the install: until it succeeds every knives command
-# here refuses. A failed sweep stops it only when it leaves entries this
+# A failed migrate stops the install with migrate's own exit status. The
+# installer sends what migrate prints to stderr, where its own message goes.
+# So in every log the message comes after the lines it points to. When
+# migrate exits 3, the message also says what to run.
+#
+# A failed sweep stops the install only when it leaves entries this
 # machine alone holds (`unsent`, per repository; absent when knives could not
 # count them): a new machine whose git cannot reach GitHub yet has nothing to
 # lose and joins on its next sweep.
 if [[ -n "$ledgers" ]]; then
-    knives ledger migrate || {
+    knives ledger migrate >&2 || {
         status=$?
-        echo "knives: the ledger migration did not finish; branch statements stay in state.json and every knives command refuses until it does. Once git can reach each ledger repository (gh auth login), run: bash ~/.dotfiles/installers/knives.sh" >&2
+        echo "knives: \`knives ledger migrate\` exited $status." >&2
+        if [[ $status -eq 3 ]]; then
+            echo "knives: the lines it printed above say what went wrong. Fix each problem they name that needs a fix, then run: bash ${DOTFILES_DIR}/installers/knives.sh" >&2
+            echo "knives: if a line above asks for a change to repos.toml, make it in ${DOTFILES_DIR}/knives/repos.toml: at each run this installer replaces ~/.config/knives/repos.toml with a render of that file." >&2
+        fi
         exit "$status"
     }
     status=0
@@ -117,7 +125,7 @@ if [[ -n "$ledgers" ]]; then
     # A sweep that panicked or was killed prints no JSON: show what it printed,
     # and count its backlog as unknown rather than as nothing.
     summary="$(jq -c . <<<"$sweep" 2>/dev/null)" || summary="$sweep"
-    echo "knives: ledger sweep: $summary"
+    echo "knives: ledger sweep: $summary" >&2
     if [[ $status -ne 0 ]]; then
         stranded="$(jq '(.destinations // []) as $d | if ($d | length) == 0 then -1 else ([$d[] | .unsent // -1] | if any(. < 0) then -1 else add end) end' <<<"$sweep" 2>/dev/null)" || stranded=-1
         [[ -n $stranded ]] || stranded=-1
