@@ -38,10 +38,14 @@ else
     mkdir -p "$MISE_DATA_DIR" 2>/dev/null || true
     # Under the lock (a wait of 600 s for it is a failed try), with DOTFILES_INSTALL_LOCK_HELD=1 so
     # a knives call under the install does not wait on it; under a caller that holds the lock and
-    # set the marker, without it.
+    # set the marker, without it. Where there is no flock(1) (macOS), the install runs without the
+    # lock but with the marker, as shims/knives runs its own: a knives call under it then does not
+    # start a second install.
     for _ in {1..3}; do
         if [ -n "${DOTFILES_INSTALL_LOCK_HELD:-}" ]; then
             mise install && break
+        elif ! command -v flock &>/dev/null; then
+            DOTFILES_INSTALL_LOCK_HELD=1 mise install && break
         elif DOTFILES_INSTALL_LOCK_HELD=1 flock -w 600 "$MISE_DATA_DIR/.dotfiles-install.lock" mise install; then
             break
         fi

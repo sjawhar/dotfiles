@@ -60,10 +60,10 @@ WAIT_LINE_PART = "is held by another install; waiting up to"
 # hold the lock around it. `grep -rn 'mise install\|dotfiles-install.lock' scripts shims
 # installers` found them: scripts/dotfiles-follow (`install_tools`), scripts/dotfiles-sync
 # (`tools_step`) and scripts/agent-session. The same search finds the shim's own install
-# (shims/knives `install_pin`) and two installers that run `mise install` with no lock today,
-# installers/mise.sh and installers/librarian-harness-host.sh; those two are in INSTALLERS and
-# have rows of their own (L11, L12). A new writer of mise's data dir goes into this list, or
-# into a row of its own.
+# (shims/knives `install_pin`) and two installers that ran `mise install` with no lock before
+# this change and now take it, installers/mise.sh and installers/librarian-harness-host.sh; those
+# two are in INSTALLERS and have rows of their own (L11, L12). A new writer of mise's data dir
+# goes into this list, or into a row of its own.
 HOLDERS = ("follow", "sync", "session")
 INSTALLERS = ("mise_sh", "librarian")
 
@@ -514,8 +514,10 @@ class InstallLock(unittest.TestCase):
         return found
 
     def clean_up(self) -> None:
-        # Every release file, so each held stand-in finishes as it would; then every Popen, the
-        # pids the event log names, and any other process of this test that is still alive.
+        # Every release file, so each held stand-in finishes as it would; then every Popen, and any
+        # other process of this test that is still alive. Each process the event log names carries
+        # the test's HOME, so ours() finds it; a pid of the log alone may already belong to another
+        # process of the pod, so it is never killed by its number.
         if self.state.is_dir():
             for role in ("tools", "shim"):
                 for step in (1, 2):
@@ -535,10 +537,7 @@ class InstallLock(unittest.TestCase):
         settle = time.monotonic() + 10
         while self.ours() and time.monotonic() < settle:
             time.sleep(0.05)
-        logged = {int(line.split()[2 if line.startswith("start ") else 1])
-                  for line in self.events() if line.startswith(("start ", "child "))}
-        left = self.ours()
-        for pid in sorted(logged & left) + sorted(left - logged):
+        for pid in self.ours():
             try:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
@@ -761,6 +760,23 @@ class InstallLock(unittest.TestCase):
         self.assertTrue(failed.is_file(), self.describe())
         self.assertEqual(failed.read_text(encoding="utf-8").split()[:1], [PIN], self.describe())
         self.wait_until(lambda: not alive(pid), f"the stand-in mise {pid} to be killed")
+        self.wait_until(lambda: self.probe(self.lock) == 0, f"{self.lock} to be free once the shim's mise is gone")
+
+    def test_l13b_a_cap_that_stops_the_shims_mise_is_not_called_the_shims_own_timeout(self) -> None:
+        """L13 (b): a hung install that stops on TERM ends at the cap; timeout's 124 is the
+        install's status, not the shim's wait for the pin running out."""
+        self.flag("gate-shim")
+        shim = self.start_shim(self.env(DOTFILES_KNIVES_INSTALL_CAP="2"))
+        self.wait_for_file("holding-shim", "the shim's mise install to start and hold")
+        pid = self.start_pid("shim")
+        self.finish(shim, "shims/knives")
+        self.assertEqual(shim.returncode, 127, self.describe())
+        self.assertIn(f"exited 124 without knives {PIN} in place", shim.stderr(), self.describe())
+        self.assertLess(shim.elapsed, SHIM_WAIT, self.describe())
+        failed = Path(f"{self.lock}.failed")
+        self.assertTrue(failed.is_file(), self.describe())
+        self.assertEqual(failed.read_text(encoding="utf-8").split()[:1], [PIN], self.describe())
+        self.wait_until(lambda: not alive(pid), f"the stand-in mise {pid} to be stopped")
         self.wait_until(lambda: self.probe(self.lock) == 0, f"{self.lock} to be free once the shim's mise is gone")
 
 

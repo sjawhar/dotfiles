@@ -36,8 +36,7 @@ export PLAYWRIGHT_SKIP_BROWSER_GC=1
 
 # From $HOME, so mise resolves uv by the global config, not a checkout's own (or untrusted) mise.toml.
 cd "$HOME"
-# Under that lock, with DOTFILES_INSTALL_LOCK_HELD=1 so a knives call under the install does not
-# wait on it; under a caller that holds the lock and set the marker, without it.
+# .dotfiles-install.lock and DOTFILES_INSTALL_LOCK_HELD: see item 1 at the top of this file.
 if [ -n "${DOTFILES_INSTALL_LOCK_HELD:-}" ]; then
     mise install "github:sjawhar/oh-my-pi@$HARNESS_OMP"
 else

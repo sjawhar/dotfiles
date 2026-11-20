@@ -203,7 +203,7 @@ if [[ -z "$_knives" ]]; then
         local installed="$data/installs/github-sjawhar-knives/$_pin/bin/knives"
         local lock="$data/.dotfiles-install.lock"
         local wait="${DOTFILES_KNIVES_INSTALL_TIMEOUT:-300}" cap="${DOTFILES_KNIVES_INSTALL_CAP:-600}"
-        local fd="" rc=0 pid="" deadline held="" locked="" detach=()
+        local fd="" rc=0 pid="" deadline announced="" locked="" status="" out_of_time="" detach=()
         # Whole seconds. wait: how long a call waits for the pin, first while another install
         # holds the lock, then while its own install runs. cap: how long its mise may run before
         # timeout sends TERM, and KILL 10 s later.
@@ -242,9 +242,9 @@ if [[ -z "$_knives" ]]; then
                     rc=1
                     break
                 fi
-                if [[ -z "$held" ]]; then
+                if [[ -z "$announced" ]]; then
                     echo "knives: knives $_pin is not installed and $lock is held by another install; waiting up to ${wait}s for it" >&2
-                    held=1
+                    announced=1
                 fi
                 if (( ${EPOCHSECONDS:-$(date +%s)} >= deadline )); then
                     echo "knives: waited ${wait}s for $lock, which another call holds while it installs knives $_pin" >&2
@@ -278,26 +278,30 @@ if [[ -z "$_knives" ]]; then
                     < /dev/null > "$_install_log" 2>&1 &
                 pid=$!
                 deadline=$(( ${EPOCHSECONDS:-$(date +%s)} + wait ))
-                rc=124
-                while (( ${EPOCHSECONDS:-$(date +%s)} < deadline )); do
+                # rc is 0 here. out_of_time says this call's own wait ran out. A wrapper that
+                # ended reports its own status; 124 there means timeout stopped mise at the cap.
+                while :; do
+                    if (( ${EPOCHSECONDS:-$(date +%s)} >= deadline )); then
+                        rc=1 out_of_time=1
+                        break
+                    fi
                     if pin_in_place; then
-                        rc=0
                         break
                     fi
                     if ! kill -0 "$pid" 2>/dev/null; then
-                        rc=0
-                        wait "$pid" || rc=$?
-                        if pin_in_place; then rc=0; elif (( rc == 0 )); then rc=1; fi
+                        status=0
+                        wait "$pid" || status=$?
+                        pin_in_place || rc=1
                         break
                     fi
                     sleep 0.5
                 done
                 if (( rc != 0 )); then
                     printf '%s %s\n' "$_pin" "${EPOCHSECONDS:-$(date +%s)}" > "$lock.failed" 2>/dev/null || true
-                    if (( rc == 124 )); then
+                    if [[ -n "$out_of_time" ]]; then
                         echo "knives: \`mise install github:sjawhar/knives@$_pin\` had not put knives $_pin in place after ${wait}s; the end of its log:" >&2
                     else
-                        echo "knives: \`mise install github:sjawhar/knives@$_pin\` exited $rc without knives $_pin in place; the end of its log:" >&2
+                        echo "knives: \`mise install github:sjawhar/knives@$_pin\` exited $status without knives $_pin in place; the end of its log:" >&2
                     fi
                     tail -n 20 "$_install_log" >&2 || true
                 fi

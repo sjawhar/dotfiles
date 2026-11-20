@@ -895,11 +895,15 @@ class CacheOffTheRootDisk(unittest.TestCase):
                "GIT_CONFIG_GLOBAL": str(gitconfig), "GIT_CONFIG_NOSYSTEM": "1"}
 
         def writer():
-            """The pid, other than this one, that has decisions.log open."""
+            """The pid, other than this one, that has decisions.log open. Only processes of this
+            test are looked at: each has the test's HOME in its environment."""
+            marker = f"HOME={home}".encode()
             for pid in filter(str.isdigit, os.listdir("/proc")):
                 if int(pid) == os.getpid():
                     continue
                 try:
+                    if marker not in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"):
+                        continue
                     fds = os.listdir(f"/proc/{pid}/fd")
                 except OSError:
                     continue
