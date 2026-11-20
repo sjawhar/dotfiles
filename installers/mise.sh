@@ -25,12 +25,27 @@ fi
 MISE_VERSION=v2026.10.11
 ensure_command mise "curl -fsSL https://mise.run | MISE_VERSION=${MISE_VERSION} MISE_INSTALL_PATH=\"${DOTFILES_DIR}/bin/mise\" sh"
 
+# mise's data dir, absolute as scripts/dotfiles-follow makes it: the install goes there, and its
+# .dotfiles-install.lock is the one the dotfiles' other installs take.
+export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
+[[ "$MISE_DATA_DIR" = /* ]] || MISE_DATA_DIR="$PWD/$MISE_DATA_DIR"
+
 if [ "$SKIP_MISE" = true ]; then
     echo "Skipping mise install (--skip-mise)"
 else
     echo "Installing tools via mise..."
+    # A directory it cannot make shows up as flock's failure to open the lock, a failed try.
+    mkdir -p "$MISE_DATA_DIR" 2>/dev/null || true
+    # Under the lock (a wait of 600 s for it is a failed try), with DOTFILES_INSTALL_LOCK_HELD=1 so
+    # a knives call under the install does not wait on it; under a caller that holds the lock and
+    # set the marker, without it.
     for _ in {1..3}; do
-        mise install && break || echo "Some tools failed to install (may be rate-limited). Run 'mise install' later."
+        if [ -n "${DOTFILES_INSTALL_LOCK_HELD:-}" ]; then
+            mise install && break
+        elif DOTFILES_INSTALL_LOCK_HELD=1 flock -w 600 "$MISE_DATA_DIR/.dotfiles-install.lock" mise install; then
+            break
+        fi
+        echo "Some tools failed to install (may be rate-limited). Run 'mise install' later."
         sleep 1
     done
 fi

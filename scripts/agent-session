@@ -319,6 +319,9 @@ else
         fi
         rc=0
         (
+            # In this subshell alone, so a knives call under the install does not wait on the lock
+            # it holds, and the agent exec'd below never has the marker.
+            export DOTFILES_INSTALL_LOCK_HELD=1
             # shellcheck disable=SC1007
             CDPATH= cd -- "$DOTFILES_DIR" && exec timeout -k "$grace" "$limit" flock "$MISE_DATA_DIR/.dotfiles-install.lock" "$mise_bin" install
         ) >&"$out_fd" 2>&1 &

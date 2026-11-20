@@ -231,9 +231,9 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         destinations = [line.split("|", 1)[0] for line in self.ssh_record.read_text().splitlines()]
-        self.assertEqual(destinations, ["sami@sami", "sami@sami-leanperf", "sami@sami-rocqperf"])
-        self.assertEqual(len(self.calls("mise")), 3, self.records())
-        self.assertEqual(len(self.calls("bun")), 3, self.records())
+        self.assertEqual(destinations, ["sami@sami"])
+        self.assertEqual(len(self.calls("mise")), 1, self.records())
+        self.assertEqual(len(self.calls("bun")), 1, self.records())
 
     def test_case_05_plain_git_checkout_runs_tools(self) -> None:
         _, env = self.plain_checkout("plain")

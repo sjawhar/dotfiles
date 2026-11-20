@@ -20,6 +20,9 @@ HARNESS_OMP="18.13.3-sami.20261029-115123"
 
 export PATH="$HOME/.dotfiles/bin:$HOME/.mise/shims:$PATH"
 export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
+# Absolute, as scripts/dotfiles-follow makes it, before the cd below: the install goes there, and
+# its .dotfiles-install.lock is the one the dotfiles' other installs take.
+[[ "$MISE_DATA_DIR" = /* ]] || MISE_DATA_DIR="$PWD/$MISE_DATA_DIR"
 user="${USER:-$(id -un)}"
 if [ -d "/mnt/nvme/$user" ]; then
     export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/mnt/nvme/$user/cache/ms-playwright}"
@@ -28,7 +31,20 @@ export PLAYWRIGHT_SKIP_BROWSER_GC=1
 
 # From $HOME, so mise resolves uv by the global config, not a checkout's own (or untrusted) mise.toml.
 cd "$HOME"
-mise install "github:sjawhar/oh-my-pi@$HARNESS_OMP"
+# Under that lock, with DOTFILES_INSTALL_LOCK_HELD=1 so a knives call under the install does not
+# wait on it; under a caller that holds the lock and set the marker, without it.
+if [ -n "${DOTFILES_INSTALL_LOCK_HELD:-}" ]; then
+    mise install "github:sjawhar/oh-my-pi@$HARNESS_OMP"
+else
+    lock="$MISE_DATA_DIR/.dotfiles-install.lock"
+    mkdir -p "$MISE_DATA_DIR"
+    rc=0
+    DOTFILES_INSTALL_LOCK_HELD=1 flock -w 600 -E 75 "$lock" mise install "github:sjawhar/oh-my-pi@$HARNESS_OMP" || rc=$?
+    if [ "$rc" = 75 ]; then
+        echo "librarian-harness-host: another install held $lock for 600 s; omp $HARNESS_OMP not installed" >&2
+    fi
+    [ "$rc" = 0 ] || exit "$rc"
+fi
 omp_bin="$MISE_DATA_DIR/installs/github-sjawhar-oh-my-pi/$HARNESS_OMP/bin/omp"
 [ -x "$omp_bin" ] || { echo "librarian-harness-host: no $omp_bin after mise install" >&2; exit 1; }
 echo "librarian-harness-host: omp $HARNESS_OMP at $omp_bin"

@@ -53,8 +53,6 @@ JJ_FETCH_FAILURE=75
 # machine's hostname syncs locally. oryx follows main by its own dotfiles-follow timer.
 MACHINES=(
   sami=sami@sami
-  sami-leanperf=sami@sami-leanperf
-  sami-rocqperf=sami@sami-rocqperf
 )
 
 # hunks: a -U0 patch on stdin, written as one line per hunk (its path, then its - and + lines, no
@@ -204,7 +202,9 @@ tools_step() (
     return 127
   fi
   [[ "$mise" = /* ]] || mise="$PWD/$mise"
-  tools_run "mise install" "$dir" "$limit" flock "$lock" "$mise" install || return $?
+  # The marker reaches this `mise install` alone, so a knives call under it does not wait on the
+  # lock this step holds; Bun's call below does not get it.
+  DOTFILES_INSTALL_LOCK_HELD=1 tools_run "mise install" "$dir" "$limit" flock "$lock" "$mise" install || return $?
 
   [[ -f "$dir/omp/plugins/package.json" ]] || return 0
   if ! bun="$(command -v bun 2>/dev/null)"; then
