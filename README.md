@@ -52,6 +52,9 @@ Run `bash ~/.dotfiles/oryx/install.sh` once on oryx. It arms the
 `dotfiles-follow` user timer with oryx's drop-in, so oryx's `~/.dotfiles`
 follows `origin/main` every 10 minutes and its alerts go to the HOME controller.
 It needs no Tailscale; `oryx-edge-cutover` writes oryx's forward configuration.
+Run it as `agent`, the sudo user: it also enables and starts `bluetooth` and
+turns on lingering for `sami`, because the Galaxy A15 agent phone line pairs with
+oryx over Bluetooth and its bridge runs in `sami`'s user session.
 
 `oryx-tunnel-enrol`, which `bash ~/.dotfiles/installers/forward.sh daemon` runs,
 writes the line in `oryx/oryx-tunnel.key-options` in front of the laptop's

@@ -1,7 +1,8 @@
 #!/bin/bash
 # oryx's entry point: arms the dotfiles-follow timer, with oryx's drop-in
 # (oryx/dotfiles-follow.service.d/oryx.conf), so oryx's ~/.dotfiles follows
-# origin's main. Run it once on oryx: bash ~/.dotfiles/oryx/install.sh
+# origin's main, and keeps what the A15 agent phone line needs. Run it once on
+# oryx, as agent (the sudo user): bash ~/.dotfiles/oryx/install.sh
 # It needs no Tailscale and runs no forward installer: oryx-edge-cutover writes
 # oryx's forward configuration.
 set -euo pipefail
@@ -17,3 +18,13 @@ mkdir -p "$HOME/.config/systemd/user/dotfiles-follow.service.d"
 ensure_link "$HOME/.dotfiles/oryx/dotfiles-follow.service.d/oryx.conf" \
     "$HOME/.config/systemd/user/dotfiles-follow.service.d/oryx.conf"
 arm_user_timer devbox dotfiles-follow
+
+# The agent phone line (~/src/voice-clone/calls/hfp on sami's account): the Galaxy A15 is on
+# oryx's USB and pairs with oryx as a Bluetooth hands-free unit, so bluetoothd must run, and
+# sami's user manager (PipeWire, WirePlumber, the bridge) must outlive his ssh sessions.
+if ! systemctl is-enabled --quiet bluetooth || ! systemctl is-active --quiet bluetooth; then
+    sudo systemctl enable --now bluetooth
+fi
+if [[ "$(loginctl show-user sami -p Linger --value 2>/dev/null)" != yes ]]; then
+    sudo loginctl enable-linger sami
+fi
