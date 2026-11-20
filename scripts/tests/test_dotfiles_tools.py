@@ -23,6 +23,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SYNC = ROOT / "scripts" / "dotfiles-sync"
 PUBLISH = ROOT / "scripts" / "dotfiles-publish"
+# The limit on a sync, a publish or a git setup call: it only stops a stuck run. On a dev box at
+# load average 900-1500 (288 CPUs, 2026-11-20) one run took up to 52 s, and a 15 s limit failed
+# nine cases that do not hang. The limits under test (DOTFILES_TOOLS_TIMEOUT, the kill grace) stay
+# short; a case whose limit fails runs into this guard and fails.
+HANG_GUARD = 180
 _SYNC_LOADER = importlib.machinery.SourceFileLoader("dotfiles_sync_fixture", str(Path(__file__).with_name("test_dotfiles_sync.py")))
 _SYNC_SPEC = importlib.util.spec_from_loader(_SYNC_LOADER.name, _SYNC_LOADER)
 assert _SYNC_SPEC is not None
@@ -119,7 +124,7 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         )
         ssh.chmod(0o755)
 
-    def _run(self, script: Path, *args: str, env: dict[str, str] | None = None, cwd: Path | None = None, timeout: float = 15) -> subprocess.CompletedProcess[str]:
+    def _run(self, script: Path, *args: str, env: dict[str, str] | None = None, cwd: Path | None = None, timeout: float = HANG_GUARD) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash", str(script), *args],
             cwd=cwd,
@@ -129,7 +134,7 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
             timeout=timeout,
         )
 
-    def sync(self, *args: str, env: dict[str, str] | None = None, timeout: float = 15) -> subprocess.CompletedProcess[str]:
+    def sync(self, *args: str, env: dict[str, str] | None = None, timeout: float = HANG_GUARD) -> subprocess.CompletedProcess[str]:
         return self._run(SYNC, *args, env=env, timeout=timeout)
 
     def publish(self, rev: str, env: dict[str, str] | None = None, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -161,7 +166,7 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         checkout = home / ".dotfiles"
         env = {**self.env, "HOME": str(home)}
         cloned = subprocess.run(
-            ["git", "clone", "-q", str(self.origin), str(checkout)], env=env, capture_output=True, text=True, timeout=10
+            ["git", "clone", "-q", str(self.origin), str(checkout)], env=env, capture_output=True, text=True, timeout=HANG_GUARD
         )
         self.assertEqual(cloned.returncode, 0, cloned.stderr)
         self._write_standin("mise", checkout / "bin" / "mise")
@@ -270,11 +275,11 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         local, local_env = self.plain_checkout("local")
         (local / "local.txt").write_text("local\n")
         committed = subprocess.run(
-            ["git", "add", "local.txt"], cwd=local, env=local_env, capture_output=True, text=True, timeout=10
+            ["git", "add", "local.txt"], cwd=local, env=local_env, capture_output=True, text=True, timeout=HANG_GUARD
         )
         self.assertEqual(committed.returncode, 0, committed.stderr)
         committed = subprocess.run(
-            ["git", "commit", "-q", "-m", "local"], cwd=local, env=local_env, capture_output=True, text=True, timeout=10
+            ["git", "commit", "-q", "-m", "local"], cwd=local, env=local_env, capture_output=True, text=True, timeout=HANG_GUARD
         )
         self.assertEqual(committed.returncode, 0, committed.stderr)
         local_result = self.sync("local", env=local_env)
@@ -313,11 +318,14 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assertEqual(len(self.calls("bun")), 1, self.records())
 
     def test_case_10_mise_and_bun_timeouts_leave_the_move(self) -> None:
+        # The limit under test is DOTFILES_TOOLS_TIMEOUT=2. The stand-in's sleep outlives its shell,
+        # so the step also waits out its 10 s grace before it kills the group. A run that returns
+        # before the 600 s install would end shows the limit worked; HANG_GUARD only stops a stuck run.
         started = time.monotonic()
         mise = self.sync(
-            "local", env={**self.env, "DOTFILES_TOOLS_TIMEOUT": "2", "FAKE_MISE_SLEEP": "30"}, timeout=15
+            "local", env={**self.env, "DOTFILES_TOOLS_TIMEOUT": "2", "FAKE_MISE_SLEEP": "600"}
         )
-        self.assertLess(time.monotonic() - started, 15)
+        self.assertLess(time.monotonic() - started, HANG_GUARD)
         self.assertNotEqual(mise.returncode, 0, mise.stdout + mise.stderr)
         self.assertIn("`mise install`", mise.stderr)
         self.assertIn("exited 124", mise.stderr)
@@ -330,9 +338,9 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.clear_records()
         started = time.monotonic()
         bun = self.sync(
-            "local", env={**self.env, "DOTFILES_TOOLS_TIMEOUT": "2", "FAKE_BUN_SLEEP": "30"}, timeout=15
+            "local", env={**self.env, "DOTFILES_TOOLS_TIMEOUT": "2", "FAKE_BUN_SLEEP": "600"}
         )
-        self.assertLess(time.monotonic() - started, 15)
+        self.assertLess(time.monotonic() - started, HANG_GUARD)
         self.assertNotEqual(bun.returncode, 0, bun.stdout + bun.stderr)
         self.assertIn("`bun install --frozen-lockfile`", bun.stderr)
         self.assertIn("exited 124", bun.stderr)
@@ -377,12 +385,14 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         fcntl.flock(held, fcntl.LOCK_EX)
         try:
             started = time.monotonic()
-            result = self.sync("local", env={**self.env, "DOTFILES_TOOLS_TIMEOUT": "2"}, timeout=15)
+            # The lock stays held until the run returns, so only the 2 s limit under test can end
+            # the wait; HANG_GUARD stops the run if it does not.
+            result = self.sync("local", env={**self.env, "DOTFILES_TOOLS_TIMEOUT": "2"})
         finally:
             fcntl.flock(held, fcntl.LOCK_UN)
             held.close()
 
-        self.assertLess(time.monotonic() - started, 15)
+        self.assertLess(time.monotonic() - started, HANG_GUARD)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("`mise install`", result.stderr)
         self.assertIn("exited 124", result.stderr)
@@ -409,7 +419,9 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         )
         pid = None
         try:
-            for _ in range(100):
+            # Reaching the install step is not under test; the grace after it starts is.
+            deadline = time.monotonic() + HANG_GUARD
+            while time.monotonic() < deadline:
                 if pid_file.exists() and pid_file.read_text().strip():
                     break
                 time.sleep(0.1)
@@ -418,13 +430,13 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
             # inside the grace with 2 s of margin on one side and 8 s on the other.
             time.sleep(4)
             self.assertTrue(Path(f"/proc/{pid}").exists(), "the survivor was killed before the grace ended")
-            during = subprocess.run(["flock", "-n", "-E", "75", str(lock), "true"], capture_output=True, text=True, timeout=3)
+            during = subprocess.run(["flock", "-n", "-E", "75", str(lock), "true"], capture_output=True, text=True, timeout=HANG_GUARD)
             self.assertEqual(during.returncode, 75, "the lock was free while the survivor still ran")
-            stdout, stderr = sync.communicate(timeout=40)
+            stdout, stderr = sync.communicate(timeout=HANG_GUARD)
             self.assertNotEqual(sync.returncode, 0, stdout + stderr)
             self.assertIn("exited 124", stderr)
             self.assertFalse(Path(f"/proc/{pid}").exists(), f"survivor {pid} remains")
-            after = subprocess.run(["flock", "-n", str(lock), "true"], capture_output=True, text=True, timeout=3)
+            after = subprocess.run(["flock", "-n", str(lock), "true"], capture_output=True, text=True, timeout=HANG_GUARD)
             self.assertEqual(after.returncode, 0, after.stderr)
         finally:
             if sync.poll() is None:
@@ -527,7 +539,7 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
             env=env,
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=HANG_GUARD,
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -704,7 +716,7 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
             env=env,
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=HANG_GUARD,
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
