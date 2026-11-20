@@ -1940,6 +1940,27 @@ class GcloudLockedStoreRetry(unittest.TestCase):
         self.assertEqual(result.stdout, "OK-2\n")
         self.assertEqual(self.call_count(), 2)
 
+    def test_a_held_back_attempt_writes_to_pipes_not_files(self):
+        """The snap's gcloud, started from inside another snap's process (the snap's bq calls
+        `gcloud config config-helper` for its configuration), runs snap-confine, whose AppArmor
+        profile revokes an inherited descriptor to a regular file outside its rules (`apparmor=
+        "DENIED" operation="file_inherit" profile=".../snap-confine" name=".../gcloud-shim.*/out"`,
+        2026-11-20T21:26Z). gcloud's writes then fail, and it exits 1 with no output, so bq had no
+        configuration and ran as the box. A held-back attempt gives gcloud pipes; this stub
+        exits 1 silently when either is a regular file, as that gcloud did."""
+        write_stub(
+            self.stub_dir,
+            "gcloud",
+            '[[ -f /dev/stdout || -f /dev/stderr ]] && exit 1\n'
+            'echo "HELPER-OUT"; echo "HELPER-NOTE" >&2',
+        )
+        for args in (["config", "config-helper", "--format=json"], ["auth", "print-access-token"],
+                     ["compute", "instances", "describe", "vm"]):
+            with self.subTest(args=args):
+                result = self.run_shim(args)
+                self.assertEqual((result.returncode, result.stdout), (0, "HELPER-OUT\n"), result.stderr)
+                self.assertIn("HELPER-NOTE", result.stderr)
+
     def test_storage_transfers_and_reads_are_run_again_on_either_text(self):
         """cp and rsync give each object the same bytes on every attempt, and ls, cat, du and the
         objects/buckets reads change nothing. stdout goes through as it comes; stderr shows each

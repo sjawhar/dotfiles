@@ -1491,6 +1491,23 @@ run_streamed_attempt() {
     } || :
 }
 
+# One attempt with its output held back: gcloud writes to pipes, which <dir>/out and <dir>/err
+# take in, and which have ended when this returns. Its status is in <dir>/status. Not to the files
+# themselves: the snap's gcloud, run from inside another snap's process (the snap's bq asks `gcloud
+# config config-helper` for its configuration), starts through snap-confine, whose AppArmor profile
+# revokes an inherited descriptor to a regular file outside its rules (operation="file_inherit",
+# 2026-11-20T21:26Z). gcloud's writes then fail, it exits 1 with no output, and bq ran as the box.
+run_held_attempt() {
+    local dir="$GCLOUD_RETRY_DIR"
+    {
+        {
+            local status=0
+            "$@" || status=$?
+            printf '%s\n' "$status" >"${dir}/status"
+        } 2>&1 1>&3 3>&- | cat >"${dir}/err" 3>&-
+    } 3>&1 | cat >"${dir}/out" || :
+}
+
 # Every lock text an attempt printed adds one line to GCLOUD_LOCK_LOG, so counting lock hits is
 # `wc -l`, not a scan of transcripts:
 # `<UTC time>\t<kind>\t<outcome>\t<subcommand>\t<pid>\t<session>\t<caller>`.
@@ -1631,7 +1648,9 @@ run_with_lock_retry() {
                 exit "$status"
             fi
         else
-            "$@" >"${GCLOUD_RETRY_DIR}/out" 2>"${GCLOUD_RETRY_DIR}/err" 9>&- || status=$?
+            rm -f -- "${GCLOUD_RETRY_DIR}/status"
+            run_held_attempt "$@" 9>&-
+            status="$(cat -- "${GCLOUD_RETRY_DIR}/status" 2>/dev/null || echo 1)"
             if ((status == 0)) || ! grep -qxE -- "$GCLOUD_LOCK_ERROR" "${GCLOUD_RETRY_DIR}/err"; then
                 log_lock_hits gave-up
                 cat -- "${GCLOUD_RETRY_DIR}/out"
