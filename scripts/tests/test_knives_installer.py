@@ -541,6 +541,48 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         self.assertEqual(config("knives.machine"), [joined], result.stdout + result.stderr)
         self.assertEqual(config("core.bare"), ["false"], result.stdout + result.stderr)
 
+    def test_a_knives_command_never_finds_the_ledger_git_directory_half_made(self) -> None:
+        real_git = shutil.which("git", path="/usr/local/bin:/usr/bin:/bin")
+        self.assertIsNotNone(real_git, "needs git in /usr/local/bin, /usr/bin or /bin")
+        git_dir = self.ledger_git_dir()
+        log = self.root / "half-made.log"
+        # knives reads every directory in ledger-repositories as a git directory of a ledger.
+        # Found with no origin, it says the directory "is there already, and its origin is not"
+        # the ledger and exits 3; found with no machine name, it refuses the sweep; found bare,
+        # it reads no work tree (knives 5.0.0, src/ledger_sweep/join.rs:143-146). A git stub
+        # first on PATH stands in for a knives command that runs at any moment of the install:
+        # before each git call, when the ledger's git directory exists, it logs the call if
+        # the directory has no origin, no knives.machine, or core.bare other than false.
+        write_executable(
+            self.root / "bin" / "git",
+            f'if [ -e "{git_dir}" ]; then\n'
+            f'    origin="$("{real_git}" --git-dir="{git_dir}" config remote.origin.url || true)"\n'
+            f'    machine="$("{real_git}" --git-dir="{git_dir}" config knives.machine || true)"\n'
+            f'    bare="$("{real_git}" --git-dir="{git_dir}" config core.bare || true)"\n'
+            '    if [ -z "$origin" ] || [ -z "$machine" ] || [ "$bare" != false ]; then\n'
+            f'        echo "before git $*: origin=$origin machine=$machine bare=$bare" >>"{log}"\n'
+            '    fi\n'
+            'fi\n'
+            f'exec "{real_git}" "$@"',
+        )
+
+        # Given: a new machine.
+        (self.config / "state.json").unlink()
+
+        # When: the installer joins the machine to the ledger.
+        result = self.install()
+
+        # Then: it succeeds, and at no git call did the git directory stand there without
+        # an origin, a machine name, or with core.bare other than false.
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        half_made = log.read_text(encoding="utf-8") if log.exists() else ""
+        self.assertEqual(half_made, "", "the ledger's git directory stood there half made:\n" + half_made)
+        origin = subprocess.run(
+            [real_git, "--git-dir", str(git_dir), "config", "remote.origin.url"],
+            capture_output=True, text=True, env=self.env, check=False,
+        )
+        self.assertEqual(origin.stdout.strip(), LEDGER_URL, result.stdout + result.stderr + origin.stderr)
+
     def test_two_spellings_of_one_ledger_make_one_git_directory(self) -> None:
         # Given: two forks naming the same ledger repository in different case,
         # one with a .git suffix.
