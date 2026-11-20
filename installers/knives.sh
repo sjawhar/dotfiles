@@ -80,19 +80,31 @@ jq -e '.repos | type == "array"' <<<"$repos_json" >/dev/null 2>&1 || {
 }
 ledgers="$(jq -r '[.repos[].ledger // empty] | unique | .[]' <<<"$repos_json")"
 
-while IFS= read -r ledger; do
-    [[ -n "$ledger" ]] || continue
-    git_dir="$repositories/${ledger//\//--}.git"
-    if [[ ! -d "$git_dir" ]]; then
-        echo "knives: joining the ledger at $ledger"
-        git init --quiet --bare "$git_dir"
-        git --git-dir="$git_dir" config core.bare false
-        git --git-dir="$git_dir" config core.worktree "$ledger_root"
-        git --git-dir="$git_dir" remote add origin "https://github.com/$ledger"
-    fi
-    git --git-dir="$git_dir" config knives.machine >/dev/null ||
-        git --git-dir="$git_dir" config knives.machine "$machine"
-done <<<"$ledgers"
+# Two installs at once on one machine can both find no git directory here.
+# Then both run `git init` and `git remote add`. One of them can fail, or
+# the git directory can end with no remote. So the loop runs under a lock on
+# ledger-repositories.lock, and a second install waits for the first. knives
+# locks migrate and the sweep itself.
+#
+# The subshell holds the lock file open on fd 9. So the lock ends with the
+# loop, and the shell that sources this file keeps no extra fd. macOS has no
+# flock by default: where flock is absent, the loop runs with no lock.
+(
+    if command -v flock >/dev/null; then flock 9; fi
+    while IFS= read -r ledger; do
+        [[ -n "$ledger" ]] || continue
+        git_dir="$repositories/${ledger//\//--}.git"
+        if [[ ! -d "$git_dir" ]]; then
+            echo "knives: joining the ledger at $ledger"
+            git init --quiet --bare "$git_dir"
+            git --git-dir="$git_dir" config core.bare false
+            git --git-dir="$git_dir" config core.worktree "$ledger_root"
+            git --git-dir="$git_dir" remote add origin "https://github.com/$ledger"
+        fi
+        git --git-dir="$git_dir" config knives.machine >/dev/null ||
+            git --git-dir="$git_dir" config knives.machine "$machine"
+    done <<<"$ledgers"
+) 9>"$repositories.lock"
 
 # Move a ledger an older knives wrote to the upstream-named layout, then bring
 # in what other machines have pushed, so the first `knives notch` here reads
@@ -116,7 +128,9 @@ if [[ -n "$ledgers" ]]; then
         status=$?
         echo "knives: \`knives ledger migrate\` exited $status." >&2
         if [[ $status -eq 3 ]]; then
-            echo "knives: the lines it printed above say what went wrong. Fix each problem they name that needs a fix, then run: bash ${DOTFILES_DIR}/installers/knives.sh" >&2
+            # %q quotes the path for the shell, so the command runs as printed from any path.
+            printf -v rerun 'bash %q' "${DOTFILES_DIR}/installers/knives.sh"
+            echo "knives: the lines it printed above say what went wrong. Fix each problem they name that needs a fix, then run: $rerun" >&2
             echo "knives: if a line above asks for a change to repos.toml, make it in ${DOTFILES_DIR}/knives/repos.toml: at each run this installer replaces ~/.config/knives/repos.toml with a render of that file." >&2
         fi
         exit "$status"

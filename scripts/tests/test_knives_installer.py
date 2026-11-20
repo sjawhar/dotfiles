@@ -17,12 +17,14 @@ tests pin the link to the registry's private part (repos.local.toml from the .se
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -230,7 +232,12 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         of stderr. A line that knives printed before the message holds knives_text."""
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         # lib.sh sets DOTFILES_DIR with `cd ... && pwd`, and that keeps each symlink in the path.
-        # So the message names self.dotfiles as it is, not its resolved path.
+        # So the message names self.dotfiles as it is, not its resolved path. The installer quotes
+        # the command with bash's `printf %q`, so ask the same bash how it quotes this path.
+        rerun = subprocess.run(
+            ["bash", "-c", 'printf "bash %q" "$1"', "_", str(self.dotfiles / "installers" / "knives.sh")],
+            capture_output=True, text=True, env=self.env, check=True,
+        ).stdout
         lines = result.stderr.splitlines()
         # A failure prints both lists whole, so it shows the message the installer printed.
         self.maxDiff = None
@@ -239,7 +246,7 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
             [
                 "knives: `knives ledger migrate` exited 3.",
                 "knives: the lines it printed above say what went wrong. Fix each problem they name"
-                f" that needs a fix, then run: bash {self.dotfiles}/installers/knives.sh",
+                f" that needs a fix, then run: {rerun}",
                 f"knives: if a line above asks for a change to repos.toml, make it in {self.dotfiles}/knives/repos.toml:"
                 " at each run this installer replaces ~/.config/knives/repos.toml with a render of that file.",
             ],
@@ -408,6 +415,66 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         # Then: the command is this installer, it succeeds, and the statement is on the
         # remote, under this machine's ref.
         self.assert_install_succeeded(rerun)
+
+    def test_two_first_time_installs_join_the_ledger_one_at_a_time(self) -> None:
+        real_flock = shutil.which("flock", path="/usr/local/bin:/usr/bin:/bin")
+        if real_flock is None:
+            self.skipTest("needs flock: where it is absent (macOS), the installer takes no lock")
+        # A flock stub first on PATH writes the path of the file that its fd argument names,
+        # then runs the real flock. The shim's sweep branch also runs flock, on ledger.lock,
+        # so look for the exact path.
+        asked = self.root / "flock-asked"
+        write_executable(
+            self.root / "bin" / "flock",
+            f'readlink "/proc/$$/fd/${{@: -1}}" >>"{asked}" || true\nexec "{real_flock}" "$@"',
+        )
+        lock = self.config / "ledger-repositories.lock"
+        # The installer names the git directory `<owner>--<name>.git` after the ledger repository.
+        ledger = LEDGER_URL.removeprefix("https://github.com/")
+        git_dir = self.config / "ledger-repositories" / f"{ledger.replace('/', '--')}.git"
+
+        def asked_for_the_lock() -> bool:
+            return asked.exists() and str(lock.resolve()) in asked.read_text(encoding="utf-8").splitlines()
+
+        # Given: a new machine, and another install that holds the lock the installer
+        # takes to join the ledger.
+        (self.config / "state.json").unlink()
+        holder = lock.open("w")
+        fcntl.flock(holder, fcntl.LOCK_EX)
+
+        # When: the installer starts, and asks flock for that lock.
+        installer = subprocess.Popen(
+            ["bash", str(self.dotfiles / "installers" / "knives.sh")],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=self.env,
+        )
+        # Cleanups run in reverse order. So on a failure the lock goes first, and the
+        # installer can end and close its output.
+        self.addCleanup(installer.communicate)
+        self.addCleanup(installer.kill)
+        self.addCleanup(holder.close)
+        for _ in range(1200):
+            if asked_for_the_lock() or installer.poll() is not None:
+                break
+            time.sleep(0.05)
+
+        # Then: it waits for the lock, and has made no git directory yet.
+        if installer.poll() is not None:
+            stdout, stderr = installer.communicate()
+            self.fail("the installer ended and never waited for ledger-repositories.lock:\n" + stdout + stderr)
+        self.assertTrue(asked_for_the_lock(), "the installer never asked flock for ledger-repositories.lock")
+        self.assertFalse(git_dir.exists(), "the installer made the git directory before it held the lock")
+
+        # When: the other install lets the lock go.
+        holder.close()
+        stdout, stderr = installer.communicate(timeout=120)
+
+        # Then: the installer joins the ledger and succeeds.
+        self.assertEqual(installer.returncode, 0, stdout + stderr)
+        origin = subprocess.run(
+            ["git", "--git-dir", str(git_dir), "config", "remote.origin.url"],
+            capture_output=True, text=True, env=self.env, check=False,
+        )
+        self.assertEqual(origin.stdout.strip(), LEDGER_URL, stdout + stderr + origin.stderr)
 
     def test_two_spellings_of_one_ledger_make_one_git_directory(self) -> None:
         # Given: two forks naming the same ledger repository in different case,
