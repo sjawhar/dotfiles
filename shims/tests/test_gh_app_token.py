@@ -725,9 +725,10 @@ class BoxEnrollmentWait(unittest.TestCase):
         self.key_dir.mkdir()
         self.marker = self.key_dir / gh_app_token.ENROLLMENT_MARKER
 
-    def wait(self, sleep, key_dir=True):
+    def wait(self, sleep, key_dir=True, environment=None):
         """wait_for_box_enrollment with `sleep` standing in for time.sleep; returns its stderr."""
-        environment = {"AGENT_SECRETS_KEY_DIR": str(self.key_dir)} if key_dir else {}
+        if environment is None:
+            environment = {"AGENT_SECRETS_KEY_DIR": str(self.key_dir)} if key_dir else {}
         err = io.StringIO()
         with (
             patch.dict(os.environ, environment, clear=True),
@@ -782,6 +783,30 @@ class BoxEnrollmentWait(unittest.TestCase):
         self.assertEqual(clock[0], gh_app_token.ENROLLMENT_WAIT_SECONDS)
         # Long enough for the 116 s a box took to enroll on 2026-11-01.
         self.assertGreaterEqual(gh_app_token.ENROLLMENT_WAIT_SECONDS, 160)
+
+    def test_an_environment_without_the_key_dir_variable_waits_on_the_clients_default(self):
+        """An environment that dropped AGENT_SECRETS_* (omp's eval kernel) still reaches the
+        box's key dir: the agent-secrets client falls back to $XDG_RUNTIME_DIR/agent-secrets, so
+        the wait does too, or the client would meet the marker with only its own 20 s."""
+        self.marker.touch()
+        slept = []
+
+        def sleep(seconds):
+            slept.append(seconds)
+            self.marker.unlink()
+
+        stderr = self.wait(sleep, environment={"XDG_RUNTIME_DIR": self.temp_dir.name})
+        self.assertEqual(len(slept), 1)
+        self.assertEqual(stderr.count("still being enrolled"), 1)
+
+    def test_a_named_key_dir_is_the_only_one_read(self):
+        """The client reads the default only when AGENT_SECRETS_KEY_DIR is unset, so a marker in
+        the default dir does not hold a call whose named key dir has none."""
+        self.marker.touch()
+        named = Path(self.temp_dir.name) / "named"
+        named.mkdir()
+        environment = {"AGENT_SECRETS_KEY_DIR": str(named), "XDG_RUNTIME_DIR": self.temp_dir.name}
+        self.assertEqual(self.wait(self.never_sleeps, environment=environment), "")
 
 
 
