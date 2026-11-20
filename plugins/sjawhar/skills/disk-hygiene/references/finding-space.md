@@ -15,7 +15,7 @@ Read this before you size, rank or watch disk use, or before you delete by a pat
 
 ## What writes now
 
-- Rank writers: `sudo python3 $S writers --seconds 5 --top 15`. Each row gives the rate over the sample beside the process's whole-life average; where the two disagree, the sample caught a burst, so run it again. Without `sudo`, other users' processes are unreadable.
+- Rank writers: `sudo python3 $S writers --seconds 5 --top 15`. Each row gives the rate over the sample (`MB/s wr`) beside the same counter over the process's whole life (`MB/s life`). Where a listed row's `MB/s wr` differs from its `MB/s life`, the sample may have caught a burst: run it again, and count as a steady writer only a process that both runs list. Without `sudo`, other users' processes are unreadable.
 - Name the file a writer grows: `python3 $S fdwrites --seconds 5 --pid <pid>`.
 - What holds the CPU: `python3 $S cpu --seconds 5`, grouped by command name, where a fan-out of one name hides.
 - A write sample says who writes now, not who holds the space. Rank owners by each session's `du -xsm` of its own paths; rank a process by sizing the files it holds open twice, minutes apart.

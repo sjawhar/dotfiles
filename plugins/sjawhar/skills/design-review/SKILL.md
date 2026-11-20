@@ -12,7 +12,7 @@ description: Use when someone wants one plan or design reviewed before it is bui
    - `cybersecurity-expert`: security vulnerabilities, authentication and authorization, data exposure.
    - `ux-designer`: user experience, API ergonomics, developer experience.
    - `performance-engineer`: performance, scalability bottlenecks, optimization opportunities.
-   - `bug-finder`: bugs, edge cases, failure modes, bad interactions with the rest of the codebase.
+   - `bug-finder`: subtle bugs, edge cases, failure modes, bad interactions with the rest of the codebase.
 4. When all five finish, present one summary:
    - Sort the findings: Critical (causes a bug, security hole or data loss; fix before implementing), High (works, but forces a rework later), Medium (an improvement with no known failure behind it), Low (style or preference).
    - Name where the agents agree, and where they disagree, with your recommendation.

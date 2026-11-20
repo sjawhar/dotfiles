@@ -1,7 +1,7 @@
 ---
 name: landing-a-pr
 description: >-
-  Use when a PR is open and unmerged, from `gh pr create` on: after a push, before you watch CI
+  Use when any PR is open, from `gh pr create` on: after any push to it, before you watch CI
   (`gh pr checks`, `gh run watch`, sleep loops), on a check result, a bot or human review, a merge
   conflict or silence with nothing running, and when its owner approves it or says to merge or
   consolidate PRs.
@@ -18,7 +18,7 @@ You make the PR ready; auto-merge (`gh pr merge --auto`) merges it. `ce-babysit-
 - Before you enable auto-merge, tell every session that can push to the branch, including a subagent that handed you the PR, to stop pushing, amending or editing the body.
 - Do not use `--admin` or any bypass that skips a check that tests the work.
 - When the person who owns the work approves the PR, or says to merge or consolidate PRs, do it yourself; do not hand it back to them to click.
-- Legion merges the PRs it produces: its merger role merges the head it read. The session that commissioned the issue watches and does not merge.
+- Legion, the daemon that runs Dispatch issues labelled `legion` through phase sessions, merges the PRs it produces (branch `legion/<KEY>`): its merger session merges the head it read. The session that asked Legion for the issue watches and does not merge.
 - After the required checks and review pass, merge instead of pushing more: each push restarts every check. Push first only a fix for a defect that would do harm once merged (wrong behavior, a security hole, bad data); other fixes go in one follow-up PR.
 
 Read `references/repo-merge-rules.md` before you change an enabled auto-merge, merge in `trajectory-labs-pbc/agent-c`, `cybermonklabs/legion`, `theorem-labs/*` or a repo another person maintains, when GitHub refuses an admin action or an approval, and for a PR that adds or changes a database migration.
@@ -63,7 +63,7 @@ A push ends readiness. Rerun the step 4 proof at the new head for each surface t
 
 1. Reread the live PR, checks, reviews, mergeability and deploy claims.
 2. Run `pr-gate <owner/repo> <N>` and read its reasons, not only its exit code. Run it also before a review gate tied to a head, and after a base move that may conflict. Decide readiness from its output and cite that output in the report: a script or checklist of your own drifts from what the gate checks.
-3. Not ready while any item is unread, a finding is unresolved, an expected review has not posted and branch rules would let auto-merge go without it, or a required scenario has neither passed nor been waived by the person who owns the work. Report the blocker, the command that shows it and a link to its record; keep watching and finish the work you can.
+3. Not ready while any item is unread, a finding is unresolved, an expected review has not posted and branch rules would let auto-merge go without it, or a required scenario has neither passed nor been waived by the person who owns the work. Report the blocker, the command that shows it and a link to its record; keep watching, and finish each item that does not wait on that blocker.
 4. Write the report as `references/readiness-report.md` says.
 5. Once ready, enable auto-merge (or merge a migration by hand). Then change the head only for a failed check or review.
 

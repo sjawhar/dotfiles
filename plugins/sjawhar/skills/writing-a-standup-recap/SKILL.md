@@ -15,7 +15,7 @@ be right without his edits. You are the editor: subagents draft and review, and 
    drafters. A Monday recap of the past week starts the preceding Monday; a daily standup starts after the last
    standup that was presented. A weekly page gets charts and a link. A daily recap, a chat update and a Legion
    controller's standup lines are one message in the short shape that `references/page.md` describes, with no
-   charts. Read the last recap, so nothing in it returns as new.
+   charts. Read the last recap of the same shape (a weekly page or the short shape), so nothing in it returns as new.
 2. Pull the window's merged pull requests once with `scripts/merged_prs.py` (its docstring has an example call).
    GitHub search has one rate limit for the whole machine, so every drafter reads that file instead of searching.
 3. Start one fresh drafter per stream, in parallel, from the stream table: the table of Sami's work streams, each
@@ -72,12 +72,13 @@ The rules reviewer checks the draft against each rule here, one at a time.
 
 - The first line of each item is the result for the company.
 - Every line uses only words every reader knows: no internal name, code name, agent name, issue key, pull request
-  number, internal unit (CPU seconds, "objects") without what it means, or person from outside the company without
-  their role and organization.
+  number, internal unit (CPU seconds, "objects") without what it means, or person the team does not know, which is
+  anyone from outside the company: give such a person's role and organization, not their name.
 - Define an unavoidable term where it is first used.
 - Explain, do not recite: each claim carries its reason or its mechanism.
 - Short: the page reads top to bottom in five minutes. High level: each item says what changed for the company, not
-  how it was built. Use plain controlled English. Fewer items said clearly beat more items.
+  how it was built. Write in plain controlled English, ASD-STE100 (the `asd-ste100` skill). Fewer items said
+  clearly beat more items.
 
 ### Numbers
 
@@ -87,8 +88,9 @@ The rules reviewer checks the draft against each rule here, one at a time.
   repeats it, and keep the source's link beside the number in the draft. When a number went down, say why.
 - Measure a merged change on the same inputs, old against new. Do not hold a result back because production has not
   adopted it: merging is what puts code into production.
-- Shapes that read well: a before and after from production, plain scores per attempt, and a page whose rows each
-  show a trend at a glance, such as the timeline's row per project (`references/page.md`, Charts).
+- These shapes read well; use one where the data fits, though none is required: a before and after from production;
+  plain scores per attempt, which list in order the score that grading gave each run of the same task; and a page
+  whose rows each show a trend at a glance, such as the timeline's row per project (`references/page.md`, Charts).
 
 ### Dates and charts
 

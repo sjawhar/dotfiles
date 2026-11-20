@@ -2,7 +2,7 @@
 
 ## Sections every plan carries
 
-- `## Hardening ledger`: empty at first. Add a row for each shortcut you or a worker takes and each part nobody is sure is covered, when it happens; step 1 of `opening-a-pr` finishes each row or names its blocker before the PR opens.
+- `## Hardening ledger`: empty at first. Add a row for each shortcut you or a worker takes, and for each part of the request whose covering change or check (a diff hunk, a test or a scenario run) you or a worker cannot name, when it happens; step 1 of `opening-a-pr` finishes each row or names its blocker before the PR opens.
 - `## End-to-end verification plan`, per slice: its class and user-visible outcome; the real production transport and environment; the production identity and grant path (a human grant for human-facing work); the existing driver, or a task to build one; the cheapest real shared-resource substitute (staging, a branch run), never a local simulation of the transport.
 - `## Skill catalog`: each step's required worker skills.
 - `## Contract change census`: for a change that tightens a contract, as `opening-a-pr` defines it: the search commands, each hit's disposition, and the rollout line. Trace producers, consumers and shared builders in this repo and its siblings yourself, including callers that rebuild a value without spelling the field or endpoint (concatenation, `**kwargs`, a config map), which a name search does not find. The brief's caller list is not evidence.

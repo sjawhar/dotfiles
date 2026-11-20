@@ -46,7 +46,7 @@ Rule 1 binds your own calls too whenever your cwd is not the tree you edit: chec
 
 ## When a lane reports
 
-1. Treat the report as a claim. Check it file by file against what you asked. When you relay it, attribute it ("my tester reports X"), say what was measured and who measured it, and add no causal clause of your own to someone else's measurement: measure the cause yourself if it matters.
+1. Treat the report as a claim. Check it file by file against what you asked. When you relay it, attribute it ("my tester reports X"), say what was measured and who measured it, and add no causal clause of your own to someone else's measurement. When a decision of yours depends on the cause, measure the cause yourself first.
 2. Treat an empty, malformed or all-empty result, a refusal, a quota failure, or a verdict that cites no file, line or command as an unexecuted task. Re-dispatch with what is known. A terse report that shows its work is a report.
 3. Before you repeat a claimed blocker, run the command that failed and read the record that showed it (an issue, a CI run, a log), and name both. If the command now succeeds, or the record shows the blocker is gone, drop the blocker and continue.
 4. For a follow-up, a fix or "also do X", message the same subagent (`write agent://<id>`): it keeps what it learned. Dispatch fresh, with a summary, only for a wedged lane.

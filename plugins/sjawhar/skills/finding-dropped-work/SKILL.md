@@ -12,10 +12,13 @@ A session's own memory of its work is the thing that fails, so a fresh agent rea
 - Any session: before it tells a person that an issue or a request is done, before it moves an issue to `done`, and
   before it ends. Audit its own transcript since its last audit or its start.
 - A lead, once a day: each agent of its stream, and its own. A stream is a line of work with its own Dispatch issue
-  labelled `stream`; its agents are the sessions that hold the claim on that issue or on one of its child issues.
-  If the stream issue names a daily audit program, run it over the stream's sessions. Else follow How below, one
-  subagent per agent.
-- The chief of staff, every 4 hours: every session since the last audit, one subagent per session.
+  labelled `stream`. Its lead is the session that the issue's `scoreboard.json` artifact names as `lead`, else the
+  session that holds the claim on that issue. Its agents are the sessions that hold the claim on that issue or on
+  one of its child issues. If the stream has its own daily audit program (a script that audits the stream's
+  sessions, such as the Rocq speed stream's `audit.py`), run it with its roots set to the stream's sessions. Else
+  follow How below, one subagent per agent.
+- The chief of staff, every 4 hours: every session with a message since the last audit, each read from that audit
+  to now, one subagent per session.
 
 ## How
 
@@ -39,11 +42,13 @@ A session's own memory of its work is the thing that fails, so a fresh agent rea
   message, a comment on an answered ask or a review request is not an ask.
 - A Dispatch record names a local file: upload the file as an artifact on that issue and link it.
 - The result sits in a document, artifact or chat line with no ask: open an ask that links the result and asks the
-  user's next step. Put it in an ask block at the end of that document, else in a `dispatch ask`. An artifact
-  notifies nobody.
+  user's next step. If the result is in a Dispatch document, end that document with an ask block (a `:::ask` block,
+  `skill://dispatch`); for any other result, open a `dispatch ask`. An artifact notifies nobody.
 - The work was delivered smaller or different than its goal: count it open. Finish the missing part now, or open an
   ask on its issue naming each unmet requirement and asking whether it is dropped. A new issue for the missing part
   does not close the row.
 - An eval's result does not answer the question it was asked: count it open. Say in one line what it does answer and
   what is missing, then run the missing arm or cells now, or open an ask with both.
+- An idle span (the report's list E): close the item it left open with that item's own action above. A long
+  project run without its workflow skill (list F): run the rest of the project under that skill.
 - Dropped on purpose: say so to the requester, with the reason, on the issue.

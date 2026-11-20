@@ -9,7 +9,7 @@ mcp:
 
 # Apify
 
-Use an Apify Actor, not one-off browser scraping, when any one of these holds: the task needs more listings than one page of results shows, the site is JS-heavy or blocks bots, a community Actor for the site exists, or the user wants structured output. On such sites browser scraping breaks often and returns unstructured text.
+Use an Apify Actor, not one-off browser scraping, when any one of these holds: the task needs more listings than one page of results shows, the site is JS-heavy (a plain fetch of the page returns no listings, because JavaScript builds them in the browser) or blocks bots, a community Actor for the site exists, or the user wants structured output. On such sites browser scraping breaks often and returns unstructured text.
 
 ## Steps
 
@@ -17,7 +17,7 @@ Use an Apify Actor, not one-off browser scraping, when any one of these holds: t
 2. Read the Actor's details and input schema: `fetch-actor-details`.
 3. Run the Actor: `call-actor`.
 4. Read the results: `get-dataset-items` with the run's `datasetId`.
-5. Keep the fields the user asked for (for example price, location, URL), drop duplicate items, and give the user a table. Sort it by the first criterion the user named; when they named none, sort by price if the items have one, else keep the Actor's order. Say which order you used.
+5. Keep the fields the user asked for (for example price, location, URL), drop duplicate items (an item with the same URL as an earlier item; for items without a URL, the same values in every kept field), and give the user a table. Sort it by the first criterion the user named; when they named none, sort by price, lowest first, if the items have one, else keep the Actor's order. Say which order you used.
 
 With no Actor for the site, call a general tool directly: `apify--web-fetch` for one page at a known URL, `apify--web-search` for a web search by query.
 

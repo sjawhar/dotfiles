@@ -44,7 +44,7 @@ For each DROPPED, MISSED-GOAL, UNSURFACED and WAITING-UNREPORTED row, give the m
 
 ## Report
 
-One table per list (A to F): time UTC, the words (verbatim, at most 40), outcome, evidence or mechanism with FILE:LINE. Then the totals per outcome and per mechanism. End with every DROPPED, MISSED-GOAL, UNSURFACED, WAITING-UNREPORTED and LOCAL-ONLY row again, and every E and F row, one line each, with the action that closes it: deliver the missing part now, in the session or a subagent it waits for (an issue for later does not close it); open the ask that links the result and asks the next step; upload the local file as an artifact on its issue and link it; or open the ask.
+One table per list (A to F): time UTC, the words (verbatim, at most 40), outcome, evidence or mechanism with FILE:LINE. Then the totals per outcome and per mechanism. End with every DROPPED, MISSED-GOAL, UNSURFACED, WAITING-UNREPORTED and LOCAL-ONLY row again, and every E and F row, one line each, with the action that closes it: deliver the missing part now, in the session or a subagent it waits for (an issue for later does not close it); open the ask that links the result and asks the next step; upload the local file as an artifact on its issue and link it; or open the ask. An E row closes with the action of the item from A to C that was open during it; an F row closes when the rest of the project runs under its workflow skill.
 ```
 
 ## tq recipe

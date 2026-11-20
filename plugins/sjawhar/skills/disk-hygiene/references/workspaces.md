@@ -1,6 +1,6 @@
 # Phases 3 and 4: classify and apply working copies
 
-Read this before you run `inventory`, `plan` or `apply`, before a manual `rm` of a working copy, or to undo a forget. `S` is set in SKILL.md.
+Read this before you run `inventory`, `plan` or `apply`, before a manual `rm` of a working copy or of a folder that holds a git store, or to undo a forget. `S` is set in SKILL.md.
 
 ## What each class means for you
 

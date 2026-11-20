@@ -27,7 +27,7 @@ For any other project, all three hold:
 - The two steps below ran: the writing skills passed over the text, and a fresh reviewer cut the exact text that goes out.
 - It sits in a flow we control: an enrollee who came to us, or a project already enrolled; not contact we open into a space we do not run. A new enrollee counts with no prior rapport: the control is the template and the flow.
 
-Enrolled means the enrolling project's own record lists the project. The enrolling project's stream (the line of work with its own lead and Dispatch stream issue) names where that record is in its brief, the standing instructions its agents work from. With no record found, the project has not enrolled. Do not decide it from a message's tone or from a maintainer having replied before.
+Enrolled means the enrolling project's own record lists the project. The enrolling project's stream (the line of work with its own lead and its own stream issue: the open issue labelled `stream` in Dispatch, the issue tracker the `dispatch` command reads) names where that record is in its brief, the standing instructions its agents work from. With no record found, the project has not enrolled. Do not decide it from a message's tone or from a maintainer having replied before.
 
 ## Waits for him
 

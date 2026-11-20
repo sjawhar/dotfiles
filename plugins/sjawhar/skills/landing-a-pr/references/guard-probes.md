@@ -1,6 +1,6 @@
 # Proof design: mutations, fixtures and guards
 
-Read before you claim coverage, independence, a guard's safety, no regression or "cannot happen". Follow the repo's test conventions. Use throwaway probes for evidence that does not need a permanent consumer-contract test.
+Read before you claim coverage, independence, a guard's safety, no regression or "cannot happen". Follow the repo's test conventions. Commit a consumer-contract test for each behavior the change promises its consumers, so a later change that breaks it goes red. Evidence about this head only (a mutation, a planted defect, a swapped order) is a throwaway probe: run it in a scratch copy and do not commit it.
 
 - Name the test and exact assertion a mutation must violate; otherwise a probe can mutate a neighboring guard.
 - Mutate the decision in a scratch copy, run the real consumer, and require the predicted red. Check from inside the run that the copy loaded (`module.__file__` or a head-unique output): an editable install can load the unchanged tree. A setup crash is not a kill; read failure types before you count.
@@ -20,4 +20,4 @@ Read before you claim coverage, independence, a guard's safety, no regression or
 - A second defect from the same test driver (the harness code that feeds inputs to the system under test): audit the whole driver against the contract, and construct its interactions with collaborators, not only your own side. Write the invariant that closes the family, and name the family for the next reader.
 - When the fix changes more lines than the code that made the choice behind the defect, review that choice. Stop polishing a mechanism whose premise is wrong.
 - Before you copy code to avoid an import, ask whether the source can drop its heavy import-time dependency, and reuse existing helpers and validation contracts. A second copy of a selector or regex is not a dependency-boundary fix.
-- A rule broken again and again may need a refusal in the owning tool, built with its real failure case. Build one only when it is the approved work; do not add a gate as a side effect of a readiness report.
+- A rule broken again after a fix for it may need a refusal in the owning tool, built with its real failure case. Build one only when it is the approved work; do not add a gate as a side effect of a readiness report.

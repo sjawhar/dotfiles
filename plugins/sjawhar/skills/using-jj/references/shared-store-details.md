@@ -21,7 +21,7 @@
 ## Owners
 
 - The `Omp-Session` trailer names a commit's session (`session-attribution` skill). Without one, `jj op log | grep <bookmark>` names the workspace that pushed it; it can be your own forgotten one. For a stray workspace nobody claims, compare its working-copy commit time with each candidate's workspace-add time in `jj op log`.
-- A conflicted local bookmark warns in every `jj status`. Clear your own at once. For another owner's, check the commit is still visible (`jj log -r <commit>`), tell the owner what it pointed at, then `jj bookmark forget` it. If the owner does not answer, forget it and write in your report that you could not reach them. To check whether it is on main, compare subject or content: `git merge-base --is-ancestor` calls every squash-merged commit absent.
+- A conflicted local bookmark warns in every `jj status`. Clear your own at once. For another owner's, check the commit is still visible (`jj log -r <commit>`), tell the owner what it pointed at, then `jj bookmark forget` it; the forget does not wait for a reply. If the owner has not replied when you write your report, write in it that you could not reach them. To check whether it is on main, compare subject or content: `git merge-base --is-ancestor` calls every squash-merged commit absent.
 
 ## Immutable refusals
 

@@ -18,7 +18,7 @@ You do not implement, hand the plan to another session, or serialize disjoint wo
 
 ## 1. Adopt the existing work
 
-1. Find the tracker that answers with a command that exits 0, such as `dispatch issue --help` or `gh issue list`. On Dispatch, search for related work first (`dispatch` skill). None reachable: say what failed in one line, work from the repo (checked-in plans, `git log`, the branch diff) and the conversation, and do not skip this step or restart approval.
+1. Find the tracker that answers with a command that exits 0, such as `dispatch issue --help` or `gh issue list`. On Dispatch, search for related work first (`dispatch` skill). None reachable: say what failed in one line, work from the repo (checked-in plans and specs, `git log`, the branch diff) and the conversation, and do not skip this step or restart approval.
 2. Read what is settled and what is really built, and keep an approved design approved: read `references/adopting.md` before you plan.
 3. Carry the decisions and rejections, with sources, into the plan and every brief they apply to: a worker without them re-proposes what Sami rejected.
 

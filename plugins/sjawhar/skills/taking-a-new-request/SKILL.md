@@ -1,6 +1,6 @@
 ---
 name: taking-a-new-request
-description: Use when a person, lead or parent agent asks mid-task for more than your goal ("new task/job", "also do X", "while you're at it", a new direction, a pasted link or error needing its own fix) or similar files tempt a fold-in, or to say what a running session can absorb. Not a re-review or next round.
+description: Use when a person, lead or parent agent asks mid-task for more than your goal ("new task/job", "also do X", "while you're at it", new direction, pasted link or error needing its own fix) even if subjects or files look alike, or to say what a running session can absorb. Not a re-review or next round.
 ---
 
 # Taking a new request while working
@@ -18,4 +18,4 @@ A request folded into running work gets done only where it overlaps, and the res
 
 Do steps 1 to 3 anyway. Then name what this session cannot cover, and offer a fresh agent for it with the command that starts it. This session cannot cover a requirement that needs another repository or branch, that blocks on something this session waits for, or that this session could not finish together with the running work, so the running work would end this session undelivered. Do not accept the whole request silently and deliver only the overlap.
 
-The command is `agent-new <issue key>` when the request has a Dispatch issue, else `agent-new @brief.md` or `agent-new "<request>"`. Add `--repo <repo> --name <name>` to start it in its own worktree, and `--window <stream window>` to start it beside that stream's lead (`agent-new --help`).
+The command is `agent-new <issue key>` when the request has a Dispatch issue, else `agent-new @brief.md` or `agent-new "<request>"`. Add `--repo <repo> --name <name>` to start it in its own worktree. When the request belongs to a stream, a line of work with its own tmux window where the session that leads it runs, add `--window <that window's name>` to open the new agent as a pane beside that lead (`agent-new --help`).

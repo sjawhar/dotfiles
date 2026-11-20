@@ -37,7 +37,7 @@ Read `references/commands.md` for a command or revset you do not know, bookmark 
 - Every rewrite moves the commits stacked on it: `describe`, amend, `squash`, `abandon`, `absorb`, every `rebase`. Before one, run `jj log -r '<rev>::'` and get the agreement of the owner of every commit and bookmark it lists; being the author does not make it safe. Do not pipe a rewrite, which hides its exit code and first error; check it with `jj log` afterward.
 - Read `references/commands.md` before you run `jj absorb`.
 - Mutate only change IDs you name. A broad set (`mine()`, `empty()`, `divergent()`, `visible_heads() & ~immutable()`, `all:`, an open range such as `main@origin..`) matches other sessions' commits.
-- Never run a bare `jj restore` or `jj abandon`, or a bare `jj new` in a checkout other sessions use: each takes other sessions' uncommitted work. Name the source and the paths, `jj restore --from <rev> <paths>`, in your own workspace.
+- Never run a bare `jj restore` or `jj abandon` in any checkout, or a bare `jj new` in one other sessions use: each takes other sessions' uncommitted work. Name the source and the paths, `jj restore --from <rev> <paths>`, in your own workspace.
 - After a failure, read the whole error, `jj status` and `jj log -r '@ | @-'`, then make one correction.
 - An immutable refusal is not a reason for `--ignore-immutable`. Find the pin: `jj log -r 'immutable_heads() & descendants(<rev>)'`. In a knives-managed fork (one that `knives repos` lists), read the `fork-work` and `using-knives` skills first.
 - Read `references/shared-store-details.md` before you rewrite a commit that has descendants, override an immutable refusal, or clear another owner's conflicted bookmark.

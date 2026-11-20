@@ -30,7 +30,7 @@ An add that got `--ignore-working-copy` by mistake is in the same state; finish 
 - Put a file you copied into a workspace in a described commit at once, and check with `jj log -r @` that `@` is not empty.
 - A file no jj command has snapshotted is not stored. Find saved states with `jj op log --limit <n>` and `jj --at-op <op> file list`, then recover with `jj restore --from <commit> <paths>`.
 - A file from an old operation can be read with `jj --at-op <op> file show -r <commit> 'root-file:"<path>"'`. It is an old snapshot: restoring it can revert later fixes.
-- Snapshot and push work as soon as it is worth keeping: a lost or deleted workspace takes unpushed work with it.
+- Snapshot and push early: push a change as soon as you describe it, and before you leave the workspace, as section 4 of `SKILL.md` says. A lost or deleted workspace takes unpushed work with it.
 - Retire only your own superseded workspace, by name: `jj workspace forget <name>`, `agent-workspace rm`, or `knives finish` in a fork. Never delete your current directory.
 - Before `jj workspace forget` on a shared store, run `jj --version`: a stock jj 0.45.1 forget runs a repository-wide prune, which the `-sami` builds from `0.45.1-sami.20260909-184010` do not.
 

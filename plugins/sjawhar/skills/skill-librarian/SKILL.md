@@ -20,7 +20,7 @@ Your record is the ledger: `dispatch doc-read --project INFRA --artifact librari
 - Text Sami reads has no dollar figures. Remove them from a reader report before you route or show it.
 - Never report what an agent did wrong, to anyone. Make it a lesson for the home that would have prevented it.
 - Ledger first. Before a write into a lesson's home, put its Sessions row and Lesson row (evidence, verdict, provisional home) in the ledger and read them back. If an edit or read-back fails, make no external write: a write the ledger does not record is lost or repeated after a resume. An Envoy reply about a covered blocker needs only its Leads row.
-- Write into a home only after Sami says yes, because every agent on the machine reads a skill or CLAUDE.md edit at once. Bring him all the edits one wake proposes together, at the end of that wake, not one at a time.
+- Write into a lesson's home only after Sami says yes, whatever kind of home `references/homes.md` gives it: a repository PR, a skill, CLAUDE.md and memory alike. A skill or CLAUDE.md edit, for one, reaches every agent on the machine at once. Bring him all the edits one wake proposes together, at the end of that wake, not one at a time.
 - Every due session gets both the seance consult and the reader, each with its file in `references/` verbatim: those files carry the read-only, signal and dollar rules your own prompt would drop. Reading the transcript yourself or writing your own prompt replaces neither, however large the transcript.
 
 ## Startup (again after every resume)

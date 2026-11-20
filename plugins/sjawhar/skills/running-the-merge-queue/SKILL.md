@@ -29,7 +29,7 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 
 - Register each PR when it opens: owner, purpose, intended published parent, file scope, required gates, and the end-to-end scenarios the owner will run before merge. Give the owner the gate list then, so the packet arrives complete.
 - Act on packets, and on CI events for PRs that have one. Do not sweep all owners.
-- Owners drive their PRs while they are live. Every 30 minutes, find orphans: PRs whose owner is gone and that nobody will packet. Close or reassign one only under a current decision from Sami that names it. Until then it stays yours: keep it registered and report it in each queue status.
+- Owners drive their PRs while they are live. Every 30 minutes, find orphans: PRs whose owner is gone (`envoy_sessions` lists its session as neither live nor unresponsive) and that nobody will packet. Close or reassign one only under a current decision from Sami that names it. Until then it stays yours: keep it registered and report it in each queue status.
 - Who sends the packet:
   - a PR for an issue a coordinator (the `sdd` lead) owns: that coordinator's gate packet, naming the head;
   - a PR with an active gate session (the session a coordinator assigned to check its gates): that session's packet, or a verdict on the PR naming the head from any other reviewer who is not the author;

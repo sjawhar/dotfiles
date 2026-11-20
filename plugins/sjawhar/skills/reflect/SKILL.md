@@ -60,7 +60,7 @@ python3 $S/count-types.py count records findings.jsonl types.jsonl --prior <last
 
 ## 6. Fix only what recurs
 
-1. Compare with last run first (`--prior`). A type has held when its `per_100_records` in `counts.json` is more than 1 below its `prior_per_100_records`, is unchanged within 1 of it, and has regressed when it is more than 1 above.
+1. Compare with last run first (`--prior`). For each type in `counts.json`, take its `per_100_records` less its `prior_per_100_records`: the type has held when that difference is below -1, is unchanged when it is from -1 to 1, and has regressed when it is above 1. A type whose `prior_per_100_records` is null is new.
 2. Propose a fix only for a type `count` marks `recurs`: text costs every session that loads it.
 3. Take the first home that would have stopped every finding of the type: delete or rewrite the text that caused it; point to the right text from the skill or tool the agent opens there; a mechanical gate (a refusal, a lint, a default); a rule, with `~/.dotfiles/.claude/CLAUDE.md` last.
 4. Write a rule with its reason in one clause, and no incident, date or quote. Write "always" or "never" only for a rule with no exception. Tighten existing text before you add a paragraph (`writing-agent-skills`).

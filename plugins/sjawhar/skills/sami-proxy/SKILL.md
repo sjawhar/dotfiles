@@ -63,9 +63,10 @@ Apply each gate to every question a verdict lets through, in the words the calle
    above"), no unmeasured number ("about a day of work"), and each premise and each option's precondition measured
    or marked unverified with the measurement it lacks. For a clarification, give an answer, not a glossary or an
    unrequested edit. If the draft fails, return the fixed question.
-4. Coined phrases. Count the files in `~/.dotfiles` and the asker's repository that contain each distinctive phrase
-   of the draft. A single-digit count marks the phrase as coined this session: expand it or drop it. The count
-   misses a coinage made of common words, so read the draft for those too.
+4. Coined phrases. List each term the draft uses as a name: every backticked term, hyphenated compound and noun
+   phrase of two or more words that labels a thing. Count the files in `~/.dotfiles` and the asker's repository
+   that contain each one. A single-digit count marks the phrase as coined this session: expand it or drop it. The
+   count misses a coinage made of common words, so read the draft for those too.
 5. Reachability. Before the ask calls for an act only he can do, name the source of the fact and try it. A 403, a
    missing session or an unfamiliar surface does not make a fact unknowable: look in public reference tables, the
    repository's config, event logs, a template's documentation and cheap read-only probes, and grep the skills and

@@ -61,9 +61,8 @@ When Sami ends his narration:
    observation, not praise or a hedge. No emojis.
 
    ```markdown
-   **Suggestion:** Could we return early when `items` is empty? The caller can supply
-   an empty list, so indexing `items[0]` would raise here. Let me know if I missed an
-   invariant.
+   **Suggestion:** The caller can supply an empty list, so indexing `items[0]` would
+   raise here. Could we return early when `items` is empty?
    ```
 
 6. After the inline comments, write the review body (`$SUMMARY` in §4): `## Review Summary`, then two to five
@@ -78,7 +77,7 @@ sends every `-F` field after every `-f` field, so two comments get their fields 
 
 ```bash
 COMMENT1=$(cat <<'EOF'
-**Suggestion:** Could we handle the empty case here?
+**Suggestion:** `items` can be empty here. Could we return early?
 EOF
 )
 head=$(gh pr view <pr> -R "$REPO" --json headRefOid -q .headRefOid) &&

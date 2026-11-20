@@ -20,7 +20,7 @@ Read [references/pipeline.md](references/pipeline.md) when you install the tools
 
 ## Record
 
-- Terminal: one logical section per `.cast`, 120x35, dark theme. Keep a script of what to type, and do at most one dry run of a section before you record it. Type `# Section: ...` comments to mark trim points.
+- Terminal: one logical section per `.cast`, 120x35, dark theme. Keep a script of what to type, and do at most one dry run of a section before you record it: one pass through its commands outside `asciinema rec`, which your session's transcript shows. Type `# Section: ...` comments to mark trim points.
 - GUI or editor: after an input you cannot see land, measure its effect (a panel's bounding box, clip duration against wall clock, a counter, terminal DOM text) instead of trusting the keypress. When a take fails, measure the artefact before the next try.
 - Playwright, CDP and keyboard chords can deliver input to the wrong place and fail silently, and a readiness wait on text can never match. When one hits, apply the workaround in pipeline.md's "Input and readiness traps"; do not tear down the live sandbox.
 - Set the layout before you record, and check it in the recorded frame: panes that collapse, scroll or resize between takes clip beats and break crops.
@@ -36,7 +36,7 @@ Read [references/pipeline.md](references/pipeline.md) when you install the tools
    - Teach-back: give a fresh subagent only the narration and the audience (for example "a technical leader who knows software and the field, and has not followed this project"), with: "As that reader, for each sentence, write in your own words what it tells you. If you must guess what a word or phrase refers to, write 'unclear:' and the word or phrase. Do not mark words that reader knows."
    - Score each sentence 2 (the teach-back matches your meaning, carries its number or example, and the facts support it), 1 (matches, but vague where the facts have a number or example) or 0 (wrong, "unclear", or a claim the facts do not support). Pass: no 0, and at most one 1 per section. Rewrite each 0 and 1 and test again on a new subagent: one that read an earlier version has learned the words.
 5. If narration cannot fit, shorten the words. Cut footage only where reality is unwatchably slow (a sandbox boot).
-6. Choose the voice first: give the user one labeled A/B video of several voice samples. Take the candidates from the three highest-ranked models, among providers you have keys for, on the current Artificial Analysis TTS leaderboard (https://artificialanalysis.ai/text-to-speech/leaderboard, read on the day), and the voices each provider recommends for narration.
+6. Choose the voice first: give the user one labeled A/B video of several voice samples. Take the candidates from the current Artificial Analysis TTS leaderboard (https://artificialanalysis.ai/text-to-speech/leaderboard, read on the day): go down it from the top, skip each model whose provider you have no key for, and stop at three models. Add the voices each provider recommends for narration.
 7. Generate with the model the user picked, at `mp3_44100_192` or better, at the pace the user wants. Reach it with the model's speed setting and fewer words, and drop a voice that stops sounding natural at that pace.
 8. `.strip()` the API key. Catch transport errors without printing headers: httpx otherwise prints the raw key in a traceback.
 9. After the recordings are final and before the final render, audit every narration line against the screen: command output, numbers, feature names, workflow.

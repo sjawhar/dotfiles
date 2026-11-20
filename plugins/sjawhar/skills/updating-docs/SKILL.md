@@ -59,11 +59,11 @@ A cutover replaces a name, path, command, tool or interface with a new one and r
 
 - List files with a tree walk (`git ls-files <dir>`), not a hand-written glob, which misses nested paths. Check every file type: scripts and configs record what runs.
 - Before you sweep, write down the questions each file must answer (stale claim? resolved?); without them you check only what you happen to notice.
-- When a decision rests on the sweep (a deletion, a merge, or a report that no stale copy is left), have a second agent sweep from the claim itself, not your search terms, and merge the hits. Start it with omp's `task` tool and `agent: "scout"`, a read-only search agent.
+- When a decision rests on the sweep (a deletion, a merge, or a report that no stale copy is left), have a second agent sweep from the claim itself, not your search terms, and merge the hits. In omp (oh-my-pi, the agent harness; it sets `OMPCODE=1` in every shell it starts), start it with the `task` tool and `agent: "scout"`, a read-only search agent; in another harness, start a read-only subagent.
 
 ## Read the whole artifact back
 
-- After an edit, read the whole document (every line, in one read or in ranges that cover it), not a grep for what you added. For a file under version control, then read its diff (`git diff -- <file>` or `jj diff <file>`) and check two things: every part of the edit landed where you meant it, since an insert can take the wrong anchor, and the diff changes no line you did not mean to change.
+- After an edit, read the whole document (every line, in one read or in ranges that cover it), not a grep for what you added, and check two things: every part of the edit landed where you meant it, since an insert can take the wrong anchor, and the untouched neighbors survived. For a file under version control, also read its diff (`git diff -- <file>` or `jj diff <file>`): it must change no line you did not mean to change.
 - Before you trust a read-back, make it find a string you know is there, so a broken reader cannot report success.
 - A change to a string invalidates offsets computed on it. Apply `(start, end, text)` edits back to front, or replace the region in one slice, and check the result.
 - Chain a publish command to its guard with `&&`, or start the script with `set -euo pipefail`: a newline is not a guard.

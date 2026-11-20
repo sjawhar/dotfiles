@@ -11,7 +11,7 @@ Read when a packet reports no findings, no checks, missing content, an expected 
   - runner lost or run incomplete: check that the run belongs to the current head, then rerun that attempt;
   - red explained only by a newer main-side fix: wait until the owner pushes a content change, or Sami gives a new decision;
   - a failure that fix does not cover: the owner diagnoses it.
-- Required red CI is not mergeable. When several PRs are red from the same failure on main (a main-red class) and no action above fits it, ask Sami once on the existing tracking issue for a queue-wide action, and continue other work.
+- Required red CI is not mergeable. When several PRs are red from the same failure on main (a main-red class) and no action above fits it, ask Sami once with `dispatch ask` on the queue record (SKILL.md step 1; with none, on the Dispatch issue one of those PRs names) for a queue-wide action, and continue other work.
 - A queued check-suite with zero check-runs is not a failed check. Read `mergeable_state` and the repository's docs on which GitHub App posts each required check; the owner follows `landing-a-pr`.
 - A superseded cancelled run is not a current required failure. Identify it by run and head, not by conclusion alone.
 

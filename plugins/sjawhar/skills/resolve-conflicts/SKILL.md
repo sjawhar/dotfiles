@@ -34,5 +34,5 @@ The commands are git's. In a jj checkout, jj records conflicts in the commits an
 - Rebase so that a parent commit that conflicts with yours is no longer under your commits (onto an older commit, or with that parent skipped): that loses the parent's changes.
 - Add a fix-up commit that reverses changes: fix the original resolution instead.
 - Run `git reset --hard` to try again: it leaves no record of what you tried, and a reset of pushed commits rewrites shared history. Make one deliberate fix instead.
-- Drop commits to clean up a resolution: first check that nobody wants or relies on them and `git branch -r --contains <sha>` is empty.
+- Drop commits to clean up a resolution: first check that nobody wants or relies on them. `git branch -r --contains <sha>` must be empty, and a commit you did not make in this session needs the user's yes, asked with its `git log --oneline -1 <sha>` line.
 - Start a second fix after the first fell short: redo step 1.
