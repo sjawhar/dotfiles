@@ -499,14 +499,17 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         self.assertIsNotNone(real_git, "needs git in /usr/local/bin, /usr/bin or /bin")
         git_dir = self.ledger_git_dir()
         joined = f"{HOSTNAME}-0000feed"
-        # A git stub first on PATH stands in for a knives command that joins the ledger. When
-        # the installer runs `git init` on the ledger's git directory, and the directory does
-        # not exist, the stub first makes it as the join of knives 5.0.0 does. It makes the
-        # directory in a scratch directory, gives it an origin and a machine name of its own,
-        # and renames it into place. Then, and for every other call, the stub runs the real git.
+        # A git stub first on PATH stands in for a knives command that joins the ledger. At the
+        # installer's first `git init --quiet --bare`, when the ledger's git directory does not
+        # exist, the stub first makes that directory as the join of knives 5.0.0 does. It makes
+        # the directory in a scratch directory, gives it an origin and a machine name of its own,
+        # and renames it into place. So the directory appears after the installer's `[[ ! -d ]]`
+        # test, and before the installer puts its own git directory in place. Then, and for every
+        # other call, the stub runs the real git.
         write_executable(
             self.root / "bin" / "git",
-            f'if [ "$*" = "init --quiet --bare {git_dir}" ] && [ ! -e "{git_dir}" ]; then\n'
+            'if [ "$#" -eq 4 ] && [ "$1 $2 $3" = "init --quiet --bare" ]'
+            f' && [ ! -e "{git_dir}" ]; then\n'
             f'    scratch="$(mktemp -d "{self.config}/.knives-joining-XXXXXX")"\n'
             '    made="$scratch/ledger.git"\n'
             f'    "{real_git}" init --quiet --bare "$made"\n'
@@ -521,14 +524,14 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         )
 
         # Given: a new machine, and a knives command that joins the ledger after the
-        # installer finds no git directory for it, and before the installer's `git init`.
+        # installer finds no git directory for it, and before the installer puts its own in place.
         (self.config / "state.json").unlink()
 
         # When: the installer joins the machine.
         result = self.install()
 
         # Then: it succeeds, and the git directory keeps the origin and the machine name
-        # that knives gave it, and is not bare.
+        # that knives gave it, and is not bare. The installer deleted its scratch directory.
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
         def config(*key: str) -> list[str]:
@@ -540,6 +543,10 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         self.assertEqual(config("--get-all", "remote.origin.url"), [LEDGER_URL], result.stdout + result.stderr)
         self.assertEqual(config("knives.machine"), [joined], result.stdout + result.stderr)
         self.assertEqual(config("core.bare"), ["false"], result.stdout + result.stderr)
+        self.assertEqual(
+            sorted(p.name for p in self.config.glob(".knives-installer-joining-*")), [],
+            result.stdout + result.stderr,
+        )
 
     def test_a_knives_command_never_finds_the_ledger_git_directory_half_made(self) -> None:
         real_git = shutil.which("git", path="/usr/local/bin:/usr/bin:/bin")
@@ -582,6 +589,49 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
             capture_output=True, text=True, env=self.env, check=False,
         )
         self.assertEqual(origin.stdout.strip(), LEDGER_URL, result.stdout + result.stderr + origin.stderr)
+
+    def test_where_mv_has_no_dash_t_the_git_directory_is_built_in_place(self) -> None:
+        real_mv = shutil.which("mv", path="/usr/local/bin:/usr/bin:/bin")
+        self.assertIsNotNone(real_mv, "needs mv in /usr/local/bin, /usr/bin or /bin")
+        log = self.root / "mv.log"
+        # An mv stub first on PATH stands in for an mv with no -T, as on macOS. For `--help`, it
+        # prints a usage that has no --no-target-directory to stderr, and exits 64. It logs every
+        # other call, and runs the real mv for it.
+        write_executable(
+            self.root / "bin" / "mv",
+            'if [ "${1:-}" = --help ]; then\n'
+            '    echo "usage: mv [-f | -i | -n] [-hv] source target" >&2\n'
+            '    exit 64\n'
+            'fi\n'
+            f'echo "mv $*" >>"{log}"\n'
+            f'exec "{real_mv}" "$@"',
+        )
+        git_dir = self.ledger_git_dir()
+
+        # Given: a new machine whose mv has no -T.
+        (self.config / "state.json").unlink()
+
+        # When: the installer joins the machine to the ledger.
+        result = self.install()
+
+        # Then: it succeeds, and no mv call has -T or names a scratch directory. The git
+        # directory has the ledger as its origin, this machine's name, the ledger as its work
+        # tree, and is not bare.
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = log.read_text(encoding="utf-8") if log.exists() else ""
+        self.assertNotIn(" -T ", calls, calls)
+        self.assertNotIn(".knives-installer-joining-", calls, calls)
+
+        def config(key: str) -> list[str]:
+            return subprocess.run(
+                ["git", "--git-dir", str(git_dir), "config", "--get-all", key],
+                capture_output=True, text=True, env=self.env, check=False,
+            ).stdout.split()
+
+        self.assertEqual(config("remote.origin.url"), [LEDGER_URL], result.stdout + result.stderr)
+        self.assertEqual(config("knives.machine"), [MACHINE], result.stdout + result.stderr)
+        self.assertEqual(config("core.worktree"), [str(self.config / "ledger")], result.stdout + result.stderr)
+        self.assertEqual(config("core.bare"), ["false"], result.stdout + result.stderr)
 
     def test_two_spellings_of_one_ledger_make_one_git_directory(self) -> None:
         # Given: two forks naming the same ledger repository in different case,
