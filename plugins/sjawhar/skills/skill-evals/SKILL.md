@@ -1,6 +1,7 @@
 ---
 name: skill-evals
 description: "Use when changing skills, agent instructions, advisor prompts, or harness behavior and needing evidence that the change helps, before or after adopting it."
+disable-model-invocation: true
 ---
 
 # Skill evals
