@@ -17,7 +17,7 @@ A session's own memory of its work is the thing that fails, so a fresh agent rea
 ## How
 
 1. Start one fresh read-only subagent per transcript (on Oh My Pi: `task` with the default agent; it needs a shell
-   for `tq` and `dispatch read`). Read `references/audit-brief.md` when you write its task, and give it that brief
+   for `tq` and `dispatch read`). Read `assets/audit-brief.md` when you write its task, and give it that brief
    as the file says, with the session id, the window and a report path filled in.
 2. Read the report yourself. Open the FILE:LINE behind each DROPPED, MISSED-GOAL, UNSURFACED, WAITING-UNREPORTED and
    LOCAL-ONLY row before you act on it.
