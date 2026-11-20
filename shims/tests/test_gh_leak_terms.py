@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 
 from leak_terms_fixture import (ALLOWED_TEST_TOKENS, REGISTRY_TEST_TERMS, SCOPED_TEST_TERMS, TEST_TERMS,
@@ -45,6 +46,12 @@ YGO = "theorem-labs/ygo"
 YGO_LIST = "the knives ygo-fork list"
 # The one target of every raw GraphQL mutation (GH_GRAPHQL_TARGET): the check reads no mutation as going anywhere else.
 MUTATION = "a raw GraphQL mutation, which is read as public"
+# The documents of the tests that read a call as GraphQL or not by where gh sends it, each an `-f` value: a raw mutation
+# whose body spells the canary's first letter with a GraphQL `\u` escape, which GitHub decodes, so only a call read as
+# GraphQL is refused for it; and a query, a read, whose search holds the canary as written.
+ESCAPED_MUTATION = ('query=mutation { addComment(input: {subjectId: "I_1", body: "see \\u%04x%s"}) '
+                    '{ clientMutationId } }' % (ord(CANARY[0]), CANARY[1:]))
+SEARCH_QUERY = 'query=query { search(query: "see %s", type: ISSUE, first: 1) { issueCount } }' % CANARY
 # The variables that make a shim read its caller as an agent (shims/AGENTS.md, "Who is an agent").
 AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION", "CLAUDECODE",
                  "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "SSH_CONNECTION", "SSH_TTY")
@@ -924,42 +931,50 @@ class GhLeakTerms(unittest.TestCase):
             self.setUp_calls()
             self.assert_sent(self.run_gh(argv), argv)
 
-    def test_a_call_whose_branch_gh_cannot_fill_is_passed_since_gh_sends_nothing(self) -> None:
-        # gh 2.98.0 refuses a call whose `{branch}` or `:branch` it cannot fill before it sends anything (measured:
-        # exit 1, and no request): with GH_REPO set, on a detached HEAD, as a jj checkout that shares its git directory
-        # usually has, and outside a git repository. The check passes such a call whatever else it holds, here a body
-        # with a listed term to a public repository.
+    def branches_gh_cannot_fill(self) -> list[tuple[str, Callable[[], dict[str, str]]]]:
+        """(name, make) for each checkout in which gh 2.98.0 cannot fill `{branch}` or `:branch`, and refuses the call
+        before it sends anything (measured: exit 1, and no request): with GH_REPO set, on a detached HEAD, as a jj
+        checkout that shares its git directory usually has, and outside a git repository. MAKE makes the work directory
+        that checkout, checks that git names a current branch only in the one with GH_REPO set, and returns the
+        environment to run gh in."""
         git = ["git", "-C", str(self.work)]
+
+        def made(env: dict[str, str], named: bool) -> dict[str, str]:
+            current = subprocess.run([*git, "symbolic-ref", "--quiet", "HEAD"], env=env, capture_output=True,
+                                     check=False)
+            self.assertEqual(current.returncode == 0, named, current)
+            return env
 
         def gh_repo() -> dict[str, str]:
             self.on_branch()
-            return {**self.env, "GH_REPO": PUBLIC}
+            return made({**self.env, "GH_REPO": PUBLIC}, True)
 
         def detached() -> dict[str, str]:
             self.on_branch()
             subprocess.run([*git, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
                             "commit", "-q", "--allow-empty", "-m", "x"], check=True, env=self.env)
             subprocess.run([*git, "checkout", "-q", "--detach"], check=True, env=self.env)
-            return self.env
+            return made(self.env, False)
 
         def no_repository() -> dict[str, str]:
             shutil.rmtree(self.work / ".git", ignore_errors=True)
-            return {**self.env, "GIT_CEILING_DIRECTORIES": str(self.tmp)}
+            return made({**self.env, "GIT_CEILING_DIRECTORIES": str(self.tmp)}, False)
 
+        return [("GH_REPO set", gh_repo), ("detached HEAD", detached), ("no git repository", no_repository)]
+
+    def test_a_call_whose_field_holds_a_branch_gh_cannot_fill_is_passed_since_gh_sends_nothing(self) -> None:
+        # gh 2.98.0 fills an -F value's `{branch}` or `:branch` before the endpoint (pkg/cmd/api/api.go apiRun:
+        # parseFields, then fillPlaceholders), and refuses a call whose branch it cannot fill before it sends anything
+        # (branches_gh_cannot_fill). The check passes a call with such a value whatever else it holds, here a body with
+        # a listed term to a public repository. A call whose endpoint alone holds the branch is read as GraphQL instead
+        # (test_an_endpoint_the_check_cannot_fill_for_certain_is_read_as_graphql).
         field = ["api", f"repos/{PUBLIC}/issues", "-F", "title={branch}", "-f", f"body={TEXT}"]
-        endpoint = ["api", "-X", "POST", f"repos/{PUBLIC}/branches/:branch/rename", "-f", f"new_name={TEXT}"]
         raw = ["api", f"repos/{PUBLIC}/issues", "-f", "title={branch}", "-f", f"body={TEXT}"]
-        for condition, make, has_branch in (("GH_REPO set", gh_repo, True), ("detached HEAD", detached, False),
-                                            ("no git repository", no_repository, False)):
-            for form, argv in (("-F title={branch}", field), (":branch in the endpoint", endpoint)):
-                with self.subTest(condition=condition, form=form):
-                    env = make()
-                    # The checkout is as named: git names a current branch only in the one with GH_REPO set.
-                    current = subprocess.run([*git, "symbolic-ref", "--quiet", "HEAD"], env=env, capture_output=True,
-                                             check=False)
-                    self.assertEqual(current.returncode == 0, has_branch, current)
-                    self.setUp_calls()
-                    self.assert_sent(self.run_gh(argv, env=env), argv)
+        for condition, make in self.branches_gh_cannot_fill():
+            with self.subTest(condition=condition, form="-F title={branch}"):
+                env = make()
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(field, env=env), field)
             # Control: -f sends `{branch}` as written, so gh sends the call, and its body is read.
             with self.subTest(condition=condition, control="-f title={branch}"):
                 env = make()
@@ -1183,61 +1198,30 @@ class GhLeakTerms(unittest.TestCase):
             for advice in (contents, remove):
                 self.assertIn(advice, refused.stderr.decode())
 
-    def test_a_call_gh_sends_to_github_s_graphql_api_is_graphql_however_its_endpoint_is_spelled(self) -> None:
-        # gh 2.98.0 resolves a `gh api` endpoint into an address (pkg/cmd/api/http.go): one holding `://` is the address
-        # itself, and any other a path on api.github.com with one leading `/` dropped. GitHub ran each spelling below as
-        # GraphQL, its path `/graphql` once the query string and the fragment are left out (measured 2026-11-19 with
-        # `query { viewer { login } }`, GH_GRAPHQL_PATH), so a mutation there is read as public, with a GraphQL
-        # string's `\u` escape read as the letter GitHub decodes, and a query is a read. Until review round 6 of
-        # dispatch://INFRA-3365 only `graphql` was GraphQL, and a mutation to any other spelling was read as a REST
-        # body, as written, so a term spelled with an escape went out.
-        escaped = "\\u%04x%s" % (ord(CANARY[0]), CANARY[1:])
-        mutation = ('query=mutation { addComment(input: {subjectId: "I_1", body: "see %s"}) { clientMutationId } }'
-                    % escaped)
-        query = 'query=query { search(query: "see %s", type: ISSUE, first: 1) { issueCount } }' % CANARY
-        for spelling in (["graphql"], ["/graphql"], ["graphql?"], ["graphql?x=1"], ["graphql#x"], ["/graphql?x=1#y"],
-                         ["https://api.github.com/graphql?x=1"], ["https://api.github.com/graphql#x"],
-                         ["https://API.GITHUB.COM/graphql"], ["HTTPS://api.github.com/graphql"],
-                         ["GRAPHQL"], ["Graphql"],
-                         ["--hostname", "github.com", "graphql"]):
-            with self.subTest(endpoint=" ".join(spelling), document="a mutation"):
-                self.setUp_calls()
-                refused = self.run_gh(["api", *spelling, "-f", mutation])
-                self.assert_refused(refused, "--raw-field query string 2", CANARY, line=1)
-                self.assertIn(f"to {MUTATION}:", refused.stderr.decode())
-            with self.subTest(endpoint=" ".join(spelling), document="a query"):
-                argv = ["api", *spelling, "-f", query]
-                self.setUp_calls()
-                self.assert_sent(self.run_gh(argv), argv)
-        # GitHub answered 502 to `GRAPHQL` and `Graphql`, which are read as GraphQL all the same, erring toward refusing.
-        # Controls: GitHub answered 404 to `graphql/` and `//graphql` and 400 to
-        # `https://uploads.github.com/graphql`, so none is GraphQL: a query there is read as a REST body, as written,
-        # and its term is refused, for an endpoint that names no repository. Until review round 6 the address on
-        # uploads.github.com was read as GraphQL, as `graphql` on github.com.
-        for spelling in ("graphql/", "//graphql", "https://uploads.github.com/graphql"):
-            with self.subTest(endpoint=spelling, control="not GraphQL"):
-                self.setUp_calls()
-                refused = self.run_gh(["api", spelling, "-f", query])
-                self.assert_refused(refused, "--raw-field query", CANARY, line=1)
-                self.assertIn("to no repository, read as public:", refused.stderr.decode())
-
-    def test_a_graphql_call_is_graphql_on_any_host_once_gh_has_filled_its_endpoint(self) -> None:
-        # gh 2.98.0 fills the endpoint's placeholders first (pkg/cmd/api/api.go apiRun), then sends `graphql` to the
-        # GraphQL API of the host --hostname, GH_HOST or its default names, whatever host (pkg/cmd/api/http.go
-        # httpRequest, internal/ghinstance GraphQLEndpoint): `https://HOST/api/graphql` for an Enterprise host,
-        # garage.github.com and `github.com.`, which go-gh reads as an Enterprise host, and `https://api.HOST/graphql`
-        # for a GHE.com host. An address on an Enterprise host's GraphQL API is GraphQL too, and so are `{branch}` and
-        # `/{branch}` on a branch named graphql. So a mutation there is read as public, with a GraphQL string's `\u`
-        # escape read as the letter GitHub decodes, and a query is a read. Until review round 7 of
-        # dispatch://INFRA-3365 a call was GraphQL only on github.com, decided before gh fills the endpoint, and a
-        # mutation to each of these was read as a REST body, as written, so the escaped term went out.
-        escaped = "\\u%04x%s" % (ord(CANARY[0]), CANARY[1:])
-        mutation = ('query=mutation { addComment(input: {subjectId: "I_1", body: "see %s"}) { clientMutationId } }'
-                    % escaped)
-        query = 'query=query { search(query: "see %s", type: ISSUE, first: 1) { issueCount } }' % CANARY
+    def test_a_call_gh_sends_to_a_graphql_api_is_graphql_on_any_host_however_its_endpoint_is_spelled(self) -> None:
+        # gh 2.98.0 fills the endpoint's placeholders first (pkg/cmd/api/api.go apiRun), then resolves it into an
+        # address (pkg/cmd/api/http.go httpRequest): one holding `://` is the address itself, `graphql` the GraphQL API
+        # of the host --hostname, GH_HOST or gh's config names, whatever host (internal/ghinstance GraphQLEndpoint), and
+        # any other a path on that host's REST API, on api.github.com with one leading `/` dropped. GitHub ran each
+        # github.com spelling below as GraphQL, its path `/graphql` once the query string and the fragment are left out
+        # (measured 2026-11-19 with `query { viewer { login } }`; scripts/leak-terms-check, above gh_graphql_api). The
+        # GraphQL API of an Enterprise host, of garage.github.com and of `github.com.`, which go-gh reads as an
+        # Enterprise host, is `https://HOST/api/graphql`, and that of a GHE.com host `https://api.HOST/graphql`;
+        # `{branch}` and `/{branch}` on a branch named graphql are GraphQL too. So a mutation to each is read as public,
+        # with a GraphQL string's `\u` escape read as the letter GitHub decodes, and a query is a read. Until review
+        # round 6 of dispatch://INFRA-3365 only `graphql` was GraphQL, and until review round 7 only on github.com,
+        # decided before gh fills the endpoint: a mutation to any other spelling was read as a REST body, as written,
+        # so a term spelled with an escape went out.
         # The checkout is on a branch named graphql, for the `{branch}` rows.
         self.on_branch("graphql")
-        for spelling, extra in ((["--hostname", "ghe.example.com", "graphql"], {}),
+        for spelling, extra in ((["graphql"], {}), (["/graphql"], {}), (["graphql?"], {}), (["graphql?x=1"], {}),
+                                (["graphql#x"], {}), (["/graphql?x=1#y"], {}),
+                                (["https://api.github.com/graphql?x=1"], {}),
+                                (["https://api.github.com/graphql#x"], {}),
+                                (["https://API.GITHUB.COM/graphql"], {}), (["HTTPS://api.github.com/graphql"], {}),
+                                (["GRAPHQL"], {}), (["Graphql"], {}),
+                                (["--hostname", "github.com", "graphql"], {}),
+                                (["--hostname", "ghe.example.com", "graphql"], {}),
                                 (["graphql"], {"GH_HOST": "ghe.example.com"}),
                                 (["--hostname", "garage.github.com", "graphql"], {}),
                                 (["--hostname", "theorem.ghe.com", "graphql"], {}),
@@ -1249,16 +1233,30 @@ class GhLeakTerms(unittest.TestCase):
             env = {**self.env, **extra}
             with self.subTest(endpoint=name, document="a mutation"):
                 self.setUp_calls()
-                refused = self.run_gh(["api", *spelling, "-f", mutation], env=env)
+                refused = self.run_gh(["api", *spelling, "-f", ESCAPED_MUTATION], env=env)
                 self.assert_refused(refused, "--raw-field query string 2", CANARY, line=1)
                 self.assertIn(f"to {MUTATION}:", refused.stderr.decode())
             with self.subTest(endpoint=name, document="a query"):
-                argv = ["api", *spelling, "-f", query]
+                argv = ["api", *spelling, "-f", SEARCH_QUERY]
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv, env=env), argv)
-        # Controls: a REST endpoint on an Enterprise host, which gh sends under `https://HOST/api/v3/`, is no GraphQL
-        # API, so it is judged as before: a clean title goes out, and a listed term is refused for a repository on
-        # that host, read as public.
+        # GitHub answered 502 to `GRAPHQL` and `Graphql`, which are read as GraphQL all the same, erring toward refusing.
+        # Controls: GitHub answered 404 to `graphql/` and `//graphql` and 400 to
+        # `https://uploads.github.com/graphql`, so none is GraphQL: a query there is read as a REST body, as written,
+        # and its term is refused, for an endpoint that names no repository. Until review round 6 the address on
+        # uploads.github.com was read as GraphQL, as `graphql` on github.com.
+        for spelling in ("graphql/", "//graphql", "https://uploads.github.com/graphql"):
+            with self.subTest(endpoint=spelling, control="not GraphQL"):
+                self.setUp_calls()
+                refused = self.run_gh(["api", spelling, "-f", SEARCH_QUERY])
+                self.assert_refused(refused, "--raw-field query", CANARY, line=1)
+                self.assertIn("to no repository, read as public:", refused.stderr.decode())
+
+    def test_a_rest_call_to_an_enterprise_host_is_judged_as_a_repository_on_that_host(self) -> None:
+        # A REST endpoint on an Enterprise host, which gh 2.98.0 sends under `https://HOST/api/v3/`, is no GraphQL API
+        # (test_a_call_gh_sends_to_a_graphql_api_is_graphql_on_any_host_however_its_endpoint_is_spelled), so it is
+        # judged as a REST call: a clean title goes out, and a listed term is refused for a repository on that host,
+        # read as public.
         rest = ["api", "--hostname", "ghe.example.com", "repos/o/r/issues"]
         with self.subTest(control="a clean REST call to ghe.example.com"):
             argv = [*rest, "-f", "title=t"]
@@ -1273,39 +1271,36 @@ class GhLeakTerms(unittest.TestCase):
     def test_an_endpoint_the_check_cannot_fill_for_certain_is_read_as_graphql(self) -> None:
         # Where the check cannot fill an endpoint's placeholder as gh does, it cannot tell whether gh sends the call to
         # a GraphQL API, so it reads the call as GraphQL, failing closed: a mutation is read whole, as public, and its
-        # escaped term is refused (dispatch://INFRA-3365, review round 7). On a detached HEAD git names no current
-        # branch, and gh 2.98.0 refuses to fill `{branch}` (test_a_call_whose_branch_gh_cannot_fill_is_passed_since_…),
-        # so a query there goes out. A base repository the check cannot read, as GH_REPO on another host is, may make
-        # the call a REST one instead, so a query there is judged as that REST call too, and its term is refused.
-        escaped = "\\u%04x%s" % (ord(CANARY[0]), CANARY[1:])
-        mutation = ('query=mutation { addComment(input: {subjectId: "I_1", body: "see %s"}) { clientMutationId } }'
-                    % escaped)
-        query = 'query=query { search(query: "see %s", type: ISSUE, first: 1) { issueCount } }' % CANARY
-        git = ["git", "-C", str(self.work)]
-        with self.subTest(condition="detached HEAD"):
-            self.on_branch("graphql")
-            subprocess.run([*git, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
-                            "commit", "-q", "--allow-empty", "-m", "x"], check=True, env=self.env)
-            subprocess.run([*git, "checkout", "-q", "--detach"], check=True, env=self.env)
-            self.assertNotEqual(subprocess.run([*git, "symbolic-ref", "--quiet", "HEAD"], env=self.env,
-                                               capture_output=True, check=False).returncode, 0)
-            self.setUp_calls()
-            refused = self.run_gh(["api", "{branch}", "-f", mutation])
-            self.assert_refused(refused, "--raw-field query string 2", CANARY, line=1)
-            self.assertIn(f"to {MUTATION}:", refused.stderr.decode())
-            # Control: a query to the same endpoint is a read, and goes out; gh then refuses to fill the branch.
-            argv = ["api", "{branch}", "-f", query]
-            self.setUp_calls()
-            self.assert_sent(self.run_gh(argv), argv)
+        # escaped term is refused (dispatch://INFRA-3365, review round 7), and a query is a read, which goes out. In
+        # each checkout of branches_gh_cannot_fill gh fills no branch, so neither can the check, in the endpoint's
+        # `{branch}` or `:branch`. gh then sends nothing, but the check passes only a call whose -F value holds the
+        # branch for that (test_a_call_whose_field_holds_a_branch_gh_cannot_fill_is_passed_since_gh_sends_nothing):
+        # a call whose endpoint alone holds it, here a REST route too, is read as GraphQL. A base repository the check
+        # cannot read, as GH_REPO on another host is, may make the call a REST one instead, so a query there is judged
+        # as that REST call too, and its term is refused.
+        checkouts = dict(self.branches_gh_cannot_fill())
+        rename = f"repos/{PUBLIC}/branches/:branch/rename"
+        for condition, endpoint in (("detached HEAD", "{branch}"), *((condition, rename) for condition in checkouts)):
+            with self.subTest(condition=condition, endpoint=endpoint, document="a mutation"):
+                env = checkouts[condition]()
+                self.setUp_calls()
+                refused = self.run_gh(["api", "-X", "POST", endpoint, "-f", ESCAPED_MUTATION], env=env)
+                self.assert_refused(refused, "--raw-field query string 2", CANARY, line=1)
+                self.assertIn(f"to {MUTATION}:", refused.stderr.decode())
+            with self.subTest(condition=condition, endpoint=endpoint, document="a query"):
+                env = checkouts[condition]()
+                argv = ["api", "-X", "POST", endpoint, "-f", SEARCH_QUERY]
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=env), argv)
         with self.subTest(condition="GH_REPO on another host"):
             env = {**self.env, "GH_REPO": "ghe.example.com/o/r"}
             endpoint = ["api", "repos/{owner}/{repo}/issues"]
             self.setUp_calls()
-            refused = self.run_gh([*endpoint, "-f", mutation], env=env)
+            refused = self.run_gh([*endpoint, "-f", ESCAPED_MUTATION], env=env)
             self.assert_refused(refused, "--raw-field query string 2", CANARY, line=1)
             self.assertIn(f"to {MUTATION}:", refused.stderr.decode())
             self.setUp_calls()
-            refused = self.run_gh([*endpoint, "-f", query], env=env)
+            refused = self.run_gh([*endpoint, "-f", SEARCH_QUERY], env=env)
             self.assert_refused(refused, "--raw-field query", CANARY, line=1)
             self.assertIn("filled in from GH_REPO, which could not be read, read as public", refused.stderr.decode())
 
@@ -1639,21 +1634,82 @@ class GhLeakTerms(unittest.TestCase):
         self.setUp_calls()
         self.assert_sent(self.run_gh(argv), argv)
 
-    def test_gh_api_goes_to_the_one_host_gh_s_hosts_yml_lists(self) -> None:
-        # With no --hostname and no GH_HOST, gh 2.98.0 sends a `gh api` call to the one host its hosts.yml lists when
-        # it lists exactly one, else to github.com (go-gh v2.13.0 pkg/auth/auth.go defaultHost), so a REST call goes
-        # to that host, read as public, whatever repository its path names (dispatch://INFRA-3365, review round 7).
-        hosts = self.tmp / "config" / "gh" / "hosts.yml"
-        hosts.parent.mkdir()
-        hosts.write_text("ghe.example.com:\n    git_protocol: https\n    user: x\n", encoding="utf-8")
-        argv = ["api", "-X", "POST", f"repos/{PRIVATE}/issues", "-f", f"title={TEXT}"]
-        refused = self.run_gh(argv)
-        self.assert_refused(refused, "--raw-field title")
-        self.assertIn("to a repository on ghe.example.com, read as public:", refused.stderr.decode())
-        # Control: with github.com listed too, gh takes github.com, where the repository is private.
-        hosts.write_text("github.com:\n    user: x\nghe.example.com:\n    user: x\n", encoding="utf-8")
-        self.setUp_calls()
-        self.assert_sent(self.run_gh(argv), argv)
+    # The private repository the rows below write to, from a checkout of it, as the tester's probe does.
+    AGENT_INFRA = "theorem-labs/agent-infra"
+
+    def gh_config(self, name: str, config: str, hosts: str | None) -> dict[str, str]:
+        """The environment with gh's configuration directory (GH_CONFIG_DIR) a new one, NAME, whose config.yml holds
+        CONFIG and whose hosts.yml holds HOSTS, with no hosts.yml for None."""
+        directory = self.tmp / "gh-config" / name
+        directory.mkdir(parents=True)
+        (directory / "config.yml").write_text(config, encoding="utf-8")
+        if hosts is not None:
+            (directory / "hosts.yml").write_text(hosts, encoding="utf-8")
+        return {**self.env, "GH_CONFIG_DIR": str(directory)}
+
+    def test_gh_api_goes_to_the_host_gh_s_config_names(self) -> None:
+        # With no --hostname and no GH_HOST, gh 2.98.0 sends a `gh api` call to the one host its config lists when it
+        # lists exactly one, else to github.com (go-gh v2.13.0 pkg/auth/auth.go defaultHost): the hosts of config.yml's
+        # `hosts:` key, which wins over hosts.yml (pkg/config/config.go load), else those of hosts.yml, each file read
+        # as YAML in whatever layout it has. The rows after the first are the tester's, each with the host gh 2.98.0
+        # went to, measured with fake tokens (dispatch://INFRA-3365, review round 8): a write with a listed term to a
+        # private repository, from a checkout of it, goes out where gh goes to github.com, and is refused as a
+        # repository on ghe.example.com, read as public, where gh goes there. Until review round 8 only the keys at
+        # column 0 of hosts.yml were read: five of the tester's rows went the other way, and the flow form's host was
+        # read as `{"ghe.example.com"`.
+        self.answer(self.AGENT_INFRA, "private")
+        self.remotes(("origin", self.AGENT_INFRA))
+        argv = ["api", f"repos/{self.AGENT_INFRA}/issues", "-f", "title=t", "-f", f"body={TEXT}"]
+        host = "    users:\n        x:\n            oauth_token: gho_fake\n    user: x\n    oauth_token: gho_fake\n"
+        ghe, github, version = "ghe.example.com:\n" + host, "github.com:\n" + host, 'version: "1"\n'
+
+        def indented(text: str, by: str) -> str:
+            return "".join(by + line for line in text.splitlines(keepends=True))
+
+        def hosts_key(entry: str) -> str:
+            return version + "hosts:\n" + indented(entry, "    ")
+
+        def flow(name: str) -> str:
+            # The check reads only the keys; a quoted token value would trip the push's secret scan.
+            return '{"%s": {"users": {"x": {}}, "user": "x", "git_protocol": "https"}}\n' % name
+
+        to_ghe, to_github = "ghe.example.com", "github.com"
+        for number, (row, config, hosts, to) in enumerate((
+                ("hosts.yml lists only ghe.example.com", version, ghe, to_ghe),
+                ("config.yml hosts: key lists only ghe.example.com, no hosts.yml", hosts_key(ghe), None, to_ghe),
+                ("hosts.yml indented two spaces, only ghe.example.com", version, indented(ghe, "  "), to_ghe),
+                ("hosts.yml after a --- document start, only ghe.example.com", version, "---\n" + ghe, to_ghe),
+                ("hosts.yml with the host quoted, only ghe.example.com", version, '"ghe.example.com":\n' + host,
+                 to_ghe),
+                ("hosts.yml in YAML flow form, only ghe.example.com", version, flow("ghe.example.com"), to_ghe),
+                ("config.yml hosts: ghe.example.com, hosts.yml github.com", hosts_key(ghe), github, to_ghe),
+                ("hosts.yml lists github.com and ghe.example.com", version, github + ghe, to_github),
+                ("hosts.yml lists github.com only", version, github, to_github),
+                ("hosts.yml in YAML flow form, github.com only", version, flow("github.com"), to_github),
+                ("hosts.yml after a --- document start, github.com only", version, "---\n" + github, to_github),
+                ("config.yml hosts: github.com, hosts.yml ghe.example.com", hosts_key(github), ghe, to_github))):
+            with self.subTest(row=row, gh_goes_to=to):
+                env = self.gh_config(f"row-{number}", config, hosts)
+                self.setUp_calls()
+                if to == "github.com":
+                    self.assert_sent(self.run_gh(argv, env=env), argv)
+                    continue
+                refused = self.run_gh(argv, env=env)
+                self.assert_refused(refused, "--raw-field body")
+                self.assertIn(f"to a repository on {to}, read as public:", refused.stderr.decode())
+        # Fail closed: where the check cannot be sure of the hosts gh reads, it reads the call as going to a host it
+        # cannot name, read as public, so the write is refused, also where gh goes to github.com: measured, gh reads
+        # only the first document of a hosts.yml, here github.com's, and goes to ghe.example.com past its anchor.
+        for number, (row, hosts) in enumerate((
+                ("hosts.yml lists github.com, then ghe.example.com in a second document", github + "---\n" + ghe),
+                ("hosts.yml lists only ghe.example.com, with an anchor", "ghe.example.com: &host\n" + host))):
+            with self.subTest(row=row, control="the check cannot be sure of the hosts"):
+                env = self.gh_config(f"unread-{number}", version, hosts)
+                self.setUp_calls()
+                refused = self.run_gh(argv, env=env)
+                self.assert_refused(refused, "--raw-field body")
+                self.assertIn("to a repository on a host the check cannot read in gh's config, read as public:",
+                              refused.stderr.decode())
 
     def test_a_repository_argument_on_another_host_is_read_as_public(self) -> None:
         # `repo edit HOST/OWNER/REPO` edits a repository on HOST, where gh sends the call, so it is read as public, as

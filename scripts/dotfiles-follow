@@ -1082,7 +1082,8 @@ def assess_jj_and_follow(
     if facts["fast_forwarded"]:
         log(f"moved colocated jj checkout {display} from {short(before)} to {short(head)}")
     # The registry render runs on every run at main; it writes the copy only when it is missing or
-    # not a plain file, or knives/repos.toml changed since the last render.
+    # not a plain file, or when knives/repos.toml, the oh-my-pi workspaces path or the render script
+    # changed since the last render (run_registry_step).
     run_registry_step(repo, options, found, judged, facts)
     if data.get("tools_ok_head") != head:
         run_tools_step(repo, options, state, deadline, head, found, judged, facts)
@@ -1226,8 +1227,9 @@ def assess_and_follow(
                 head = facts["head"]
 
     # At HEAD with nothing uncommitted: the registry render on every run (it writes the copy only
-    # when it is missing or not a plain file, or knives/repos.toml changed since the last render),
-    # then the tools step after a fast-forward, and again on each run until it passes at HEAD.
+    # when it is missing or not a plain file, or when knives/repos.toml, the oh-my-pi workspaces
+    # path or the render script changed since the last render), then the tools step after a
+    # fast-forward, and again on each run until it passes at HEAD.
     if head == target and "dirty" not in found:
         run_registry_step(repo, options, found, judged, facts)
         if facts["fast_forwarded"] or data.get("tools_ok_head") != head:
