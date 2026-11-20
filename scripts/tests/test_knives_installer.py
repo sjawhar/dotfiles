@@ -641,12 +641,13 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
 
         # Given: a new machine whose ledger git directory is as an older installer leaves it when
         # it stops after `git init --bare` on the final path: core.bare is true, and it has no
-        # work tree, no origin and no machine name. It holds a ledger commit under a ref of its
-        # own, which no sweep pushed, and a file that the test puts in it.
+        # work tree, no origin and no machine name. The test also puts a ref with a commit and a
+        # file in it, as a person who made the git directory by hand can. The installer cannot
+        # tell its own leftover from such a git directory, so it must keep what is there.
         (self.config / "state.json").unlink()
         git_dir.parent.mkdir(parents=True)
         subprocess.run(["git", "init", "--quiet", "--bare", str(git_dir)], check=True, env=self.env)
-        commit = git("commit-tree", git("mktree"), "-m", "a ledger commit that no sweep pushed")
+        commit = git("commit-tree", git("mktree"), "-m", "a commit that a person made by hand")
         git("update-ref", kept, commit)
         marker = git_dir / "installer-test-marker"
         marker.write_text("kept\n", encoding="utf-8")
@@ -656,15 +657,137 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
 
         # Then: it succeeds, and the installer did not replace the git directory: the ref holds
         # the same commit, and the file is there. The git directory now has the ledger as its
-        # one origin, core.bare false, the ledger root as its work tree, and one machine name.
+        # one origin, with the fetch refspec of `git remote add`, core.bare false, the ledger
+        # root as its work tree, and one machine name.
         output = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, output)
         self.assertEqual(git("rev-parse", kept), commit, output)
         self.assertEqual(marker.read_text(encoding="utf-8"), "kept\n", output)
         self.assertEqual(self.ledger_config("--get-all", "remote.origin.url"), [LEDGER_URL], output)
+        self.assertEqual(
+            self.ledger_config("--get-all", "remote.origin.fetch"), ["+refs/heads/*:refs/remotes/origin/*"], output
+        )
         self.assertEqual(self.ledger_config("core.bare"), ["false"], output)
         self.assertEqual(self.ledger_config("core.worktree"), [str(self.config / "ledger")], output)
         self.assertEqual(self.ledger_config("--get-all", "knives.machine"), [MACHINE], output)
+
+    def test_the_repair_of_a_git_directory_with_no_origin_writes_the_origin_last(self) -> None:
+        real_git = shutil.which("git", path="/usr/local/bin:/usr/bin:/bin")
+        self.assertIsNotNone(real_git, "needs git in /usr/local/bin, /usr/bin or /bin")
+        git_dir = self.ledger_git_dir()
+        log = self.root / "origin-first.log"
+
+        # Given: a new machine whose ledger git directory is as an older installer leaves it when
+        # it stops after `git init --bare` on the final path: it has no origin.
+        (self.config / "state.json").unlink()
+        git_dir.parent.mkdir(parents=True)
+        subprocess.run([real_git, "init", "--quiet", "--bare", str(git_dir)], check=True, env=self.env)
+        # A knives command that finds the origin uses the git directory as it is. A git stub first
+        # on PATH stands in for a knives command that runs at any moment of the install. Before
+        # each git call, when the git directory has an origin in its own config, the stub logs the
+        # call if core.bare is not false, or if core.worktree or knives.machine has no value.
+        write_executable(
+            self.root / "bin" / "git",
+            f'origin="$("{real_git}" --git-dir="{git_dir}" config --local remote.origin.url || true)"\n'
+            'if [ -n "$origin" ]; then\n'
+            f'    bare="$("{real_git}" --git-dir="{git_dir}" config --local core.bare || true)"\n'
+            f'    worktree="$("{real_git}" --git-dir="{git_dir}" config --local core.worktree || true)"\n'
+            f'    machine="$("{real_git}" --git-dir="{git_dir}" config --local knives.machine || true)"\n'
+            '    if [ "$bare" != false ] || [ -z "$worktree" ] || [ -z "$machine" ]; then\n'
+            f'        echo "before git $*: bare=$bare worktree=$worktree machine=$machine" >>"{log}"\n'
+            '    fi\n'
+            'fi\n'
+            f'exec "{real_git}" "$@"',
+        )
+
+        # When: the installer joins the machine.
+        result = self.install()
+
+        # Then: it succeeds, and the git directory has the ledger as its origin. At no git call
+        # did it have an origin without core.bare false, core.worktree and knives.machine.
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        origin_first = log.read_text(encoding="utf-8") if log.exists() else ""
+        self.assertEqual(origin_first, "", "the git directory had an origin before its other keys:\n" + origin_first)
+        self.assertEqual(self.ledger_config("--get-all", "remote.origin.url"), [LEDGER_URL], output)
+
+    def test_the_repair_of_a_git_directory_with_no_origin_keeps_its_work_tree(self) -> None:
+        git_dir = self.ledger_git_dir()
+        work_tree = self.root / "another-work-tree"
+
+        # Given: a new machine whose ledger git directory has core.bare false and no origin, and
+        # whose core.worktree names another directory, as a person who made the git directory by
+        # hand can set it.
+        (self.config / "state.json").unlink()
+        git_dir.parent.mkdir(parents=True)
+        work_tree.mkdir()
+        for args in (
+            ["init", "--quiet", "--bare", str(git_dir)],
+            [f"--git-dir={git_dir}", "config", "core.bare", "false"],
+            [f"--git-dir={git_dir}", "config", "core.worktree", str(work_tree)],
+        ):
+            subprocess.run(["git", *args], check=True, env=self.env)
+
+        # When: the installer joins the machine.
+        result = self.install()
+
+        # Then: it succeeds, and the git directory keeps that work tree. It has the ledger as its
+        # one origin.
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertEqual(self.ledger_config("--get-all", "core.worktree"), [str(work_tree)], output)
+        self.assertEqual(self.ledger_config("--get-all", "remote.origin.url"), [LEDGER_URL], output)
+
+    def test_a_git_directory_with_an_origin_and_no_machine_name_gets_one(self) -> None:
+        git_dir = self.ledger_git_dir()
+
+        # Given: a new machine whose ledger git directory has an origin and core.bare false, but
+        # no knives.machine. An older installer leaves it so when it stops after `git remote add`
+        # and before it writes knives.machine.
+        (self.config / "state.json").unlink()
+        git_dir.parent.mkdir(parents=True)
+        for args in (
+            ["init", "--quiet", "--bare", str(git_dir)],
+            [f"--git-dir={git_dir}", "config", "core.bare", "false"],
+            [f"--git-dir={git_dir}", "config", "core.worktree", str(self.config / "ledger")],
+            [f"--git-dir={git_dir}", "remote", "add", "origin", LEDGER_URL],
+        ):
+            subprocess.run(["git", *args], check=True, env=self.env)
+
+        # When: the installer joins the machine.
+        result = self.install()
+
+        # Then: it succeeds, and the git directory names this machine alone. It keeps its one
+        # origin and core.bare false.
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertEqual(self.ledger_config("--get-all", "knives.machine"), [MACHINE], output)
+        self.assertEqual(self.ledger_config("--get-all", "remote.origin.url"), [LEDGER_URL], output)
+        self.assertEqual(self.ledger_config("core.bare"), ["false"], output)
+
+    def test_a_directory_at_the_final_path_that_is_not_a_git_directory_stops_the_install(self) -> None:
+        git_dir = self.ledger_git_dir()
+        kept = git_dir / "a-file"
+
+        # Given: a new machine with a directory at the path of the ledger's git directory. It
+        # holds one ordinary file, so it is not empty, and git cannot read it as a git directory.
+        (self.config / "state.json").unlink()
+        git_dir.mkdir(parents=True)
+        kept.write_text("kept\n", encoding="utf-8")
+
+        # When: the installer joins the machine.
+        result = self.install()
+
+        # Then: it stops with exit 1. Its message names the directory and says what to do. The
+        # directory still holds the file, and only the file.
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn(
+            f"knives: git cannot read {git_dir} as a git directory. Move it away, then run this installer again.",
+            result.stderr, output,
+        )
+        self.assertEqual(kept.read_text(encoding="utf-8"), "kept\n", output)
+        self.assertEqual(sorted(p.name for p in git_dir.iterdir()), ["a-file"], output)
 
     def test_two_spellings_of_one_ledger_make_one_git_directory(self) -> None:
         # Given: two forks naming the same ledger repository in different case,

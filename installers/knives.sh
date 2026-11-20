@@ -102,21 +102,35 @@ ledgers="$(jq -r '[.repos[].ledger // empty] | unique | .[]' <<<"$repos_json")"
 # subshell exits. A killed install (SIGKILL) can leave it, and knives never
 # reads it.
 #
-# The loop repairs these states at the final path, which an earlier install
-# can leave:
+# knives reads knives.machine and the origin only from the git directory's
+# own config file: src/ledger_sweep/destinations.rs:221-227 in knives 5.0.0
+# reads them with `git config --local` (src/ledger_git/mod.rs:812-820). git
+# ignores a core.worktree in ~/.gitconfig. So the loop reads these keys with
+# `git config --local`, and a value in ~/.gitconfig does not count.
+#
+# The loop handles these states at the final path, which an earlier install
+# or a person can leave:
 #
 # - An empty directory. rmdir removes a directory only when it is empty.
 #   Then the loop builds the git directory as for an absent one.
-# - A git directory with no knives.machine. The loop gives it one.
+# - A git directory with no knives.machine. The loop gives it one. An older
+#   version of this installer can stop after it adds the origin and before
+#   it writes knives.machine.
 # - A git directory with no origin. An older version of this installer made
 #   the git directory in place, one key at a time, and that install can stop
-#   between two keys. That git directory can hold ledger commits that a
-#   sweep of knives 3.2.x could not push, so the loop never deletes or
-#   replaces it. The loop sets core.bare, core.worktree and the origin as
-#   knives does. It writes the origin last, after knives.machine. So a
-#   knives command that finds the origin also finds the other three keys.
+#   between two keys. The loop cannot tell that leftover from a git
+#   directory that a person made by hand. So the loop never deletes or
+#   replaces the git directory, and it keeps each key that has a value,
+#   except core.bare. It sets core.bare to false, as knives does, because
+#   `git init --bare` sets it to true. It writes core.worktree only when the
+#   key has no value. It adds the origin last, with `git remote add` as
+#   knives does, so the fetch refspec is there too. So a knives command that
+#   finds the origin also finds core.bare false, core.worktree and
+#   knives.machine.
+# - A directory that git cannot read as a git directory. The install stops
+#   and says to move the directory away.
 #
-# A git directory whose origin is another repository stays as it is, and
+# A git directory whose origin is another repository keeps that origin, and
 # knives reports it. A file at the final path stops the install.
 #
 # The subshell holds the lock file open on fd 9. So the lock ends with the
@@ -150,12 +164,17 @@ ledgers="$(jq -r '[.repos[].ledger // empty] | unique | .[]' <<<"$repos_json")"
                 fi
             )
         fi
-        git --git-dir="$git_dir" config knives.machine >/dev/null ||
+        if ! why="$(git --git-dir="$git_dir" rev-parse --git-dir 2>&1)"; then
+            echo "knives: git cannot read $git_dir as a git directory. Move it away, then run this installer again. git says: $why" >&2
+            exit 1
+        fi
+        git --git-dir="$git_dir" config --local knives.machine >/dev/null ||
             git --git-dir="$git_dir" config knives.machine "$machine"
-        if ! git --git-dir="$git_dir" config remote.origin.url >/dev/null; then
+        if ! git --git-dir="$git_dir" config --local remote.origin.url >/dev/null; then
             git --git-dir="$git_dir" config core.bare false
-            git --git-dir="$git_dir" config core.worktree "$ledger_root"
-            git --git-dir="$git_dir" config remote.origin.url "https://github.com/$ledger"
+            git --git-dir="$git_dir" config --local core.worktree >/dev/null ||
+                git --git-dir="$git_dir" config core.worktree "$ledger_root"
+            git --git-dir="$git_dir" remote add origin "https://github.com/$ledger"
         fi
     done <<<"$ledgers"
 ) 9>"$repositories.lock"
