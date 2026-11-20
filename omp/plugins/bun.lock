@@ -6,7 +6,7 @@
       "name": "omp-plugins",
       "dependencies": {
         "@bopstack/pi-codegraph": "^0.1.1",
-        "@sjawhar/opencode-knives": "github:sjawhar/knives#v5.0.0",
+        "@sjawhar/opencode-knives": "github:sjawhar/knives#v5.1.0",
         "@sjawhar/pi-envoy": "17.39.0",
         "@sjawhar/pi-legion": "18.52.2",
         "ctx-memory": "github:sjawhar/ctx-memory#v0.2.9",
@@ -152,7 +152,7 @@
 
     "@silvia-odwyer/photon-node": ["@silvia-odwyer/photon-node@0.3.4", "", {}, "sha512-bnly4BKB3KDTFxrUIcgCLbaeVVS8lrAkri1pEzskpmxu9MdfGQTy8b8EgcD83ywD3RPMsIulY8xJH5Awa+t9fA=="],
 
-    "@sjawhar/opencode-knives": ["@sjawhar/opencode-knives@github:sjawhar/knives#f0077db", {}, "sjawhar-knives-f0077db", "sha512-VnnZRPRjRXPaHghoasQPkzXJDst4UevemABUjJzCbnJNeNAq9HcDMPH/sF7T2UDCUJaF3pihH3/YTYmG4WHIkg=="],
+    "@sjawhar/opencode-knives": ["@sjawhar/opencode-knives@github:sjawhar/knives#f6a1ef9", {}, "sjawhar-knives-f6a1ef9", "sha512-+JU3rz9wxL5ckI1lQFNAYFh1W/y+/IlkDkHS8wsXSpsGLkZ9tlrX5Zk2WfL/52UiSTS7tBnTpeBZvzb/eJf/RA=="],
 
     "@sjawhar/pi-envoy": ["@sjawhar/pi-envoy@17.39.0", "", {}, "sha512-io2+AhQVZ8ln/EE9/NG4u5Fr8YhJxWiN4aZ1JMc0HxjHEIjfGUhCMQZWDMXfYnI9x39jOI4lNb9xdSwSzwCRjA=="],
 
