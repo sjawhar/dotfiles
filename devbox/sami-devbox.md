@@ -56,7 +56,30 @@ does not post to `#fleet-alerts`, and resumes the CronJob after 35 minutes. Run 
 twin monitor whose title starts with `DRILL`, which posts there for real. A pass needs the
 twin's Alert, its Datadog event (status error, `_dd.has_notification` true), and its post in
 the channel. Before agent-infra #1464 a silent responder showed No Data, not Alert, and paged
-nobody (the drills of 2026-11-02 17:37Z and 19:16Z).
+nobody (the drills of 2026-11-02 17:37Z and 19:16Z). The drill runs as the box's account, so it
+stops working once the box's clients act as dev-box@theorem-agent-infra
+(`installers/agent-identity.sh`), which holds no patch on `cronjobs/box-monitor`.
+
+## The account its clients act as
+
+The VM runs as `dev-sjawhar@theorem-agent-infra` until its account changes, which Google allows
+only while the VM is stopped. The metadata relay (`scripts/agentbox-gce-metadata-relay`) lets every
+client act as `dev-box@theorem-agent-infra` before that, with no stop: while
+`~/.config/agent-identity/account` names `dev-box@`, the relay answers every token, identity-token
+and email request as `dev-box@`, minted through IAM Credentials on the VM's own token. Without
+that file the relay passes everything through, so nothing changes until the switch.
+
+- The switch: `bash ~/.dotfiles/installers/agent-identity.sh dev-box@theorem-agent-infra.iam.gserviceaccount.com`.
+  It writes the file, runs the host's relay (`devbox/agent-identity-relay.service`, 127.0.0.1:8170),
+  restarts the box relay `agentbox-imds`, points the host's units, shells (`.bashrc`) and tmux at the
+  host's relay, and runs `installers/gcloud-box.sh` and `installers/gcloud-boxid.sh` again, so the
+  configuration `box` names `dev-box@`. Each running unit, shell and session keeps its old
+  environment until it restarts.
+- The revert: the same command with `dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com`.
+- The switch refuses, and changes nothing, while the relay cannot mint `dev-box@`'s token: until
+  `dev-sjawhar@` holds Token Creator on `dev-box@`, its message names IAM Credentials' refusal. A run
+  that fails later puts the previous switch back.
+- Before the switch, `sami-devbox-check` fails every line that names the box's account, and `infra-applier closed`.
 
 ## The secret files (step 2's copy)
 
@@ -96,7 +119,12 @@ Host half (`sami-devbox-check`, on sami-devbox as sami):
 | --- | --- | --- |
 | host | `hostname -s`, `id -u` | `sami-devbox`, `1000` |
 | tailnet | `tailscale status --self --json` | HostName `sami-devbox`, no tags, owner `sami@theorem.dev` |
-| attached account | metadata `service-accounts/default/email` | `dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com` |
+| metadata account | `service-accounts/default/email` from `$GCE_METADATA_HOST`, the host's relay (`installers/agent-identity.sh`) | `dev-box@theorem-agent-infra.iam.gserviceaccount.com`; before the switch the relay passes the VM's own account through, and this line fails |
+| attached account | the same path from `169.254.169.254` itself | a note: `dev-sjawhar@` until the VM's account changes at a stop |
+| infra-applier closed | the box's token, on curl's stdin, to `testIamPermissions` on `infra-applier@theorem-agent-infra` for `iam.serviceAccounts.getAccessToken` (the box half runs these four lines too) | no permission in the answer, and no error |
+| no envoy secrets | `kubectl --context gke_theorem-agent-infra_us-west1_dispatch -n envoy auth can-i get secrets` | `no` |
+| no envoy exec | `kubectl … -n envoy auth can-i create pods/exec` | `no` |
+| sessions | `theorem-session list` (built from agent-infra `sessions/`) | exit 0 |
 | no credential file | `~/.config/gcloud/box_credential_config.json`, `$GOOGLE_APPLICATION_CREDENTIALS` | neither exists |
 | disks | `findmnt`, `stat` | `/mnt/nvme` = `google-state` xfs, `/mnt/durable` = `google-cold` xfs, `/home`, `/theorem`, `/theorem-ext4`, `/theorem-xfs` = `/mnt/nvme/<name>`, `/mnt/scratch` on `/dev/md*`, swap `/mnt/scratch/swapfile`; `/tmp`, `/var/tmp` = `/mnt/scratch/tmp`, `/mnt/scratch/var-tmp` (a WAIT until the next planned reset) |
 | nofile | `systemctl show tailscaled ssh -p LimitNOFILESoft -p ExecMainStartTimestamp`; `stat` of each `60-nofile.conf` | both units `65536`, and each started after its drop-in (tailscaled: a WAIT until it restarts, at the next planned reset). Not `/proc/<tailscaled>/limits`: Go raises its own soft limit to the hard one and gives its children the one it started with |
@@ -118,23 +146,25 @@ Box half (`agentbox new --dir /mnt/nvme/sami/cutover --dir /mnt/nvme/sami/boxid 
 
 | Check | Command | Passes when |
 | --- | --- | --- |
-| Google Cloud | `gcloud auth list --filter=status:ACTIVE`; tokeninfo of `gcloud auth print-access-token` | both name dev-sjawhar@ |
+| metadata account | as on the host, from the box relay | dev-box@ |
+| Google Cloud | `gcloud auth list --filter=status:ACTIVE`; tokeninfo of `gcloud auth print-access-token` | both name dev-box@ |
 | build pool | `kubectl --context gke_theorem-agent-infra_us-west1_dispatch -n builds auth can-i create jobs` | `yes` |
-| boxid paths | `CLOUDSDK_CONFIG=/mnt/nvme/sami/boxid/gcloud-box gcloud auth print-access-token` to tokeninfo; `kubectl --kubeconfig /mnt/nvme/sami/boxid/infra-kubeconfig get namespaces` (`installers/gcloud-boxid.sh`; the paths sami-rocqperf's scripts name) | dev-sjawhar@; `namespace/builds` listed |
+| grade pool | `kubectl --context gke_theorem-agent-infra_us-west1-b_grade-us-west1 -n grade auth can-i create jobs` | `no`: a Legion pod submits grade Jobs as `grade-submit@` (the move census of INFRA-1433, row U15) |
+| boxid paths | `CLOUDSDK_CONFIG=/mnt/nvme/sami/boxid/gcloud-box gcloud auth print-access-token` to tokeninfo; `kubectl --kubeconfig /mnt/nvme/sami/boxid/infra-kubeconfig -n builds auth can-i create jobs` (`installers/gcloud-boxid.sh`; the paths sami-rocqperf's scripts name) | dev-box@; `yes` |
 | secrets broker | `$AGENT_SECRETS_KEY_DIR/enrollment`; `https://secrets.tail12ec1c.ts.net/healthz` | an enrollment id; 200 |
 | secrets, agent tier | `secrets CERAMIC_API_KEY -- …` | a non-empty value |
 | Envoy | `envoy ps --json`; tcp `envoy-hub.tail12ec1c.ts.net:4222` | answers; connects |
 | Dispatch | `dispatch read --issue INFRA-993` | `Title: sami-devbox…` |
 | MLflow | `http://mlflow.tail12ec1c.ts.net/health` | `OK` |
-| model gateway | the `email` of `scripts/gateway-token`'s output; `/v1/models` with it | dev-sjawhar@; 200 |
+| model gateway | the `email` of `scripts/gateway-token`'s output; `/v1/models` with it | dev-box@; 200 |
 | openai through the gateway | `omp -p "say ok" --model @slow`, and `--model model-gateway/openai/gpt-6-astra:xhigh` | each answers `ok` (a fail prints `Use /login` or an HTTP 4xx) |
-| Azure | `az account show` | user type `servicePrincipal` |
+| Azure | `az-reader account show` (an Azure read, as the Azure `legion-reader`; agent-azure no longer signs in from this box, census row D10) | user type `servicePrincipal` |
 | GitHub | the same two `git ls-remote` with the box's routing include | a sha for each |
 | N6 tools | each of `bin/ossv-{n6-farm,n6-shards,n6-pod,job,job-farm}` and `notes/{ossv-n6-peaks.tsv,ossv-n6.md,ossv-job.md}` in the live tree `~/src/oss-verifier` (the host half runs this line too) | each a readable file, not empty |
 | N6 repository | `git -C ~/src/oss-verify-proofs-internal rev-parse --is-shallow-repository`, `config remote.origin.promisor`, `extensions.partialclone`; `git archive HEAD \| tar -t \| head -100` | `false`, unset, unset; 100 entries |
-| N6 signers | for `build-io-signer@` and `ossv-runs-signer@`: `gcloud auth print-access-token --impersonate-service-account=<sa>`; `gcloud iam service-accounts sign-blob --iam-account=<sa>` | a token; a signature |
-| N6 buckets | `gcloud storage cat -r 0-63` of one object under the newest `out/ossv/` prefix of `gs://theorem-build-io` and of `gs://theorem-ossv-runs` | bytes from each |
-| N6 farm namespace | `kubectl --context gke_theorem-agent-infra_us-west1_dispatch -n builds-ossv auth can-i create jobs` | `yes` |
+| N6 signers | for each of `build-io-signer@` and `ossv-runs-signer@`: `gcloud auth print-access-token --impersonate-service-account=<sa>`; `gcloud iam service-accounts sign-blob --iam-account=<sa>` | `build-io-signer@`: a token and a signature, through dev-box@'s Token Creator on that one account (the exception of census row U23). `ossv-runs-signer@`: both refused (`PERMISSION_DENIED`), since the farm's pods sign its URLs (U05). A failure that is not a refusal fails the line |
+| N6 buckets | `gcloud storage cat -r 0-63` of one object under the newest `out/ossv/` prefix of `gs://theorem-build-io`; `gcloud storage ls gs://theorem-ossv-runs/out/ossv/` | bytes from the first; the second refused (403), since the farm's pods write it (U05) |
+| N6 farm namespace | `kubectl --context gke_theorem-agent-infra_us-west1_dispatch -n builds-ossv auth can-i create jobs` | `no`: the farm's pods submit (U05) |
 | N6 release asset | `gh release download --repo theorem-labs/oss-verify-proofs-internal <newest published tag> -p <its smallest asset>` through `shims/gh` as an agent call | the asset's size |
 | N6 disk-gate | `disk-gate status`; `disk-gate reserve 1 <name>`, `status`, `release <name>` | a floor of at least 2.25% of `/mnt/nvme` (369 GiB of 16,383); granted, listed, released |
 | N6 box paths (box only) | `findmnt --target` of `/mnt/nvme/sami/ossv-n6` and `~/.cache/ossv-n6-runs` | each a bind from the host (`scripts/agentbox`, `agentbox/mounts`) |

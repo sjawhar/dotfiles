@@ -155,9 +155,9 @@ class GatewayToken(unittest.TestCase):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
     def test_a_google_vm_prints_its_own_identity_and_impersonates_nobody(self) -> None:
-        """sami-devbox: dev-sjawhar@ is a gateway account of its own (agent-infra
-        model-gateway/vm/ossv_box_accounts.py, team `box`), so the box needs no impersonation and
-        IAM Credentials is never asked."""
+        """sami-devbox: the account its metadata server serves is a gateway account of its own (agent-infra
+        model-gateway/vm/ossv_box_accounts.py, team `box`), so the box needs no impersonation and IAM Credentials is
+        never asked."""
         result = self.run_token()
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -172,6 +172,17 @@ class GatewayToken(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([r["url"] for r in self.requests()], [PROBE, EMAIL, IDENTITY])
+
+    def test_behind_the_relay_the_served_account_is_asked_for_its_own_token(self) -> None:
+        """After the switch the metadata server a session reads is the box's relay, which serves dev-box@
+        (installers/agent-identity.sh). gateway-token asks it for dev-box@'s identity token, by default or by name, and
+        mints nothing through IAM Credentials itself: the relay does the minting."""
+        for args in ((), (DEV_BOX,)):
+            with self.subTest(args=args):
+                self.log.unlink(missing_ok=True)
+                result = self.run_token(*args, STUB_GCE_EMAIL=DEV_BOX)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual([r["url"] for r in self.requests()], [PROBE, EMAIL, IDENTITY])
 
     def test_a_google_vm_acts_as_another_account_by_generate_id_token(self) -> None:
         result = self.run_token(DEV_BOX)

@@ -5,9 +5,10 @@
 # (2026-10-30), and a cold `gcloud auth print-access-token` call costs ~2.5 s unloaded.
 #
 # It backs the `google-vertex` provider in omp/models.local.yml: Vertex AI takes a
-# bearer token of the box's keyless identity (Azure WIF -> impersonation of
-# dev-sjawhar@theorem-agent-infra), so nothing here is key material and the cache
-# holds only a token that expires by itself.
+# bearer token of the box's keyless identity (on sami-devbox, the account the
+# metadata relay serves: dev-box@theorem-agent-infra once installers/agent-identity.sh
+# switches the host to it, the VM's own dev-sjawhar@ before), so nothing here is key
+# material and the cache holds only a token that expires by itself.
 #
 # Google's access tokens are opaque, not JWTs, so freshness comes from the cache
 # file's age and not from a claim inside it: a mint lives 3600 s and the cache is
