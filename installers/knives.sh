@@ -80,21 +80,14 @@ jq -e '.repos | type == "array"' <<<"$repos_json" >/dev/null 2>&1 || {
 }
 ledgers="$(jq -r '[.repos[].ledger // empty] | unique | .[]' <<<"$repos_json")"
 
-# Two installs at once on one machine can write to one git config at once:
-# knives.machine, or the keys of a repair below. git does not wait for its
-# config lock, so one of the two writes can fail. To prevent this, the loop
-# runs under a lock on ledger-repositories.lock, and a second install waits
-# for the first. knives locks migrate and the sweep itself.
-#
-# The lock does not cover knives itself. knives 5.0.0 and later joins a
-# ledger that no git directory here reaches, and a knives command can run at
-# any time during this loop. knives reads each directory in
-# ledger-repositories as a git directory. When it finds one with no origin,
-# it does not join the ledger, and the command fails. So the loop builds the
-# git directory whole in a scratch directory and moves it into
-# ledger-repositories, as knives itself does. A knives command never sees a
-# directory that the loop built only in part. Of two renames to one final
-# path at once, only one can succeed. When a knives command or another
+# knives 5.0.0 and later joins a ledger that no git directory here reaches,
+# and a knives command can run at any time during this loop. knives reads
+# each directory in ledger-repositories as a git directory. When it finds one
+# with no origin, it does not join the ledger, and the command fails. So the
+# loop builds the git directory whole in a scratch directory and moves it
+# into ledger-repositories, as knives itself does. A knives command never
+# sees a directory that the loop built only in part. Of two renames to one
+# final path at once, only one can succeed. When a knives command or another
 # install put its git directory there first, the loop keeps that directory.
 #
 # The scratch directory is in ~/.config/knives, beside ledger-repositories,
@@ -102,17 +95,9 @@ ledgers="$(jq -r '[.repos[].ledger // empty] | unique | .[]' <<<"$repos_json")"
 # subshell exits. A killed install (SIGKILL) can leave it, and knives never
 # reads it.
 #
-# knives reads knives.machine and the origin only from the git directory's
-# own config file: src/ledger_sweep/destinations.rs:221-227 in knives 5.0.0
-# reads them with `git config --local` (src/ledger_git/mod.rs:812-820). git
-# ignores a core.worktree in ~/.gitconfig. So the loop reads these keys with
-# `git config --local`, and a value in ~/.gitconfig does not count.
+# The loop handles these states of a git directory at the final path, which
+# an earlier install or a person can leave:
 #
-# The loop handles these states at the final path, which an earlier install
-# or a person can leave:
-#
-# - An empty directory. rmdir removes a directory only when it is empty.
-#   Then the loop builds the git directory as for an absent one.
 # - A git directory with no knives.machine. The loop gives it one. An older
 #   version of this installer can stop after it adds the origin and before
 #   it writes knives.machine.
@@ -122,62 +107,50 @@ ledgers="$(jq -r '[.repos[].ledger // empty] | unique | .[]' <<<"$repos_json")"
 #   directory that a person made by hand. So the loop never deletes or
 #   replaces the git directory, and it keeps each key that has a value,
 #   except core.bare. It sets core.bare to false, as knives does, because
-#   `git init --bare` sets it to true. It writes core.worktree only when the
-#   key has no value. It adds the origin last, with `git remote add` as
-#   knives does, so the fetch refspec is there too. So a knives command that
-#   finds the origin also finds core.bare false, core.worktree and
-#   knives.machine.
-# - A directory that git cannot read as a git directory. The install stops
-#   and says to move the directory away.
+#   `git init --bare` sets it to true. It writes core.worktree only when
+#   `git config` reads no value for it. It adds the origin last, with
+#   `git remote add` as knives does, so the fetch refspec is there too. So
+#   once the loop adds the origin, `git config` also reads core.bare false
+#   and a value for core.worktree and for knives.machine.
 #
 # A git directory whose origin is another repository keeps that origin, and
-# knives reports it. A file at the final path stops the install.
-#
-# The subshell holds the lock file open on fd 9. So the lock ends with the
-# loop, and the shell that sources this file keeps no extra fd. macOS has no
-# flock by default: where flock is absent, the loop runs with no lock.
-(
-    if command -v flock >/dev/null; then flock 9; fi
-    while IFS= read -r ledger; do
-        [[ -n "$ledger" ]] || continue
-        git_dir="$repositories/${ledger//\//--}.git"
-        rmdir -- "$git_dir" 2>/dev/null || true
-        if [[ ! -d "$git_dir" ]]; then
-            echo "knives: joining the ledger at $ledger"
-            (
-                scratch="$(mktemp -d "$HOME/.config/knives/.knives-installer-joining-XXXXXX")"
-                trap 'rm -rf -- "$scratch"' EXIT
-                made="$scratch/${git_dir##*/}"
-                git init --quiet --bare "$made"
-                git --git-dir="$made" config core.bare false
-                git --git-dir="$made" config core.worktree "$ledger_root"
-                git --git-dir="$made" remote add origin "https://github.com/$ledger"
-                git --git-dir="$made" config knives.machine "$machine"
-                # The target is ledger-repositories, not the final path. When a directory is at the
-                # final path, `mv "$made" "$git_dir"` moves the source into that directory and exits 0.
-                # With ledger-repositories as the target, mv renames the source to the final path,
-                # and the rename fails when a directory that is not empty is there. Then another
-                # process made that directory first. The loop keeps it and does not show mv's error.
-                if ! moved="$(mv "$made" "$repositories/" 2>&1)" && [[ ! -d "$git_dir" ]]; then
-                    echo "knives: cannot move $made to $repositories/: $moved" >&2
-                    exit 1
-                fi
-            )
-        fi
-        if ! why="$(git --git-dir="$git_dir" rev-parse --git-dir 2>&1)"; then
-            echo "knives: git cannot read $git_dir as a git directory. Move it away, then run this installer again. git says: $why" >&2
-            exit 1
-        fi
-        git --git-dir="$git_dir" config --local knives.machine >/dev/null ||
-            git --git-dir="$git_dir" config knives.machine "$machine"
-        if ! git --git-dir="$git_dir" config --local remote.origin.url >/dev/null; then
-            git --git-dir="$git_dir" config core.bare false
-            git --git-dir="$git_dir" config --local core.worktree >/dev/null ||
-                git --git-dir="$git_dir" config core.worktree "$ledger_root"
-            git --git-dir="$git_dir" remote add origin "https://github.com/$ledger"
-        fi
-    done <<<"$ledgers"
-) 9>"$repositories.lock"
+# knives reports it. A file at the final path stops the install. A directory
+# there that git cannot read as a git directory also stops it, with git's
+# own error.
+while IFS= read -r ledger; do
+    [[ -n "$ledger" ]] || continue
+    git_dir="$repositories/${ledger//\//--}.git"
+    if [[ ! -d "$git_dir" ]]; then
+        echo "knives: joining the ledger at $ledger"
+        (
+            scratch="$(mktemp -d "$HOME/.config/knives/.knives-installer-joining-XXXXXX")"
+            trap 'rm -rf -- "$scratch"' EXIT
+            made="$scratch/${git_dir##*/}"
+            git init --quiet --bare "$made"
+            git --git-dir="$made" config core.bare false
+            git --git-dir="$made" config core.worktree "$ledger_root"
+            git --git-dir="$made" remote add origin "https://github.com/$ledger"
+            git --git-dir="$made" config knives.machine "$machine"
+            # The target is ledger-repositories, not the final path. When a directory is at the
+            # final path, `mv "$made" "$git_dir"` moves the source into that directory and exits 0.
+            # With ledger-repositories as the target, mv renames the source to the final path,
+            # and the rename fails when a directory that is not empty is there. Then another
+            # process made that directory first. The loop keeps it and does not show mv's error.
+            if ! moved="$(mv "$made" "$repositories/" 2>&1)" && [[ ! -d "$git_dir" ]]; then
+                echo "knives: cannot move $made to $repositories/: $moved" >&2
+                exit 1
+            fi
+        )
+    fi
+    git --git-dir="$git_dir" config knives.machine >/dev/null ||
+        git --git-dir="$git_dir" config knives.machine "$machine"
+    if ! git --git-dir="$git_dir" config remote.origin.url >/dev/null; then
+        git --git-dir="$git_dir" config core.bare false
+        git --git-dir="$git_dir" config core.worktree >/dev/null ||
+            git --git-dir="$git_dir" config core.worktree "$ledger_root"
+        git --git-dir="$git_dir" remote add origin "https://github.com/$ledger"
+    fi
+done <<<"$ledgers"
 
 # Move a ledger an older knives wrote to the upstream-named layout, then bring
 # in what other machines have pushed, so the first `knives notch` here reads
