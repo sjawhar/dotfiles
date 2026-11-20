@@ -8,8 +8,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # branch ran and prints each change it makes.
 #
 # On a Google Compute Engine VM (scripts/on-google-vm; sami-devbox,
-# dispatch://INFRA-993) the identity is the VM's attached service account, and
-# every client takes its tokens from the metadata server with no file at all:
+# dispatch://INFRA-993) the identity is the account the metadata server serves,
+# and every client takes its tokens from it with no file at all. That is the
+# VM's attached service account, or, where the host's relay stands in front of
+# the server (installers/agent-identity.sh, which runs this again with
+# GCE_METADATA_HOST naming the relay), the account the relay serves:
 #   - gcloud: configuration `box`, whose account is the metadata server's
 #     default account email and whose auth/credential_file_override and
 #     auth/access_token_file are unset. gcloud checks those two properties and
@@ -37,9 +40,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # login found there is kept once as application_default_credentials.json.pre-box.
 #
 # On both, it creates no configuration for a person's login: an agent applies in
-# CI or as agent-infra's applier, impersonated from this identity, and a step only
-# a person can make is on agent-infra's docs/break-glass.md. Any other
-# configuration that already exists, and its legacy_credentials, are never touched.
+# CI, a by-hand production step runs under a one-hour admin grant or Sami's own
+# login, and a step only a person can make is on agent-infra's
+# docs/break-glass.md. Any other configuration that already exists, and its
+# legacy_credentials, are never touched.
 #
 # On any other machine (not a Google VM, and no Azure IMDS identity that is
 # box-sjawhar) it changes nothing.
@@ -78,7 +82,7 @@ if "$(dirname "${BASH_SOURCE[0]}")/../scripts/on-google-vm"; then
         echo "gcloud-box: Google VM, but its metadata server names no service account (got '${BOX_ACCOUNT}'); attach one to the VM" >&2
         exit 1
     }
-    echo "gcloud-box: Google VM: gcloud and ADC use the attached account ${BOX_ACCOUNT} from the metadata server"
+    echo "gcloud-box: Google VM: gcloud and ADC use ${BOX_ACCOUNT}, the account the metadata server at ${GCE_METADATA_HOST:-metadata.google.internal} serves"
 elif box_identity_present; then
     branch=azure
     echo "gcloud-box: Azure VM with the box-sjawhar managed identity: gcloud and ADC use ${BOX_ACCOUNT} through workload identity federation"

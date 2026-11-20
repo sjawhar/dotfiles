@@ -17,7 +17,7 @@
 #                                   host. No log file, no marker.
 #
 # A2 asks that a NEW session on the machine runs in an agent box and reaches, from inside the
-# box, Google Cloud as dev-sjawhar@ (also through a gcloud config dir a session brought from an
+# box, Google Cloud as the box's account, ACCOUNT below (also through a gcloud config dir a session brought from an
 # Azure box), the build pool, the grade pool, Artifact Registry through docker's credential
 # helper, the secrets broker, Envoy, Dispatch, MLflow,
 # the model gateway with a dev-box@ token and Azure; and that no person's login file is on any
@@ -43,7 +43,12 @@ export AGENT_SHIM_PERSON=1
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 CUTOVER_DIR="${SAMI_DEVBOX_CUTOVER_DIR:-/mnt/nvme/$(id -un)/cutover}"
 TAILNET=tail12ec1c.ts.net
-ACCOUNT="dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com"
+# The account every agent and gcloud call on the machine acts as: the plain dev box. The VM itself
+# runs as dev-sjawhar@ until its account changes at a stop; until then the metadata relay serves
+# dev-box@'s tokens (installers/agent-identity.sh), and before the switch every line that names
+# ACCOUNT fails (dispatch://INFRA-1433).
+ACCOUNT="dev-box@theorem-agent-infra.iam.gserviceaccount.com"
+APPLIER_ACCOUNT="infra-applier@theorem-agent-infra.iam.gserviceaccount.com"
 KUBE_CONTEXT=gke_theorem-agent-infra_us-west1_dispatch
 # S3's grade Jobs: namespace grade of grade-us-west1 (installers/gcloud-sdk.sh, KUBE_CLUSTERS).
 GRADE_KUBE_CONTEXT=gke_theorem-agent-infra_us-west1-b_grade-us-west1
@@ -64,6 +69,49 @@ fail() { echo "FAIL $*"; fails=$((fails + 1)); }
 note() { echo "note $*"; }
 stamp() { date -u +%FT%TZ; }
 
+# The account the metadata server serves, read as every client reads it: through GCE_METADATA_HOST,
+# which names the host's relay on the host (once the switch is on) and the box relay in a box.
+metadata_account_check() {
+    local where="$1" md="${GCE_METADATA_HOST:-metadata.google.internal}" got
+    got="$(curl -fsS -m 5 --noproxy '*' -H 'Metadata-Flavor: Google' \
+        "http://$md/computeMetadata/v1/instance/service-accounts/default/email" 2>&1)"
+    [[ "$got" == "$ACCOUNT" ]] && ok "metadata account $where: the metadata server at $md serves $got" \
+        || fail "metadata account $where: want $ACCOUNT from the metadata server at $md, got: $(tail -1 <<<"$got")"
+}
+
+# What the plain dev box may not do and may do: mint no token of infra-applier@ (the box's token,
+# on curl's stdin, to testIamPermissions, which answers the permissions the caller holds), read no
+# Envoy Secret, exec into no Envoy pod, and list the agent sessions. An answer that is an error
+# says nothing about a grant, so it fails the line.
+identity_limits_check() {
+    local where="$1" tok out got
+    if tok="$(gcloud auth print-access-token 2>&1)"; then
+        if out="$(printf 'header = "Authorization: Bearer %s"\n' "$tok" | curl -fsS -m 20 -K - -X POST \
+            -H 'Content-Type: application/json' -d '{"permissions":["iam.serviceAccounts.getAccessToken"]}' \
+            "https://iam.googleapis.com/v1/projects/-/serviceAccounts/$APPLIER_ACCOUNT:testIamPermissions" 2>&1)" \
+            && jq -e 'type == "object" and (has("error") | not) and ((.permissions // []) == [])' <<<"$out" >/dev/null 2>&1; then
+            ok "infra-applier closed $where: testIamPermissions on $APPLIER_ACCOUNT answers no iam.serviceAccounts.getAccessToken"
+        else
+            fail "infra-applier closed $where: testIamPermissions on $APPLIER_ACCOUNT: $(tr '\n' ' ' <<<"$out" | cut -c1-300)"
+        fi
+    else
+        fail "infra-applier closed $where: gcloud auth print-access-token: $(tail -1 <<<"$tok")"
+    fi
+    got="$(kubectl --context "$KUBE_CONTEXT" -n envoy auth can-i get secrets 2>&1)"
+    [[ "$got" == no ]] && ok "no envoy secrets $where: kubectl -n envoy auth can-i get secrets: no" \
+        || fail "no envoy secrets $where: kubectl -n envoy auth can-i get secrets: $(tail -1 <<<"$got")"
+    got="$(kubectl --context "$KUBE_CONTEXT" -n envoy auth can-i create pods/exec 2>&1)"
+    [[ "$got" == no ]] && ok "no envoy exec $where: kubectl -n envoy auth can-i create pods/exec: no" \
+        || fail "no envoy exec $where: kubectl -n envoy auth can-i create pods/exec: $(tail -1 <<<"$got")"
+    if ! command -v theorem-session >/dev/null; then
+        fail "sessions $where: theorem-session is not on PATH (agent-infra sessions/README.md builds it)"
+    elif out="$(timeout 120 theorem-session list 2>&1)"; then
+        ok "sessions $where: theorem-session list exits 0 ($(wc -l <<<"$out") lines)"
+    else
+        fail "sessions $where: theorem-session list: $(tail -1 <<<"$out")"
+    fi
+}
+
 # --- the box half ----------------------------------------------------------------------------
 in_box() {
     [[ -n "${AGENTBOX_BOX:-}" ]] || { echo "sami-devbox-check --in-box runs inside an agent box" >&2; exit 2; }
@@ -71,8 +119,10 @@ in_box() {
     ok "session runs in agent box $AGENTBOX_BOX (AGENTBOX_BOX set, /etc/agentbox-identity $( [[ -e /etc/agentbox-identity ]] && echo present || echo absent))"
 
     local out got tok
-    # Google Cloud as the attached account: the account gcloud names, and a token Google
-    # itself says belongs to it, so a configured name with no working credential fails.
+    # Google Cloud as the box's account: the account the metadata relay serves, the account gcloud
+    # names, and a token Google itself says belongs to it, so a configured name with no working
+    # credential fails.
+    metadata_account_check "in the box"
     got="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>&1)"
     [[ "$got" == "$ACCOUNT" ]] && ok "gcloud auth list: active account $got" || fail "gcloud auth list: want $ACCOUNT, got: $got"
     if tok="$(gcloud auth print-access-token 2>&1)"; then
@@ -81,12 +131,12 @@ in_box() {
     else
         fail "gcloud auth print-access-token: $(tail -1 <<<"$tok")"
     fi
+    identity_limits_check "in the box"
 
     # The build pool: the GKE cluster the builds run in, through the box's ~/.kube.
     got="$(kubectl --context "$KUBE_CONTEXT" -n builds auth can-i create jobs 2>&1)"
     [[ "$got" == yes ]] && ok "build pool: kubectl -n builds auth can-i create jobs: yes" || fail "build pool: kubectl -n builds auth can-i create jobs: $got"
-    got="$(kubectl --context "$GRADE_KUBE_CONTEXT" -n grade auth can-i create jobs 2>&1)"
-    [[ "$got" == yes ]] && ok "grade pool: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: yes" || fail "grade pool: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: $got"
+    grade_pool_check "in the box"
     # Artifact Registry: retrieve through Docker's configured helper, store, or inline auth.
     if out="$("$DOTFILES_DIR/scripts/docker-registry-auth-check" us-east1-docker.pkg.dev retrieve --timeout 60)"; then
         ok "Artifact Registry: $out"
@@ -158,8 +208,9 @@ host_sshd_check() {
 
 # Scripts written on sami-rocqperf (the cost lead's spend loaders, sre-reading, bqq) name
 # CLOUDSDK_CONFIG=/mnt/nvme/sami/boxid/gcloud-box and KUBECONFIG=/mnt/nvme/sami/boxid/infra-kubeconfig.
-# installers/gcloud-boxid.sh makes both here as the attached account; through each, from the box,
-# a token Google says is dev-sjawhar@'s and a read of the dispatch cluster's namespaces.
+# installers/gcloud-boxid.sh makes both here as the account the metadata server serves; through
+# each, from the box, a token Google says is ACCOUNT's and the build pool's submit, which the team
+# set gives ACCOUNT (move census row U07).
 boxid_check() {
     local tok got
     if tok="$(CLOUDSDK_CONFIG="$BOXID_DIR/gcloud-box" gcloud auth print-access-token 2>&1)"; then
@@ -168,18 +219,15 @@ boxid_check() {
     else
         fail "boxid: CLOUDSDK_CONFIG=$BOXID_DIR/gcloud-box gcloud auth print-access-token: $(tail -1 <<<"$tok")"
     fi
-    got="$(CLOUDSDK_CONFIG="$BOXID_DIR/gcloud-box" kubectl --kubeconfig "$BOXID_DIR/infra-kubeconfig" get namespaces -o name 2>&1)"
-    if grep -qx 'namespace/builds' <<<"$got"; then
-        ok "boxid: kubectl --kubeconfig $BOXID_DIR/infra-kubeconfig get namespaces lists $(wc -l <<<"$got"), builds among them"
-    else
-        fail "boxid: kubectl --kubeconfig $BOXID_DIR/infra-kubeconfig get namespaces: $(tail -1 <<<"$got")"
-    fi
+    got="$(CLOUDSDK_CONFIG="$BOXID_DIR/gcloud-box" kubectl --kubeconfig "$BOXID_DIR/infra-kubeconfig" -n builds auth can-i create jobs 2>&1)"
+    [[ "$got" == yes ]] && ok "boxid: kubectl --kubeconfig $BOXID_DIR/infra-kubeconfig -n builds auth can-i create jobs: yes" \
+        || fail "boxid: kubectl --kubeconfig $BOXID_DIR/infra-kubeconfig -n builds auth can-i create jobs: $(tail -1 <<<"$got")"
 }
 
 # A session moved here from sami-rocqperf can bring a gcloud config dir of its own (CLOUDSDK_CONFIG)
 # that holds the Azure box credential, which fails on this machine until shims/gcloud removes it
 # (LINUX-1248, 2026-11-03). So the check builds such a dir the way gcloud stores it on an Azure
-# box, and through it writes and deletes a scratch object as dev-sjawhar@: the repair and the
+# box, and through it writes and deletes a scratch object as ACCOUNT: the repair and the
 # box identity's write to the bucket, as a moved session needs both.
 moved_gcloud_config_check() {
     local dir object out
@@ -244,9 +292,10 @@ github_check() {
 #      ossv-tree-follow timer merges over it and that the stream's data copy has saved it within 2 h;
 #   2. the repository the farm stages from (`git archive`): ~/src/oss-verify-proofs-internal, whole
 #      (not shallow, not partial), on the state disk;
-#   3. both URL signers and both buckets: dev-sjawhar@ mints each signer's token and has it sign a
-#      blob, and reads one object of each bucket;
-#   4. the farm's namespace: kubectl auth can-i create jobs -n builds-ossv;
+#   3. the build bucket and its URL signer: ACCOUNT reads one object of gs://theorem-build-io (the
+#      team set) and signs as build-io-signer@ (census row U23's exception);
+#   4. what the farm's own pods do now (n6_routes_check): ACCOUNT mints no token of ossv-runs-signer@,
+#      lists nothing in gs://theorem-ossv-runs and creates no Job in builds-ossv;
 #   5. a release asset of the repository through shims/gh and the GitHub App;
 #   6. disk-gate on /mnt/nvme: status, and a reserve and release round trip; in a box also the
 #      farm's work root and run index bound from the host (scripts/agentbox, agentbox/mounts).
@@ -255,11 +304,13 @@ OSSV_FILES=(bin/ossv-n6-farm bin/ossv-n6-shards bin/ossv-n6-pod bin/ossv-job bin
     notes/ossv-n6-peaks.tsv notes/ossv-n6.md notes/ossv-job.md)
 OVPI_DIR="$HOME/src/oss-verify-proofs-internal"
 OVPI_REPO=theorem-labs/oss-verify-proofs-internal
-N6_SIGNERS=(build-io-signer ossv-runs-signer)
-N6_BUCKETS=(theorem-build-io theorem-ossv-runs)
+# The farm's namespace (its own pods submit there now) and the account the farm signs its URLs with.
 N6_NAMESPACE=builds-ossv
+# A refusal, told apart from any other failure: an error that is not a refusal says nothing about
+# the grant, so it fails the line.
+REFUSED='PERMISSION_DENIED|[Pp]ermission .* denied|HTTPError 403|403 Forbidden'
 n6_check() {
-    local where="$1" f got differ="" tok sig sa b prefix obj n tag asset size dir out
+    local where="$1" f got differ="" prefix obj n tag asset size dir out
     # 1. Each file in the live tree, readable and not empty.
     for f in "${OSSV_FILES[@]}"; do
         [[ -f "$OSSV_TREE/$f" && -r "$OSSV_TREE/$f" && -s "$OSSV_TREE/$f" ]] || differ+=" $f"
@@ -274,28 +325,15 @@ n6_check() {
     else
         fail "N6 repository $where: $OVPI_DIR: shallow/promisor/partialclone '$got', git archive HEAD | tar -t listed $n of the first 100 entries"
     fi
-    # 3. The signers and the buckets, as the account the farm submits with.
-    for sa in "${N6_SIGNERS[@]}"; do
-        sa="$sa@theorem-agent-infra.iam.gserviceaccount.com"
-        tok="$(gcloud auth print-access-token --impersonate-service-account="$sa" 2>/dev/null)"
-        sig="$(mktemp)"
-        printf 'sami-devbox-check' >"$sig.in"
-        out="$(gcloud iam service-accounts sign-blob --iam-account="$sa" "$sig.in" "$sig" 2>&1)"
-        n="$(stat -c %s "$sig" 2>/dev/null)"
-        rm -f "$sig" "$sig.in"
-        [[ "${#tok}" -gt 100 && "$n" -gt 0 ]] && ok "N6 signer $where: dev-sjawhar@ impersonates $sa (a ${#tok}-character token) and signBlob answers a $n-byte signature" \
-            || fail "N6 signer $where: $sa: token ${#tok} characters, signBlob: $(tail -1 <<<"$out")"
-    done
-    for b in "${N6_BUCKETS[@]}"; do
-        prefix="$(gcloud storage ls "gs://$b/out/ossv/" 2>/dev/null | sort | tail -1)"
-        obj="$(gcloud storage ls "$prefix" 2>/dev/null | grep -v '/$' | head -1)"
-        n="$(gcloud storage cat -r 0-63 "$obj" 2>/dev/null | wc -c)"
-        [[ -n "$obj" && "$n" -gt 0 ]] && ok "N6 bucket $where: read $n bytes of $obj" \
-            || fail "N6 bucket $where: gs://$b: no object read under out/ossv/ (newest prefix '${prefix:-none}', object '${obj:-none}')"
-    done
-    # 4. The farm's namespace.
-    got="$(kubectl --context "$KUBE_CONTEXT" -n "$N6_NAMESPACE" auth can-i create jobs 2>&1)"
-    [[ "$got" == yes ]] && ok "N6 farm $where: kubectl -n $N6_NAMESPACE auth can-i create jobs: yes" || fail "N6 farm $where: kubectl -n $N6_NAMESPACE auth can-i create jobs: $(tail -1 <<<"$got")"
+    # 3. The build bucket, as the account the box writes builds with.
+    prefix="$(gcloud storage ls "gs://theorem-build-io/out/ossv/" 2>/dev/null | sort | tail -1)"
+    obj="$(gcloud storage ls "$prefix" 2>/dev/null | grep -v '/$' | head -1)"
+    n="$(gcloud storage cat -r 0-63 "$obj" 2>/dev/null | wc -c)"
+    [[ -n "$obj" && "$n" -gt 0 ]] && ok "N6 bucket $where: read $n bytes of $obj" \
+        || fail "N6 bucket $where: gs://theorem-build-io: no object read under out/ossv/ (newest prefix '${prefix:-none}', object '${obj:-none}')"
+    # 4. The box's own URL signer, and what moved to the farm's own pods.
+    n6_box_signer_check "$where"
+    n6_routes_check "$where"
     # 5. A release asset through shims/gh, as an agent session's call (the App's token; the marker
     #    only for these calls, as azure_check does): the newest published release's smallest asset.
     local -a agent=(env "AGENTBOX_SESSION=${AGENTBOX_SESSION:-sami-devbox-check}")
@@ -330,6 +368,67 @@ n6_check() {
                 || fail "N6 farm in the box: $f is not bound from the host (findmnt: $(findmnt -n -o TARGET,SOURCE --target "$f" 2>&1))"
         done
     fi
+}
+
+# What the move census (dispatch://INFRA-1433, move-census.md) routes off the box, read from the
+# box: each is refused, and a failure that is not a refusal (REFUSED) fails the line.
+#   grade Jobs: a Legion pod acting as grade-submit@ (row U15);
+#   the farm's URL signer ossv-runs-signer@, its run bucket and its Jobs in builds-ossv: the farm's
+#   own pods (U05).
+grade_pool_check() {
+    local where="$1" got
+    got="$(kubectl --context "$GRADE_KUBE_CONTEXT" -n grade auth can-i create jobs 2>&1)"
+    [[ "$got" == no ]] && ok "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: no (a Legion pod submits as grade-submit@)" \
+        || fail "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: want no, got: $(tail -1 <<<"$got")"
+}
+# signer_try SA: mint SA's token and sign a blob as it. Sets sign_tok_rc, sign_tok_out (the token,
+# or the mint's error), sign_tok_note (what a line may print of it: a token's length, never the
+# token, or the mint's last error line), sign_rc, sign_out and sign_bytes (the signature's size).
+signer_try() {
+    local sig
+    sign_tok_out="$(gcloud auth print-access-token --impersonate-service-account="$1" 2>&1)"
+    sign_tok_rc=$?
+    if (( sign_tok_rc == 0 )); then
+        sign_tok_note="a ${#sign_tok_out}-character token"
+    else
+        sign_tok_note="token exit $sign_tok_rc: $(tail -1 <<<"$sign_tok_out" | cut -c1-200)"
+    fi
+    sig="$(mktemp)"
+    printf 'sami-devbox-check' >"$sig.in"
+    sign_out="$(gcloud iam service-accounts sign-blob --iam-account="$1" "$sig.in" "$sig" 2>&1)"
+    sign_rc=$?
+    sign_bytes="$(stat -c %s "$sig" 2>/dev/null || echo 0)"
+    rm -f "$sig" "$sig.in"
+}
+# The box's own URL signer: census row U23's exception gives dev-box@ Token Creator on
+# build-io-signer@ alone, for interactive signed URLs of gs://theorem-build-io.
+N6_BOX_SIGNER=build-io-signer@theorem-agent-infra.iam.gserviceaccount.com
+n6_box_signer_check() {
+    local where="$1" sign_tok_rc sign_tok_out sign_tok_note sign_rc sign_out sign_bytes
+    signer_try "$N6_BOX_SIGNER"
+    if (( sign_tok_rc == 0 && ${#sign_tok_out} > 100 && sign_rc == 0 && sign_bytes > 0 )); then
+        ok "N6 signer $where: $ACCOUNT impersonates $N6_BOX_SIGNER (a ${#sign_tok_out}-character token) and signBlob answers a $sign_bytes-byte signature"
+    else
+        fail "N6 signer $where: $N6_BOX_SIGNER: $sign_tok_note; signBlob exit $sign_rc: $(tail -1 <<<"$sign_out")"
+    fi
+}
+N6_FARM_SIGNER=ossv-runs-signer@theorem-agent-infra.iam.gserviceaccount.com
+n6_routes_check() {
+    local where="$1" out got sign_tok_rc sign_tok_out sign_tok_note sign_rc sign_out sign_bytes
+    signer_try "$N6_FARM_SIGNER"
+    if (( sign_tok_rc != 0 && sign_rc != 0 && sign_bytes == 0 )) \
+        && grep -qE "$REFUSED" <<<"$sign_tok_out" && grep -qE "$REFUSED" <<<"$sign_out"; then
+        ok "N6 signer $where: $ACCOUNT is refused a token of $N6_FARM_SIGNER and a signature as it (the farm's pods sign its URLs)"
+    else
+        fail "N6 signer $where: $N6_FARM_SIGNER: want both refused, got $sign_tok_note; signBlob exit $sign_rc: $(tail -1 <<<"$sign_out")"
+    fi
+    out="$(gcloud storage ls gs://theorem-ossv-runs/out/ossv/ 2>&1)"
+    grep -qE "$REFUSED" <<<"$out" && ! grep -q '^gs://' <<<"$out" \
+        && ok "N6 bucket $where: $ACCOUNT is refused the listing of gs://theorem-ossv-runs/out/ossv/ (the farm's pods write it)" \
+        || fail "N6 bucket $where: gs://theorem-ossv-runs/out/ossv/: want a refusal, got: $(tail -1 <<<"$out")"
+    got="$(kubectl --context "$KUBE_CONTEXT" -n "$N6_NAMESPACE" auth can-i create jobs 2>&1)"
+    [[ "$got" == no ]] && ok "N6 farm $where: kubectl -n $N6_NAMESPACE auth can-i create jobs: no (the farm's pods submit)" \
+        || fail "N6 farm $where: kubectl -n $N6_NAMESPACE auth can-i create jobs: want no, got: $(tail -1 <<<"$got")"
 }
 
 # The host half of check 1. ~/src/oss-verifier is the live tree: the stream's loops write it here, and
@@ -460,8 +559,8 @@ gateway_check() {
     }
     email="$(jwt_claim "$token" email)"
     aud="$(jwt_claim "$token" aud)"
-    # This box's own account, which the gateway's list serves as team `box` with no pins. No
-    # impersonation: dev-box@ is for a machine that has no accepted identity of its own.
+    # This box's own account, which the gateway's list serves as team `box` with no pins
+    # (shared/boxaccounts' dev-box@ entry); the metadata relay serves its token with no mint here.
     [[ "$email" == "$ACCOUNT" && "$aud" == model-gateway-gce ]] && ok "model gateway: minted an ID token for $email, audience $aud" || fail "model gateway: minted token: want $ACCOUNT for model-gateway-gce, got ${email:-none} for ${aud:-none}"
     # The gateway sessions use: the model-gateway provider's baseUrl in omp/models.local.yml.
     url="$(awk '/^  model-gateway:/ { p = 1; next } p && /baseUrl:/ { print $2; exit } /^  [^ ]/ { p = 0 }' "$DOTFILES_DIR/omp/models.local.yml" 2>/dev/null)"
@@ -473,20 +572,21 @@ gateway_check() {
     [[ "$code" == 401 ]] && ok "model gateway: a forged token answers 401" || fail "model gateway: a forged token answered $code, want 401"
 }
 
+# Azure reads go through az-reader, as the Azure legion-reader (move census row D10): agent-azure's
+# federated credential (shims/az) trusts the identity tokens of dev-sjawhar@, which the box's
+# metadata relay no longer serves, and a write takes a one-hour AZURE_ADMIN grant.
+# az's answer is stdout alone: the broker prints a notice on stderr on every grant.
 azure_check() {
-    local out
-    # As a session's az call: shims/az chooses the agents' Azure identity only in an agent session
-    # (OMP_SESSION_ID and its kin), which this script, run by agentbox directly, is not.
-    out="$(AGENTBOX_SESSION="${AGENTBOX_SESSION:-sami-devbox-check}" az account show --query '{user:user.name,type:user.type,subscription:id}' -o json 2>&1)"
+    local out err
+    err="$(mktemp)"
+    out="$(AZ_READER_REASON="INFRA-1433: sami-devbox-check, az account show (the Azure reader's own sign-in)" \
+        timeout 180 az-reader account show --query '{user:user.name,type:user.type,subscription:id}' -o json 2>"$err")"
     if [[ "$(jq -r '.type // empty' <<<"$out" 2>/dev/null)" == servicePrincipal ]]; then
-        ok "Azure: az account show as service principal $(jq -r .user <<<"$out") on subscription $(jq -r .subscription <<<"$out")"
-    elif [[ -z "${AGENT_AZURE_CLIENT_ID:-}" && ! -s "$HOME/.config/agent-azure/client-id" ]]; then
-        # The one wait A2 allows: the agent-azure identity is not issued yet, so the client id
-        # shims/az needs is absent. Any other az failure is a FAIL.
-        echo "WAIT Azure: $(tail -1 <<<"$out") (waits on agent-infra #1146, AzureWIF)"
+        ok "Azure: az-reader account show as service principal $(jq -r .user <<<"$out") on subscription $(jq -r .subscription <<<"$out")"
     else
-        fail "Azure: az account show: want a servicePrincipal, got: $(tail -1 <<<"$out")"
+        fail "Azure: az-reader account show: want a servicePrincipal, got: $(tail -1 <<<"${out:-$(cat "$err")}")"
     fi
+    rm -f "$err"
 }
 
 # The transcript store, as a session reads it: `tq` through the front door
@@ -807,8 +907,15 @@ host_identity() {
         "sami-devbox tags [tag:sami-devbox] owner "*) ok "tailnet: node sami-devbox, still tag:sami-devbox until Sami signs it in (INFRA-1099)" ;;
         *) fail "tailnet: want 'sami-devbox tags [] owner sami@theorem.dev', got '$got'" ;;
     esac
-    got="$(curl -fsS -m 5 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email 2>&1)"
-    [[ "$got" == "$ACCOUNT" ]] && ok "host: the VM's attached account is $got" || fail "host: metadata account: $got"
+    metadata_account_check "on the host"
+    # The VM's own attached account, from the server itself and not the relay: it changes only while
+    # the VM is stopped, so until then it is a note beside the account the relay serves.
+    got="$(curl -fsS -m 5 --noproxy '*' -H 'Metadata-Flavor: Google' http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/email 2>&1)"
+    if [[ "$got" == "$ACCOUNT" ]]; then
+        ok "host: the VM's attached account is $got"
+    else
+        note "host: the VM's attached account is $got; the clients here act as $ACCOUNT only through the metadata relay (installers/agent-identity.sh)"
+    fi
     [[ ! -e "$HOME/.config/gcloud/box_credential_config.json" && -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]] \
         && ok "host: no box_credential_config.json and no GOOGLE_APPLICATION_CREDENTIALS (ADC is the metadata server)" \
         || fail "host: a credential file is configured: ${GOOGLE_APPLICATION_CREDENTIALS:-$HOME/.config/gcloud/box_credential_config.json}"
@@ -1055,14 +1162,21 @@ global_hooks_host_check() {
 # Its smoke failed on 2026-11-03 11:35Z with "Install gke-gcloud-auth-plugin": that PATH has
 # ~/.mise/shims but not ~/.local/bin, so installers/gcloud-sdk.sh links the plugin into
 # /usr/local/bin. SSH_PATH is `ssh sami@sami-devbox 'echo $PATH'` as read on 2026-11-03, and
-# MISE_DATA_DIR is set in that shell too (without it the shim installs a second kubectl).
+# MISE_DATA_DIR is set in that shell too (without it the shim installs a second kubectl). That shell
+# also gets GCE_METADATA_HOST, _ROOT and _IP from .bashrc once the host's clients read the metadata
+# relay (installers/agent-identity.sh), so each one set here is passed on. The namespace is builds,
+# which the box account's team set reads (move census row U07).
 SSH_PATH="$HOME/.cargo/bin:$HOME/.dotfiles/shims:$HOME/.dotfiles/bin:$HOME/.dotfiles/scripts:$HOME/.npm-global/bin:$HOME/.mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
 host_plain_path_kubectl() {
-    local out rc=0
+    local out rc=0 name
+    local -a relay=()
+    for name in GCE_METADATA_HOST GCE_METADATA_ROOT GCE_METADATA_IP; do
+        [[ -n "${!name:-}" ]] && relay+=("$name=${!name}")
+    done
     out="$(env -i HOME="$HOME" MISE_DATA_DIR="$HOME/.mise" KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" PATH="$SSH_PATH" \
-        kubectl --context "$KUBE_CONTEXT" -n "$N6_NAMESPACE" get jobs --chunk-size 1 -o name 2>&1)" || rc=$?
-    (( rc == 0 )) && ok "ssh-PATH kubectl: env -i kubectl -n $N6_NAMESPACE get jobs: exit 0 ($(grep -c . <<<"$out") jobs)" \
-        || fail "ssh-PATH kubectl: env -i kubectl -n $N6_NAMESPACE get jobs: exit $rc: $(tail -1 <<<"$out")"
+        ${relay[@]+"${relay[@]}"} kubectl --context "$KUBE_CONTEXT" -n builds get jobs --chunk-size 1 -o name 2>&1)" || rc=$?
+    (( rc == 0 )) && ok "ssh-PATH kubectl: env -i kubectl -n builds get jobs: exit 0 ($(grep -c . <<<"$out") jobs)" \
+        || fail "ssh-PATH kubectl: env -i kubectl -n builds get jobs: exit $rc: $(tail -1 <<<"$out")"
 }
 
 # The Dispatch CLI by name, as a shell omp did not start finds it (shims/dispatch): on the host with
@@ -1080,6 +1194,7 @@ dispatch_cli_check() {
 host() {
     echo "== host $(hostname -s), $(stamp)"
     host_identity
+    identity_limits_check "on the host"
     host_disks
     host_rootfs
     host_units

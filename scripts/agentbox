@@ -2484,7 +2484,9 @@ session_env() {
     e+=(-e "AGENTBOX_IMDS_FORWARDER=$NETWORK_GATEWAY:$IMDS_PORT")
     # On a Google VM the same relay reaches Google's metadata server, which is also
     # 169.254.169.254:80 (dispatch://INFRA-993): gcloud, google-auth and Go's compute/metadata
-    # then act as the VM's attached account with no credential file. Each reads its own name:
+    # then act as the account the relay serves (the VM's attached account, or the account
+    # ~/.config/agent-identity/account names, scripts/agentbox-gce-metadata-relay) with no
+    # credential file. Each reads its own name:
     # gcloud GCE_METADATA_ROOT (core/credentials/gce_read.py), google-auth GCE_METADATA_HOST then
     # GCE_METADATA_ROOT, and GCE_METADATA_IP for its probe (compute_engine/_metadata.py), Go
     # GCE_METADATA_HOST, which alone also makes it decide it is on GCE. On another machine none is

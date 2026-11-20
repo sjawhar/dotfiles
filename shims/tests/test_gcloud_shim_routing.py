@@ -1053,13 +1053,24 @@ class GcloudRouting(unittest.TestCase):
 
     def assert_agent_refusal(self, result: subprocess.CompletedProcess[str]) -> None:
         """Every agent-session refusal: nothing ran, and the text names the box identity, the CI
-        route and the applier, and the break-glass page, and tells the agent to run no sign-in."""
+        route, the admin routes of a by-hand production step (not the applier, which the box
+        identity no longer impersonates), and the break-glass page, and tells the agent to run no
+        sign-in."""
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
         self.assertIn("gcloud shim: REFUSED in an agent session", result.stderr)
         self.assertIn("box identity", result.stderr)
         self.assertIn("CI apply", result.stderr)
-        self.assertIn(self.APPLIER, result.stderr)
+        self.assertIn("GCP_ADMIN", result.stderr)
+        self.assertIn("one-hour", result.stderr)
+        self.assertIn("GCLOUD_SAMI", result.stderr)
+        self.assertIn(f"never as {self.APPLIER}", result.stderr)
+        # Route 4, the person's own login, is not a route the refusal offers.
+        self.assertNotIn("own login", result.stderr)
+        self.assertNotIn(f"CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT={self.APPLIER}", result.stderr)
+        # A read goes through a reader account, not the box identity.
+        self.assertIn("gcloud-reader", result.stderr)
+        self.assertIn("GCLOUD_READER_REASON", result.stderr)
         self.assertIn("dispatch ask", result.stderr)
         self.assertIn(self.BREAK_GLASS_URL, result.stderr)
         self.assertNotIn("gcloud auth login", result.stderr)
@@ -1313,6 +1324,9 @@ class GcloudRouting(unittest.TestCase):
         copy = scratch / "gcloud"
         (copy / "configurations").mkdir(parents=True)
         (copy / "configurations" / "config_theorem").write_text("[core]\n", encoding="utf-8")
+        # As a real copy does, it holds its origin's active configuration (box), whose change would make the next call
+        # copy again; only the configuration this call chooses (theorem) differs.
+        (copy / "configurations" / "config_box").write_text((self.configs_dir / "config_box").read_text())
         (copy / "active_config").write_text("box\n", encoding="utf-8")
         marker = copy / ".gcloud-session-copied"
         marker.write_text(f"{self.stub_dir / 'another-home'}/.config/gcloud\n", encoding="utf-8")
@@ -1629,6 +1643,18 @@ class GcloudAzureCredentialOnGoogleVm(unittest.TestCase):
         self.assertNotIn(b"/metadata/identity/oauth2/token", (self.config / "credentials.db").read_bytes())
         again = self.run_shim({"GCE_METADATA_HOST": server.host})
         self.assertEqual((again.returncode, again.stdout, again.stderr), (0, "REAL-GCLOUD-RAN\n", ""))
+
+    def test_a_store_without_an_azure_entry_is_not_rewritten(self) -> None:
+        """The check runs on each call; a store it has nothing to remove from keeps its bytes and its
+        time, so calls in parallel do not take turns rewriting it."""
+        server = MetadataStub.start()
+        self.addCleanup(server.stop)
+        self.run_shim({"GCE_METADATA_HOST": server.host})
+        store = self.config / "credentials.db"
+        before = (store.read_bytes(), store.stat().st_mtime_ns)
+        again = self.run_shim({"GCE_METADATA_HOST": server.host})
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual((store.read_bytes(), store.stat().st_mtime_ns), before)
 
     def test_the_default_config_dir_is_repaired_too(self) -> None:
         server = MetadataStub.start()
@@ -2359,6 +2385,48 @@ class GcloudSessionConfig(unittest.TestCase):
         self.store("credentials.db", "refresh-2")
         self.assertEqual(self.run_shim(["storage", "ls"]), str(self.copy))
         self.assertEqual(self.rows(self.copy / "credentials.db"), ["refresh-1"])
+
+    def test_a_copy_older_than_the_active_configuration_is_copied_again(self) -> None:
+        """installers/gcloud-box.sh changes configuration box's account when the box's metadata server serves another
+        account (installers/agent-identity.sh). A copy made before that would ask the server for the old account, which
+        it no longer serves, so a copy older than the active configuration's file is set aside and made again."""
+        self.run_shim(["auth", "list"])
+        config = self.origin / "configurations" / "config_default"
+        config.write_text("[core]\naccount = b@p.iam.gserviceaccount.com\n")
+        # The copy was made before the change: its marker is older than the configuration's file.
+        earlier = config.stat().st_mtime - 10
+        os.utime(self.copy / ".gcloud-session-copied", (earlier, earlier))
+        self.assertEqual(self.run_shim(["auth", "list"]), str(self.copy))
+        self.assertIn("b@p.iam.gserviceaccount.com", (self.copy / "configurations" / "config_default").read_text())
+        self.assertTrue(list(self.scratch.glob("gcloud.replaced.*")))
+        # A third call, with nothing changed since, keeps the new copy.
+        self.run_shim(["auth", "list"])
+        self.assertEqual(len(list(self.scratch.glob("gcloud.replaced.*"))), 1)
+
+    def test_a_copy_that_caught_a_change_mid_copy_is_copied_again(self) -> None:
+        """The helper copies configurations/ before it writes its marker. A change made in between leaves a copy of the
+        old account whose marker is newer than the change, so the copy is judged by what it holds, not by its time."""
+        self.run_shim(["auth", "list"])
+        config = self.origin / "configurations" / "config_default"
+        config.write_text("[core]\naccount = b@p.iam.gserviceaccount.com\n")
+        # The change came before the marker: the configuration's file is older than the marker.
+        earlier = (self.copy / ".gcloud-session-copied").stat().st_mtime - 10
+        os.utime(config, (earlier, earlier))
+        self.assertEqual(self.run_shim(["auth", "list"]), str(self.copy))
+        self.assertIn("b@p.iam.gserviceaccount.com", (self.copy / "configurations" / "config_default").read_text())
+
+    def test_a_copy_of_another_home_is_not_set_aside(self) -> None:
+        """Two homes can share one session's scratch (a child with a HOME of its own). A copy made from the first home
+        stays the first home's, whatever the second home's configuration holds; the second runs on its own directory."""
+        self.run_shim(["auth", "list"])
+        other = Path(self.tmp.name) / "other-home"
+        (other / ".config" / "gcloud" / "configurations").mkdir(parents=True)
+        (other / ".config" / "gcloud" / "configurations" / "config_default").write_text(
+            "[core]\naccount = c@p.iam.gserviceaccount.com\n")
+        (other / ".config" / "gcloud" / "active_config").write_text("default")
+        self.assertEqual(self.run_shim(["auth", "list"], HOME=str(other)), "<unset>")
+        self.assertEqual((self.copy / ".gcloud-session-copied").read_text().strip(), str(self.origin))
+        self.assertFalse(list(self.scratch.glob("gcloud.replaced.*")))
 
     def test_the_old_directory_where_this_does_not_apply(self) -> None:
         own = str(Path(self.tmp.name) / "own")

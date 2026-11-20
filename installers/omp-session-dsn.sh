@@ -13,8 +13,9 @@
 # Run it on sami-devbox. The machine's Application Default Credentials must be a service account
 # with roles/cloudsql.client and roles/cloudsql.instanceUser on theorem-agent-infra and an IAM
 # database user on agents-postgres that may write omp_sessions (agent-infra postgres/, config
-# boxWriterAccounts). On sami-devbox that account is dev-sjawhar@theorem-agent-infra, which the
-# metadata server gives both the host and every box.
+# boxWriterAccounts). On sami-devbox that account is the one the metadata server serves the host:
+# dev-box@theorem-agent-infra through the host's relay once ~/.config/agent-identity/account names
+# it (installers/agent-identity.sh), and the VM's attached account, dev-sjawhar@, before.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 

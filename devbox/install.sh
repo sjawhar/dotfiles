@@ -23,16 +23,23 @@ bash "${DOTFILES_DIR}/installers/agent-secrets.sh"
 # dispatch cluster's context (see installers/gcloud-sdk.sh). Before gcloud-box.sh, which needs it.
 bash "${DOTFILES_DIR}/installers/gcloud-sdk.sh"
 
-# On an Azure VM enrolled in box-identity, gcloud and ADC act as dev-sjawhar with no
-# sign-in; an apply impersonates agent-infra's applier from it (see installers/gcloud-box.sh).
+# gcloud and ADC act as the machine's own identity with no sign-in: the account the metadata
+# server serves on a Google VM, the box-identity account on an enrolled Azure VM (see
+# installers/gcloud-box.sh).
 bash "${DOTFILES_DIR}/installers/gcloud-box.sh"
 
 # Outside Google, serve the box's cached token to keyless Delta readers on loopback.
 bash "${DOTFILES_DIR}/installers/gcloud-metadata.sh"
 
 # On a Google VM, the box-identity paths scripts from sami-rocqperf name (/mnt/nvme/<user>/boxid/
-# gcloud-box and infra-kubeconfig), as the VM's account (see installers/gcloud-boxid.sh).
+# gcloud-box and infra-kubeconfig), as the machine's account (see installers/gcloud-boxid.sh).
 bash "${DOTFILES_DIR}/installers/gcloud-boxid.sh"
+
+# On a Google VM, the host's metadata relay and the variables that point every host client at it,
+# when ~/.config/agent-identity/account names an account other than the VM's own; with no such file
+# it changes nothing. After gcloud-box.sh and gcloud-boxid.sh, which it runs again through the
+# relay (see installers/agent-identity.sh).
+bash "${DOTFILES_DIR}/installers/agent-identity.sh"
 
 # On a machine with no person's GitHub login (the Google VM, sami-devbox), git outside an agent
 # session gets the GitHub App's token too, and ssh remotes of github.com go over https (see
