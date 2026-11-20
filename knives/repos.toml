@@ -201,6 +201,8 @@ base = "v9.0"
 [repos.rocq.series."9.2"]
 base = "v9.2+typewise-isomorphism"
 base_remote = "origin"
+# knives 5.1.0 and later: each cut is one merge whose first parent is the previous 9.2 release.
+stacked = true
 
 # Forks registered 2026-11-03 (Sami: dispatch://LINUX-1/ask/efee3fc7, "all the different repos that we work on
 # forks of"). Bases are the parents' default branches; theorem-labs forks share the sjawhar ledger, as lean4 does.
