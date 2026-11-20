@@ -41,10 +41,15 @@ MACHINE = f"{HOSTNAME}-{Path('/etc/machine-id').read_text(encoding='utf-8')[:8]}
 # so the sweep always finds it held. If the handed-off sweep still has the lock,
 # the holder waits for it first. With KNIVES_SHIM_SWEEP_DIES set, `ledger sweep`
 # instead exits 101 with nothing on stdout, as a panicking knives does.
+# With KNIVES_SHIM_MIGRATE_DIES set, `ledger migrate` does the same.
 # Everything else runs the real binary at once.
 HOLD_SECONDS = 3
 KNIVES_SHIM = rf"""
 if [ "${{1:-}}" = ledger ] && [ "${{2:-}}" = sweep ] && [ -n "${{KNIVES_SHIM_SWEEP_DIES:-}}" ]; then
+    echo "thread 'main' panicked (test shim)" >&2
+    exit 101
+fi
+if [ "${{1:-}}" = ledger ] && [ "${{2:-}}" = migrate ] && [ -n "${{KNIVES_SHIM_MIGRATE_DIES:-}}" ]; then
     echo "thread 'main' panicked (test shim)" >&2
     exit 101
 fi
@@ -157,14 +162,33 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         result = self.install()
 
         # Then: the statement left state.json for the ledger but never reached the
-        # remote, and the installer says so rather than succeeding.
+        # remote, and the installer stops with migrate's status and says what to run.
+        self.assert_migrate_failed(result, "did not reach the ledger")
+        self.assertIn("`knives ledger sweep` sends them", result.stderr, result.stdout + result.stderr)
         self.assertEqual(self.statements_left(), 0, result.stdout)
         self.assertEqual(self.refs_on_remote(), [], result.stdout)
+
+        # When: the installer runs again, and the remote still refuses every push.
+        result = self.install()
+
+        # Then: the sweep finds the entry that only this machine holds, and the
+        # installer says so rather than succeeding.
         self.assertNotEqual(
             result.returncode, 0,
             "the installer exited 0 though its migrated statement could not be pushed:\n"
             + result.stdout + result.stderr,
         )
+        self.assertIn("unsent: 1", result.stderr, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [], result.stdout + result.stderr)
+
+        # When: the remote accepts pushes again, and the installer runs again.
+        (self.remote / "hooks" / "pre-receive").unlink()
+        result = self.install()
+
+        # Then: it succeeds, and the statement is on the remote, under this machine's ref.
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
 
     def test_control_an_accepted_push_carries_the_migrated_statements(self) -> None:
         # Given: an existing knives user, and a ledger remote that accepts pushes.
@@ -209,6 +233,169 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         # Then: an uncounted backlog is treated as stranded, and the install stops.
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("unsent: -1", result.stderr)
+
+    def assert_migrate_failed(self, result: subprocess.CompletedProcess[str], knives_text: str) -> None:
+        """The installer stopped with migrate's status 3, and its message is the last three lines
+        of stderr. A line that knives printed before the message holds knives_text."""
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        # lib.sh sets DOTFILES_DIR with `cd ... && pwd`, and that keeps each symlink in the path.
+        # So the message names self.dotfiles as it is, not its resolved path.
+        dotfiles = self.dotfiles
+        lines = result.stderr.splitlines()
+        # A failure prints both lists whole, so it shows the message the installer printed.
+        self.maxDiff = None
+        self.assertEqual(
+            lines[-3:],
+            [
+                "knives: `knives ledger migrate` exited 3.",
+                "knives: the lines it printed above say what went wrong. Fix each problem they name"
+                f" that needs a fix, then run: bash {dotfiles}/installers/knives.sh",
+                f"knives: if a line above asks for a change to repos.toml, make it in {dotfiles}/knives/repos.toml:"
+                " at each run this installer replaces ~/.config/knives/repos.toml with a render of that file.",
+            ],
+            result.stdout + result.stderr,
+        )
+        self.assertTrue(
+            any(knives_text in line for line in lines[:-3]),
+            f"no line before the installer's message holds {knives_text!r}:\n" + result.stdout + result.stderr,
+        )
+
+    def test_a_migrate_that_cannot_pull_the_ledger_keeps_the_statements_and_says_what_to_run(self) -> None:
+        # Given: an existing knives user whose git cannot reach the ledger repository.
+        (self.home / ".gitconfig").write_text(
+            f'[url "{self.root / "unreachable.git"}"]\n\tinsteadOf = {LEDGER_URL}\n', encoding="utf-8"
+        )
+
+        # When: the installer joins the machine and migrates its statements.
+        result = self.install()
+
+        # Then: the statement stays in state.json, and the installer stops with
+        # migrate's status and says what to run.
+        self.assert_migrate_failed(result, "could not be pulled")
+        self.assertEqual(self.statements_left(), 1, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [], result.stdout + result.stderr)
+
+        # When: git can reach the ledger repository again, and the installer runs again.
+        (self.home / ".gitconfig").write_text(f'[url "{self.remote}"]\n\tinsteadOf = {LEDGER_URL}\n', encoding="utf-8")
+        result = self.install()
+
+        # Then: it succeeds, and the statement is on the remote, under this machine's ref.
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
+
+    def test_a_statement_of_a_fork_the_registry_lost_is_fixed_in_the_dotfiles_registry(self) -> None:
+        # Given: an existing knives user with a statement of a fork that repos.toml no longer names.
+        (self.config / "state.json").write_text('{"tracked_pulls": {"gone/feat/x": 7}}', encoding="utf-8")
+
+        # When: the installer joins the machine and migrates its statements.
+        result = self.install()
+
+        # Then: the statement stays in state.json, and the installer stops with
+        # migrate's status and says what to run.
+        self.assert_migrate_failed(result, "no fork in repos.toml is named gone")
+        self.assertEqual(self.statements_left(), 1, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [], result.stdout + result.stderr)
+
+        # When: the registry file that the message names gets the fork again, and the
+        # installer runs again.
+        with (self.dotfiles / "knives" / "repos.toml").open("a", encoding="utf-8") as registry:
+            registry.write(
+                '\n[repos.gone]\nupstream = "https://github.com/sjawhar/legion-smoke-gone"\n'
+                'origin = "https://github.com/sjawhar/legion-smoke-gone-installer-test"\n'
+                f'ledger = "{LEDGER_URL.removeprefix("https://github.com/")}"\n'
+            )
+        result = self.install()
+
+        # Then: it succeeds, and the statement is on the remote, under this machine's ref.
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
+
+    def test_a_sightings_file_migrate_cannot_read_stops_the_install_after_the_drop(self) -> None:
+        # Given: an existing knives user whose seen.json is not a sightings file.
+        (self.config / "seen.json").write_text("not json", encoding="utf-8")
+
+        # When: the installer joins the machine and migrates its statements.
+        result = self.install()
+
+        # Then: the statement left state.json and is on the remote. But migrate stops at
+        # seen.json, and the installer stops with migrate's status and says what to run.
+        self.assert_migrate_failed(result, "workspace sightings not renamed")
+        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
+
+        # When: the user removes seen.json, and the installer runs again.
+        (self.config / "seen.json").unlink()
+        result = self.install()
+
+        # Then: it succeeds, and the statement stays on the remote, under this machine's ref.
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
+
+    def test_a_statement_the_ledger_already_states_otherwise_needs_only_a_second_run(self) -> None:
+        # Given: a first install puts the statement on the ledger, and then state.json
+        # names another pull for the same branch.
+        first = self.install()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (self.config / "state.json").write_text('{"tracked_pulls": {"smoke/feat/x": 545}}', encoding="utf-8")
+
+        # When: the installer runs again and migrates the new statement.
+        result = self.install()
+
+        # Then: the statement left state.json, the ledger keeps its own, and the
+        # installer stops with migrate's status and says what to run.
+        self.assert_migrate_failed(result, "but the ledger already states")
+        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
+
+        # When: the installer runs again, and no one fixes anything first.
+        result = self.install()
+
+        # Then: it succeeds, and the ledger's statement stays on the remote, under this machine's ref.
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
+
+    def test_a_state_file_migrate_cannot_read_stops_the_install_before_its_report(self) -> None:
+        # Given: an existing knives user whose state.json is not valid state.
+        state = self.config / "state.json"
+        state.write_text("not json", encoding="utf-8")
+        before = state.read_bytes()
+
+        # When: the installer joins the machine and migrates its statements.
+        result = self.install()
+
+        # Then: migrate stops before it changes state.json, and the installer stops
+        # with migrate's status and says what to run.
+        self.assert_migrate_failed(result, "is not valid state")
+        self.assertEqual(state.read_bytes(), before, result.stdout + result.stderr)
+
+        # When: state.json holds the statement again, and the installer runs again.
+        state.write_text('{"tracked_pulls": {"smoke/feat/x": 544}}', encoding="utf-8")
+        result = self.install()
+
+        # Then: it succeeds, and the statement is on the remote, under this machine's ref.
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
+
+    def test_a_migrate_that_dies_without_output_stops_the_install_with_its_status(self) -> None:
+        # Given: an existing knives user, and a migrate that crashes before it prints a report.
+        self.env["KNIVES_SHIM_MIGRATE_DIES"] = "1"
+
+        # When: the installer joins the machine and migrates its statements.
+        result = self.install()
+
+        # Then: the install stops with migrate's own status, and the installer points
+        # to no report, because migrate printed none.
+        self.assertEqual(result.returncode, 101, result.stdout + result.stderr)
+        lines = result.stderr.splitlines()
+        self.assertEqual(lines[-1], "knives: `knives ledger migrate` exited 101.", result.stdout + result.stderr)
+        self.assertEqual(lines[-2], "thread 'main' panicked (test shim)", result.stdout + result.stderr)
+        self.assertNotIn("the lines it printed above", result.stderr, result.stdout + result.stderr)
+        self.assertEqual(self.statements_left(), 1, result.stdout + result.stderr)
 
     def test_two_spellings_of_one_ledger_make_one_git_directory(self) -> None:
         # Given: two forks naming the same ledger repository in different case,
