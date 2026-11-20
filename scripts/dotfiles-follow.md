@@ -76,8 +76,13 @@ Follow restores the managed marketplace lock before it calls the sync.
    non-Bun marketplace plugin below the lowest version its lock entry requires,
    `shims/omp plugin marketplace update <source>` and `shims/omp plugin upgrade <name>@<source>`.
    `mise install` holds `$MISE_DATA_DIR/.dotfiles-install.lock` (waiting for it at most
-   `--mise-timeout`), the lock `dotfiles-sync`'s tools step and `agent-session` hold too, so
-   installs on one `MISE_DATA_DIR` never run side by side and a launch waits for a running install.
+   `--mise-timeout`), the lock `dotfiles-sync`'s tools step, `agent-session`, `shims/knives`,
+   `installers/mise.sh` and `installers/librarian-harness-host.sh` hold too, so installs on one
+   `MISE_DATA_DIR` never run side by side and a launch waits for a running install. That
+   `mise install` alone gets `DOTFILES_INSTALL_LOCK_HELD=1`, so a knives call under it that lacks
+   its pin exits 127 at once instead of waiting on the lock. mise, Bun, the omp commands and the
+   pin check get the `MISE_CACHE_DIR` that the checkout's `.bashrc` gives a shell (read under
+   `--check-timeout`), so this mise and a session's take the same per-version lock in mise's cache.
    A unique `installed_plugins.json` record identifies its source. Lock entries with no record
    are silently skipped: these include vendored plugins such as compound-engineering and new
    marketplace plugins not yet bootstrapped. Bootstrapping stays an `install.sh` job; follow
@@ -134,16 +139,17 @@ Follow restores the managed marketplace lock before it calls the sync.
    fast-root pass, and a later run with its time makes the slow-root pass whole.
 
    **The tools step and the slow-root pass.** A run whose tools step (6) ran makes no slow-root
-   pass: that step's own limits (merge 120 s, mise 600 s, Bun 600 s, marketplace 300 s, pin check
-   180 s) leave no room for 1000 s. A slow-root pass that is overdue (none ended in twice the
-   interval, or none ever) is decided before the tools step: when the time left holds it, and no
-   run has done this in the last `--slow-sweep-interval`, that run leaves the tools step to the
-   next run (which retries it at the same HEAD) and makes the slow-root pass. It writes
-   `slow_sweep_priority_at` to the state file before the pass starts, so even a run killed during
-   the pass counts. So a tools step that keeps failing, or runs after every fast-forward, delays
-   the slow roots by two hours at most, never for good; and a slow-root pass that never completes
-   (killed, broken, without its summary line, its script missing) takes one run's tools step an
-   interval, never every run's: the runs between run the tools step and a fast-root pass.
+   pass: that step's own limits (merge 120 s, the rule links 180 s, the `.bashrc` read 180 s, mise
+   600 s, Bun 600 s, marketplace 300 s, pin check 180 s) leave no room for 1000 s. A slow-root pass
+   that is overdue (none ended in twice the interval, or none ever) is decided before the tools
+   step: when the time left holds it, and no run has done this in the last
+   `--slow-sweep-interval`, that run leaves the tools step to the next run (which retries it at the
+   same HEAD) and makes the slow-root pass. It writes `slow_sweep_priority_at` to the state file
+   before the pass starts, so even a run killed during the pass counts. So a tools step that keeps
+   failing, or runs after every fast-forward, delays the slow roots by two hours at most, never for
+   good; and a slow-root pass that never completes (killed, broken, without its summary line, its
+   script missing) takes one run's tools step an interval, never every run's: the runs between run
+   the tools step and a fast-root pass.
 
    Why: on sami-devbox the slow roots, `/mnt/nvme/sami` and `/mnt/durable/sami`, hold about
    20,000 checkouts and millions of directories. On 2026-11-06 the old sweep's cold walk of all
@@ -224,7 +230,7 @@ run is left (`pgrep -af dotfiles-follow`). After that every run takes the same l
 
 ## Tests
 
-`python3 -m unittest scripts.tests.test_dotfiles_follow scripts.tests.test_dotfiles_follow_marketplace scripts.tests.test_omp_marketplace_installer scripts.tests.test_dotfiles_follow_jj`:
+`python3 -m unittest scripts.tests.test_dotfiles_follow scripts.tests.test_dotfiles_follow_marketplace scripts.tests.test_omp_marketplace_installer scripts.tests.test_dotfiles_follow_jj scripts.tests.test_dotfiles_install_lock`:
 the follower cases build a throwaway origin and clone with the real provision and check scripts,
 and stand-in `mise`, `knives` and `bun`. Refusal cases assert that HEAD, the index and each file
 are unchanged, except for follow-managed lock recovery. Marketplace cases use a stub `shims/omp`
@@ -246,3 +252,7 @@ scope, so no shared row requires agreement on it. Its raw rows are written into 
 JSON text, so the installer reads them as stored.
 The jj cases use a real colocated jj checkout whose `@` holds two local files, and check that the
 files keep their bytes and nothing is pushed.
+The install-lock cases run follow's `install_tools`, `dotfiles-sync --tools`, `agent-session`, the
+two mise installers and `shims/knives` with one stand-in `mise` that fails when two installs run at
+once. They check that the installs never overlap, that a knives call under an install does not
+wait on its lock, and that follow's tools commands get the `.bashrc`'s `MISE_CACHE_DIR`.

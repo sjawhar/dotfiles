@@ -260,13 +260,20 @@ class Party:
                 start_new_session=True,
             )
         self.started = time.monotonic()
-        self.elapsed: float | None = None
+        self.ended: float | None = None
 
     def poll(self) -> int | None:
         code = self.popen.poll()
-        if code is not None and self.elapsed is None:
-            self.elapsed = time.monotonic() - self.started
+        if code is not None and self.ended is None:
+            self.ended = time.monotonic()
         return code
+
+    @property
+    def elapsed(self) -> float:
+        """Seconds from the start to the first poll that saw the process exit."""
+        if self.ended is None:
+            raise AssertionError(f"{self.name}: no poll has seen it exit")
+        return self.ended - self.started
 
     @property
     def returncode(self) -> int | None:

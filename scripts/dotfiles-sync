@@ -13,16 +13,18 @@
 # MISE_CACHE_DIR where it sets one) that the checkout's .bashrc gives a shell. It runs after every
 # move that ends on main, also when main brought nothing new, so a later sync installs a pin an
 # earlier step did not. `mise install` holds an exclusive lock on
-# $MISE_DATA_DIR/.dotfiles-install.lock, the one dotfiles-follow and agent-session take for their
-# own installs, so a launch during the install waits for it instead of finding no binary. A failed
-# `mise install` stops the step before Bun, whose mise shim could install outside that lock. Each
-# command has DOTFILES_TOOLS_TIMEOUT seconds (a whole number 1-600; default 600), the lock wait
-# included; at its limit it gives the command 10 s to exit, then kills every process it left so
-# its lock is free. A failure or a command past its limit prints the command, its status and the
-# last lines of its output, keeps the move, and the run exits non-zero after the other hosts. A
-# remote host's ssh limit is its parts: 180 s for the move, the 300 s default sync-lock wait, and
-# each command's limit plus that 10 s kill grace. The sync lock is released before the step, so an
-# install does not hold off another move.
+# $MISE_DATA_DIR/.dotfiles-install.lock, the one dotfiles-follow, agent-session, shims/knives,
+# installers/mise.sh and installers/librarian-harness-host.sh take for their own installs, so a
+# launch during the install waits for it instead of finding no binary. That `mise install` alone
+# gets DOTFILES_INSTALL_LOCK_HELD=1, so a knives call under it that lacks its pin exits 127 at once
+# instead of waiting on the lock. A failed `mise install` stops the step before Bun, whose mise
+# shim could install outside that lock. Each command has DOTFILES_TOOLS_TIMEOUT seconds (a whole
+# number 1-600; default 600), the lock wait included; at its limit it gives the command 10 s to
+# exit, then kills every process it left so its lock is free. A failure or a command past its
+# limit prints the command, its status and the last lines of its output, keeps the move, and the
+# run exits non-zero after the other hosts. A remote host's ssh limit is its parts: 180 s for the
+# move, the 300 s default sync-lock wait, and each command's limit plus that 10 s kill grace. The
+# sync lock is released before the step, so an install does not hold off another move.
 #
 # Internal modes: --here OLD is the move alone, which dotfiles-follow calls and follows with its
 # own tools step (it reports a failed install as TOOLS NOT INSTALLED, not as a failed move);

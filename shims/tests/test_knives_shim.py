@@ -432,8 +432,8 @@ class KnivesShimInstallsANewPin(ShimFixture):
         self.assertEqual(self.installs(), 1)
 
     def test_a_knives_call_under_the_install_does_not_install(self) -> None:
-        """mise runs its GitHub credential command while it installs; a knives call there must
-        not wait on the lock its ancestor holds."""
+        """A knives call under a `mise install` that runs under the lock (DOTFILES_INSTALL_LOCK_HELD
+        set) exits 127: it does not install and does not wait on that lock."""
         result = self.run_new_pin(DOTFILES_INSTALL_LOCK_HELD="1")
         self.assertEqual(result.returncode, 127, result.stdout)
         self.assertEqual(self.installs(), 0)

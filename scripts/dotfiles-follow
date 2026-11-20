@@ -36,8 +36,13 @@ What one run does:
      order does not matter. An empty or missing entry is handled as before. Lock entries without an
      installed marketplace record are skipped; install.sh bootstraps them.
      `mise install` holds `$MISE_DATA_DIR/.dotfiles-install.lock` (waiting for it at most
-     --mise-timeout), the lock dotfiles-sync's tools step and agent-session hold too, so installs
-     on one MISE_DATA_DIR never run side by side and a launch waits for a running install.
+     --mise-timeout), the lock dotfiles-sync's tools step, agent-session, shims/knives,
+     installers/mise.sh and installers/librarian-harness-host.sh hold too, so installs on one
+     MISE_DATA_DIR never run side by side and a launch waits for a running install. That
+     `mise install` alone gets DOTFILES_INSTALL_LOCK_HELD=1, so a knives call under it that lacks
+     its pin exits 127 at once instead of waiting on the lock. mise, Bun, the marketplace commands
+     and the pin check get the MISE_CACHE_DIR that the checkout's .bashrc gives a shell (read under
+     --check-timeout), so this mise and a session's take the same per-version lock in mise's cache.
   7. Every run, whatever the checkout's state: one pass of the leak check's hook sweep
      (sweep-hooks.sh of the leak-check tag, in ~/.local/share/public-leak-check-hooks, which
      devbox/sami-devbox-provision's step prepush installs) over its fast roots, under

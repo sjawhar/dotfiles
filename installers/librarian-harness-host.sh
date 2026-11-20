@@ -5,7 +5,12 @@
 #
 #   1. omp 18.13.3-sami.20261029-115123, installed beside the daily pin and not made active: the
 #      harnesses run that exact build (lib.sh OMP_BIN, run.sh OMP_BIN), or a round's arms are not
-#      comparable. mise keeps replaced versions (upgrade.auto_prune=false in mise.toml).
+#      comparable. mise keeps replaced versions (upgrade.auto_prune=false in mise.toml). The install
+#      holds $MISE_DATA_DIR/.dotfiles-install.lock, the lock dotfiles-follow, dotfiles-sync,
+#      agent-session, shims/knives and installers/mise.sh take around their `mise install`, and
+#      waits at most 600 s for it. Its mise gets DOTFILES_INSTALL_LOCK_HELD=1, so a knives call
+#      under it that lacks its pin exits 127 at once instead of waiting on the lock. A caller that
+#      set the marker holds the lock already, so under it the install takes no lock.
 #   2. Playwright's Chromium for the D2 scoring check (`uv run --no-project --with playwright`), in
 #      the browsers directory .bashrc names. The libraries it loads are devbox/gce-host.sh's
 #      "Chrome libraries". devbox/nvme-cache-cap empties that directory when it passes its cap;

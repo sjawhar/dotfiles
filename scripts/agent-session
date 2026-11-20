@@ -26,10 +26,14 @@
 #     copy of it) or mise's own shims dir, which falls back to PATH when mise has no version for
 #     the directory; either would hand the call back to a launcher. When there is none (a move of
 #     the checkout brought a pin nothing installed yet), it runs `mise install` once in the
-#     checkout, holding $MISE_DATA_DIR/.dotfiles-install.lock as dotfiles-sync's tools step does,
-#     so a launch during a mover's install waits for it; then, whatever the install's result, it
-#     asks `mise which <agent>` for the pinned binary and execs that when it is not a wrapper, and
-#     exits 127 only when it is missing. A failed install's last lines go to stderr, never stdout.
+#     checkout, holding $MISE_DATA_DIR/.dotfiles-install.lock as dotfiles-sync's tools step,
+#     dotfiles-follow, shims/knives, installers/mise.sh and installers/librarian-harness-host.sh
+#     do, so a launch during a mover's install waits for it. That `mise install` alone gets
+#     DOTFILES_INSTALL_LOCK_HELD=1, so a knives call under it that lacks its pin exits 127 at once
+#     instead of waiting on the lock, and the agent does not get the marker. Then, whatever the
+#     install's result, it asks `mise which <agent>` for the pinned binary and execs that when it
+#     is not a wrapper, and exits 127 only when it is missing. A failed install's last lines go to
+#     stderr, never stdout.
 set -euo pipefail
 
 # The dotfiles checkout this script is in, not the one under HOME: a caller may give the session a
