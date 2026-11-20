@@ -25,6 +25,7 @@ test"); a row marked "each holder" is one test per entry of HOLDERS.
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import re
 import shlex
@@ -78,6 +79,12 @@ WAIT_LINE_PART = "is held by another install; waiting up to"
 # goes into this list, or into a row of its own.
 HOLDERS = ("follow", "sync", "session")
 INSTALLERS = ("mise_sh", "librarian")
+
+# Follow's tools commands, each run with install_tools' `environment` (scripts/dotfiles-follow
+# `install_tools`), which holds the MISE_CACHE_DIR of the checkout's .bashrc: `mise install`,
+# `bun install --frozen-lockfile`, the marketplace step's `shims/omp` calls and
+# `devbox/sami-devbox-check --pins`. L10 runs each of them; a new tools command goes into this list.
+FOLLOW_TOOLS = ("mise", "bun", "marketplace", "pin check")
 
 # The follow holder: scripts/dotfiles-follow loaded by its path, so this file runs unchanged at
 # any commit that has `install_tools`, and its `install_tools` called on the scratch checkout.
@@ -233,6 +240,14 @@ if [[ -e @STATE@/after-knives ]]; then
     printf 'after rc=%s\n' "$rc" >> @LOG@
     exit "$rc"
 fi
+exit 0
+"""
+
+# L10's stand-in for one of follow's tools commands after `mise install` (@TOOL@, a member of
+# FOLLOW_TOOLS): it logs the MISE_CACHE_DIR it got, runs @THEN@ and exits 0.
+STAND_IN_TOOL = r"""#!/bin/bash
+printf 'ran %s cache=%s\n' @TOOL@ "${MISE_CACHE_DIR-unset}" >> @LOG@
+@THEN@
 exit 0
 """
 
@@ -725,21 +740,67 @@ class InstallLock(unittest.TestCase):
         self.write_bashrc("")
         self.row_l1("follow", env=self.env(MISE_DATA_DIR="data"), lock=self.root / "data" / LOCK_NAME)
 
-    def test_l10_follow_gives_mise_the_cache_dir_of_the_checkouts_bashrc(self) -> None:
-        """L10: follow's mise gets the MISE_CACHE_DIR a shell on the box gets; control first."""
+    def test_l10_follow_gives_each_tools_command_the_cache_dir_of_the_checkouts_bashrc(self) -> None:
+        """L10: each of follow's tools commands (FOLLOW_TOOLS) gets the MISE_CACHE_DIR a shell on the
+        box gets; control first."""
+        log = shlex.quote(str(self.log))
+        plugins = self.checkout / "omp" / "plugins"
+        installed = plugins / "installed_plugins.json"
+
+        def record(version: str) -> str:
+            return json.dumps({"plugins": {"l10-plugin@l10-market": [{"version": version}]}}) + "\n"
+
+        def tool(path: Path, name: str, then: str = ":") -> None:
+            body = STAND_IN_TOOL.replace("@TOOL@", shlex.quote(name)).replace("@LOG@", log)
+            executable(path, body.replace("@THEN@", then))
+
+        # package.json makes follow run Bun. A lock entry above the installed record makes the
+        # marketplace step run `shims/omp plugin marketplace update` and `shims/omp plugin upgrade`;
+        # it runs them because XDG_CONFIG_HOME holds no omp/profile, so the profile is not legion.
+        plugins.mkdir(parents=True)
+        (plugins / "package.json").write_text("{}\n", encoding="utf-8")
+        lock_entry = json.dumps({"plugins": {"l10-plugin": {"version": "2.0.0"}}}) + "\n"
+        (plugins / "omp-plugins.lock.json").write_text(lock_entry, encoding="utf-8")
+        tool(self.bin / "bun", "bun")
+        # The step reads the installed record again after `plugin upgrade`, and a record still below
+        # the lock fails it before the pin check; so the upgrade raises it, as the real one does.
+        raise_record = f'[[ "${{1-}} ${{2-}}" != "plugin upgrade" ]] || printf %s {shlex.quote(record("2.0.0"))} > {shlex.quote(str(installed))}'
+        tool(self.checkout / "shims" / "omp", "marketplace", raise_record)
+        tool(self.checkout / "devbox" / "sami-devbox-check", "pin check")
+        # After its omp calls follow restores the lock with `git checkout`. This git fails as git
+        # does outside a repository, so follow writes the lock back itself and no git runs.
+        executable(self.bin / "git", "#!/bin/bash\nexit 128\n")
+
+        def run(what: str) -> dict[str, list[str]]:
+            """One install_tools of follow: the MISE_CACHE_DIR each call of each tools command got."""
+            installed.write_text(record("1.0.0"), encoding="utf-8")
+            before = len(self.events())
+            party = self.start_holder("follow")
+            self.finish(party, what)
+            self.assert_succeeded(party)
+            seen: dict[str, list[str]] = {name: [] for name in FOLLOW_TOOLS}
+            for line in self.events()[before:]:
+                if line.startswith("start tools "):
+                    seen["mise"].append(line.split("cache=", 1)[1])
+                elif line.startswith("ran "):
+                    name, _, cache = line[len("ran "):].partition(" cache=")
+                    seen.setdefault(name, []).append(cache)
+            return seen
+
+        def assert_each_saw(seen: dict[str, list[str]], cache: str, what: str) -> None:
+            silent = [name for name in FOLLOW_TOOLS if not seen[name]]
+            self.assertEqual(silent, [], f"{what}: these tools commands made no call\n{self.describe()}")
+            self.assertEqual(
+                {name: sorted(set(caches)) for name, caches in seen.items()},
+                {name: [cache] for name in FOLLOW_TOOLS},
+                f"{what}: the MISE_CACHE_DIR each tools command got\n{self.describe()}",
+            )
+
         self.write_bashrc("# exports nothing\n")
-        control = self.start_holder("follow")
-        self.finish(control, "follow (control)")
-        self.assert_succeeded(control)
+        assert_each_saw(run("follow (control)"), "unset", "control")
         cache = self.root / "bashrc-cache"
         self.write_bashrc(f'export MISE_CACHE_DIR="${{MISE_CACHE_DIR:-{cache}}}"\n')
-        party = self.start_holder("follow")
-        self.finish(party, "follow")
-        self.assert_succeeded(party)
-        caches = [line.split("cache=", 1)[1] for line in self.events() if line.startswith("start tools ")]
-        self.assertEqual(len(caches), 2, self.describe())
-        self.assertEqual(caches[0], "unset", f"control\n{self.describe()}")
-        self.assertEqual(caches[1], str(cache), self.describe())
+        assert_each_saw(run("follow"), str(cache), "follow")
 
     def test_l11a_installers_mise_sh_holds_the_lock_and_the_shim_waits(self) -> None:
         """L11 (a): installers/mise.sh's install runs: as L1."""
