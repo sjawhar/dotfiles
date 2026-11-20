@@ -18,7 +18,9 @@
 # helper never registered a broker identity for this one command. The broker releases a bare access
 # token (agent-infra bootstrap/metadataread.go). It goes to a 0600 file of a mktemp -d directory,
 # removed on exit, never to an argument list; the command runs with CLOUDSDK_AUTH_ACCESS_TOKEN_FILE
-# set to that file, a fresh CLOUDSDK_CONFIG and prompts off. A first word that is no command on PATH
+# set to that file, a fresh CLOUDSDK_CONFIG, prompts off and file logging off, whatever the caller
+# set: gcloud copies a command's output into a log file under CLOUDSDK_CONFIG/logs, so a printed
+# token would land on disk (dispatch://INFRA-4824). A first word that is no command on PATH
 # is gcloud's: `gcloud-reader storage buckets get-iam-policy gs://b` runs gcloud. Give `gcloud`, `bq`
 # or `sh -c '...'` to choose; a REST call reads the header from stdin:
 #   sh -c 'printf "header = \"Authorization: Bearer %s\"\n" "$(cat "$CLOUDSDK_AUTH_ACCESS_TOKEN_FILE")" | curl -sS -f -K - URL'
@@ -64,4 +66,5 @@ unset "$secret" token GCLOUD_READER_INNER GCLOUD_READER_REASON GCLOUD_ACCOUNT CL
   CLOUDSDK_CORE_ACCOUNT CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT GOOGLE_APPLICATION_CREDENTIALS
 mkdir "$dir/config"
 command -v -- "$1" >/dev/null 2>&1 || set -- gcloud "$@"
-CLOUDSDK_CONFIG="$dir/config" CLOUDSDK_AUTH_ACCESS_TOKEN_FILE="$dir/token" CLOUDSDK_CORE_DISABLE_PROMPTS=1 "$@"
+CLOUDSDK_CONFIG="$dir/config" CLOUDSDK_AUTH_ACCESS_TOKEN_FILE="$dir/token" CLOUDSDK_CORE_DISABLE_PROMPTS=1 \
+  CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true "$@"
