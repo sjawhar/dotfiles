@@ -2426,48 +2426,40 @@ def gh_config_directory(environment: Mapping[str, str]) -> Path:
     return Path(environment.get("HOME") or passwd_home()) / ".config" / "gh"
 
 
-# A YAML string in quotes, on one line: "double-quoted", with its backslash escapes, or 'single-quoted', with `''`.
-YAML_DOUBLE_QUOTED = r'"(?:[^"\\\n]|\\.)*"'
-YAML_SINGLE_QUOTED = r"'(?:[^'\n]|'')*'"
-# A key of a YAML block mapping, as gh writes one and as both readers of gh's config read it, gh_alias (after the
-# entry's indentation) and yaml_block (at any indentation): one of the quoted forms, or a plain key, whose first
-# character is no YAML indicator (YAML 1.2, ns-plain-first) and which runs to the first `:` that whitespace or the
-# line's end follows, with no ` #` comment in it. A plain key may hold a `:` with no space after it, as a host with its
-# port does: gh 2.98.0 sends `gh api` to `ghe.example.com:8443` when that is the one key of hosts.yml (measured
-# 2026-11-20).
-YAML_KEY = rf"""({YAML_DOUBLE_QUOTED}|{YAML_SINGLE_QUOTED}|[^\s#:'"?,\[\]{{}}&*!|>%@`-](?:\S|[ \t]+(?!#))*?)"""
-
-
-def yaml_scalar(value: str) -> str:
-    """A one-line YAML scalar, as gh writes an alias: plain, 'single-quoted' or "double-quoted"."""
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] == "'":
-        return value[1:-1].replace("''", "'")
-    if len(value) >= 2 and value[0] == value[-1] == '"':
-        try:
-            return json.loads(value)
-        except json.JSONDecodeError:
-            return value[1:-1]
-    return re.sub(r"\s+#.*$", "", value)
+class GhAliasUnread(Exception):
+    """gh's aliases, config.yml's `aliases`, that the check cannot be sure it reads as gh 2.98.0 does (gh_alias)."""
 
 
 def gh_alias(word: str, environment: Mapping[str, str]) -> str | None:
-    """The expansion of the gh alias WORD in gh's config.yml, or None."""
+    """The expansion of the gh alias WORD, as gh 2.98.0 reads it (internal/config AliasConfig.Get, go-gh's
+    `cfg.Get(["aliases", WORD])`): the text of the value of the first key WORD in the mapping of config.yml's first
+    `aliases` key, read by yaml_mapping in whatever form it has, a block or a flow mapping, its value plain, quoted or
+    a literal block scalar (YamlScalar). None for a word that is no alias of a config read for certain: no config.yml,
+    no `aliases` key, no key WORD in it, or a null value, which registers no alias (gh takes no alias whose expansion
+    is empty, pkg/cmd/alias/shared ValidAliasExpansionFunc). GhAliasUnread, failing closed, where the check cannot be
+    sure: config.yml cannot be read, or yaml_mapping does not read it; `aliases` holds no mapping (go-gh's FindEntry
+    reads the items of a sequence as keys and values too); or WORD's value is one the reader does not decode
+    (YamlScalar.text None) or no scalar. gh_check then refuses the call.
+
+    Measured 2026-11-20 with `gh alias set` in a new GH_CONFIG_DIR: gh writes a block mapping whose values are plain
+    (a long one on one line), 'single-quoted' (`''` for `'`), "double-quoted" (`\\t`), or a `|-` or `|4-` block
+    scalar for a value of several lines; and once `gh alias delete` removed the last alias, a flow mapping,
+    `aliases: {prc: pr comment --body …}`, in which a value of several lines is "double-quoted" with `\\n`. Until
+    review round 9 of dispatch://INFRA-3365 an alias was read only from a line below a line `aliases:`, each value as
+    one line, so a flow alias or a `|-` alias with a listed term went to a public repository unread."""
     try:
-        lines = (gh_config_directory(environment) / "config.yml").read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
+        root = yaml_mapping(gh_config_text(gh_config_directory(environment) / "config.yml"))
+    except YamlUnread as error:
+        raise GhAliasUnread(str(error)) from None
+    aliases = next((value for key, value in root if key == "aliases"), [])
+    if not isinstance(aliases, list):
+        raise GhAliasUnread("its aliases key holds no mapping")
+    value = next((value for key, value in aliases if key == word), None)
+    if value is None:
         return None
-    inside = False
-    for line in lines:
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        if not line[0].isspace():
-            inside = line.rstrip() == "aliases:"
-            continue
-        entry = re.match(rf"^\s+{YAML_KEY}\s*:(?:\s+(.*))?$", line)
-        if inside and entry and yaml_scalar(entry.group(1)) == word:
-            return yaml_scalar(entry.group(2) or "")
-    return None
+    if not isinstance(value, YamlScalar) or value.text is None:
+        raise GhAliasUnread(f"the value of the alias {c_escape(word)} is one the check does not read")
+    return value.text
 
 
 def gh_expand_alias(expansion: str, arguments: Sequence[str]) -> list[str] | None:
@@ -2509,7 +2501,7 @@ def gh_next_command(arguments: Sequence[str]) -> tuple[str, list[str]] | None:
 def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
                depth: int = 0) -> tuple[str, str, list[str]] | None:
     """(group, subcommand, the arguments the subcommand reads) of a gh call that can send text, after a gh alias;
-    None for any other call."""
+    None for any other call; GhAliasUnread where a word gh may run as an alias is one gh_alias cannot be sure of."""
     found = gh_next_command(arguments)
     if found is None:
         return None
@@ -2534,7 +2526,8 @@ def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
 def gh_alias_command(name: str, rest: Sequence[str], environment: Mapping[str, str],
                      depth: int) -> tuple[str, str, list[str]] | None:
     """gh_command of what the gh alias NAME runs with REST; None for no such alias, for a shell alias (`!…`), which
-    runs a shell whose own gh calls come back through shims/gh, and past three aliases in a row."""
+    runs a shell whose own gh calls come back through shims/gh, and past three aliases in a row; GhAliasUnread where
+    gh_alias cannot be sure of the aliases."""
     expansion = gh_alias(name, environment) if depth < 3 else None
     expanded = None if expansion is None or expansion.startswith("!") else gh_expand_alias(expansion, rest)
     return gh_command(expanded, environment, depth + 1) if expanded else None
@@ -2711,8 +2704,7 @@ def gh_argument_repository(group: str, sub: str, number: int, value: str,
     repository_argument = (group, sub) in GH_REPOSITORY_ARGUMENT and number == 1
     named = gh_url_repository(value) if repository_argument or (group, sub) in GH_URL_ARGUMENT else None
     if named:
-        host = gh_call_host(hosts, GH_GIVEN_HOST, named[0])
-        return named[1], host, f"https://{host}/{named[1]}"
+        return named[1], *gh_repository_address(value, hosts)
     if repository_argument:
         return value, *gh_repository_address(value, hosts)
     return None
@@ -2889,49 +2881,90 @@ class YamlText:
     starts: tuple[int, ...]
 
 
-# A value of a mapping yaml_mapping reads, besides a mapping (a list of (key, value) pairs) and a null (None): a
-# scalar, and anything else, a sequence or a block scalar, whose lines it skips.
-YAML_SCALAR = "a scalar"
-YAML_OTHER = "a sequence or a block scalar"
+@dataclass(frozen=True)
+class YamlScalar:
+    """A scalar yaml_mapping reads: TEXT, its value as yaml.v3 decodes it (yaml_plain_text, yaml_quoted_text,
+    yaml_block_text), None where the reader does not decode it. gh_alias reads the text, and fails closed on None; the
+    hosts reader needs only the keys."""
+
+    text: str | None
+
+
+# A value of a mapping yaml_mapping reads, besides a mapping (a list of (key, value) pairs), a null (None) and a scalar
+# (YamlScalar): a sequence, whose lines it skips.
+YAML_OTHER = "a sequence"
+# A YAML string in quotes, on one line: "double-quoted", with its backslash escapes, or 'single-quoted', with `''`.
+YAML_DOUBLE_QUOTED = r'"(?:[^"\\\n]|\\.)*"'
+YAML_SINGLE_QUOTED = r"'(?:[^'\n]|'')*'"
+# The first character of a plain key: none of YAML 1.2's indicators (c-indicator, which ns-plain-first leaves out), nor
+# whitespace. YAML lets `-`, `?` and `:` start a plain scalar before a character that is not whitespace; the reader
+# does not, and refuses such a key.
+YAML_PLAIN_FIRST = r"""[^\s#:'"?,\[\]{}&*!|>%@`-]"""
+# A key of a YAML block mapping, as gh writes one and as yaml_block reads it at any indentation: one of the quoted
+# forms, or a plain key, which starts with YAML_PLAIN_FIRST and runs to the first `:` that whitespace or the line's end
+# follows, with no ` #` comment in it. A plain key may hold a `:` with no space after it, as a host with its port does:
+# gh 2.98.0 sends `gh api` to `ghe.example.com:8443` when that is the one key of hosts.yml (measured 2026-11-20). Each
+# run of blanks in a plain key is read whole (`[ \t]+(?![ \t#])`), so a line is matched in one way: until review round 9
+# of dispatch://INFRA-3365 a run of n blanks could be split in 2^(n-1) ways, each tried again on a line with no key,
+# and that review measured a gh call held 13.9 s by a config.yml whose plain value 26 blanks followed.
+YAML_KEY = rf"({YAML_DOUBLE_QUOTED}|{YAML_SINGLE_QUOTED}|{YAML_PLAIN_FIRST}(?:\S|[ \t]+(?![ \t#]))*?)"
 # A key line of a block mapping: its indentation, its key (YAML_KEY) and what follows the key's `:` on the line.
 YAML_KEY_LINE = re.compile(rf"( *){YAML_KEY}[ \t]*:(?:[ \t]+(.*))?\Z")
-# Where a node starts, YAML's indicators the reader does not follow: an anchor, an alias, a tag, a directive, a
-# complex key, and the two reserved ones.
+# Where a node starts, the indicators of YAML_PLAIN_FIRST that start what the reader does not follow: an anchor, an
+# alias, a tag, a directive, a complex key, and the two reserved ones. The others it reads where they stand (quotes,
+# flow collections, block scalars, a sequence's `-`, a comment) or refuses there (`:`, `,`, `]`, `}`).
 YAML_UNREAD_START = frozenset("&*!%?@`")
 YAML_QUOTED = {'"': re.compile(YAML_DOUBLE_QUOTED), "'": re.compile(YAML_SINGLE_QUOTED)}
-YAML_BLOCK_SCALAR = re.compile(r"[|>](?:[1-9][+-]?|[+-][1-9]?)?(?:[ \t]+#.*)?\Z")
+YAML_BLOCK_SCALAR = re.compile(r"([|>])(?:([1-9])([+-]?)|([+-])([1-9]?))?(?:[ \t]+#.*)?\Z")
 YAML_SEQUENCE_ENTRY = re.compile(r"-(?:[ \t]|\Z)")
 # A plain key of a flow mapping: as YAML_KEY's plain key, without a flow indicator, and ending before any `:`.
-YAML_FLOW_KEY = re.compile(r"""[^\s#:'"?,\[\]{}&*!|>%@`-](?:[^\s:,\[\]{}#]|(?<=\S)#|[ \t]+(?![\s#:,\[\]{}]))*""")
+YAML_FLOW_KEY = re.compile(YAML_PLAIN_FIRST + r"(?:[^\s:,\[\]{}#]|(?<=\S)#|[ \t]+(?![\s#:,\[\]{}]))*")
 # A plain scalar of a flow node, over line breaks: up to a flow indicator, a `:` that whitespace or one follows, or a
 # ` #` comment.
 YAML_FLOW_PLAIN = re.compile(r"(?:[^\s:,\[\]{}#]|:(?![\s,\[\]{}]|\Z)|(?<=\S)#|\s+(?![\s#:,\[\]{}]|\Z))+")
+# The escapes of a double-quoted YAML scalar that stand for one character, as yaml.v3 decodes them, and each escape: one
+# of these, or `\x`, `\u` or `\U` with two, four or eight hexadecimal digits. YAML 1.2 (5.7) defines `\/` too, which
+# yaml.v3 does not: measured 2026-11-20, an alias `"q\/q"` made gh 2.98.0 refuse its config ("invalid yaml"), and an
+# alias with each escape here was read by `gh alias list` as decoded.
+YAML_ESCAPES = {"0": "\0", "a": "\a", "b": "\b", "t": "\t", "\t": "\t", "n": "\n", "v": "\v", "f": "\f", "r": "\r",
+                "e": "\x1b", " ": " ", '"': '"', "'": "'", "\\": "\\", "N": "\x85", "_": "\xa0", "L": "\u2028",
+                "P": "\u2029"}
+YAML_ESCAPE = re.compile(r"\\(?:x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|(.))", re.DOTALL)
 
 
 def yaml_mapping(text: str) -> list[tuple[str, object]]:
     """The root mapping of TEXT, a file of gh's config, as go-gh v2.13.0 reads it (pkg/config/config.go load, through
-    yaml.v3): its (key, value) pairs in order, each value a mapping read the same way, None for a null, YAML_SCALAR
+    yaml.v3): its (key, value) pairs in order, each value a mapping read the same way, None for a null, a YamlScalar
     or YAML_OTHER; [] for a text that holds no node, which go-gh reads as an empty mapping. The script takes no YAML
     library, so this reads the YAML a gh config holds, and raises YamlUnread for the rest, which GhHosts reads as a
-    config the check cannot read (gh_call_host): the call is then judged as public, erring toward refusing. Each rule:
+    config the check cannot read (gh_call_host): the call is then judged as public, erring toward refusing; gh_alias
+    refuses the call. Each rule:
 
     - A block mapping at any indentation its lines keep, its keys plain or in quotes (YAML_KEY). A line indented below
-      a key belongs to that key's value: a mapping, read the same way; a sequence, a block scalar or a plain scalar's
-      later lines, skipped, since no line of these is a key of the mapping read. Exact, for the YAML yaml.v3 reads. A
-      file yaml.v3 cannot read makes gh refuse to start (measured: "failed to read configuration"), so gh sends
-      nothing, and no reading of such a file lets a term out.
+      a key belongs to that key's value: a mapping, read the same way; a sequence, skipped; a block scalar or a plain
+      scalar's later lines, which are none of the mapping's keys. Exact, for the YAML yaml.v3 reads. A file yaml.v3
+      cannot read makes gh refuse to start (measured: "failed to read configuration"), so gh sends nothing, and no
+      reading of such a file lets a term out.
     - A key given twice is listed twice, as yaml.v3 gives it to go-gh, which counts both: measured 2026-11-20, a
       hosts.yml with `ghe.example.com` twice sent `gh api` to github.com. Exact.
     - A `---` that starts the one document, and comments, are read as yaml.v3 reads them. Exact.
     - A flow mapping, as JSON or with plain keys, on one line or on several: its keys on one line, its values flow
       nodes. Exact.
+    - A scalar's text as yaml.v3 decodes it (YamlScalar): a plain one folded over its lines (yaml_plain_text), a
+      quoted one with its escapes decoded (yaml_quoted_text), and a literal block scalar with its chomping
+      (yaml_block_text). Its text is None, which gh_alias reads as one it cannot be sure of, for a folded block scalar
+      (`>`), which the reader does not fold, an escape YAML does not define, and a plain scalar whose later lines it
+      is not sure of.
     - YamlUnread, erring toward refusing, for what the reader does not follow: an anchor, an alias, a tag, a
       directive, a complex key (`?`), a second document or a document end (`...`, where yaml.v3 reads only the
       first document: measured, gh read the first), a key the reader cannot read (a plain key that starts with an
-      indicator, a double-quoted key with a backslash escape), a quoted scalar or a flow key across a line break, a
-      line indented where no key stands, a tab in an indentation, a character YAML does not allow or reads as a line
-      break (NEL, U+2028, U+2029), a value that holds `: `, and a root that is no mapping. gh refuses to start for
-      some of these (a directive, a root that is no mapping, measured) and reads the others."""
+      indicator, a double-quoted key with an escape YAML does not define), a quoted scalar or a flow key across a
+      line break, a line indented where no key stands, a tab in an indentation, a character YAML does not allow or
+      reads as a line break (NEL, U+2028, U+2029), a value that holds `: `, a root that is no mapping, and a node
+      nested deeper than Python's recursion limit lets the reader follow (RecursionError: until review round 9 of
+      dispatch://INFRA-3365 that escaped as a traceback, and a hosts.yml of 1200 nested keys, which go-gh reads, made
+      gh_check exit 1). gh refuses to start for some of these (a directive, a root that is no mapping, measured) and
+      reads the others."""
     text = text.removeprefix("\ufeff")
     if re.search(r"[^\t\n\r\x20-\x7e\xa0-\u2027\u202a-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]", text):
         raise YamlUnread("a character YAML does not allow, or reads as a line break")
@@ -2946,13 +2979,16 @@ def yaml_mapping(text: str) -> list[tuple[str, object]]:
     if index == len(lines):
         return []
     indent = yaml_indent(lines[index])
-    if lines[index].startswith("{", indent):
-        root, end = yaml_flow(document, starts[index] + indent)
-        index = yaml_line_end(document, end)
-    elif YAML_KEY_LINE.match(lines[index]):
-        root, index = yaml_block(document, index, indent)
-    else:
-        raise YamlUnread(f"line {index + 1}, which starts no mapping")
+    try:
+        if lines[index].startswith("{", indent):
+            root, end = yaml_flow(document, starts[index] + indent)
+            index = yaml_line_end(document, end)
+        elif YAML_KEY_LINE.match(lines[index]):
+            root, index = yaml_block(document, index, indent)
+        else:
+            raise YamlUnread(f"line {index + 1}, which starts no mapping")
+    except RecursionError:
+        raise YamlUnread("a node nested deeper than the reader follows") from None
     if yaml_next(document, index) < len(lines):
         raise YamlUnread(f"line {yaml_next(document, index) + 1}, after the root mapping")
     assert isinstance(root, list)
@@ -2995,15 +3031,110 @@ def yaml_line_end(document: YamlText, at: int) -> int:
 
 
 def yaml_key(token: str) -> str:
-    """The text of a key that YAML_KEY or YAML_FLOW_KEY matched: a plain key as written, a 'single-quoted' one with each
-    `''` read as `'`, and a "double-quoted" one with no backslash escape, which the reader does not decode."""
+    """The text of a key that YAML_KEY or YAML_FLOW_KEY matched: a plain key as written, a quoted one as
+    yaml_quoted_text decodes it; YamlUnread for a double-quoted one with an escape YAML does not define."""
+    if token[:1] not in YAML_QUOTED:
+        return token
+    text = yaml_quoted_text(token)
+    if text is None:
+        raise YamlUnread(f"the key {token}, with an escape YAML does not define")
+    return text
+
+
+def yaml_quoted_text(token: str) -> str | None:
+    """The text of TOKEN, a quoted scalar on one line (YAML_QUOTED), as yaml.v3 decodes it: a 'single-quoted' one with
+    each `''` read as `'`, a "double-quoted" one with each escape decoded (YAML_ESCAPE, YAML_ESCAPES); None for an
+    escape YAML does not define, or one of a code point Unicode has no character for, which yaml.v3 refuses."""
     if token.startswith("'"):
         return token[1:-1].replace("''", "'")
-    if token.startswith('"'):
-        if "\\" in token:
-            raise YamlUnread(f"the key {token}, whose escape the reader does not decode")
-        return token[1:-1]
-    return token
+    decoded: list[str] = []
+    position = 1
+    for found in YAML_ESCAPE.finditer(token, 1, len(token) - 1):
+        decoded.append(token[position:found.start()])
+        digits = found[1] or found[2] or found[3]
+        if digits:
+            point = int(digits, 16)
+            if 0xD800 <= point <= 0xDFFF or point > 0x10FFFF:
+                return None
+            decoded.append(chr(point))
+        elif found[4] in YAML_ESCAPES:
+            decoded.append(YAML_ESCAPES[found[4]])
+        else:
+            return None
+        position = found.end()
+    decoded.append(token[position:-1])
+    return "".join(decoded)
+
+
+def yaml_plain_text(lines: Sequence[str]) -> str | None:
+    """The text of a plain scalar whose LINES are its first line, from where it starts, and each line after it that is
+    the rest of its node (yaml_below, or a flow node's line breaks), folded as YAML 1.2 folds them (6.5 and 7.3.3):
+    each line without the whitespace around it and the last without its comment, two lines joined by a space, or by
+    one line break for each empty line between them; the empty lines and comments after the last line are none of it.
+    None where the reader is not sure: a comment before the last line, and a later line that starts with `- `, `? ` or
+    `: ` or holds `: `, which yaml.v3 reads otherwise or refuses."""
+    pieces = [line.strip(" \t") for line in lines]
+    while len(pieces) > 1 and (not pieces[-1] or pieces[-1].startswith("#")):
+        pieces.pop()
+    text, empty = "", 0
+    for number, piece in enumerate(pieces):
+        if not piece:
+            empty += 1
+            continue
+        comment = re.search(r"(?:\A|[ \t])#", piece)
+        if (comment and number < len(pieces) - 1
+                or number and (re.match(r"[-?:](?:[ \t]|\Z)", piece) or re.search(r":(?:[ \t]|\Z)", piece))):
+            return None
+        if comment:
+            piece = piece[:comment.start()].rstrip(" \t")
+        text = text + ("\n" * empty or " ") + piece if number else piece
+        empty = 0
+    return text
+
+
+def yaml_block_text(document: YamlText, header: re.Match[str], index: int, end: int, indent: int) -> str | None:
+    """The text of the block scalar whose HEADER (YAML_BLOCK_SCALAR) ends line INDEX, a value of the block mapping at
+    INDENT, its lines those before line END (yaml_below), as yaml.v3 reads a literal block scalar (YAML 1.2, 8.1.1 and
+    8.1.2): its content indented by the indentation indicator past INDENT, else as its first line that is not only
+    spaces is, or with none as its longest line; each line without that indentation, a line of no more spaces an empty
+    line; and the line breaks at its end as its chomping indicator says: `-` none, `+` each, else that of its last
+    line that is not empty. None for a folded block scalar (`>`), which the reader does not fold, and where it is not
+    sure: an empty line before the first line and longer than it, which YAML refuses, and a line that is not a comment
+    after one indented less than the content, which ends the scalar."""
+    if header[1] == ">":
+        return None
+    lines = document.lines
+    numbers = range(index + 1, end)
+    given, chomping = header[2] or header[5], header[3] or header[4]
+    if given:
+        content = indent + int(given)
+    else:
+        first = next((number for number in numbers if lines[number].strip(" ")), None)
+        if first is None:
+            content = max([indent + 1, *(len(lines[number]) for number in numbers)])
+        else:
+            content = max(yaml_indent(lines[first]), indent + 1)
+            if any(len(lines[number]) > content for number in range(index + 1, first)):
+                return None
+    # Each line of the scalar: its text, None for an empty line, and whether a line break ends it.
+    found: list[tuple[str | None, bool]] = []
+    for number in numbers:
+        line = lines[number]
+        if number == len(lines) - 1 and not line:
+            break
+        if yaml_indent(line) >= content or not line.strip(" "):
+            found.append((line[content:] if len(line) > content else None, number < len(lines) - 1))
+        elif all(yaml_blank(rest) for rest in lines[number:end]):
+            break
+        else:
+            return None
+    last = max((place for place, (text, _) in enumerate(found) if text is not None), default=-1)
+    text = "\n".join(line or "" for line, _ in found[:last + 1])
+    if last >= 0 and found[last][1] and chomping != "-":
+        text += "\n"
+    if chomping == "+":
+        text += "\n" * sum(1 for _, ends in found[last + 1:] if ends)
+    return text
 
 
 def yaml_block(document: YamlText, index: int, indent: int) -> tuple[list[tuple[str, object]], int]:
@@ -3059,14 +3190,18 @@ def yaml_node(document: YamlText, index: int, column: int, indent: int) -> tuple
         found = YAML_QUOTED[first].match(rest)
         if found is None:
             raise YamlUnread(f"line {index + 1}, a quoted scalar that does not end on its line")
-        return YAML_SCALAR, yaml_line_end(document, document.starts[index] + column + found.end())
-    if YAML_BLOCK_SCALAR.match(rest):
-        return YAML_OTHER, yaml_below(document, index + 1, indent)
+        end = yaml_line_end(document, document.starts[index] + column + found.end())
+        return YamlScalar(yaml_quoted_text(found[0])), end
+    header = YAML_BLOCK_SCALAR.match(rest)
+    if header:
+        end = yaml_below(document, index + 1, indent)
+        return YamlScalar(yaml_block_text(document, header, index, end, indent)), end
     plain = re.sub(r"[ \t]+#.*", "", rest)
     if (first in YAML_UNREAD_START or first in ",]}|>\t" or re.match(r"[-:](?:[ \t]|\Z)", plain)
             or re.search(r":(?:[ \t]|\Z)", plain)):
         raise YamlUnread(f"line {index + 1}, a value the reader does not read")
-    return YAML_SCALAR, yaml_below(document, index + 1, indent)
+    end = yaml_below(document, index + 1, indent)
+    return YamlScalar(yaml_plain_text([rest, *document.lines[index + 1:end]])), end
 
 
 def yaml_flow_space(text: str, at: int) -> int:
@@ -3127,7 +3262,7 @@ def yaml_flow_key(text: str, at: int) -> tuple[str, int]:
 
 
 def yaml_flow_node(document: YamlText, at: int) -> tuple[object, int]:
-    """The flow node at offset AT of the text, a mapping (yaml_flow), YAML_OTHER or YAML_SCALAR, and the offset after
+    """The flow node at offset AT of the text, a mapping (yaml_flow), YAML_OTHER or a YamlScalar, and the offset after
     it."""
     text = document.text
     first = text[at:at + 1]
@@ -3137,7 +3272,8 @@ def yaml_flow_node(document: YamlText, at: int) -> tuple[object, int]:
     if (found is None or first in YAML_UNREAD_START or first in ",]}#|>"
             or re.match(r"[-:](?:[\s,\[\]{}]|\Z)", text[at:at + 2])):
         raise YamlUnread("a flow node the reader does not read")
-    return YAML_SCALAR, found.end()
+    value = yaml_quoted_text(found[0]) if first in YAML_QUOTED else yaml_plain_text(found[0].split("\n"))
+    return YamlScalar(value), found.end()
 
 
 def gh_config_text(path: Path) -> str:
@@ -3156,17 +3292,19 @@ def gh_config_hosts(environment: Mapping[str, str]) -> list[str]:
     the keys of config.yml's first `hosts` key, which wins over hosts.yml, since go-gh's load adds hosts.yml's mapping
     after config.yml's own keys and FindEntry takes the first, and none when its value is a null or a scalar (measured
     2026-11-20: with `hosts:`, `hosts: {}` or `hosts: x` in config.yml, gh sent `gh api` to github.com whatever
-    hosts.yml listed); with no `hosts` key in config.yml, the keys of hosts.yml, none for a hosts.yml that does not
-    exist or holds no node. YamlUnread where yaml_mapping cannot read a file, and for a `hosts` key whose value is a
-    sequence or a block scalar, which was not measured."""
+    hosts.yml listed; with `hosts: |`, `hosts: |-` or `hosts: >` over a line `ghe.example.com`, and hosts.yml listing
+    only ghe.example.com, gh asked for `gh auth login`, as with no host listed and no token for github.com); with no
+    `hosts` key in config.yml, the keys of hosts.yml, none for a hosts.yml that does not exist or holds no node.
+    YamlUnread where yaml_mapping cannot read a file, and for a `hosts` key whose value is a sequence, which was not
+    measured."""
     directory = gh_config_directory(environment)
     for key, value in yaml_mapping(gh_config_text(directory / "config.yml")):
         if key == "hosts":
             if isinstance(value, list):
                 return [name for name, _ in value]
-            if value is None or value == YAML_SCALAR:
+            if value is None or isinstance(value, YamlScalar):
                 return []
-            raise YamlUnread("config.yml's hosts key holds a sequence or a block scalar")
+            raise YamlUnread("config.yml's hosts key holds a sequence")
     return [name for name, _ in yaml_mapping(gh_config_text(directory / "hosts.yml"))]
 
 
@@ -3199,15 +3337,35 @@ class GhHosts:
             return None
 
     @property
+    def source(self) -> str | None:
+        """Where gh's default host comes from (go-gh v2.13.0 defaultHost's source): `GH_HOST`; `hosts`, the one host
+        gh's config lists when it lists exactly one; else `default`, for github.com; None where the check cannot read
+        that config."""
+        if self.variable:
+            return "GH_HOST"
+        if self.listed is None:
+            return None
+        return "hosts" if len(self.listed) == 1 else "default"
+
+    @property
     def default(self) -> str | None:
         """gh's default host (go-gh v2.13.0 pkg/auth/auth.go defaultHost, cfg.Authentication().DefaultHost()): GH_HOST,
-        else the one host gh's config lists when it lists exactly one, else github.com; None where the check cannot
-        read that config."""
+        else the one host gh's config lists when it lists exactly one, else github.com (GhHosts.source); None where the
+        check cannot read that config."""
         if self.variable:
             return self.variable
         if self.listed is None:
             return None
         return self.listed[0] if len(self.listed) == 1 else "github.com"
+
+    @property
+    def known(self) -> frozenset[str] | None:
+        """The hosts gh knows, each as gh_host reads it, which a remote's host must be for gh to keep the remote
+        (pkg/cmd/factory/remote_resolver.go: go-gh's auth.KnownHosts, the default host and ghinstance.Default): the
+        hosts gh's config lists, GH_HOST's, and github.com; None where the check cannot read that config."""
+        if self.listed is None:
+            return None
+        return frozenset(gh_host(name) for name in (*self.listed, self.variable) if name) | {"github.com"}
 
 
 # How a gh call gives the host it goes to (gh_call_host).
@@ -3224,10 +3382,11 @@ def gh_call_host(hosts: GhHosts, given: str, value: str | None = None) -> str:
     the gate decides which host a call reaches reads that host here, and gh_reach reads a host that is not github.com
     as public, with a repository the check reads nothing of:
 
-    - GH_GIVEN_DEFAULT, no host given: a repository named as `OWNER/REPO` by -R, --branch-repo, GH_REPO or a repository
-      argument (gh_repository_address), and a `gh api` endpoint that no --hostname names (gh_api_resolve), which gh
-      reads on its default host (GhHosts.default; ghrepo.FromFullName, pkg/cmd/api/api.go apiRun), as gh_host reads
-      it; GH_UNREAD_HOST where the check cannot read gh's config.
+    - GH_GIVEN_DEFAULT, no host given: a repository named as `OWNER/REPO` by -R, --branch-repo, GH_REPO, a repository
+      argument or `repo create` (gh_repository_address), a new repository `repo create` names with no `/` or not at
+      all (gh_reach), and a `gh api` endpoint that no --hostname names (gh_api_resolve), which gh reads on its default
+      host (GhHosts.default; ghrepo.FromFullName, pkg/cmd/api/api.go apiRun), as gh_host reads it; GH_UNREAD_HOST
+      where the check cannot read gh's config.
     - GH_GIVEN_HOST, VALUE a host gh is given by name: --hostname, the HOST of `HOST/OWNER/REPO`, and the host of an
       http or https URL that names a repository (gh_url_repository): gh_host, which reads it as gh does.
     - GH_GIVEN_ADDRESS, VALUE the host of an address that holds `://`, which gh sends a `gh api` call to as it is
@@ -3235,18 +3394,12 @@ def gh_call_host(hosts: GhHosts, given: str, value: str | None = None) -> str:
       API hosts (GH_API_HOSTS), else that host as written.
     - GH_GIVEN_URL, VALUE a git URL that names a repository (`git@host:o/r`, `ssh://…`; gh_repository_address):
       github.com where scripts/github-repo-visibility reads it as GitHub's (gh_repository), else GH_URL_HOST.
-    - GH_GIVEN_REMOTE, VALUE a remote's URL (gh_bases): github.com for one the helper reads as GitHub's, else the
-      host of an http or https URL, else GH_URL_HOST; "" for a remote gh does not take. gh may take a remote on
-      github.com, on GH_HOST's host or on a host its config lists (first a remote on the one host it lists, when it
-      lists one), and drops any other. Measured 2026-11-20 with fake tokens, `pr comment 1` from a checkout whose
-      remotes are origin and upstream, one on github.com and one on ghe.example.com: with hosts.yml listing only
-      ghe.example.com gh went there, either way round; listing both hosts, to the upstream's; listing only github.com,
-      to github.com; and from a checkout whose one remote is github.com's, with hosts.yml listing only ghe.example.com,
-      to github.com. The check keeps each remote gh may take, as gh_bases keeps every remote. A remote whose host the
-      check cannot read is kept when gh's config lists a host that is not github.com, or GH_HOST names one, since its
-      host may be that one, and every remote is kept where the check cannot read gh's config: both err toward refusing.
+    - GH_GIVEN_REMOTE, VALUE a remote's URL (gh_bases): the host of the remote's repository, github.com for one the
+      helper reads as GitHub's, else the host of an http or https URL, else GH_URL_HOST. Which remotes gh keeps, and
+      on which of them it reads `gh repo set-default`'s choice, gh_taken_remotes and gh_bases decide from these hosts,
+      in gh's order: the remotes on hosts gh knows, then those on its default host, then a remote's `gh-resolved`.
     - GH_GIVEN_CALL, a call that is not `gh api`, whatever repositories it reaches: GH_HOST's host when that is set,
-      since gh then takes only a remote on it and refuses the call when none is (measured: "none of the git remotes
+      since gh then keeps only a remote on it and refuses the call when none is (measured: "none of the git remotes
       configured for this repository correspond to the GH_HOST environment variable", nothing sent), which the check
       reads as sent to that host, erring toward refusing; else github.com, where each repository the call reaches
       gives its own host (gh_reach), and with none named the remote's (measured 2026-11-20: with hosts.yml listing only
@@ -3266,13 +3419,7 @@ def gh_call_host(hosts: GhHosts, given: str, value: str | None = None) -> str:
     if given == GH_GIVEN_URL:
         return GH_URL_HOST
     named = gh_url_repository(value or "")
-    host = gh_host(named[0]) if named else GH_URL_HOST
-    if hosts.listed is None:
-        return host
-    taken = {gh_host(name) for name in (*hosts.listed, hosts.variable) if name} | {"github.com"}
-    if host == GH_URL_HOST:
-        return host if taken != {"github.com"} else ""
-    return host if host in taken else ""
+    return gh_host(named[0]) if named else GH_URL_HOST
 
 
 def gh_api_address(host: str, endpoint: str) -> str:
@@ -3356,24 +3503,33 @@ def gh_graphql_api(parts: urllib.parse.SplitResult, host: str) -> bool:
 @dataclass(frozen=True)
 class GhApiAddress:
     """One address gh 2.98.0 sends a `gh api` call to, for one filling of its endpoint (gh_api_resolve): HOST, where gh
-    sends it, read as gh_host reads it; ENDPOINT, its path (and query) on that host's API, as `repos/O/R/…`; URL, the
-    address, None for a host the check cannot name (GH_UNREAD_HOST); UPLOAD, whether it is on uploads.github.com; and
-    GRAPHQL, whether it is a GraphQL API's, None where the check cannot tell."""
+    sends it, read as gh_host reads it; ENDPOINT, its path (and query) on that host's API, as `repos/O/R/…`; UPLOAD,
+    whether it is on uploads.github.com; and GRAPHQL, whether it is a GraphQL API's, None where the check cannot
+    tell."""
 
     host: str
     endpoint: str
-    url: str | None
     upload: bool
     graphql: bool | None
+
+
+def gh_address_parts(address: str) -> tuple[urllib.parse.SplitResult, str] | None:
+    """ADDRESS split into its parts (urlsplit) and its host in lower case, "" for none; None for one urlsplit cannot
+    read."""
+    try:
+        parts = urllib.parse.urlsplit(address)
+        return parts, parts.hostname or ""
+    except ValueError:
+        return None
 
 
 def gh_api_resolve(hosts: GhHosts, hostname: str | None, value: str) -> GhApiAddress:
     """Where gh 2.98.0 sends a `gh api` call whose endpoint, its placeholders filled, is VALUE (pkg/cmd/api/http.go
     httpRequest), on HOSTNAME, the host the last --hostname names, else gh's default host (HOSTS): a VALUE holding
-    `://` is the address itself, whatever HOSTNAME says, and any other an address on that host, any host at all
-    (gh_api_address). The one parse of the address (urlsplit) gives all the rest, and gh_call_host its host: the
-    --hostname host (GH_GIVEN_HOST), gh's default host (GH_GIVEN_DEFAULT), or the address's own host
-    (GH_GIVEN_ADDRESS).
+    `://` is the address itself, whatever HOSTNAME says, and its own host is read by gh_call_host (GH_GIVEN_ADDRESS);
+    any other is an address on the --hostname host (GH_GIVEN_HOST) or gh's default host (GH_GIVEN_DEFAULT), any host at
+    all, read once by gh_call_host, which gh builds from that host as it is named (gh_api_address). The one parse of
+    the address (gh_address_parts) gives all the rest.
 
     The host (GhApiAddress.host) is the one gh sends to, read as gh_host reads it: for a host NormalizeHostname makes
     github.com, gh_api_address builds `https://api.<host>/`, a name under github.com (api.foo.github.com has no
@@ -3383,30 +3539,32 @@ def gh_api_resolve(hosts: GhHosts, hostname: str | None, value: str) -> GhApiAdd
     `https://api.github.com/graphql` is `graphql`. An address on any other host is that host's. The address is GraphQL
     when VALUE is `graphql`, gh's own test, which sends it to the host's GraphQL API whatever the host, or when the
     address is a GraphQL API's (gh_graphql_api); the check cannot tell when it cannot read the address or name the
-    host. Until review round 8 of dispatch://INFRA-3365 the endpoint was read before gh fills it and again after, so
-    `https://api.github.com:owner/repos/o/r/issues` was github.com's while gh sent it to
-    `https://api.github.comsjawhar/…`."""
-    host: str | None = None
+    host (GH_UNREAD_HOST), and then builds none. Until review round 8 of dispatch://INFRA-3365 the endpoint was read
+    before gh fills it and again after, so `https://api.github.com:owner/repos/o/r/issues` was github.com's while gh
+    sent it to `https://api.github.comsjawhar/…`; until its review round 9 gh's default host was read twice, and a
+    hosts.yml whose one key is `""` gave a host the check cannot name and an address built and read as REST."""
+    unread = True if value == "graphql" else None
     if "://" in value:
-        url = value
-    else:
-        named = hostname or hosts.default
-        host = gh_call_host(hosts, GH_GIVEN_HOST, hostname) if hostname else gh_call_host(hosts, GH_GIVEN_DEFAULT)
-        if named is None:
-            return GhApiAddress(host, value, None, False, True if value == "graphql" else None)
-        url = gh_api_address(named, value)
-    try:
-        parts = urllib.parse.urlsplit(url)
-        address = parts.hostname or ""
-    except ValueError:
-        return GhApiAddress(host or gh_call_host(hosts, GH_GIVEN_ADDRESS), value, url, False,
-                            True if value == "graphql" else None)
-    endpoint = value
-    if host is None:
+        split = gh_address_parts(value)
+        if split is None:
+            return GhApiAddress(gh_call_host(hosts, GH_GIVEN_ADDRESS), value, False, unread)
+        parts, address = split
         host = gh_call_host(hosts, GH_GIVEN_ADDRESS, address)
+        endpoint = value
         if host == "github.com" and parts.scheme.lower() in ("http", "https"):
             endpoint = parts.path.lstrip("/") + (f"?{parts.query}" if parts.query else "")
-    return GhApiAddress(host, endpoint, url, address == "uploads.github.com",
+    else:
+        host = gh_call_host(hosts, GH_GIVEN_HOST, hostname) if hostname else gh_call_host(hosts, GH_GIVEN_DEFAULT)
+        if host == GH_UNREAD_HOST:
+            return GhApiAddress(host, value, False, unread)
+        # gh_call_host names a host only for a --hostname or a default host that is not empty.
+        named = hostname or hosts.default
+        assert named
+        split = gh_address_parts(gh_api_address(named, value))
+        if split is None:
+            return GhApiAddress(host, value, False, unread)
+        (parts, address), endpoint = split, value
+    return GhApiAddress(host, endpoint, address == "uploads.github.com",
                         value == "graphql" or gh_graphql_api(parts, address))
 
 
@@ -3988,16 +4146,11 @@ def gh_repository_address(value: str, hosts: GhHosts) -> tuple[str, str]:
 
 
 def gh_remotes() -> tuple[tuple[str, str, str], ...]:
-    """(name, URL, RESOLVED) of each remote of this directory gh can take for the repository: the ones `gh repo
-    set-default` named (a remote's `gh-resolved`), RESOLVED "" for `base`, the remote itself, else the `OWNER/REPO` gh
-    takes in its place, on the remote's host (gh_bases); else every one, RESOLVED "", since which one gh takes then
-    depends on its version. A `gh-resolved` value counts only on a remote git lists, as gh attaches each to the remote
-    of its name, so a checkout whose only values are on no such remote reads every remote. Measured 2026-11-20 with
-    fake tokens, with hosts.yml listing only ghe.example.com: a checkout whose origin is github.com's and whose origin's
-    `gh-resolved` is `other/repo` sent `pr comment 1` to github.com, and one whose origin is on ghe.example.com sent it
-    there. Until review round 8 of dispatch://INFRA-3365 the value was github.com's whatever its remote, so with a
-    remote on another host it was judged by the visibility of github.com's repository of that name, a private one's
-    too."""
+    """(name, URL, RESOLVED) of each remote of this directory, in the order git lists them: RESOLVED is the remote's
+    `gh-resolved`, which `gh repo set-default` writes: `base`, the remote itself; an `OWNER/REPO` gh takes in its
+    place, on the remote's host; or "" for none. A `gh-resolved` value counts only on a remote git lists, as gh
+    attaches each to the remote of its name. gh reads it only on the remotes it keeps, and so does gh_bases
+    (gh_taken_remotes)."""
     def git(*arguments: str) -> list[str]:
         try:
             completed = subprocess.run(["git", *arguments], stdin=subprocess.DEVNULL, capture_output=True, text=True,
@@ -4020,10 +4173,7 @@ def gh_remotes() -> tuple[tuple[str, str, str], ...]:
         name = key.removeprefix("remote.").removesuffix(".gh-resolved")
         if name in names and value.strip():
             resolved[name] = value.strip()
-    if not resolved:
-        return tuple((name, url, "") for name, url in remotes)
-    return tuple((name, url, "" if resolved[name] == "base" else resolved[name])
-                 for name, url in remotes if name in resolved)
+    return tuple((name, url, resolved.get(name, "")) for name, url in remotes)
 
 
 @lru_cache(maxsize=None)
@@ -4055,34 +4205,100 @@ class GhBase:
     host: str
 
 
+@dataclass(frozen=True)
+class GhRemote:
+    """A remote of this directory (gh_remotes): NAME, URL, RESOLVED, its `gh-resolved` ("" for none), and HOST, the
+    host of its repository (gh_call_host, GH_GIVEN_REMOTE)."""
+
+    name: str
+    url: str
+    resolved: str
+    host: str
+
+
+def gh_taken_remotes(remotes: Sequence[GhRemote], hosts: GhHosts) -> tuple[list[GhRemote], bool]:
+    """The REMOTES gh 2.98.0 may keep before it reads any `gh-resolved` (pkg/cmd/factory/remote_resolver.go), by gh's
+    hosts (HOSTS), and whether the check is sure gh keeps each of them. gh keeps each remote on a host it knows
+    (GhHosts.known). Then, where its default host is GH_HOST's or the one host its config lists (GhHosts.source), it
+    keeps only those on that host: for GH_HOST whether or not one is, and with none left it refuses the call; for its
+    config's host only when one is, else it keeps the remotes it kept before. The order gh sorts them in (upstream,
+    github, origin, then the rest) does not count here, since the check keeps every remote gh may take. The check is
+    not sure of a remote whose host it cannot read (GH_URL_HOST), which is not github.com but may be any other host,
+    nor of any remote where it cannot read gh's config; it keeps such a remote wherever gh may keep it, and where it
+    is not sure which remote is on gh's config's host, every remote gh may keep, erring toward refusing.
+
+    Measured 2026-11-20 with fake tokens, `pr comment 1` from a checkout whose remotes are origin and upstream, one
+    on github.com and one on ghe.example.com: with hosts.yml listing only ghe.example.com gh went there, either way
+    round; listing both hosts, to the upstream's; listing only github.com, to github.com; and from a checkout whose one
+    remote is github.com's, with hosts.yml listing only ghe.example.com, to github.com. With GH_HOST=ghe.example.com
+    and hosts.yml listing only github.com, from a checkout whose one remote is github.com's, gh refused: "none of the
+    git remotes configured for this repository correspond to the GH_HOST environment variable"."""
+    def on(host: str, names: frozenset[str] | None) -> bool | None:
+        """Whether HOST is one of NAMES, None where the check cannot tell."""
+        if names is None or host == GH_URL_HOST and names - {"github.com"}:
+            return None
+        return host in names
+
+    kept = [(remote, found) for remote in remotes if (found := on(remote.host, hosts.known)) is not False]
+    if hosts.source in ("GH_HOST", "hosts"):
+        default = frozenset((gh_call_host(hosts, GH_GIVEN_DEFAULT),))
+        narrowed = [(remote, found) for remote in remotes if (found := on(remote.host, default)) is not False]
+        if hosts.source == "GH_HOST" or any(found for _, found in narrowed):
+            kept = narrowed
+        elif narrowed:
+            kept = [(remote, None) for remote, _ in kept]
+    return [remote for remote, _ in kept], all(found for _, found in kept)
+
+
 def gh_bases(environment: Mapping[str, str], reads_gh_repo: bool, hosts: GhHosts) -> list[GhBase]:
     """Each repository gh 2.98.0 may take as the base repository of a call that names none: GH_REPO's when that is set
     and the call reads it (READS_GH_REPO: a command with -R/--repo, whose cmdutil.EnableRepoOverride reads GH_REPO, and
-    the placeholders of `gh api`, whose PreRun does), else each remote of this directory gh can take (gh_remotes) that
-    gh takes (gh_call_host, GH_GIVEN_REMOTE: a remote on github.com, on GH_HOST's host or on a host gh's config lists,
-    HOSTS), on its host, a `gh-resolved` repository on its remote's. GH_REPO is `[HOST/]OWNER/REPO` or a URL
+    the placeholders of `gh api`, whose PreRun does), else one of the remotes of this directory (gh_remotes), in gh's
+    order. gh first keeps the remotes on the hosts it knows, then those on its default host (gh_taken_remotes, HOSTS);
+    then, on the remotes left, it takes the first that `gh repo set-default` resolved (`gh-resolved`, context/context.go
+    BaseRepo): the remote itself for `base`, else the `OWNER/REPO` it names on that remote's host; with none resolved,
+    the first remote left, or where it can prompt one of their network. So the check keeps each resolved remote left,
+    else every remote left; where it is not sure which remotes are left, it trusts no resolution, and keeps every
+    remote gh may keep and each repository a resolution names. GH_REPO is `[HOST/]OWNER/REPO` or a URL
     (ghrepo.FromFullName), on gh's default host when it names none (gh_repository_address). A base on another host
-    names a repository the check cannot read, read as public. `repo edit` and `repo fork` have no -R, so with no
-    repository argument they edit or fork the checkout's repository whatever GH_REPO says: until 2026-11-19 they were
-    read as GH_REPO's, so a `repo edit` description went to a public checkout's repository unread while GH_REPO named a
-    private one (dispatch://INFRA-3365). Until review round 8 a remote was kept only when its URL was GitHub's, so from
-    a checkout whose remotes were a private repository on github.com and one on ghe.example.com, with hosts.yml listing
-    only ghe.example.com, `pr comment 1` with a listed term went out, judged by the private repository, while gh sent
-    it to ghe.example.com. gh_check reads them at most once, and only for a reading that takes them."""
+    names a repository the check cannot read, read as public.
+
+    Measured 2026-11-20 with fake tokens, from a checkout whose origin is github.com's theorem-labs/agent-infra, with
+    `gh-resolved` base, and whose upstream is ghe.example.com's sjawhar/ygo, with hosts.yml listing only
+    ghe.example.com: `gh api --hostname github.com 'repos/{owner}/{repo}/issues' -X GET --verbose` sent `GET
+    /repos/sjawhar/ygo/issues` to https://api.github.com, filled from the upstream, and `pr comment 1` went to
+    https://ghe.example.com/api/graphql; with GH_HOST=ghe.example.com and hosts.yml listing only github.com, that `gh
+    api` call went to the same address; with hosts.yml listing only github.com, it sent `GET
+    /repos/theorem-labs/agent-infra/issues`, and `pr comment 1` went to https://api.github.com/graphql. `repo edit` and
+    `repo fork` have no -R, so with no repository argument they edit or fork the checkout's repository whatever
+    GH_REPO says: until 2026-11-19 they were read as GH_REPO's, so a `repo edit` description went to a public
+    checkout's repository unread while GH_REPO named a private one (dispatch://INFRA-3365). Until review round 8 a
+    remote was kept only when its URL was GitHub's, so from a checkout whose remotes were a private repository on
+    github.com and one on ghe.example.com, with hosts.yml listing only ghe.example.com, `pr comment 1` with a listed
+    term went out, judged by the private repository, while gh sent it to ghe.example.com. Until review round 9 the
+    resolved remote was read before gh's host filters, so in the first checkout above both calls with a listed term
+    went out, judged by the private origin, while gh filled the `gh api` endpoint with the upstream's name, the public
+    github.com repository sjawhar/ygo, and sent `pr comment` to ghe.example.com. gh_check reads them at most once, and
+    only for a reading that takes them."""
     value = environment.get("GH_REPO", "") if reads_gh_repo else ""
     if value:
         host, url = gh_repository_address(value, hosts)
         return [GhBase("GH_REPO", value, url, gh_repository_on(host, url), host)]
+    remotes = [GhRemote(name, url, resolved, gh_call_host(hosts, GH_GIVEN_REMOTE, url))
+               for name, url, resolved in gh_remotes()]
+    taken, sure = gh_taken_remotes(remotes, hosts)
+    resolved = sure and any(remote.resolved for remote in taken)
     bases: list[GhBase] = []
-    for name, url, resolved in gh_remotes():
-        host = gh_call_host(hosts, GH_GIVEN_REMOTE, url)
-        if not host:
-            continue
-        if resolved:
-            name, url = resolved, f"https://{host}/{resolved}"
-        base = GhBase(f"remote {name}", f"remote {name}", url, gh_repository_on(host, url), host)
-        if base not in bases:
-            bases.append(base)
+    for remote in taken:
+        named: list[tuple[str, str]] = []
+        if not resolved or remote.resolved == "base":
+            named.append((remote.name, remote.url))
+        if remote.resolved not in ("", "base"):
+            named.append((remote.resolved, f"https://{remote.host}/{remote.resolved}"))
+        for name, url in named:
+            base = GhBase(f"remote {name}", f"remote {name}", url, gh_repository_on(remote.host, url), remote.host)
+            if base not in bases:
+                bases.append(base)
     return bases
 
 
@@ -4373,8 +4589,9 @@ def gh_reach(call: GhCall, bases: Callable[[], Sequence[GhBase]]) -> list[GhTarg
     """Every target the call (CALL, gh_check's reading of a call it does not judge as GraphQL) can reach: its host,
     where gh sends it (GhAddress.host), and on github.com the repositories it names, else its base repository (BASES,
     gh_bases: GH_REPO's for a command with -R/--repo, else this directory's remotes, which gh_check reads at most once
-    for every reading that takes them), and the repository `issue develop --branch-repo` names; for a `gh api` call,
-    the repository the `repos/O/R` of its endpoint names once gh has filled its placeholders from each base repository
+    for every reading that takes them), and the repository `issue develop --branch-repo` names; for `repo create`, the
+    repository it makes and the --template repository, each on the host of its name; for a `gh api` call, the
+    repository the `repos/O/R` of its endpoint names once gh has filled its placeholders from each base repository
     (GhAddress.fillings), or a new repository (GH_API_NEW_REPOSITORY; GhAddress.endpoint says which endpoint it is). A
     repository the call makes public (GhCall.made_public) is open, and so is one whose visibility cannot be read, and
     a target with no repository: a gist (anyone with its address reads it), a project, a repository on another host,
@@ -4397,9 +4614,30 @@ def gh_reach(call: GhCall, bases: Callable[[], Sequence[GhBase]]) -> list[GhTarg
         else:
             values.setdefault(long.get(option, option), []).append(value)
     if (group, sub) == ("repo", "create"):
-        name = positionals[0] if positionals else "a new repository"
-        shown = f"{name} ({'not made private, so read as public' if call.made_public else 'private'})"
-        return [GhTarget(shown, name.lower() if name.count("/") == 1 else "", call.made_public)]
+        # gh 2.98.0 makes the repository on the host of its name, which it reads as ghrepo.FromFullName reads a name
+        # with a `/` (`OWNER/NAME` on its default host, `HOST/OWNER/NAME` on HOST, a URL on its host), and a name with
+        # none, or none given, on its default host (pkg/cmd/repo/create createFromScratch, createFromLocal). It reads a
+        # --template repository so too, and asks that host for it by name. gh_repository_address and gh_call_host
+        # read each host, and one that is not github.com is read as public, made private or not. Measured 2026-11-20
+        # with fake tokens: `repo create ghe.example.com/o/r --private` with hosts.yml listing only github.com, and
+        # `repo create o/r --private` with it listing only ghe.example.com, each first asked
+        # https://ghe.example.com/api/v3/users/o, and with it listing only github.com, https://api.github.com/users/o;
+        # `repo create github.com/o/r --private --template o/t` with it listing only ghe.example.com first asked
+        # https://ghe.example.com/api/graphql. Until review round 9 of dispatch://INFRA-3365 no host was read, so a
+        # private repository made on another host was judged as a private github.com one.
+        name = positionals[0] if positionals else ""
+        host = gh_repository_address(name, call.hosts)[0] if name else gh_call_host(call.hosts, GH_GIVEN_DEFAULT)
+        if host == "github.com":
+            state = "not made private, so read as public" if call.made_public else "private"
+            made = [GhTarget(f"{name or 'a new repository'} ({state})", name.lower() if name.count("/") == 1 else "",
+                             call.made_public)]
+        else:
+            made = [GhTarget(f"a repository on {host}, read as public", "", True)]
+        for template in [value for value in values.get("--template", []) if value][-1:]:
+            template_host = gh_repository_address(template, call.hosts)[0]
+            if template_host != "github.com":
+                made.append(GhTarget(f"the template repository on {template_host}, read as public", "", True))
+        return made
     repositories: list[GhRepository] = []
 
     def add(shown: str, host: str, url: str, tie: GhTie = GhTie()) -> None:
@@ -4473,11 +4711,21 @@ def gh_reach(call: GhCall, bases: Callable[[], Sequence[GhBase]]) -> list[GhTarg
 
 def gh_check(arguments: Sequence[str]) -> int:
     """`gh -- ARGV…`: refuse a gh call that sends a listed term to anything not confirmed private (exit 3), whose text
-    cannot be checked because the list cannot be read (exit 2), or that names a file nobody can read (exit 4); exit
-    GH_STDIN_EXIT to ask for standard input. Any other call exits 0 untouched, and the text of a call that reaches only
-    private or internal repositories is not checked, nor are their visibilities read before a term is found."""
+    cannot be checked because the list cannot be read (exit 2), or that names a file nobody can read or may run a gh
+    alias the check cannot read (exit 4); exit GH_STDIN_EXIT to ask for standard input. Any other call exits 0
+    untouched, and the text of a call that reaches only private or internal repositories is not checked, nor are their
+    visibilities read before a term is found."""
     environment = os.environ
-    command = gh_command(arguments, environment)
+    try:
+        command = gh_command(arguments, environment)
+    except GhAliasUnread as error:
+        # A word gh may run as an alias, in a config.yml whose aliases the check cannot be sure of (gh_alias): what
+        # the call runs, and so what it sends where, is unknown.
+        config = gh_config_directory(environment) / "config.yml"
+        print(f"leak terms: gh: cannot read gh's aliases in {c_escape(str(config))}, so the check cannot tell what the "
+              f"call runs: {error}", file=sys.stderr)
+        print("leak terms: gh: refused before gh ran, so nothing was sent.", file=sys.stderr)
+        return TEXT_EXIT
     if command is None:
         return 0
     group, sub, rest = command
