@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep this machine's ~/.dotfiles on origin's main by fast-forward only, and say when it cannot.
+"""Keep this machine's ~/.dotfiles on origin's main by fast-forward only, and log when it cannot.
 
 Why this exists: the dotfiles change only by commit and push, and each machine pulls
 (dispatch://INFRA-993, the cutover rule). On sami-devbox nothing pulled, and when someone did,
@@ -43,8 +43,8 @@ What one run does:
      devbox/sami-devbox-provision's step prepush installs) over its fast roots, under
      --sweep-timeout; at most once per --slow-sweep-interval, and not in a run whose tools step
      ran, a pass over its fast and slow roots together instead, under --slow-sweep-timeout. Every
-     pass ends before the run's deadline (--run-limit less the time kept for the state and
-     alerts): a slow-root pass starts only with its whole budget left, a fast-root pass is cut to
+     pass ends before the run's deadline (--run-limit less the time kept for the state write): a
+     slow-root pass starts only with its whole budget left, a fast-root pass is cut to
      the time left, and none runs with under 30 s left. A slow-root pass overdue by twice its
      interval is made before the tools step, which that run leaves to the next, at most once per
      interval (slow_sweep_priority_at, written before the pass starts). It installs the
@@ -52,18 +52,18 @@ What one run does:
      checkout it cannot hook, a checkout it deferred to a later pass (its cap on GitHub visibility
      lookups, dispatch://BET-706), a pass that does not end within its timeout, a pass that could
      not run for lack of time, or a missing sweep is a condition.
-  8. Say each new condition once, all of one run's in one message; say it again once after
-     --escalate if it still holds; say when it clears.
-     When HEAD is at origin/main and only tools/hooks remain open, say a post-update step failed,
-     not that the checkout failed to follow. Any open follow failure keeps the not-following headline.
+  8. Log each new condition once, all of one run's in one report, and log when it clears. When HEAD
+     is at origin/main and only tools/hooks remain open, the report says a post-update step
+     failed, not that the checkout failed to follow. Any open follow failure keeps the
+     not-following headline.
 
 In git mode, it never stashes, resets, rebases or abandons. In jj mode, dotfiles-sync rebases
 `@` and abandons commits that main already has. dotfiles-follow never describes, commits or pushes.
 It restores only the follow-managed marketplace lock, before judging dirty files and after plugin
 commands. Other edits are discarded only when origin/main already holds their bytes, right before
 the fast-forward. Apart from that lock recovery, a refusal leaves HEAD, the index and every file
-as they were. Alerts go over Envoy to BOX_HEALTH_OWNER when set, else --box-health-role when set,
-else the `lead-box-health` role, then the SRE session.
+as they were. It sends no alert and no message: its reports go to its own log (the unit's journal),
+and the state file holds the conditions still open.
 """
 
 from __future__ import annotations
@@ -79,23 +79,9 @@ import signal
 import socket
 import stat
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
-
-# scripts/ is this file's own directory; the shared Envoy client lives beside it.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import envoy_client  # noqa: E402
-
-# Box health belongs to the SRE session (dispatch://INFRA-6) when nobody holds the role, as for
-# unit-health-watch, load-swap-watch and disk-fill-watch.
-SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
-BOX_HEALTH_ROLE_TOPIC = "notifications.role.lead-box-health"
-OWNER_RE = re.compile(
-    r"01[0-9a-f]{6}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
-)
-ROLE_RE = re.compile(r"[a-z0-9][a-z0-9-]*\Z")
 
 # Where the state file goes, as the sibling watches place theirs: the big disk where there is one,
 # ~/.local/state elsewhere. devbox/sami-devbox-check reads it for A2.
@@ -160,42 +146,6 @@ def tail(text: str, lines: int = 15) -> str:
     if len(kept) > lines:
         kept = [f"(... {len(kept) - lines} earlier lines)"] + kept[-lines:]
     return "\n".join(f"    {line}" for line in kept) or "    (no output)"
-
-
-# ------------------------------------------------------------------------------- Envoy
-
-
-class Envoy(envoy_client.Envoy):
-    """scripts/envoy_client's client, logging through this watch's log()."""
-
-    def __init__(self, timeout: float = 8.0) -> None:
-        super().__init__(timeout=timeout, log=log)
-
-
-def box_health_owner() -> str:
-    """The session id BOX_HEALTH_OWNER names, or "" for the role-then-SRE default."""
-    owner = (os.environ.get("BOX_HEALTH_OWNER") or "").strip()
-    if owner and not OWNER_RE.fullmatch(owner):
-        raise SystemExit(
-            f"BOX_HEALTH_OWNER={owner!r} is not an omp session id"
-            " (01xxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx); unset it for the box-health role"
-        )
-    return owner
-
-
-def tell_box_health(envoy: Envoy, text: str, role: str = "") -> str:
-    """Tell this box's health owner, and say who heard it ("" when every route refused)."""
-    owner = box_health_owner()
-    if owner:
-        return owner if envoy.send(owner, text) else ""
-    if role:
-        topic = f"notifications.role.{role}"
-        return topic if envoy.publish(topic, text) else ""
-    if envoy.publish(BOX_HEALTH_ROLE_TOPIC, text):
-        return BOX_HEALTH_ROLE_TOPIC
-    if envoy.send(SRE, text):
-        return SRE
-    return ""
 
 
 # ------------------------------------------------------------------------------- git
@@ -577,7 +527,7 @@ def install_tools(repo: Path, options: argparse.Namespace) -> str:
         data.mkdir(parents=True, exist_ok=True)
         handle = lock.open("a")
     except OSError as error:
-        # A tools condition like any other failed install, not a crash that skips the alert.
+        # A tools condition like any other failed install, not a crash that skips the report.
         return f"`mise install` in {display_path(repo)} did not start: cannot open {display_path(lock)}: {error}"
     with handle:
         while True:
@@ -636,12 +586,9 @@ SWEEP_SUMMARY_RE = re.compile(r" sweep \[[^\]]*\]: (\d+) checkouts.*, (\d+) inst
 SWEEP_DEFERRED_RE = re.compile(r", (\d+) deferred, \d+ installed, \d+ failed$")
 
 
-# The end of a run's time that is kept for what comes after the sweep: the state write and the
-# alerts. A run sends at most three messages (new, escalated, cleared), and each goes to the
-# box-health role and, only when that publish fails, to the SRE session (tell_box_health), each
-# request bounded by --http-timeout: 3 x 2 x 8 s = 48 s by default. STATE_RESERVE is the state
-# write (a temp file, two fsyncs and a rename, with no timeout of their own) and the interpreter's
-# start before the run's clock starts.
+# The end of a run's time that is kept for what comes after the sweep: the state write (a temp
+# file, two fsyncs and a rename, with no timeout of their own) and the interpreter's start before
+# the run's clock starts.
 STATE_RESERVE = 12.0
 # A fast-root pass with less time than this left is not started (and reported as not run).
 MIN_SWEEP_SECONDS = 30.0
@@ -650,11 +597,6 @@ MIN_SWEEP_SECONDS = 30.0
 def monotonic() -> float:
     """The run's clock (its own name, so the tests can move it without touching subprocess's)."""
     return time.monotonic()
-
-
-def alert_reserve(options: argparse.Namespace) -> float:
-    """Seconds kept at the end of the run for the state write and the alerts (STATE_RESERVE)."""
-    return 3 * 2 * options.http_timeout + STATE_RESERVE
 
 
 def epoch_age(value: object, now: float) -> float | None:
@@ -736,7 +678,7 @@ def sweep_hooks(options: argparse.Namespace, kind: str, timeout: float) -> tuple
     a kill can read what the pass did before it.
 
     How each pass fits the unit's TimeoutStartSec=1170 (--run-limit): run_once keeps a monotonic
-    deadline, its start plus --run-limit less alert_reserve (60 s by default), and no pass runs
+    deadline, its start plus --run-limit less STATE_RESERVE (12 s), and no pass runs
     past it. A slow-root pass starts only when the time left holds its whole --slow-sweep-timeout,
     so it is never a shortened walk; otherwise the run makes a fast-root pass, bounded by the
     smaller of --sweep-timeout and the time left, or none, reported, when under MIN_SWEEP_SECONDS
@@ -899,7 +841,7 @@ def judge_fetch(
     data: dict, options: argparse.Namespace, found: dict[str, str], failed: bool, command: str,
     said: str, after: str,
 ) -> None:
-    """Count runs in a row whose fetch failed; say it once --fetch-grace of them have (both modes)."""
+    """Count runs in a row whose fetch failed; report it once --fetch-grace of them have (both modes)."""
     if not failed:
         data["fetch_failures"] = 0
         return
@@ -1217,17 +1159,18 @@ def choose_sweep(options: argparse.Namespace, data: dict, judged: set[str], now:
     return "fast", min(options.sweep_timeout, left) if left >= MIN_SWEEP_SECONDS else 0.0
 
 
-def run_once(options: argparse.Namespace) -> int:
+def run_once(options: argparse.Namespace) -> list[str]:
+    """One run. Returns its reports, each also written to the log: none when nothing opened or
+    cleared, or when another run holds the state lock."""
     # The run's deadline: systemd kills the unit at --run-limit (TimeoutStartSec) after its start;
-    # the last alert_reserve seconds of that are kept for the state write and the alerts.
-    deadline = monotonic() + options.run_limit - alert_reserve(options)
+    # the last STATE_RESERVE seconds of that are kept for the state write.
+    deadline = monotonic() + options.run_limit - STATE_RESERVE
     now = time.time()
     repo = options.repo
-    envoy = Envoy(timeout=options.http_timeout)
     state = State(options.state)
     if not state.locked:
         log(f"another run holds {options.state}; skipping this period")
-        return 0
+        return []
     data = state.data
     incidents: dict = data.setdefault("incidents", {})
     found, judged, facts = assess_and_follow(repo, options, state, deadline)
@@ -1242,7 +1185,7 @@ def run_once(options: argparse.Namespace) -> int:
         else:
             why, completed = (
                 f"no hook sweep pass ran: this run had {max(0.0, deadline - monotonic()):.0f}s left before its"
-                f" {options.run_limit:.0f}s limit, less {alert_reserve(options):.0f}s kept for the state and alerts,"
+                f" {options.run_limit:.0f}s limit, less {STATE_RESERVE:.0f}s kept for the state write,"
                 f" under the {MIN_SWEEP_SECONDS:.0f}s a fast-root pass (fast_roots only) needs. The next run sweeps."
             ), False
         if sweep_kind == "slow" and completed:
@@ -1256,20 +1199,16 @@ def run_once(options: argparse.Namespace) -> int:
             found["hooks"] = why
 
     opened: dict[str, str] = {}
-    escalated: dict[str, str] = {}
     cleared: list[str] = []
     for kind in KINDS:
         why = found.get(kind)
         incident = incidents.get(kind)
         if why:
             if not incident:
-                incidents[kind] = {"opened_at": now, "alerted_at": now, "escalated_at": None, "why": why}
+                incidents[kind] = {"opened_at": now, "why": why}
                 opened[kind] = why
             else:
                 incident["why"] = why
-                if incident.get("escalated_at") is None and now - incident["alerted_at"] >= options.escalate:
-                    incident["escalated_at"] = now
-                    escalated[kind] = why
         elif incident and kind in judged:
             cleared.append(
                 f"{HEADLINE[kind]} cleared after {human_time(now - incident['opened_at'])}"
@@ -1314,15 +1253,6 @@ def run_once(options: argparse.Namespace) -> int:
             if post_update_only else f"DOTFILES NOT FOLLOWING MAIN on {host}"
         )
         messages.append(f"{headline} ({where}).\n\n{blocks(opened)}\n\n{footer}")
-    if escalated:
-        headline = (
-            f"{host} is on main, but a post-update step is still failing"
-            if post_update_only else f"STILL NOT FOLLOWING MAIN on {host}"
-        )
-        messages.append(
-            f"{headline}, {human_time(options.escalate)} after the first alert"
-            f" ({where}).\n\n{blocks(escalated)}\n\n{footer}"
-        )
     if cleared:
         messages.append(
             f"DOTFILES FOLLOWING MAIN AGAIN on {host} ({where}):\n"
@@ -1342,26 +1272,9 @@ def run_once(options: argparse.Namespace) -> int:
         f" kept: {', '.join(facts.get('kept_modified', [])) or 'none'}; open: {', '.join(sorted(incidents)) or 'none'};"
         f" new: {len(opened)}; cleared: {len(cleared)}"
     )
-    unheard = 0
     for text in messages:
-        if options.print_alert:
-            print(text + "\n", flush=True)
-        target = tell_box_health(envoy, text, getattr(options, "box_health_role", ""))
-        if target:
-            log(f"told {target}")
-        else:
-            unheard += 1
-    if unheard:
-        # The state already records the alert as made, so this line is the only trace that it
-        # reached nobody.
-        log(f"NOBODY HEARD IT: {unheard} message(s) refused by every Envoy route; see above")
-    return 0
-
-
-def health_role(value: str) -> str:
-    if not ROLE_RE.fullmatch(value):
-        raise argparse.ArgumentTypeError("ROLE must match [a-z0-9][a-z0-9-]*")
-    return value
+        log(text)
+    return messages
 
 
 def main() -> int:
@@ -1379,8 +1292,7 @@ def main() -> int:
         help="the script whose SECRET_FILES names the kept files (default <repo>/devbox/sami-devbox-provision)",
     )
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE, help=f"state file (default {DEFAULT_STATE})")
-    parser.add_argument("--escalate", type=float, default=7200.0, help="say a condition again once after this many seconds (default 7200)")
-    parser.add_argument("--fetch-grace", type=int, default=3, help="runs in a row a fetch may fail before it is said (default 3)")
+    parser.add_argument("--fetch-grace", type=int, default=3, help="runs in a row a fetch may fail before it is reported (default 3)")
     parser.add_argument("--fetch-timeout", type=float, default=120.0)
     parser.add_argument("--mise-timeout", type=float, default=600.0)
     parser.add_argument("--check-timeout", type=float, default=180.0)
@@ -1393,24 +1305,19 @@ def main() -> int:
     parser.add_argument("--sweep-timeout", type=float, default=420.0, help="one fast-root hook sweep pass, killed after this many seconds (default 420; a longer cap only lengthened passes stuck on a stalled disk)")
     parser.add_argument("--slow-sweep-interval", type=float, default=3600.0, help="sweep the slow roots too at most once per this many seconds, counted from the last slow-root pass that ended with its summary line (default 3600)")
     parser.add_argument("--slow-sweep-timeout", type=float, default=1000.0, help="one hook sweep pass over the fast and slow roots, killed after this many seconds; started only when the run has this long left before its deadline (default 1000)")
-    parser.add_argument("--run-limit", type=float, default=1170.0, help="seconds the whole run may take, the unit's TimeoutStartSec; no hook sweep pass runs past it less the time kept for the state and alerts (default 1170)")
-    parser.add_argument("--http-timeout", type=float, default=8.0)
+    parser.add_argument("--run-limit", type=float, default=1170.0, help="seconds the whole run may take, the unit's TimeoutStartSec; no hook sweep pass runs past it less the time kept for the state write (default 1170)")
     parser.add_argument("--no-hook-sweep", action="store_true", help="skip the hook sweep for this machine")
-    parser.add_argument(
-        "--box-health-role",
-        type=health_role,
-        metavar="ROLE",
-        default=None,
-        help="publish alerts to notifications.role.ROLE after BOX_HEALTH_OWNER, without an SRE fallback",
-    )
-    parser.add_argument("--print-alert", action="store_true", help="print each message to stdout as well as sending it")
+    # Ignored. oryx's user manager loaded its drop-in's ExecStart, which passes this flag, before the
+    # drop-in dropped it, and keeps passing it until its next `systemctl --user daemon-reload`
+    # (oryx/install.sh runs one); refusing it would stop oryx following main, with nothing to say so.
+    # It goes once `systemctl --user show -p ExecStart dotfiles-follow.service` on oryx omits it.
+    parser.add_argument("--box-health-role", help=argparse.SUPPRESS)
     options = parser.parse_args()
-    options.box_health_role = options.box_health_role or ""
     options.repo = options.repo.absolute()
     if options.provision is None:
         options.provision = options.repo / "devbox/sami-devbox-provision"
-    box_health_owner()
-    return run_once(options)
+    run_once(options)
+    return 0
 
 
 if __name__ == "__main__":

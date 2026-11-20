@@ -94,7 +94,8 @@ check (`host_omp_logins` in `sami-devbox-check`) accepts exactly that row as a n
 person's row is a FAIL.
 
 `.dotfiles/secrets.env` is the one of them git tracks, and its copy differs from its commit on
-purpose. `scripts/dotfiles-follow`, which fast-forwards `~/.dotfiles` here every 10 minutes,
+purpose. `scripts/dotfiles-follow`, when it runs here (nothing arms it on this machine; see
+`devbox/install.sh`),
 keeps every `SECRET_FILES` path that git tracks (read from this list, not a second one) and
 refuses on any other change; it also refuses when main changes such a file
 (`scripts/dotfiles-follow.md`).
@@ -132,8 +133,7 @@ Host half (`sami-devbox-check`, on sami-devbox as sami):
 | no login files | `sudo find / /mnt/nvme /mnt/durable /mnt/scratch -xdev` | no `application_default_credentials.json`, `box_credential_config.json`, `credentialed_accounts.db`, `.config/gh/hosts.yml`; no `legacy_credentials` unless every file in it is a keyless `external_account` `adc.json` (no `private_key`, no `refresh_token`) or a `.boto` that only names one (a note: moves carry sessions' own gcloud directories holding dev-sjawhar@'s keyless external_account). A `service_account` key fails, as a user login does. The spec's A2 names the directory by name alone; dispatch://INFRA-993 records the change |
 | no gcloud login | every `credentials.db` | no row of type `authorized_user` |
 | no Azure login | every `azureProfile.json` | no subscription whose user type is `user` |
-| dotfiles follow main | `systemctl --user is-active dotfiles-follow.timer`, `systemctl --user show dotfiles-follow.service`, its state file | timer active; last run exited 0; that run, at most 30 min ago, left HEAD on origin/main with nothing open and the tools installed |
-| mise pins | `mise ls --missing` (`sami-devbox-check --pins` adds the box half's `knives --version` line; `dotfiles-follow` runs it on the host after each fast-forward) | nothing missing |
+| mise pins | `mise ls --missing` (`sami-devbox-check --pins` adds the box half's `knives --version` line; `dotfiles-follow` runs it after each fast-forward) | nothing missing |
 | openai routes | `yq` of `~/.dotfiles/omp/config.local.yml` (`modelRoles.slow`, `.deep`, `task.agentModelOverrides.astra`, `["sami-proxy"]`) and of `~/.omp/agent/models.yml` | each names `model-gateway/openai/<id>`; model-gateway declares 2 or more `openai/` models |
 | GitHub, plain shell | `git ls-remote https://github.com/theorem-labs/{machcsl-riscv,oss-verify-proofs-internal} HEAD` with no agent marker and no routing include, as `agentbox move --to` runs over ssh | a sha for each (the App's token, through `installers/gh-app-host.sh`) |
 | ssh to sami-rocqperf | `ssh -o BatchMode=yes -o ConnectTimeout=15 sami@sami-rocqperf true` (movers run scripts there after the move) | exit 0: both are Sami's own nodes, which Tailscale SSH takes as sami |

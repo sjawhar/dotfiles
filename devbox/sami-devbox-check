@@ -972,31 +972,6 @@ host_units() {
     fi
 }
 
-# The dotfiles follow origin's main by themselves (scripts/dotfiles-follow): its timer is active,
-# its last run exited 0, and that run, at most 30 minutes ago, left ~/.dotfiles on origin/main
-# with no condition open and its tools installed.
-host_follow() {
-    local got state outcome age head target tools
-    got="$(systemctl --user is-active dotfiles-follow.timer 2>&1)"
-    [[ "$got" == active ]] || { fail "dotfiles-follow: timer is '$got', want active (devbox/install.sh arms it)"; return; }
-    # One line per property, sorted, so the order systemctl prints them in does not matter.
-    got="$(systemctl --user show -p Result -p ExecMainStatus -p ExecMainExitTimestamp dotfiles-follow.service 2>&1 | sort | tr '\n' ' ')"
-    if [[ " $got" == *" ExecMainExitTimestamp= "* || " $got" != *" ExecMainStatus=0 "* || " $got" != *" Result=success "* ]]; then
-        fail "dotfiles-follow: its last run did not exit 0, or none ran: $got"
-        return
-    fi
-    for state in "/mnt/nvme/$(id -un)/tmp/dotfiles-follow/state.json" "${XDG_STATE_HOME:-$HOME/.local/state}/dotfiles-follow/state.json"; do
-        [[ -s "$state" ]] && break
-    done
-    outcome="$(jq -r '"\(.last_outcome) \(now - (.last_run // 0) | floor) \(.head[0:12]) \(.target[0:12]) \(.tools_ok_head == .head)"' "$state" 2>&1)"
-    read -r got age head target tools <<<"$outcome"
-    if [[ "$got" == ok && "$age" =~ ^[0-9]+$ && "$age" -le 1800 && "$head" == "$target" && "$tools" == true ]]; then
-        ok "dotfiles-follow: timer active; its last run, ${age}s ago, exited 0 and left ~/.dotfiles on origin/main $head with its tools installed (state $state)"
-    else
-        fail "dotfiles-follow: last run: '$outcome' (want: outcome ok, at most 1800 s ago, HEAD = origin/main, tools installed at HEAD; state $state)"
-    fi
-}
-
 # The apt packages devbox/gce-host.sh adds for lanes (2026-11-03): python3 has pip and venv (the
 # N6 farm runs `python3 -m pip install --target`), and the commands of the other packages resolve.
 host_packages() {
@@ -1198,7 +1173,6 @@ host() {
     host_disks
     host_rootfs
     host_units
-    host_follow
     host_packages
     host_bwrap
     host_nofile

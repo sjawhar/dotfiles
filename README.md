@@ -50,7 +50,7 @@ setup below is a backup for when you are away from the laptop.
 
 Run `bash ~/.dotfiles/oryx/install.sh` once on oryx. It arms the
 `dotfiles-follow` user timer with oryx's drop-in, so oryx's `~/.dotfiles`
-follows `origin/main` every 10 minutes and its alerts go to the HOME controller.
+follows `origin/main` every 10 minutes.
 It needs no Tailscale; `oryx-edge-cutover` writes oryx's forward configuration.
 Run it as `agent`, the sudo user: it also enables and starts `bluetooth` and
 turns on lingering for `sami`, because the Galaxy A15 agent phone line pairs with
