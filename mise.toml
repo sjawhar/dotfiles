@@ -81,44 +81,38 @@ _.path = ['{{ env.DOTFILES_DIR | default(value=env.HOME ~ "/.dotfiles") }}/shims
 # upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec
 # them for hub/worker spawns.
 #
-# v18.18.6-sami.20261117-053702 (commit 7ae9bc73) adds the fix for the subagent progress probe
-# (dispatch://INFRA-4027, cybermonklabs/oh-my-pi#14): a probe goes out only when at least 95% of
-# its prompt is in the agent's prompt cache, the agent's tools and thinking level are unchanged,
-# and the cache entry has more than 30 s of its lifetime left; and a side request (/btw, a probe)
-# now carries its parent's session id, so a gateway serves it from the parent's cache. Both checks
-# of INFRA-4027 pass on this linux-x64 asset against v18.18.6-sami.20261117-013345: 10 of 10
-# probes read at least 95% from the cache, where the control had 5 of 8 gateway Claude probes
-# under 95% (lowest 41.3%). task.completionProbe stays false in omp/config.yml, although Sami said
-# on 2026-11-17 to turn the probe on (dispatch://INFRA-4027/ask/32dc7c33-b1bd-49aa-9048-dd941ecb2b63):
-# the comment at that key says why. Since 11-10 the release also carries RPC startup
-# dispatch (#19126: a command sent after `ready` is answered while startup still runs) and a pause
-# after a failed Hindsight auto-recall (hindsight.recallCooldownMs), and it still carries the
-# 11-10 fix for the memory leak that was killing long-running sessions (447.6 -> 145.7 KiB per
-# model call, 67.5%, measured in the binary; dispatch://INFRA-1876). The linux-x64 asset (sha256
-# 642dab6d0b95abf2daaf2b207aeff0bd2c0d72715a0b2c6a1149100f1d774aba) is smoke-tested:
-# `omp --version` gives omp/18.18.6 and `omp --smoke-test` gives `smoke-test: ok`. packages/mnemopi
-# is unchanged since the 11-10 release, so "npm:@oh-my-pi/pi-mnemopi" below stays 18.18.6.
-# Release: https://github.com/cybermonklabs/oh-my-pi/releases/tag/v18.18.6-sami.20261117-053702
+# v18.18.6-sami.20261119-162325 (commit b40fd3c3), the build dispatch://INFRA-4638 pins for INFRA's
+# pods, carries 230bc2fa (cybermonklabs/oh-my-pi#48, dispatch://INFRA-4512): after a classifier
+# refusal, no fallback in the same turn sends the request again to the model that refused it, by
+# any name, route or provider, and the walk keeps its retry budget and provider exclusion past a
+# spent fallback. The pin before it, v18.18.6-sami.20261117-053702, lacked it, and new sessions
+# multiplied OpenAI cyber_policy refusals (dispatch://INFRA-1484). Over 053702 it also brings: the
+# fallback walk passes over a model in cooldown or with spent usage (#19); a turn whose `!command`
+# key prints nothing is retried, and `--restore` continues it (#22); subagents share Hindsight's
+# recall pause (#28); `--session-id <uuid>`; model discovery yields the event loop every 10 ms; and
+# fixes to the shell builtins (rm, mv, find, grep), the directory walker and robomp. Its session-store
+# changes (SQL leases, PostgreSQL writes opened read-write) apply only under `session.storage: sql`,
+# which no config here sets, and its `secrets.maskSessionStore` is off by default. A `!command` value
+# now runs in a session of its own with no terminal; scripts/gateway-token and
+# scripts/gcloud-token-fast each print a token so (measured 2026-11-21). It keeps the 11-17 probe fix
+# (dispatch://INFRA-4027), the 11-10 memory-leak fix (dispatch://INFRA-1876) and setup version 3.
+# The linux-x64 asset (sha256 9fd84e4ff44cddef87f323100e5cb30ca235284033c8a05192f90c69481fea68) is
+# smoke-tested: `omp --version` gives omp/18.18.6 and `omp --smoke-test` gives `smoke-test: ok`.
+# packages/mnemopi changed only to keep mnemopi's state under OMP_CONFIG_ROOT when that is set, and
+# nothing here sets it, so "npm:@oh-my-pi/pi-mnemopi" below stays 18.18.6.
+# Release: https://github.com/cybermonklabs/oh-my-pi/releases/tag/v18.18.6-sami.20261119-162325
 #
-# There is NO macOS split here, and do not add one. A darwin-arm64 asset is published but was
-# cross-built on Linux and has never been executed. On 2026-11-10 this file briefly held macOS
-# back on 18.16.0 waiting for someone to run it on Apple Silicon; Sami then said plainly that
-# he does not have a Mac and runs Linux (dispatch://INFRA-1876/ask/6ad5d62f). The hold
+# There is NO macOS split here, and do not add one. The fork's CI builds and smoke-tests a
+# darwin-arm64 asset on a macos-15 runner, but no Mac of Sami's runs it. On 2026-11-10 this file
+# briefly held macOS back on 18.16.0 waiting for someone to run it on Apple Silicon; Sami then said
+# plainly that he does not have a Mac and runs Linux (dispatch://INFRA-1876/ask/6ad5d62f). The hold
 # protected nobody and would have rotted into a permanently stale second pin.
 #
-# Actions on cybermonklabs/oh-my-pi have created no run since 2026-11-07T11:44:58Z (that one was
-# cancelled in flight), so this release was built by hand from the workflow's own version
-# computation and asset names. Measured 2026-11-11: every repo field is green (enabled: true,
-# allowed_actions: all, disabled: false, archived: false) and all eleven workflows read active --
-# not disabled_fork, so it is NOT GitHub's fork gate. Both event paths are dead, not just one:
-# ci.yml is on main with workflow_dispatch and still 422s "Actions has been disabled", and the
-# 11-10 push of the sami branch (which sami-build.yml triggers on) created no run. The only field
-# nobody here can read is orgs/cybermonklabs/actions/permissions (403, needs admin:org), and an
-# org-level policy or spending limit fits every observation. Check the ORG settings page, not the
-# repository's Actions tab. Still so on 2026-11-17: no run exists for commit 7ae9bc73, the
-# repository's newest runs sit `queued`, and the release notes of v18.18.6-sami.20261117-053702 say
-# it was built by hand in the same way.
-"github:sjawhar/oh-my-pi" = "18.18.6-sami.20261117-053702"
+# This release is an Actions build: run 44565315084 of "Build sami branch"
+# (https://github.com/cybermonklabs/oh-my-pi/actions/runs/44565315084) built and smoke-tested
+# linux-x64 on ubuntu-22.04 and darwin-arm64 on macos-15. GitHub records no build attestation for
+# its assets (`gh attestation verify` answers 404), so the digest above is the check.
+"github:sjawhar/oh-my-pi" = "18.18.6-sami.20261119-162325"
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
 # broker asset and gives it its own install dir alongside forward's.
