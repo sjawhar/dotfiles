@@ -38,7 +38,7 @@ thing. Report what you ran, what you saw, and every defect.
 - The PR links the pre-merge proof. Without the link, do not arm auto-merge.
 - Any unverified scenario, and any open finding backed by a file, a command output or a trace, blocks readiness and merge.
 - Surface not reachable: report "not merge-ready, verification blocked on X" with the failed command, do not open the PR for review, build the surface and run the scenario again.
-- Do not ask Sami to drop a scenario. A blocker that survives that work goes to him as a pre-merge decision.
+- Do not ask Sami to drop a scenario or to accept a proxy for one. A blocker that survives that work goes to him as a pre-merge decision.
 
 ## Excuses that mean: run this step
 
