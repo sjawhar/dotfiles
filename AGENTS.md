@@ -31,7 +31,7 @@ In `~/.dotfiles`, do not run `jj rebase` onto main, `git pull`, `git rebase`, `g
 
 ## Tests and lint
 
-- Python, installers included, from the repository root: `PYTHONPATH=. uvx pytest scripts/tests shims/tests` (some tests import `scripts.tests`). One file: `uvx pytest scripts/tests/test_ensure_link.py`. CI runs none of these, and no CI result holds a merge.
+- Python, installers included, from the repository root: `PYTHONPATH=. uvx pytest scripts/tests shims/tests` (some tests import `scripts.tests`). One file: `uvx pytest scripts/tests/test_ensure_link.py`. CI runs only part of `scripts/tests` and none of `shims/tests`, and no CI result holds a merge.
 - Lint with the pinned `shellcheck <file>` and `basedpyright <file>`.
 
 ## Environment Facts

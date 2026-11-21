@@ -1,6 +1,6 @@
 name: scripts-tests
 
-# The tests under scripts/tests, run as scripts/AGENTS.md documents: `PYTHONPATH=. uvx pytest
+# The tests under scripts/tests, run as the root AGENTS.md documents: `PYTHONPATH=. uvx pytest
 # scripts/tests` from the root, on an ubuntu-24.04 runner given the dev box's tools the tests call.
 # They read files all over the repository (shims/, installers/, devbox/, agentbox/,
 # agent-secrets/, .claude/, .bashrc and more), so every change runs them, not only a change under
