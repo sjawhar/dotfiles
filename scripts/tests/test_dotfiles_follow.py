@@ -2169,8 +2169,9 @@ class OneRule(RegistryCopy, Harness):
     def test_another_checkout_on_a_shared_state_file_leaves_the_registry_condition_open(self) -> None:
         # Review 21: on a --state file that is not DEFAULT_STATE, which another checkout's run owns
         # (rule B), that run cleared the KNIVES REGISTRY NOT WRITTEN ~/.dotfiles opened there, though
-        # it never renders. A condition is judged only by a run that does its work, so the run of
-        # another checkout leaves it open; the control, a ~/.dotfiles run that renders, clears it.
+        # it never renders. KNIVES REGISTRY NOT WRITTEN is judged only by a run that renders, which
+        # a run of another checkout never is, so that run leaves it open; the control, a ~/.dotfiles
+        # run that renders, clears it.
         shared = Path(self.tmp.name) / "shared" / "state.json"
         self.assertNotEqual(shared.resolve(), FOLLOW.DEFAULT_STATE.resolve())
         headline = FOLLOW.HEADLINE["registry"]
