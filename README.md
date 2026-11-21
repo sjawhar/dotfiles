@@ -18,10 +18,17 @@ Before these commands, this laptop already has `cloudflared` and
 | Command | What it prints when it works |
 | --- | --- |
 | `~/.dotfiles/scripts/dotfiles-sync local` | `== local`, then `<hostname> on <commit>`, then `tools: <command> passed in <directory>` lines |
-| `ssh oryx true` | A browser tab may open for the Cloudflare Access sign-in. Then it prints nothing and returns to the prompt with exit 0. If it prints `Permission denied (publickey)`, give an agent the public-key output from `ssh-add -L` so the agent can add the key on oryx. |
-| `ssh -t oryx '~/.local/bin/oryx-edge-cutover'` | Touch the YubiKey when asked. Its last line is `oryx-edge-cutover: complete`. |
+| `ssh oryx true` | A browser tab may open for the Cloudflare Access sign-in. ssh uses the 1Password key when 1Password's SSH agent has one turned on, otherwise the YubiKey key `~/.ssh/id_ed25519_sk_oryx_sami` with one touch (and that key's passphrase, if you set one). Then it prints nothing and returns to the prompt with exit 0. If it still says `Permission denied (publickey)`, paste to an agent the output of the command under the table, which names only the public keys ssh offered. If it says `Too many authentication failures`, 1Password offered too many keys before the YubiKey key: turn off in 1Password's SSH agent the keys that are not for oryx, and run it again. |
+| `ssh -t oryx '~/.local/bin/oryx-edge-cutover'` | Touch the YubiKey when asked. The run ends with `oryx-edge-cutover: complete`, followed by the line `oryx-edge-cutover: log <path>`, which names its log file. |
 | `bash ~/.dotfiles/installers/forward.sh daemon` | One `forward.sh daemon: oryx: <step>: <what it did>` line per step. Its last line is `forward.sh daemon: oryx: connected: forward-oryx is running`. |
 | `ssh oryx-ssm true` | It prints nothing from `true` and exits 0. The Session Manager ProxyCommand can print its own lines. |
+
+If `ssh oryx true` says `Permission denied (publickey)`, run this and paste its
+output to an agent:
+
+```bash
+ssh -v oryx true 2>&1 | grep -E 'Offering|Server accepts|denied'
+```
 
 To rotate the service token, run `bash ~/.dotfiles/installers/forward.sh daemon`
 again.
@@ -29,10 +36,11 @@ again.
 ## SSH to oryx
 
 oryx has one SSH hostname, `oryx.thecybermonk.com`, which Cloudflare Access sends
-to sshd on oryx's port 22. `ssh oryx` uses the login key in 1Password.
-`forward-oryx` uses `forward/forward-oryx.ssh-config`, its own key and the
-service token. It never shares an SSH connection with `ssh oryx`. The phone
-setup below is a backup for when you are away from the laptop.
+to sshd on oryx's port 22. `ssh oryx` offers the 1Password key first, then the
+YubiKey key (`~/.ssh/id_ed25519_sk_oryx_sami`). `forward-oryx` uses
+`forward/forward-oryx.ssh-config`, its own key and the service token. It never
+shares an SSH connection with `ssh oryx`. The phone setup below is a backup for
+when you are away from the laptop.
 
 ## Oryx tunnel ports
 
