@@ -160,6 +160,14 @@ class Fixture(unittest.TestCase):
                    '    for _ in $(seq 600); do [[ -e "$STUB_PAUSE_GATE" ]] && break; /bin/sleep 0.1; done\n'
                    'fi\n'
                    'exec /bin/sleep 0.02')
+        # With STUB_DATE_GATE set, the first `date -u +%FT%TZ` after box_client's first state read
+        # (the time of its first log line) logs `date waits` and waits (60 s at most) for that file.
+        write_stub(stubs, "date", 'if [[ -n "${STUB_DATE_GATE:-}" && "$*" == "-u +%FT%TZ" ]] \\\n'
+                   '    && grep -q "^docker ps " "$STUB_LOG" && ! grep -qx "date waits" "$STUB_LOG"; then\n'
+                   '    echo "date waits" >>"$STUB_LOG"\n'
+                   '    for _ in $(seq 600); do [[ -e "$STUB_DATE_GATE" ]] && break; /bin/sleep 0.1; done\n'
+                   'fi\n'
+                   'exec /bin/date "$@"')
         write_stub(stubs, "systemctl", 'echo "systemctl $*" >>"$STUB_LOG"; exit 0')
         write_stub(stubs, "mountpoint", "exit 1")
         write_stub(stubs, "sudo", 'echo "sudo $*" >>"$STUB_LOG"; exit 1')
@@ -352,6 +360,19 @@ class Reattach(Fixture):
         gate = self.root / "pause-gate"
         stdout, stderr = self.term_when(
             "pause waits", gate, STUB_RUN_END="eof", STUB_PAUSE_GATE=str(gate), STUB_ATTACH_END="exit 0",
+        )
+        box = self.box()
+        self.assertEqual(self.calls("docker attach"), [], stdout + stderr)
+        self.assertEqual(self.calls("docker rm"), [f"docker rm -fv {box}"], stdout + stderr)
+        self.assertFalse((self.boxes / box).exists(), stdout + stderr)
+
+    def test_a_launcher_told_to_end_while_box_client_logs_attaches_no_more(self) -> None:
+        """The client ends with 125 while the box runs, and the TERM comes while box_client writes
+        its "attaching to it again" line (its `date`). The USR1 runs its handler once that command
+        ends; the launcher still attaches no more, and closes the box as before."""
+        gate = self.root / "date-gate"
+        stdout, stderr = self.term_when(
+            "date waits", gate, STUB_RUN_END="eof", STUB_DATE_GATE=str(gate), STUB_ATTACH_END="exit 0",
         )
         box = self.box()
         self.assertEqual(self.calls("docker attach"), [], stdout + stderr)

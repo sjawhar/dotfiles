@@ -1382,8 +1382,9 @@ box_client() {
         case "$state" in
             stopped) break ;;
             running)
-                # An attach that ended at once is not made again at once. A USR1 during the pause
-                # runs its trap once the pause ends, so stop is read after it.
+                # An attach that ended at once is not made again at once. A USR1 runs its trap only
+                # once the command in hand ends (the pause, a log line's date or write), so stop is
+                # read after each, the last time just before the attach.
                 (( SECONDS - started >= BOX_CLIENT_RETRY )) || sleep "$BOX_CLIENT_RETRY"
                 (( ! stop )) || break
                 if (( SECONDS >= deadline )); then
@@ -1391,6 +1392,7 @@ box_client() {
                     break
                 fi
                 box_client_say "$box" "its Docker client ended (status $rc), and the box still runs; attaching to it again"
+                (( ! stop )) || break
                 started=$SECONDS
                 rc=0
                 docker attach "$box" || rc=$?
