@@ -49,6 +49,9 @@ fi
 if [[ -n "${STUB_MISE_LOG:-}" ]]; then
     echo call >> "$STUB_MISE_LOG"
 fi
+if [[ -n "${STUB_WHICH_RC:-}" ]]; then
+    exit "$STUB_WHICH_RC"
+fi
 if [[ -n "${STUB_MISE_SLEEP_ONCE:-}" && ! -e "$STUB_MISE_LOG.slept" ]]; then
     touch "$STUB_MISE_LOG.slept"
     sleep "$STUB_MISE_SLEEP_ONCE"
@@ -328,6 +331,15 @@ class KnivesShimWithoutMise(ShimFixture):
         ):
             self.assertIn(str(tried), result.stderr)
         self.assertIn("could not install it", result.stderr)
+
+    def test_a_mise_which_that_exits_124_at_once_did_not_time_out(self) -> None:
+        """mise can exit 124 itself; only a call that lasted the whole timeout timed out."""
+        self.write_pin("4.0.0")
+        result = self.run_pinned(STUB_WHICH_RC="124", DOTFILES_KNIVES_MISE_TIMEOUT="2", STUB_INSTALL_FAIL="1")
+        self.assertEqual(result.returncode, 127, result.stdout)
+        self.assertEqual(self.mise_calls(), 2)
+        self.assertIn("attempt 1 exited 124", result.stderr)
+        self.assertNotIn("timed out", result.stderr)
 
 
 class KnivesShimInstallsANewPin(ShimFixture):

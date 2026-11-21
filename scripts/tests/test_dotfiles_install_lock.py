@@ -880,6 +880,24 @@ class InstallLock(unittest.TestCase):
         self.wait_until(lambda: not alive(pid), f"the stand-in mise {pid} to be stopped")
         self.wait_until(lambda: self.probe(self.lock) == 0, f"{self.lock} to be free once the shim's mise is gone")
 
+    def test_l14b_installers_mise_sh_under_a_caller_that_holds_the_lock_reports_mises_75_as_a_failed_install(self) -> None:
+        """L14 (b): L14 for installers/mise.sh under a caller that holds the lock and sets the
+        marker, as L11 (b) sets it up, so mise.sh runs mise without flock. The librarian installer
+        prints no lock line in that branch, so it has no such row."""
+        self.flag("exit-75-tools")
+        self.data.mkdir(parents=True, exist_ok=True)
+        with self.lock.open("a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            party = self.start_holder("mise_sh", self.env(**{MARKER: "1"}))
+            self.finish(party, "mise_sh")
+            self.assertEqual(self.probe(self.lock), 75, f"control: the test holds {self.lock}\n{self.describe()}")
+        output = party.stdout() + party.stderr()
+        self.assertEqual([line for line in output.splitlines() if LOCK_NAME in line], [], self.describe())
+        self.assertIn("Some tools failed to install", output, self.describe())
+        self.assert_no_overlap()
+        self.assertEqual(self.starts(), ["tools"] * 3, self.describe())
+        self.assert_succeeded(party)
+
 
 def each(row: str, parties: tuple[str, ...], name: str) -> None:
     """One test per party for a row marked "each holder" (or "each installer")."""

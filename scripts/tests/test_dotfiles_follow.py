@@ -404,6 +404,27 @@ class InstallTools(Harness):
         )
         self.assertFalse(self.fake_log.exists(), "mise install ran without its lock")
 
+    def bashrc_log(self, bashrc: str, timeout: float) -> list[str]:
+        """What bashrc_mise_cache_dir logs for a checkout whose .bashrc is BASHRC."""
+        (self.repo / ".bashrc").write_text(bashrc)
+        with unittest.mock.patch.object(FOLLOW, "log") as logged:
+            self.assertEqual(FOLLOW.bashrc_mise_cache_dir(self.repo, timeout), "")
+        return [call.args[0] for call in logged.call_args_list]
+
+    def test_a_bashrc_that_exits_124_is_not_reported_as_a_timeout(self) -> None:
+        bashrc = FOLLOW.display_path(self.repo / ".bashrc")
+        self.assertEqual(
+            self.bashrc_log("exit 124\n", 30),
+            [f"tools: `bash` sourcing {bashrc} exited 124, so the tools commands get no MISE_CACHE_DIR from it"],
+        )
+
+    def test_a_bashrc_that_takes_longer_than_the_timeout_is_reported_as_one(self) -> None:
+        bashrc = FOLLOW.display_path(self.repo / ".bashrc")
+        self.assertEqual(
+            self.bashrc_log("sleep 30\n", 1),
+            [f"tools: `bash` sourcing {bashrc} took longer than 1 s, so the tools commands get no MISE_CACHE_DIR from it"],
+        )
+
 
 class Follows(Harness):
     def test_secret_files_come_from_the_provision_script(self) -> None:

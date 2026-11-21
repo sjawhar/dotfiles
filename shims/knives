@@ -167,14 +167,17 @@ if [[ -z "$_knives" ]]; then
     _why=""
     for _attempt in 1 2; do
         _rc=0
-        _start="${EPOCHSECONDS:-$(date +%s)}"
+        # The clock as EPOCHREALTIME gives it (whole seconds where bash has none), so the check
+        # below is in microseconds.
+        _start="${EPOCHREALTIME:-${EPOCHSECONDS:-$(date +%s)}.000000}"
         _knives="$(MISE_DATA_DIR="$_mise_root" MISE_GLOBAL_CONFIG_FILE="$_config" timeout "$_mise_timeout" "$_mise" which -C / knives --tool github:sjawhar/knives </dev/null)" || _rc=$?
+        _end="${EPOCHREALTIME:-${EPOCHSECONDS:-$(date +%s)}.000000}"
         if (( _rc == 0 )) && [[ -n "$_knives" ]]; then
             break
         fi
         _knives=""
         # mise can exit 124 itself; only a call that lasted the whole timeout timed out.
-        if (( _rc == 124 && ${EPOCHSECONDS:-$(date +%s)} - _start >= _mise_timeout )); then
+        if (( _rc == 124 && ${_end/[.,]/} - ${_start/[.,]/} >= _mise_timeout * 1000000 )); then
             _why+="${_why:+; }attempt $_attempt timed out after ${_mise_timeout}s"
         else
             _why+="${_why:+; }attempt $_attempt exited $_rc"
@@ -284,8 +287,8 @@ if [[ -z "$_knives" ]]; then
                 pid=$!
                 deadline=$(( ${EPOCHSECONDS:-$(date +%s)} + wait ))
                 # rc is 0 here. out_of_time says this call's own wait ran out. A wrapper that
-                # ended reports mise's status, which is 124 also where timeout stopped mise at
-                # the cap.
+                # ended reports timeout's status: mise's own, 124 where the TERM at the cap
+                # stopped mise, 137 where the KILL did.
                 while :; do
                     if (( ${EPOCHSECONDS:-$(date +%s)} >= deadline )); then
                         rc=1 out_of_time=1

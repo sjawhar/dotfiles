@@ -338,6 +338,15 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assertIn("exited 124", bun.stderr)
         self.assertIn("past its limit of 2 s", bun.stderr)
 
+    def test_case_10a_a_mise_that_exits_124_at_once_is_not_past_its_limit(self) -> None:
+        # mise can exit 124 itself; the note is only for a run that lasted the limit.
+        result = self.sync("local", env={**self.env, "DOTFILES_TOOLS_TIMEOUT": "2", "FAKE_MISE_RC": "124"})
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("`mise install`", result.stderr)
+        self.assertIn("exited 124", result.stderr)
+        self.assertNotIn("past its limit", result.stderr)
+
     def test_case_11_host_loop_continues_after_a_failure(self) -> None:
         self._install_ssh()
         result = self.sync("firsthost", "secondhost", env={**self.env, "FAKE_FAIL_HOST": "firsthost"})
