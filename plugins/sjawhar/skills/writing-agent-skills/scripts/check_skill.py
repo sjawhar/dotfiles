@@ -23,7 +23,7 @@ measured.
 
 It prints a warn line and still passes when the body has more than 40 rules, or when the name
 differs from the directory. A rule is a list item, or a sentence of a paragraph; headings, tables
-and code are not counted. Run it with `uv run --script`, which installs PyYAML from the
+and fenced code are not counted. Run it with `uv run --script`, which installs PyYAML from the
 block above; the frontmatter is read with yaml.safe_load, as a YAML reader of a host reads it.
 """
 
@@ -100,7 +100,7 @@ def references(skill_dir: Path) -> list[Path]:
 
 
 def count_rules(body: str) -> int:
-    """Each list item counts 1 and each paragraph its sentences; headings, tables, code and blank lines count 0."""
+    """Each list item counts 1 and each paragraph its sentences; headings, tables, fenced code and blank lines count 0."""
     items = 0
     paragraphs: list[list[str]] = []
     fence = ""  # the open code fence's marker; "" outside a fence
@@ -132,10 +132,9 @@ def count_rules(body: str) -> int:
 
 
 def size_fails(label: str, size: int) -> list[str]:
-    fails: list[str] = []
     if size > TARGET_BYTES:
-        fails.append(f"{label} has {size:,} bytes, over the {TARGET_BYTES:,}-byte limit")
-    return fails
+        return [f"{label} has {size:,} bytes, over the {TARGET_BYTES:,}-byte limit"]
+    return []
 
 
 def string_field(fields: dict[object, object], key: str) -> tuple[str, str | None]:

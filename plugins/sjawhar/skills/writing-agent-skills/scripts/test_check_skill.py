@@ -275,33 +275,28 @@ def warns(tmp_path: Path, body: str) -> list[str]:
 
 def as_items(count: int) -> str:
     """`count` one-sentence rules as list items, each wrapped onto a continuation line."""
-    return "".join(f"- Rule {i} is\n  one sentence.\n" for i in range(1, count + 1))
+    return "- A rule is\n  one sentence.\n" * count
 
 
 def as_paragraphs(*sizes: int) -> str:
     """One-sentence rules as paragraphs of `sizes` sentences, each sentence wrapped onto two lines."""
-    paragraphs: list[str] = []
-    first = 1
-    for size in sizes:
-        paragraphs.append("".join(f"Rule {i} is\none sentence.\n" for i in range(first, first + size)))
-        first += size
-    return "\n".join(paragraphs)
+    return "\n".join("A rule is\none sentence.\n" * size for size in sizes)
 
 
-def test_45_rules_as_list_items_warn(tmp_path: Path) -> None:
-    assert warns(tmp_path, as_items(45)) == ["warn 45 rules, over 40: split or delete"]
+def test_41_rules_as_list_items_warn(tmp_path: Path) -> None:
+    assert warns(tmp_path, as_items(41)) == ["warn 41 rules, over 40: split or delete"]
 
 
-def test_45_rules_as_paragraphs_warn(tmp_path: Path) -> None:
-    assert warns(tmp_path, as_paragraphs(*[5] * 9)) == ["warn 45 rules, over 40: split or delete"]
+def test_41_rules_as_paragraphs_warn(tmp_path: Path) -> None:
+    assert warns(tmp_path, as_paragraphs(*[5] * 8, 1)) == ["warn 41 rules, over 40: split or delete"]
 
 
-def test_39_rules_as_list_items_do_not_warn(tmp_path: Path) -> None:
-    assert warns(tmp_path, as_items(39)) == []
+def test_40_rules_as_list_items_do_not_warn(tmp_path: Path) -> None:
+    assert warns(tmp_path, as_items(40)) == []
 
 
-def test_39_rules_as_paragraphs_do_not_warn(tmp_path: Path) -> None:
-    assert warns(tmp_path, as_paragraphs(*[5] * 7, 4)) == []
+def test_40_rules_as_paragraphs_do_not_warn(tmp_path: Path) -> None:
+    assert warns(tmp_path, as_paragraphs(*[5] * 7, 4, 1)) == []
 
 
 def test_a_table_and_a_fenced_block_are_not_rules(tmp_path: Path) -> None:
