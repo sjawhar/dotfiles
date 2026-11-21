@@ -10,9 +10,11 @@ systemd-run is a stub that records its arguments, and /proc/meminfo is a file of
 
 from __future__ import annotations
 
+import os
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -30,7 +32,9 @@ def write_stub(directory: Path, name: str, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
-class OmpMemoryCeiling(unittest.TestCase):
+class ShimCase(unittest.TestCase):
+    """A scratch HOME, the stand-in mise, omp and systemd-run, and the shim's environment."""
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -52,16 +56,22 @@ class OmpMemoryCeiling(unittest.TestCase):
         self.meminfo = root / "meminfo"
         # Every case here is a HOST: a box takes no scope of its own (its own cgroup is the
         # ceiling), and this suite often runs inside one.
+        self.runtime = root / "run-user"
+        self.runtime.mkdir()
         self.env = {
             "DOTFILES_DIR": str(DOTFILES),
             "HOME": str(home),
             "PATH": f"{stubs}:/usr/bin:/bin",
             "XDG_CONFIG_HOME": str(home / ".config"),
+            "XDG_RUNTIME_DIR": str(self.runtime),
             "OMP_MEMINFO": str(self.meminfo),
             "AGENTBOX_IDENTITY_FILE": str(root / "no-identity-file"),
         }
+        self.stubs = stubs
         self.machine_file = home / ".config" / "omp" / "memory-max"
 
+
+class OmpMemoryCeiling(ShimCase):
     def ceiling(self, mem_total_kb: int, **extra: str) -> tuple[str, str]:
         """The MemoryMax the shim asks systemd for on a host of this size, and its stderr."""
         self.meminfo.write_text(f"MemTotal:       {mem_total_kb} kB\nMemFree:        1 kB\n", encoding="utf-8")
@@ -150,6 +160,76 @@ class OmpMemoryCeiling(unittest.TestCase):
     def test_an_empty_machine_file_keeps_the_default(self) -> None:
         self.machine_says("\n")
         self.assertEqual(self.ceiling(ROCQPERF_KB)[0], "24G")
+
+
+class ScopeProbeRuntimeDir(ShimCase):
+    """The scope probe without XDG_RUNTIME_DIR, as a scrubbed environment (`env -i`, a harness that
+    builds one from nothing) has it: the shim takes the user's runtime directory when it exists, and
+    does not wait 10 s to retry a probe that cannot succeed. OMP_USER_RUNTIME_DIR stands for
+    /run/user/<uid>. The stand-in systemd-run fails as the real one does with no runtime directory."""
+
+    def stand_in(self, fail_first: str = "") -> None:
+        """systemd-run that records `XDG_RUNTIME_DIR|args`, refuses with no runtime directory, and
+        fails its first call with FAIL_FIRST when given."""
+        once = Path(self.temp_dir.name) / "failed-once"
+        write_stub(self.stubs, "systemd-run", f"""printf '%s|%s\\n' "${{XDG_RUNTIME_DIR-<unset>}}" "$*" >> "{self.calls}"
+if [[ -z "${{XDG_RUNTIME_DIR:-}}" ]]; then echo "Failed to connect to bus: No medium found" >&2; exit 1; fi
+if [[ -n "{fail_first}" && ! -e "{once}" ]]; then : > "{once}"; echo "{fail_first}" >&2; exit 1; fi""")
+
+    def start(self, **extra: str) -> tuple[subprocess.CompletedProcess[str], float, list[str]]:
+        self.meminfo.write_text(f"MemTotal:       {ROCQPERF_KB} kB\n", encoding="utf-8")
+        env = {k: v for k, v in {**self.env, **extra}.items() if not (k == "XDG_RUNTIME_DIR" and v == "")}
+        began = time.monotonic()
+        result = subprocess.run([str(SHIM), "--version"], capture_output=True, text=True, env=env, check=False,
+                                timeout=60)
+        elapsed = time.monotonic() - began
+        calls = self.calls.read_text(encoding="utf-8").splitlines() if self.calls.exists() else []
+        return result, elapsed, calls
+
+    def test_an_unset_runtime_dir_is_taken_from_the_users_runtime_directory(self) -> None:
+        self.stand_in()
+        result, elapsed, calls = self.start(XDG_RUNTIME_DIR="", OMP_USER_RUNTIME_DIR=str(self.runtime))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(elapsed, 5, "the shim waited to retry")
+        self.assertEqual(len(calls), 2, calls)  # the probe, then the session's own scope
+        self.assertTrue(all(call.startswith(f"{self.runtime}|") for call in calls), calls)
+        self.assertNotIn("without a memory ceiling", result.stderr)
+
+    def test_with_no_runtime_directory_it_starts_unscoped_at_once(self) -> None:
+        self.stand_in()
+        result, elapsed, calls = self.start(XDG_RUNTIME_DIR="", OMP_USER_RUNTIME_DIR=str(self.runtime / "missing"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(elapsed, 5, "the shim waited to retry a probe that cannot succeed")
+        self.assertEqual(calls, [])
+        self.assertIn("AGENT omp", result.stdout)
+        self.assertIn("no user runtime directory", result.stderr)
+
+    def test_a_probe_that_cannot_reach_the_user_manager_is_not_retried(self) -> None:
+        self.stand_in(fail_first="Failed to connect to bus: Permission denied")
+        result, elapsed, calls = self.start()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(elapsed, 5, "the shim waited to retry a probe that cannot succeed")
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("systemd-run refused a 24G scope (Failed to connect to bus: Permission denied)", result.stderr)
+
+    def test_control_a_probe_that_timed_out_is_tried_again_after_10_s(self) -> None:
+        self.stand_in(fail_first="Failed to start transient scope unit: Connection timed out")
+        result, elapsed, calls = self.start()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertGreaterEqual(elapsed, 9)
+        self.assertEqual(len(calls), 3, calls)  # probe, probe again, the session's scope
+        self.assertNotIn("without a memory ceiling", result.stderr)
+
+    @unittest.skipUnless(Path(f"/run/user/{os.getuid()}").is_dir(), "this machine has no /run/user/<uid>")
+    def test_the_default_runtime_directory_is_run_user_uid(self) -> None:
+        self.stand_in()
+        env = {k: v for k, v in self.env.items() if k != "XDG_RUNTIME_DIR"}
+        self.meminfo.write_text(f"MemTotal:       {ROCQPERF_KB} kB\n", encoding="utf-8")
+        result = subprocess.run([str(SHIM), "--version"], capture_output=True, text=True, env=env, check=False,
+                                timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls.read_text(encoding="utf-8").splitlines()
+        self.assertTrue(calls and all(call.startswith(f"/run/user/{os.getuid()}|") for call in calls), calls)
 
 
 if __name__ == "__main__":
