@@ -44,7 +44,7 @@ ensure_link "${DOTFILES_DIR}/omp/agents"      "${OMP_AGENT_DIR}/agents"
 ensure_link "${DOTFILES_DIR}/omp/keybindings.yml" "${OMP_AGENT_DIR}/keybindings.yml"
 # omp loads <agent dir>/hooks/<pre|post>/*.ts; post/jj-snapshot.ts is the one jj snapshotter.
 ensure_link "${DOTFILES_DIR}/omp/hooks"       "${OMP_AGENT_DIR}/hooks"
-# Standing rules (omp/AGENTS.md, rules/): link every omp/rules/*.md. memory-graph.md is linked by
+# Standing rules: link every omp/rules/*.md. memory-graph.md is linked by
 # installers/ctx-memory.sh. scripts/dotfiles-follow after a pull, and dotfiles-sync's tools step
 # after a move, run this same script, so a rule added by commit goes live without a hand-run installer.
 "${DOTFILES_DIR}/scripts/omp-link-rules"
@@ -56,7 +56,7 @@ ensure_link "${DOTFILES_DIR}/omp/hooks"       "${OMP_AGENT_DIR}/hooks"
 # --frozen-lockfile` never rewrites bun.lock, and the marketplace step puts the committed
 # omp-plugins.lock.json back. On 2026-11-03 a hand upgrade that edited the pin in a following
 # machine's checkout (sami-devbox) stopped scripts/dotfiles-follow there.
-# jj snapshotting is omp/hooks/post/jj-snapshot.ts alone (see omp/AGENTS.md);
+# jj snapshotting is omp/hooks/post/jj-snapshot.ts alone (its header says so);
 # a stale extension copy is pruned so no second, awaited snapshotter loads.
 if [ -L "${OMP_AGENT_DIR}/extensions" ]; then rm "${OMP_AGENT_DIR}/extensions"; fi
 mkdir -p "${OMP_AGENT_DIR}/extensions"

@@ -447,7 +447,7 @@ Data a lane owns may be listed in `EXCLUDE`, which `upload.sh` refuses to start 
 `exclude-filter.py`. It does not check `.no-offbox` markers: 5fa06c70 (INFRA-702) took that
 check, and its `offbox-gate.py` call, out of `upload.sh` and `snapshot-copy.sh`, so a marked tree
 copies like any other. The two copies off this machine that still refuse a marked tree are
-`backup-shared-state` and `omp-teleport --host` (`agentbox/AGENTS.md`).
+`backup-shared-state` and `omp-teleport --host` (`scripts/no-offbox`'s docstring).
 
 ## Known issues
 

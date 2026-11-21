@@ -52,6 +52,8 @@
 # (BOXES below) — and works in the first. The end of a box deletes everything in
 # it, its clones too, whatever they hold: a session pushes what it wants kept
 # before it ends (dispatch://INFRA-1720). omp flags pass straight through after `--`.
+# scripts/tmux-omp-ids and scripts/tmux-resurrect-omp resume a box session by running
+# `agentbox new` again with the arguments before `--` that the pane's launcher had.
 #
 # Every box leaves a RECORD of its own beside its image, <boxes>/../disks/<box>.info:
 # `box=`, `session=` (the owning omp session), `created=`, `command=` and its
@@ -104,6 +106,8 @@
 # within 15 min when nothing renews it. When the broker refuses renew as not live, the launcher
 # enrolls the key the box holds again (reenroll_if_not_live). A failed attempt keeps the key, and
 # the launcher tries again later.
+# So a revoked enrollment does not end a box's access: closing the box, or revoking the machine
+# login, does.
 # close_box ends the box's enrollments (unenroll_box). It revokes the box's own recorded
 # enrollment at once. An enroll call whose outcome is not known can have made an enrollment with
 # an id that the host does not have. A detached process gets that id from the broker and revokes
@@ -145,7 +149,7 @@ fi
 # (dispatch://INFRA-1192). WHAT IT COSTS: a local SSD is EMPTY after a machine stop, and a raid0
 # of them is gone if one member fails. Nothing durable may live here. A box's disk image holds
 # only the box's private $HOME, its /tmp and its clones, all three of which already die with the
-# box (agentbox/AGENTS.md), and the box cache holds only build caches; the box TREES and the clone
+# box (agentbox/README.md), and the box cache holds only build caches; the box TREES and the clone
 # templates stay on /mnt/nvme. Nothing is lost that a stop did not already take.
 # Only a real mount counts: a /mnt/scratch that is a plain directory of the root disk would put
 # every box image on a 484 GiB filesystem, under the 500 GiB admission floor, and no box would
@@ -186,6 +190,9 @@ NETWORK=agentbox
 # room to spare. `agentbox new --memory SIZE --cpus N` changes one box; AGENTBOX_MEMORY and
 # AGENTBOX_CPUS do too, but a session's environment reaches every box it later starts, so prefer
 # the flag.
+# Raise one box (`--cpus`), not this default: on 2026-11-11 the boxes' quotas added up to 600
+# cores on a 288-core host and the fleet was throttled in 6.6% of periods, while each of the two
+# boxes found throttled was running its own forgotten processes.
 # The per-box limit does not bound the sum: 44 boxes at 24 GiB may claim 1,056 GiB on a 251 GiB
 # host. So every box runs under one parent slice, user-<uid>-agentbox.slice, which systemd nests in
 # user-<uid>.slice by its name. Boxes and host sessions then share that slice's one ceiling
@@ -249,6 +256,8 @@ if [[ -n "$BOX_SCRATCH" ]]; then
 else
     BOX_DISKS="${AGENTBOX_DISKS:-$(dirname "$BOXES")/disks}"
 fi
+# scripts/disk-fill-watch (agentbox_storage_paths) resolves BOXES, BOX_DISKS and BOX_CACHE_ROOT
+# the same way, to measure them: change a default here and there together.
 # EVERY BOX LEAVES A RECORD OF ITS OWN, so a sweep over what a crash left behind can say whose
 # an image is without asking anybody. At 20:05Z on 2026-11-04 this host held 103 box images from
 # before the 18:06Z reboot, 416.2 GiB, each belonging to a session that was alive in a NEW box
@@ -1960,7 +1969,7 @@ ensure_unix_forwarder() {
 # command as the host user, outside the box's cgroup and disk limit), respawn or kill any pane,
 # and `kill-server`, which would end every agent pane on the machine. It is given because the
 # relayed session bus already reaches the host's systemd user manager, so a box can already
-# `systemctl --user restart` the host's services (agentbox/AGENTS.md), and because a lead that
+# `systemctl --user restart` the host's services (agentbox/README.md), and because a lead that
 # cannot drive panes cannot be boxed at all - which would leave the coordination sessions, the
 # heaviest on the host, outside every limit this work exists to apply.
 #
@@ -2367,6 +2376,8 @@ mount_args() {
     # 2026-11-01, lane box h-dgn-t1), and the cold trees in nvme-cold and src-cold, behind
     # symlinks at their old paths (2026-11-02). A --dir or an object store under it is not in
     # BOX_MOUNTS (box_dir_bound_why, box_dir_have), so nothing here binds it twice.
+    # A host launcher of `agentbox new … -- omp @<prompt>` also keeps the prompt and its error log
+    # there, and reads them after the box has gone; the session's work output goes on the box's disk.
     [[ -z "$DURABLE_DIR" ]] || a+=(-v "$DURABLE_DIR:$DURABLE_DIR")
     if [[ -n "$COMPUTE_INVENTORY" ]]; then
         mkdir -p "$COMPUTE_INVENTORY" || { echo "agentbox: cannot make $COMPUTE_INVENTORY, the compute ledger every box writes" >&2; return 1; }
@@ -2384,7 +2395,7 @@ mount_args() {
     # places a session writes without being told where. Without them both land in the
     # container's writable layer, which is docker's data root on the shared disk and has no
     # limit of any kind here: a home path outside the allow-list is silently writable
-    # (agentbox/AGENTS.md) and /tmp is where every tool puts its scratch. Docker nests binds by
+    # (agentbox/README.md) and /tmp is where every tool puts its scratch. Docker nests binds by
     # destination, so every allow-listed path below still mounts on top of this $HOME, and the
     # startup prunes exact host mountpoints before assigning private home directories. Both go
     # with the box, and a new box starts with neither of an earlier box's (dispatch://INFRA-1720).
@@ -2594,7 +2605,7 @@ session_env() {
     e+=(-e "PATH=$DOTFILES_DIR/shims:/opt/agentbox/docker-helpers:$DOTFILES_DIR/bin:$HOME/.dotfiles/bin:$DOTFILES_DIR/scripts:$HOME/.mise/shims:$HOME/.local/bin:$HOME/.pulumi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
     e+=(-e "JJ_CONFIG=$HOME/.config/jj/config.toml:$DOTFILES_DIR/.jjconfig.toml")
     # ~/.cache/ms-playwright is mounted rw from the host; without this, a box's `playwright
-    # install` deletes the browser builds of every checkout it cannot see (agentbox/AGENTS.md).
+    # install` deletes the browser builds of every checkout it cannot see.
     e+=(-e PLAYWRIGHT_SKIP_BROWSER_GC=1)
     # gcloud's file logging off, as scripts/agent-session sets it for a host session: a gcloud run
     # past shims/gcloud and ~/.gcloud's installation property copies a printed token into a log
@@ -4637,7 +4648,7 @@ move_check_floor() {
 # /mnt/nvme/sami/worktrees/legion/stopped-tree - so the cwd alone would have given it a box whose
 # `git status` answers about ANOTHER checkout. A path a box is not given is not absent inside it:
 # a home path is silently writable into the box's own filesystem and lost with the box
-# (agentbox/AGENTS.md), which is the dangerous failure. So the spec is inferred from what the
+# (agentbox/README.md), which is the dangerous failure. So the spec is inferred from what the
 # session's own processes actually use, and `--plan` and the notice print every path with why it
 # was chosen, so a lane sees its box before it moves and adds what is missing with
 # `agentbox move --self --dir PATH`.

@@ -24,6 +24,9 @@
 #   - refuses to resume an omp session that `agentbox move --to` moved off this machine (below);
 #   - names omp/config.probe.yml, which turns the subagent progress probe on, in an omp session's
 #     PI_CONFIG_FILES only when the omp it runs is a release that holds the probe's fix (below);
+#   - sets none of DISPATCH_URL, DISPATCH_TOKEN(_FILE), ENVOY_URL, ENVOY_NATS_URL, ENVOY_TOKEN(_FILE)
+#     and NATS_NKEY_SEED(_FILE): each overrides one field of every profile's envoy.json, and would
+#     turn Envoy on for a profile that has none (scripts/agentbox's session_env sets none either);
 #   - execs the first <agent> on PATH that is not a wrapper, through scripts/agent-secrets-session.
 #     A wrapper is a file whose real path is in a shims/ directory (shims/omp, another checkout's
 #     copy of it) or mise's own shims dir, which falls back to PATH when mise has no version for
@@ -40,7 +43,7 @@
 set -euo pipefail
 
 # The dotfiles checkout this script is in, not the one under HOME: a caller may give the session a
-# HOME of its own (shims/AGENTS.md, "A moved HOME"), and shims/omp execs this script by its path.
+# HOME of its own (shims/tests/test_shim_moved_home.py), and shims/omp execs this script by its path.
 _agent_session_self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")"
 DOTFILES_DIR="${DOTFILES_DIR:-${_agent_session_self%/scripts/*}}"
 # Absolute once, before any cd. A prefix of $PWD, not a `cd` into it, so a directory that exists

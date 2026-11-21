@@ -34,7 +34,7 @@ IDENTITY_FILE="${AGENTBOX_IDENTITY_FILE:-/etc/agentbox-identity}"
 die() { echo "shims/systemd-run: $*" >&2; exit 1; }
 
 # The first systemd-run past this shim's own PATH entry; from the top, skipping this file, when
-# the shim was run by path from outside PATH (shims/AGENTS.md).
+# the shim was run by path from outside PATH.
 real_systemd_run() {
     local pass d real="" past_self=false path_dirs
     IFS=: read -ra path_dirs <<< "${PATH:-}"
