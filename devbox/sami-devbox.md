@@ -134,7 +134,7 @@ Host half (`sami-devbox-check`, on sami-devbox as sami):
 | no gcloud login | every `credentials.db` | no row of type `authorized_user` |
 | no Azure login | every `azureProfile.json` | no subscription whose user type is `user` |
 | mise pins | `mise ls --missing` (`sami-devbox-check --pins` adds the box half's `knives --version` line; `dotfiles-follow` runs it after each fast-forward) | nothing missing |
-| openai routes | `yq` of `~/.dotfiles/omp/config.local.yml` (`modelRoles.slow`, `.deep`, `task.agentModelOverrides.astra`, `["sami-proxy"]`) and of `~/.omp/agent/models.yml` | each names `model-gateway/openai/<id>`; model-gateway declares 2 or more `openai/` models |
+| openai routes | `yq` of `~/.dotfiles/omp/config.local.yml` (`task.agentModelOverrides.astra`, `["astra-api"]`, `["gpt-api"]`, `modelRoles.slow`, `.deep`, `task.agentModelOverrides["sami-proxy"]`) and of `~/.omp/agent/models.yml` | astra, astra-api and gpt-api each name `model-gateway-openai/openai/gpt-6.1-sol:xhigh`, and slow, deep and sami-proxy are unset (they take `omp/config.yml`'s Codex models); model-gateway declares 2 or more `openai/` models |
 | GitHub, plain shell | `git ls-remote https://github.com/theorem-labs/{machcsl-riscv,oss-verify-proofs-internal} HEAD` with no agent marker and no routing include, as `agentbox move --to` runs over ssh | a sha for each (the App's token, through `installers/gh-app-host.sh`) |
 | ssh to sami-rocqperf | `ssh -o BatchMode=yes -o ConnectTimeout=15 sami@sami-rocqperf true` (movers run scripts there after the move) | exit 0: both are Sami's own nodes, which Tailscale SSH takes as sami |
 | N6 live tree | `systemctl --user is-active ossv-tree-follow.timer` | not `active`: `~/src/oss-verifier` is the stream's live tree since the move of 2026-11-03 (dispatch://INFRA-993), and nothing merges or resets over it |
@@ -157,7 +157,7 @@ Box half (`agentbox new --dir /mnt/nvme/sami/cutover --dir /mnt/nvme/sami/boxid 
 | Dispatch | `dispatch read --issue INFRA-993` | `Title: sami-devbox…` |
 | MLflow | `http://mlflow.tail12ec1c.ts.net/health` | `OK` |
 | model gateway | the `email` of `scripts/gateway-token`'s output; `/v1/models` with it | dev-box@; 200 |
-| openai through the gateway | `omp -p "say ok" --model @slow`, and `--model model-gateway/openai/gpt-6-astra:xhigh` | each answers `ok` (a fail prints `Use /login` or an HTTP 4xx) |
+| openai through the gateway | `omp -p "say ok" --model @slow`, and `--model model-gateway-openai/openai/gpt-6.1-sol:xhigh` (the cross-family agents' route) | each answers `ok` (a fail prints `Use /login` or an HTTP 4xx) |
 | Azure | `az-reader account show` (an Azure read, as the Azure `legion-reader`; agent-azure no longer signs in from this box, census row D10) | user type `servicePrincipal` |
 | GitHub | the same two `git ls-remote` with the box's routing include | a sha for each |
 | N6 tools | each of `bin/ossv-{n6-farm,n6-shards,n6-pod,job,job-farm}` and `notes/{ossv-n6-peaks.tsv,ossv-n6.md,ossv-job.md}` in the live tree `~/src/oss-verifier` (the host half runs this line too) | each a readable file, not empty |
