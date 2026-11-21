@@ -608,6 +608,14 @@ codexResets:
 # GOOGLE_APPLICATION_CREDENTIALS (same two places) names the machine's own
 # Google identity: without it a kernel's google.auth.default() reads the
 # well-known ADC file, which is the user's own login on sami-rocqperf.
+# The cache directories scripts/agent-session and .bashrc set on the big disk
+# (dispatch://INFRA-613) did not reach a kernel either. On 2026-11-21 a fresh
+# kernel had none of the eight below while its omp parent had them all, and its
+# CARGO_HOME was mise's ~/.cargo default. `go test` runs from eval cells used
+# Go's default ~/.cache/go-build, which grew to 475 GB with no cap. Each name is
+# a cache path, not a secret. UV_LINK_MODE goes with UV_CACHE_DIR (agent-session
+# says why). mise's python3 shim keeps a CARGO_HOME it is given and sets
+# ~/.cargo only when there is none.
 eval:
   envPassthrough:
     names:
@@ -615,6 +623,14 @@ eval:
       - JJ_CONFIG
       - GH_CONFIG_DIR
       - GOOGLE_APPLICATION_CREDENTIALS
+      - GOCACHE
+      - GOMODCACHE
+      - UV_CACHE_DIR
+      - UV_LINK_MODE
+      - CARGO_HOME
+      - PIP_CACHE_DIR
+      - BUN_INSTALL_CACHE_DIR
+      - HF_HOME
     prefixes:
       - DISPATCH_
       - ENVOY_
