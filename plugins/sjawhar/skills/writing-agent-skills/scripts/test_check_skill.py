@@ -116,6 +116,13 @@ def test_a_double_quoted_description_counts_the_characters_yaml_reads(tmp_path: 
     assert_passes(tmp_path, {"SKILL.md": head(desc) + "x\n"})
 
 
+def test_a_description_with_no_closing_quote_fails(tmp_path: Path) -> None:
+    # No YAML reader accepts this frontmatter, so no host reads the skill's description.
+    skill_md = f'---\nname: {NAME}\ndescription: "Use when a test needs a skill\nargument-hint: "<file>"\n---\n\nx\n'
+    code, fails, out = run(tmp_path, {"SKILL.md": skill_md})
+    assert code == 1 and fails, out
+
+
 def test_skill_md_of_150_lines_passes(tmp_path: Path) -> None:
     assert_passes(tmp_path, {"SKILL.md": text_of(150, 2_000, head())})
 
