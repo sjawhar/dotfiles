@@ -64,9 +64,10 @@ bash "${DOTFILES_DIR}/installers/omp-box-memory-guard.sh"
 # (devbox/tmp-empty-prune.service).
 arm_user_timer devbox tmp-empty-prune
 
-# The box's one Go build cache, <scratch>/gocache (GOCACHE in .bashrc; <scratch> is
-# /mnt/scratch/<user> where devbox/gce-disks makes it, else /mnt/nvme/<user>), trimmed past 25 GB
-# without removing an entry a running build may read (devbox/gocache-cap.service).
+# Every Go build cache on the box (<scratch>/gocache, the GOCACHE .bashrc sets, where <scratch> is
+# /mnt/scratch/<user> where devbox/gce-disks makes it, else /mnt/nvme/<user>; a lane's own; Go's
+# default ~/.cache/go-build), trimmed past 25 GB together without removing an entry a running build
+# may read (devbox/gocache-cap.service).
 arm_user_timer devbox gocache-cap
 
 # Each agent session's own TMPDIR under <scratch>/session-tmp (scripts/agent-session),
@@ -163,6 +164,11 @@ if [ -d "$nvme_home" ] && mkdir -p "$tmp_home/tmp" "$tmp_home/gotmp" 2>/dev/null
 else
     echo "No writable $tmp_home: leaving the user manager's TMPDIR alone"
 fi
+
+# GOCACHE and GOMODCACHE in Go's own env file, for the go commands that inherit neither from .bashrc
+# or scripts/agent-session: systemd user units, and the tools omp's Python eval kernel runs (see
+# installers/go-env.sh).
+bash "${DOTFILES_DIR}/installers/go-env.sh"
 
 # ~/.ssh/known_hosts append-only, so no session's program can write over the file every session
 # shares; ssh's UpdateHostKeys is off for this user (see installers/ssh-known-hosts.sh).
