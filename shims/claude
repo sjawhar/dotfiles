@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# claude and codex wrapper (shims/codex is a link to this file): the model-spend environment
-# (scripts/agent-spend-env.sh, dispatch://INFRA-165), then the real binary of the name it was called
-# by, with its arguments, stdin and PATH untouched.
+# claude and codex wrapper (shims/codex is a link to this file): the private-project check
+# (scripts/agent-private-check, below), the model-spend environment (scripts/agent-spend-env.sh,
+# dispatch://INFRA-165), then the real binary of the name it was called by, with its arguments,
+# stdin and PATH untouched.
 #
 # It is for a claude or codex that something starts by name: a script or a session's bash tool running
 # `claude -p`. Those inherit their parent's collector and an omp parent's `OTEL_LOGS_EXPORTER=none`,
 # and without this Claude Code sent no record. scripts/cld still starts Claude Code through
-# scripts/agent-session, which skips this file and sets the same spend environment itself.
-# This does only the spend part of agent-session, not all of it: agent-session also registers the
-# process as a secrets-broker host session (agent-secrets-session), and a scripted run's workers
-# would each register, wait on the helper, and lose the identity they inherit from their parent.
+# scripts/agent-session, which skips this file and runs the same check and sets the same spend
+# environment itself. This does only those two parts of agent-session, not all of it: agent-session
+# also registers the process as a secrets-broker host session (agent-secrets-session), and a scripted
+# run's workers would each register, wait on the helper, and lose the identity they inherit from their parent.
 set -euo pipefail
 
 name="${BASH_SOURCE[0]##*/}"
@@ -131,6 +132,18 @@ if [[ -z "$real" ]]; then
         exit 127
     }
 fi
+
+# >>> private-project check (scripts/agent-private-check)
+# A claude or codex started by name, not through scripts/agent-session, gets the check every launcher
+# runs (scripts/agent-private.sh; the check's header has the rule): exit 2 with the reason when a
+# Dispatch bearer the session can reach lists a private project, or when Dispatch cannot say. The
+# check is the one in this file's checkout, through a link to it.
+private_self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")"
+# shellcheck source=../scripts/agent-private.sh
+. "${private_self%/shims/*}/scripts/agent-private.sh"
+unset private_self
+agent_private_check "$name" "$name" "$@" || exit 2
+# <<< private-project check
 
 # The spend library of the dotfiles checkout this file is in, through a link to it (shims/codex),
 # not the one under HOME: a caller may give the shim a HOME of its own (shims/AGENTS.md, "A moved HOME").

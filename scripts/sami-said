@@ -31,6 +31,10 @@ working directory, and the text. Sources:
                     serves a recent window. A window that reaches before the tail, or a feed that
                     cannot be read whole, prints no Dispatch row, says --dispatch FAILED on stderr
                     (also on the last line), and exits 1: zero Dispatch rows with status 0 means none.
+                    Each Dispatch request, and the live socket, first runs scripts/agent-private-guard
+                    with the bearer: once any project is private (or the private-projects flag cannot
+                    be read), a bearer that lists a private project, or one Dispatch does not answer
+                    for, stops the run with exit 2 and no output.
 
 How a typed message is told apart from text injected into the user role. Structural rules first:
 
@@ -986,7 +990,26 @@ def dispatch_config() -> DispatchConfig:
     return DispatchConfig(url=url, token=token)
 
 
+# The guard of the dotfiles checkout this script is in.
+GUARD = Path(__file__).resolve().parent / "agent-private-guard"
+GUARD_TIMEOUT_S = 120
+
+
+def private_guard(cfg: DispatchConfig) -> None:
+    """Return when cfg's bearer may be sent to cfg's Dispatch; else say why and exit 2. Run before every
+    request (api_get) and before the live socket opens; agent-private-guard's header has the rule."""
+    try:  # this interpreter runs the guard (standard library only), whatever PATH holds
+        run = subprocess.run([sys.executable, str(GUARD), cfg.url], input=cfg.token, capture_output=True, text=True,
+                             timeout=GUARD_TIMEOUT_S)
+        why = (run.stderr.strip() or f"agent-private-guard exited {run.returncode}") if run.returncode else ""
+    except (OSError, subprocess.SubprocessError) as e:
+        why = f"{GUARD} could not run ({e})"
+    if why:
+        die(f"{why.rstrip('.')}; Dispatch is not read")
+
+
 def api_get(cfg: DispatchConfig, path: str, query: dict | None = None):
+    private_guard(cfg)
     url = cfg.url + path + ("?" + urllib.parse.urlencode(query) if query else "")
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {cfg.token}", "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=30) as resp:
@@ -1036,6 +1059,7 @@ class LiveSocket:
         url = urllib.parse.urlsplit(cfg.url)
         if url.scheme not in ("http", "https") or not url.hostname:
             raise RuntimeError(f"Dispatch's URL {cfg.url} is not an http or https URL")
+        private_guard(cfg)
         self.timeout, self.closed, self.buf = timeout, "", bytearray()
         self.sock = socket.create_connection((url.hostname, url.port or (443 if url.scheme == "https" else 80)), timeout=timeout)
         try:

@@ -1,0 +1,686 @@
+#!/usr/bin/env python3
+"""agent-private-check: may a session start on this machine, given the private projects?
+
+  agent-private-check HARNESS CALLER [ARGS...]
+                               may HARNESS (omp, claude, codex) start with ARGS? Prints `start`, or
+                               `refuse <why>` on one line, and exits 0
+  agent-private-guard URL      the same rule for the one bearer on stdin, sent to the Dispatch at URL:
+                               exits 0, or 2 with why on stderr
+
+A private project's sessions run only in its own cluster namespace, where every store they write is
+the project's own. A developer box runs many projects' agents as one user and writes their
+transcripts and records into stores the projects share, so it refuses a session whose Dispatch
+bearer lists a private project, and fails closed when Dispatch cannot say. For such a project, a
+person runs `theorem-session launch --project <KEY> --brief-file <path>` and then attaches, from
+their laptop under their own Google login, and reads and writes it in Dispatch's web pages.
+
+Who runs it: scripts/agent-private.sh's agent_private_check, sourced by scripts/agent-session (through
+which shims/omp and scripts/cld start every harness; CALLER agent-session) and by shims/claude and
+shims/codex for a claude or codex started by name (CALLER its own name), with the harness's own
+arguments; it exits 2 with the reason on `refuse`. agent-private-guard is for the readers that send
+a bearer to Dispatch outside its client (scripts/sami-said, chief-dashboard's sources, the reflect
+skill's Dispatch reader): each runs it with the bearer it is about to send, before every /api/v1/
+request and before it opens /ws/live or /ws/doc/, and stops on 2. The `dispatch` command and the
+Envoy plugins hold the same rule in their own client.
+
+The rule:
+0. A command that starts no agent session starts with no check: help, version, and the management
+   commands each harness lists (NO_SESSION), by the first argument (for scripts/cld, the first past
+   its own flags).
+1. The flag, gs://theorem-app-transcripts-private-flags/flags/private-projects.json:
+   `{"enabled": false}` while no project is private, `{"enabled": true, ...}` from the moment any
+   is. It is read with the machine's own Google identity and nothing else: the token of the
+   metadata server's account when the metadata server answers (a Google VM, or an agent box through
+   its host's relay, which GCE_METADATA_HOST names), else the external_account configuration
+   installers/gcloud-box.sh writes, $CLOUDSDK_CONFIG/box_credential_config.json, read by that path
+   (its subject token, Google STS, then the account it impersonates). Never application default
+   credentials, which can hold a person's own login. Neither source: the flag is unreadable, always
+   on a machine with no Google identity (a laptop), so a start there that holds a Dispatch bearer
+   always asks Dispatch and is refused offline; that refusal names the bearer to start without. Each
+   HTTP request, including DNS and the response body, has a 2 s wall-clock deadline and 64 KiB, and
+   the flag's copy is kept at most 5 minutes. `enabled: false` starts the session with no Dispatch call.
+2. `enabled: true`, or the flag unreadable: check every bearer the session can reach at start, not
+   just the one that wins precedence. agent_private_launch.py, beside this file, reads the harness's
+   arguments (its directory: omp --cwd, codex -C/--cd; omp's --profile and the session a --resume,
+   -r, --session or --restore names, under --session-dir when given; Claude Code's --settings and
+   print mode: --print, or a short-flag cluster holding p). The bearers: DISPATCH_TOKEN_FILE and
+   DISPATCH_TOKEN in the environment and in each file the harness applies to its own (omp: the
+   launch directory's, agent directory's, config root's and home's .env, which omp reads before
+   --cwd moves it; Claude Code: the `env` block of its user settings, --settings and managed
+   settings, and of the project's settings in print mode or a folder Claude Code trusts, as its
+   trust function decides; in a folder not trusted yet, a project file that names a bearer refuses
+   the start, since Claude Code applies it once the folder's trust is accepted); the
+   chosen envoy.json's dispatch.token, when the client would use it (dispatchTarget: a file with no
+   serverUrl and no `enabled: true` is Dispatch off, unless DISPATCH_URL is set); an envoy.json only
+   such a file names (ENVOY_CONFIG_FILE, XDG_CONFIG_HOME); and the .envoy/envoy.json of the session's
+   directory and of a resumed session's, with its own server. Each bearer goes to its own source's
+   DISPATCH_URL or the environment's, a file's only to its own server's origin. A `!` token command
+   runs only from the chosen envoy.json: 10 s in that file's directory, kept off argv, its
+   descendants stopped on exit; one in a checkout's file, or in one only another file names, refuses.
+   Every distinct (server, bearer) must be admitted. No bearer: the session starts; the secrets
+   broker refuses a private project at `agent-secrets register --exec`.
+3. GET <Dispatch>/api/v1/whoami with the bearer, 2 s. A non-empty `private_projects` refuses, and
+   that refusal is kept for 24 hours for this bearer (by its sha256). An answer that names no
+   private project starts the session and drops a kept refusal; it is never kept itself, so a
+   token changed to list a private project is refused at the next start. Only keys matching
+   [A-Z][A-Z0-9]* are ever printed.
+4. Fail closed. When whoami gives no answer, a kept refusal refuses again, and otherwise the start
+   is refused: "Dispatch did not answer; retry". So is an answer that names a project (`projects`,
+   or a scoped bearer's `project`) without `private_projects`, a bearer that cannot be read, and a
+   fault in this check itself.
+
+Files, under ${XDG_CACHE_HOME:-~/.cache}/agent-private: flag.json (the flag as read; its mtime is
+when), flag.unreadable (a failed read, not tried again for 30 s, so launches started together do not
+each read in turn), flag.lock (one read at a time), refusals/<sha256 of the bearer>. No variable
+moves the flag: a test rewrites FLAG_URL in its own copy of this file.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import fcntl
+import hashlib
+import http.client
+import json
+import os
+import queue
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+
+# scripts/ is this file's own directory; how one agent start reads its arguments and files lives beside it.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from agent_private_launch import CONFIG_KEYS, Launch, Refused, env, launch_for  # noqa: E402
+
+# One line, which a test's copy of this file rewrites to read a stand-in (no variable can move it).
+FLAG_URL = "https://storage.googleapis.com/storage/v1/b/theorem-app-transcripts-private-flags/o/flags%2Fprivate-projects.json?alt=media"
+TIMEOUT_S = 2
+FLAG_COPY_S = 5 * 60
+REFUSAL_KEPT_S = 24 * 3600
+# A failed flag read is not tried again for this long (read_flag).
+UNREADABLE_KEPT_S = 30
+LOCK_WAIT_S = 10
+COMMAND_TIMEOUT_S = 10
+# The dispatch CLI's server when neither DISPATCH_URL nor dispatch.serverUrl names one.
+DEFAULT_DISPATCH_URL = "http://localhost:8766"
+READ_SCOPE = "https://www.googleapis.com/auth/devstorage.read_only"
+UNANSWERED = "Dispatch did not answer; retry"
+# Every answer read (the flag, a token, whoami) is a small JSON object.
+MAX_BODY_BYTES = 64 * 1024
+
+
+class NoAnswer(Exception):
+    """A request got no usable answer. `answered` is whether the server answered at all; `status`
+    its HTTP status when it answered with an error."""
+
+    def __init__(self, why: str, answered: bool = True, status: int | None = None) -> None:
+        super().__init__(why)
+        self.answered = answered
+        self.status = status
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A token endpoint must answer itself, not forward a bearer to another endpoint."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def fetch(url: str, headers: dict[str, str] | None = None, data: bytes | None = None, proxy: bool = True) -> bytes:
+    """Bound the caller's wait even when libc DNS ignores socket timeouts or restarts after a signal.
+
+    This short-lived check owns the daemon worker: an overdue resolver or transfer cannot delay its
+    exit. Socket timeouts still close ordinary stalled transfers inside that worker.
+    """
+    answers: queue.Queue[bytes | Exception] = queue.Queue(maxsize=1)
+
+    def request() -> None:
+        try:
+            req = urllib.request.Request(url, data=data, headers=headers or {})
+            handlers: list[urllib.request.BaseHandler] = [NoRedirect()]
+            if not proxy:
+                handlers.append(urllib.request.ProxyHandler({}))
+            opener = urllib.request.build_opener(*handlers)
+            with opener.open(req, timeout=TIMEOUT_S) as response:
+                body = response.read(MAX_BODY_BYTES + 1)
+        except Exception as e:
+            answers.put(e)
+        else:
+            answers.put(body)
+
+    threading.Thread(target=request, daemon=True).start()
+    try:
+        answer = answers.get(timeout=TIMEOUT_S)
+    except queue.Empty as e:
+        raise NoAnswer("request deadline expired", answered=False) from e
+    if isinstance(answer, urllib.error.HTTPError):
+        raise NoAnswer(f"HTTP {answer.code}", status=answer.code) from answer
+    if isinstance(answer, http.client.HTTPException):
+        raise NoAnswer("invalid HTTP response") from answer
+    if isinstance(answer, (urllib.error.URLError, OSError, ValueError)):
+        # Header and URL errors can contain a bearer or URL credentials. Never print their text.
+        raise NoAnswer(f"request failed ({type(answer).__name__})", answered=False) from answer
+    if isinstance(answer, Exception):
+        raise answer
+    if len(answer) > MAX_BODY_BYTES:
+        # A checkout can name its own server: no answer may grow this process without bound.
+        raise NoAnswer(f"the answer is larger than {MAX_BODY_BYTES} bytes")
+    return answer
+
+
+# ---------------------------------------------------------------- the flag
+
+
+def cache_dir() -> Path | None:
+    base = env("XDG_CACHE_HOME") or (env("HOME") and os.path.join(env("HOME"), ".cache"))
+    if not base:
+        return None
+    path = Path(base) / "agent-private"
+    try:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError:
+        return None
+    return path
+
+
+def flag_enabled(body: bytes) -> bool:
+    flag = json.loads(body)
+    if not isinstance(flag, dict) or not isinstance(flag.get("enabled"), bool):
+        raise ValueError('the flag is not {"enabled": true|false}')
+    return flag["enabled"]
+
+
+def fresh_copy(copy: Path | None, kept_s: float) -> bytes | None:
+    """COPY's bytes when it was written less than KEPT_S ago."""
+    if copy is None:
+        return None
+    try:
+        age = time.time() - copy.stat().st_mtime
+        return copy.read_bytes() if 0 <= age < kept_s else None
+    except OSError:
+        return None
+
+
+def keep(path: Path, data: bytes) -> None:
+    """Write PATH whole or not at all: a reader never sees half of it."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+
+
+def metadata_token() -> str | None:
+    """The token of the metadata server's account, or None when no metadata server answers."""
+    host = env("GCE_METADATA_HOST") or "metadata.google.internal"
+    try:
+        body = fetch(f"http://{host}/computeMetadata/v1/instance/service-accounts/default/token",
+                     {"Metadata-Flavor": "Google"}, proxy=False)
+    except NoAnswer as e:
+        if e.answered:
+            raise
+        return None
+    return json.loads(body)["access_token"]
+
+
+def box_token(path: Path) -> str:
+    """An access token of the account the box's external_account configuration impersonates."""
+    cred = json.loads(path.read_text(encoding="utf-8"))
+    if cred.get("type") != "external_account":
+        raise ValueError(f"{path} is not an external_account configuration")
+    source = cred.get("credential_source") or {}
+    if "url" in source:
+        raw = fetch(source["url"], source.get("headers") or {}, proxy=False)
+    elif "file" in source:
+        raw = Path(source["file"]).read_bytes()
+    else:
+        raise ValueError(f"{path} names no url or file credential source")
+    fmt = source.get("format") or {}
+    subject = json.loads(raw)[fmt["subject_token_field_name"]] if fmt.get("type") == "json" else raw.decode().strip()
+    form = urllib.parse.urlencode({
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "audience": cred["audience"],
+        "scope": "https://www.googleapis.com/auth/cloud-platform",
+        "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        "subject_token_type": cred["subject_token_type"],
+        "subject_token": subject,
+    }).encode()
+    federated = json.loads(fetch(cred["token_url"], {"Content-Type": "application/x-www-form-urlencoded"}, form))
+    url = cred.get("service_account_impersonation_url")
+    if not url:
+        return federated["access_token"]
+    minted = fetch(url, {"Authorization": f"Bearer {federated['access_token']}", "Content-Type": "application/json"},
+                   json.dumps({"scope": [READ_SCOPE], "lifetime": "300s"}).encode())
+    return json.loads(minted)["accessToken"]
+
+
+class NoIdentity(ValueError):
+    """This machine has no Google identity to read the flag with: no metadata server, no box file."""
+
+
+NO_IDENTITY = ("this machine has no Google identity to read the private-projects flag with (no metadata "
+               "server, no box_credential_config.json), so every start that holds a Dispatch bearer asks Dispatch")
+
+
+def flag_token() -> str:
+    token = metadata_token()
+    if token is not None:
+        return token
+    gcloud = Path(env("CLOUDSDK_CONFIG") or os.path.join(env("HOME") or "/nonexistent", ".config", "gcloud"))
+    box = gcloud / "box_credential_config.json"
+    if not box.is_file():
+        raise NoIdentity(f"no metadata server answers and there is no {box}")
+    return box_token(box)
+
+
+def copied(copy: Path | None) -> bool | None:
+    """The flag's copy when it is fresh and whole, else None."""
+    got = fresh_copy(copy, FLAG_COPY_S)
+    try:
+        return None if got is None else flag_enabled(got)
+    except (ValueError, RecursionError):
+        return None
+
+
+@dataclass(frozen=True)
+class Flag:
+    """The flag as read: `enabled`, or None when it cannot be read, why, and whether that is because
+    this machine has no Google identity to read it with (the refusal then names the way to work offline)."""
+
+    enabled: bool | None
+    why: str = ""
+    no_identity: bool = False
+
+
+def read_flag() -> Flag:
+    """The flag, from its copy when that is fresh.
+
+    A failed read is remembered for UNREADABLE_KEPT_S, so launches that waited on the lock for it, or
+    come right after it, take the whoami path at once instead of each reading again in turn."""
+    cache = cache_dir()
+    copy = cache / "flag.json" if cache else None
+    failed = cache / "flag.unreadable" if cache else None
+
+    def known() -> Flag | None:
+        """The flag's fresh copy, or a failure remembered seconds ago; None when neither is there."""
+        enabled = copied(copy)
+        if enabled is not None:
+            return Flag(enabled)
+        remembered = fresh_copy(failed, UNREADABLE_KEPT_S)
+        if remembered is None:
+            return None
+        try:
+            record = json.loads(remembered)
+            return Flag(None, str(record["why"]), record["no_identity"] is True)
+        except (ValueError, KeyError, TypeError, RecursionError):
+            return Flag(None, "the private-projects flag could not be read")
+
+    flag = known()
+    if flag is not None:
+        return flag
+    lock = take_lock(cache / "flag.lock") if cache else None
+    try:
+        flag = known()  # read, or failed, while this launch waited for the lock
+        if flag is not None:
+            return flag
+        try:
+            body = fetch(FLAG_URL, {"Authorization": f"Bearer {flag_token()}"})
+            enabled = flag_enabled(body)
+        except (NoAnswer, OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as e:
+            no_identity = isinstance(e, NoIdentity)
+            flag = Flag(None, NO_IDENTITY if no_identity else f"the private-projects flag could not be read ({type(e).__name__})",
+                        no_identity)
+            if failed is not None:
+                keep(failed, json.dumps({"why": flag.why, "no_identity": flag.no_identity}).encode())
+            return flag
+        if copy is not None:
+            keep(copy, body)
+        if failed is not None:
+            with contextlib.suppress(OSError):
+                failed.unlink(missing_ok=True)
+        return Flag(enabled)
+    finally:
+        if lock is not None:
+            lock.close()
+
+
+def take_lock(path: Path):
+    """PATH open and locked, so one launch reads the flag while the others wait for its copy; None
+    when it cannot be had within LOCK_WAIT_S (the launch then reads the flag itself)."""
+    try:
+        handle = open(path, "a")  # noqa: SIM115 - held until the read ends
+    except OSError:
+        return None
+    deadline = time.monotonic() + LOCK_WAIT_S
+    while True:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return handle
+        except OSError:
+            if time.monotonic() >= deadline:
+                handle.close()
+                return None
+            time.sleep(0.05)
+
+
+# ---------------------------------------------------------------- the bearer
+
+
+def capture_command(argv: list[str], *, pass_fds: tuple[int, ...] = (), cwd: Path | None = None,
+                    environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    """Capture a bounded command's stdout; diagnostics never affect its bearer or reach a log."""
+    with tempfile.TemporaryFile() as output:
+        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
+                                   start_new_session=True, pass_fds=pass_fds, cwd=cwd, env=environment)
+        try:
+            status = process.wait(timeout=COMMAND_TIMEOUT_S)
+        finally:
+            # Also reap helpers a successful shell left behind. No pipe or child outlives the check.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+        output.seek(0)
+        return subprocess.CompletedProcess(argv, status, output.read().decode())
+
+
+def dispatch_section(path: Path) -> dict[str, object]:
+    """PATH's dispatch section, {} when it has none or there is no file."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        raise Refused(f"{path} cannot be read as an envoy.json; retry") from e
+    section = data.get("dispatch") if isinstance(data, dict) else None
+    return section if isinstance(section, dict) else {}
+
+
+def server_url(section: dict[str, object]) -> str:
+    value = section.get("serverUrl") or DEFAULT_DISPATCH_URL
+    if not isinstance(value, str):
+        raise Refused("Dispatch's serverUrl is not an HTTP URL; retry")
+    return value
+
+
+def origin(url: str) -> tuple[str, str | None, int]:
+    """The server a file's token may be sent to, without printing any URL credentials."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+            raise ValueError
+        return parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as e:
+        raise Refused("Dispatch's URL is not an HTTP URL without credentials; retry") from e
+
+
+def valid_bearer(token: str, where: str = "") -> str:
+    """Reject unsendable headers without including their secret bytes in an error."""
+    if not token or any(ord(c) <= 32 or ord(c) >= 127 for c in token):
+        source = f" from {where}" if where else ""
+        raise Refused(f"the Dispatch bearer{source} is empty or holds whitespace or a control character; "
+                      "fix or remove it, then start again")
+    return token
+
+
+# A config the session reads: the one the launcher or the variables chose, a checkout's own, or
+# one only a file the session applies (a dotenv file, a settings `env` block) names.
+CHOSEN, CHECKOUT, NAMED = "chosen", "checkout", "named"
+
+
+def file_bearer(path: Path, section: dict[str, object], kind: str, named_by: str,
+                environment: dict[str, str]) -> tuple[str, str] | None:
+    """The (server, bearer) PATH's dispatch section gives the session, or None when it gives none.
+    ENVIRONMENT is the session's own, the files it applies included."""
+    token = section.get("token")
+    if kind == CHECKOUT:
+        # The client sends a checkout's token only to the server written beside it.
+        if not section.get("serverUrl"):
+            if token:
+                raise Refused(f"{path} holds a Dispatch bearer without its own server; fix or remove it")
+            return None
+    elif section.get("enabled") is False or not (
+            environment.get("DISPATCH_URL") or section.get("serverUrl") or section.get("enabled") is True):
+        # The client's dispatchTarget: such a file turns Dispatch off, so its token goes nowhere.
+        return None
+    elif token is None:
+        return None
+    if not isinstance(token, str) or not token:
+        raise Refused(f"{path}'s dispatch.token is not a non-empty bearer; fix or remove it")
+    url = server_url(section)
+    # The client sends a file's token to DISPATCH_URL only when it names the same server.
+    if kind != CHECKOUT and env("DISPATCH_URL") and origin(env("DISPATCH_URL")) == origin(url):
+        url = env("DISPATCH_URL")
+    if token.startswith("!"):
+        if kind == CHECKOUT:
+            raise Refused(f"{path} names its own Dispatch server with a token command; it needs a literal bearer")
+        if kind == NAMED:
+            # A command only a file the session applies names could run anything, before any check.
+            raise Refused(f"{path}, which only {named_by} names, runs a command for its Dispatch bearer; "
+                          "name it from the environment, or write a literal bearer")
+        try:
+            # The anonymous script is inherited by fd, never exposed as `sh -c <secret>`.
+            with tempfile.TemporaryFile() as script:
+                script.write(token[1:].encode())
+                script.seek(0)
+                run = capture_command(["/bin/sh", f"/proc/self/fd/{script.fileno()}"],
+                                      pass_fds=(script.fileno(),), cwd=path.absolute().parent,
+                                      environment=environment)
+        except (OSError, UnicodeError, subprocess.SubprocessError) as e:
+            raise Refused(f"the dispatch.token command in {path} could not run; retry") from e
+        token = run.stdout.strip()
+        if run.returncode != 0 or not token:
+            raise Refused(f"the dispatch.token command in {path} failed; retry")
+    return url, token.strip()
+
+
+def bearers(launch: Launch) -> list[tuple[str, str, str]]:
+    """All candidates LAUNCH can reach as (server, bearer, where it comes from), independently of
+    precedence; one refusal stops the launch. Where it comes from names a variable or a file, never
+    the bearer."""
+    section = dispatch_section(launch.envoy_json)
+    environment, applied = launch.merged
+    found: dict[tuple[str, str], str] = {}
+
+    def add(url: str, token: str, where: str) -> None:
+        origin(url)
+        found.setdefault((url.rstrip("/"), valid_bearer(token, where)), where)
+
+    # Each bearer goes to its own source's DISPATCH_URL or the environment's, never another file's.
+    for where, values in [("the environment", dict(os.environ)), *launch.sources]:
+        url = env("DISPATCH_URL") or values.get("DISPATCH_URL") or server_url(section)
+        of = "" if where == "the environment" else f" in {where}"
+        pointer = values.get("DISPATCH_TOKEN_FILE")
+        if pointer:
+            try:
+                token_path = Path(pointer)
+                token = (token_path if token_path.is_absolute() else launch.cwd / token_path).read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeError) as e:
+                raise Refused(f"DISPATCH_TOKEN_FILE{of} cannot be read; fix or remove it") from e
+            add(url, token, f"DISPATCH_TOKEN_FILE{of}")
+        if values.get("DISPATCH_TOKEN"):
+            add(url, values["DISPATCH_TOKEN"].strip(), f"DISPATCH_TOKEN{of}")
+
+    configs: dict[Path, tuple[str, str]] = {launch.envoy_json: (CHOSEN, "")}
+    for directory in launch.checkouts:
+        configs.setdefault(directory / ".envoy" / "envoy.json", (CHECKOUT, ""))
+    for key, named in CONFIG_KEYS.items():
+        if key in applied and environment.get(key):
+            value = environment[key]
+            if not os.path.isabs(value):
+                raise Refused(f"{key} in {applied[key]} must name an absolute path; fix or remove it")
+            configs.setdefault(named(value), (NAMED, f"{key} in {applied[key]}"))
+    for config, (kind, named_by) in configs.items():
+        own = section if config == launch.envoy_json else dispatch_section(config)
+        candidate = file_bearer(config, own, kind, named_by, environment)
+        if candidate is not None:
+            add(*candidate, f"dispatch.token in {config}")
+    return [(url, token, where) for (url, token), where in found.items()]
+
+
+# ---------------------------------------------------------------- Dispatch
+
+
+def private_message(keys: list[str]) -> str:
+    launch = ("`theorem-session launch --project {key} --brief-file <path>` and then attach, from your laptop "
+              "under your own Google login, never from a developer box")
+    if len(keys) == 1:
+        return (f"{keys[0]} is private. Its sessions run only in its own cluster namespace: "
+                f"{launch.format(key=keys[0])}; read and write it in Dispatch's web pages.")
+    return (f"{', '.join(keys)} are private. A private project's sessions run only in its own cluster namespace: "
+            f"{launch.format(key='<KEY>')}; read and write them in Dispatch's web pages.")
+
+
+# A project key as Dispatch writes one; nothing else from an answer is printed.
+PROJECT_KEY = re.compile(r"[A-Z][A-Z0-9]*")
+
+
+def project_keys(value: object) -> list[str] | None:
+    """VALUE as a sorted list of project keys, or None when it is not one."""
+    if not isinstance(value, list) or not all(isinstance(k, str) and PROJECT_KEY.fullmatch(k) for k in value):
+        return None
+    return sorted(value)
+
+
+def whoami(url: str, token: str) -> list[str]:
+    """The private projects whoami names for TOKEN, sorted."""
+    body = fetch(url.rstrip("/") + "/api/v1/whoami", {"Authorization": f"Bearer {token}", "Accept": "application/json"})
+    try:
+        got = json.loads(body)
+    except (ValueError, RecursionError) as e:
+        raise NoAnswer("whoami answered no JSON object") from e
+    if not isinstance(got, dict) or got.get("kind") not in ("agent", "user"):
+        raise NoAnswer("whoami answered no caller identity")
+    if "private_projects" not in got:
+        # Plan A's whoami names both lists whenever it names projects: an answer that names any
+        # project (`projects`, or the `project` a scoped bearer has today) without saying which
+        # are private is not an answer about them.
+        if "projects" in got or got.get("project") not in (None, ""):
+            raise NoAnswer("whoami named a project but no private_projects")
+        return []
+    keys = project_keys([] if got["private_projects"] is None else got["private_projects"])  # Go's nil slice
+    if keys is None:
+        raise NoAnswer("whoami's private_projects is not a list of project keys")
+    return keys
+
+
+def kept_refusal(kept: Path | None) -> list[str]:
+    """The private projects of a refusal kept for this bearer in the last 24 hours."""
+    got = fresh_copy(kept, REFUSAL_KEPT_S)
+    try:
+        keys = json.loads(got)["private_projects"] if got is not None else []
+    except (ValueError, KeyError, TypeError, RecursionError):
+        return []
+    return project_keys(keys) or []
+
+
+def decide(url: str, token: str, flag: Flag, where: str = "") -> None:
+    """Return when TOKEN may be used here; raise Refused when it may not. FLAG is the flag as read;
+    WHERE names the bearer's source (a variable or a file) for a bearer Dispatch rejects."""
+    origin(url)
+    valid_bearer(token, where)
+    cache = cache_dir()
+    kept = cache / "refusals" / hashlib.sha256(token.encode()).hexdigest() if cache else None
+    try:
+        keys = whoami(url, token)
+    except NoAnswer as e:
+        keys = kept_refusal(kept)
+        if keys:
+            raise Refused(private_message(keys)) from e
+        if e.status in (401, 403):
+            # Retrying cannot help: the bearer itself is refused, wherever the session holds it.
+            raise Refused(f"Dispatch rejects the bearer{f' from {where}' if where else ''} (HTTP {e.status}); "
+                          "fix or remove it, then start again") from e
+        offline = ""
+        if flag.no_identity:
+            # Such a machine can never read the flag; without a bearer it starts with no Dispatch call.
+            offline = (f" To work offline, start without the Dispatch bearer"
+                       f"{f' from {where}' if where else ''}.")
+        raise Refused(f"{UNANSWERED} ({'; '.join(w for w in (flag.why, str(e)) if w)}).{offline}") from e
+    if keys:
+        if kept is not None:
+            with contextlib.suppress(OSError):
+                kept.parent.mkdir(mode=0o700, exist_ok=True)
+                keep(kept, json.dumps({"private_projects": keys}).encode())
+        raise Refused(private_message(keys))
+    if kept is not None:
+        with contextlib.suppress(OSError):
+            kept.unlink(missing_ok=True)
+
+
+# The first arguments that start no agent session, so no check: help and version, and the
+# management commands each harness lists in its own `--help` (test_agent_private_check_units.py
+# reads that list from each installed binary). Only the first argument decides (for scripts/cld, the
+# first past its own flags); anything else, an alias or a command behind a flag included, is checked.
+NO_SESSION = {
+    "omp": {"--help", "-h", "--version", "-v", "session", "plugin", "config", "completions", "update", "install",
+            "login", "auth", "models", "ps", "stats", "usage", "gc", "worktree", "skill", "setup"},
+    "claude": {"--help", "-h", "--version", "-v", "mcp", "doctor", "update", "install", "setup-token", "plugin"},
+    "codex": {"--help", "-h", "--version", "-V", "help", "login", "logout", "mcp", "plugin", "completion", "update",
+              "doctor", "apply", "archive", "unarchive", "delete", "migrate-rollouts", "features", "sandbox"},
+}
+
+
+def check(harness: str, caller: str, args: list[str]) -> str:
+    launch = launch_for(harness, caller, args)
+    if launch.command in NO_SESSION.get(harness, ()):
+        return "start"
+    flag = read_flag()
+    if flag.enabled is False:
+        return "start"
+    for url, token, where in bearers(launch):
+        decide(url, token, flag, where)
+    return "start"
+
+
+def one_line(text: object) -> str:
+    return " ".join(str(text).split())
+
+
+def check_main(argv: list[str]) -> int:
+    if len(argv) < 2:
+        print("usage: agent-private-check HARNESS CALLER [ARGS...] (prints start or refuse <why>)", file=sys.stderr)
+        return 2
+    try:
+        answer = check(argv[0], argv[1], argv[2:])
+    except Refused as e:
+        answer = f"refuse {one_line(e)}"
+    except Exception as e:  # a fault in the check fails closed
+        answer = f"refuse agent-private-check failed ({type(e).__name__}); retry"
+    print(answer)
+    return 0
+
+
+def guard_main(argv: list[str]) -> int:
+    if len(argv) != 1:
+        print("usage: agent-private-guard DISPATCH_URL < BEARER", file=sys.stderr)
+        return 2
+    token = sys.stdin.read().strip()
+    if not token:
+        print("agent-private-guard: no bearer on stdin", file=sys.stderr)
+        return 2
+    try:
+        flag = read_flag()
+        if flag.enabled is not False:
+            decide(argv[0], token, flag)
+    except Refused as e:
+        print(one_line(e), file=sys.stderr)
+        return 2
+    except Exception as e:  # a fault in the guard fails closed
+        print(f"agent-private-guard failed ({type(e).__name__}); retry", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(check_main(sys.argv[1:]))

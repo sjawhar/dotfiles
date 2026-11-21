@@ -21,6 +21,10 @@ http://localhost:8766). The token is DISPATCH_TOKEN_FILE's trimmed contents, els
 else dispatch.token, which goes only to the server written beside it: with DISPATCH_URL naming
 another origin, the script refuses. A dispatch.token starting with `!` is a command, run under
 /bin/sh -c for at most 10 s, whose trimmed stdout is the token; neither of its streams is printed.
+
+Each request first runs the dotfiles' scripts/agent-private-guard with the token: once any project
+is private (or the private-projects flag cannot be read), a token that lists a private project, or
+one Dispatch does not answer for, stops the script with exit 2 before the request.
 """
 from __future__ import annotations
 
@@ -28,6 +32,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -265,7 +270,35 @@ def dispatch_settings(env: dict[str, str]) -> tuple[str, str]:
     return url.rstrip("/") + "/api/v1", token
 
 
+# Every request first runs the dotfiles' scripts/agent-private-guard with the bearer it sends: a bearer
+# that lists a private project is refused, and so is one Dispatch cannot vouch for (the guard's header
+# has the rule). The guard of the checkout this file is in, else the one on PATH. A copy with fewer
+# than six parent directories is in no checkout: Path.parents[5] would raise IndexError at import.
+_PARENTS = Path(__file__).resolve().parents
+GUARD = _PARENTS[5] / "scripts" / "agent-private-guard" if len(_PARENTS) > 5 else None
+GUARD_TIMEOUT_S = 120
+
+
+def private_guard() -> None:
+    """Return when TOKEN may be sent to the Dispatch at BASE_URL; else say why and exit 2."""
+    # No guard found refuses: a bare name would run whatever file of that name the working directory holds.
+    guard = str(GUARD) if GUARD is not None and GUARD.is_file() else shutil.which("agent-private-guard")
+    if guard is None:
+        why = "agent-private-guard is neither in this file's checkout nor on PATH"
+    else:
+        try:  # this interpreter runs the guard (standard library only), whatever PATH holds
+            run = subprocess.run([sys.executable, guard, BASE_URL.removesuffix("/api/v1")], input=TOKEN,
+                                 capture_output=True, text=True, timeout=GUARD_TIMEOUT_S)
+            why = (run.stderr.strip() or f"agent-private-guard exited {run.returncode}") if run.returncode else ""
+        except (OSError, subprocess.SubprocessError) as e:
+            why = f"{guard} could not run ({e})"
+    if why:
+        print(f"extract-dispatch-human: {why.rstrip('.')}; Dispatch is not read", file=sys.stderr)
+        sys.exit(2)
+
+
 def get(path: str):
+    private_guard()
     req = urllib.request.Request(f"{BASE_URL}{path}", headers={"Authorization": f"Bearer {TOKEN}"})
     with urllib.request.urlopen(req, timeout=60) as resp:
         return json.loads(resp.read())

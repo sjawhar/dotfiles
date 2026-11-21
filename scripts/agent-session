@@ -18,6 +18,8 @@
 #   - turns gcloud's file logging off (CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true) unless the caller
 #     set it, so a gcloud run past shims/gcloud writes no token into a log file (below);
 #   - turns CodeGraph's usage telemetry off (CODEGRAPH_TELEMETRY=0) unless the caller set it (below);
+#   - refuses a session whose Dispatch bearer lists a private project, and fails closed when
+#     Dispatch cannot say (scripts/agent-private-check, below);
 #   - gives the session a TMPDIR of its own on the big disk and points the uv, cargo and Go
 #     caches there, on a machine that has one (below); on one that has not, nothing changes;
 #   - exports the model-spend telemetry variables when this machine holds the collector's token (below);
@@ -73,8 +75,8 @@ if [[ "${agent##*/}" == omp ]]; then
     prev="" target=""
     for arg in "$@"; do
         [[ "$arg" == -- ]] && break
-        case "$prev" in --resume|-r|--session) target="$arg" ;; esac
-        case "$arg" in --resume=*|--session=*) target="${arg#*=}" ;; esac
+        case "$prev" in --resume|-r|--session|--restore) target="$arg" ;; esac
+        case "$arg" in --resume=*|--session=*|--restore=*) target="${arg#*=}" ;; esac
         prev="$arg"
     done
     if [[ -n "$target" ]]; then
@@ -207,6 +209,19 @@ if [[ -f "$session_env" && -O "$session_env" ]]; then
         source "$session_env"
     fi
 fi
+
+# >>> private-project check (scripts/agent-private-check)
+# A private project's sessions run only in its own cluster namespace, never on a machine like this
+# one, which writes every session's transcript into stores the projects share. The check beside this
+# script (its header has the rule) reads the private-projects flag with the machine's own Google
+# identity; while no project is private it answers `start` with no Dispatch call, otherwise it asks
+# Dispatch about every bearer the session can reach, from the harness's own arguments, and refuses a
+# private project, or no answer. It runs after the machine's env file above, which can name a profile
+# or a config, and changes nothing in the session's environment.
+# shellcheck source=SCRIPTDIR/agent-private.sh
+. "${_agent_session_self%/*}/agent-private.sh"
+agent_private_check "${agent##*/}" agent-session "$@" || exit 2
+# <<< private-project check
 
 # Scratch and language caches on the big disk, where this machine has one (dispatch://INFRA-613).
 # Root holds every session's transcript, so a root that fills wedges the whole box, and on

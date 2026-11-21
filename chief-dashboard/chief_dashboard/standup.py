@@ -40,7 +40,15 @@ from pathlib import Path
 
 from . import markdown, model, render
 from .paths import chief_state
-from .sources import ENVOY_CONFIG, Dispatch, SourceError, envoy_send, envoy_sessions
+from .sources import (
+    ENVOY_CONFIG,
+    Dispatch,
+    PrivateProjectRefused,
+    SourceError,
+    envoy_send,
+    envoy_sessions,
+    private_guard,
+)
 
 log = logging.getLogger(__name__)
 
@@ -327,7 +335,8 @@ class Room:
         try:
             fresh = read_thread(self.dispatch())
             err = None
-        except (SourceError, OSError, ValueError, KeyError) as exc:
+        # A refusal is a SystemExit, which would end the standup thread for good; it is a room not read, and said.
+        except (SourceError, OSError, ValueError, KeyError, PrivateProjectRefused) as exc:
             log.warning("could not read the standup room: %s", exc)
             with self.lock:
                 self.error = str(exc)[:300]
@@ -418,6 +427,7 @@ class Room:
     def _post_message(self, body: str) -> dict:
         cfg = json.loads(ENVOY_CONFIG.read_text())["dispatch"]
         server = cfg["serverUrl"].rstrip("/")
+        private_guard(server, cfg["token"])
         payload = {"body": body, "in_reply_to": ROOT, "actor": {"kind": "session", "id": CHIEF_SESSION}}
         req = urllib.request.Request(
             f"{server}/api/v1/issues/{urllib.parse.quote(ISSUE)}/messages",
