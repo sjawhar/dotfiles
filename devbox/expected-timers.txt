@@ -91,7 +91,11 @@ unit-health-watch.timer            # owner: box-health lead. This list, and ever
 # has found the intended state, not a regression.
 
 # --- the box's own housekeeping (devbox/) ---
-dotfiles-follow.timer              # owner: box-health lead. ~/.dotfiles fast-forwards to main.
+# dotfiles-follow.timer was retired here on 2026-11-21 under the same decision
+# (dispatch://INFRA-2022/ask/b5ddab54-8ba0-40e8-b4ba-c2dcb291ca5c, and
+# dispatch://INFRA-2022/ask/4badbed6-a78d-4405-adcb-cbe2679e12d3 for a timer that watches
+# nothing): no answer of Sami's approves it, and devbox/install.sh no longer arms it. ~/.dotfiles
+# moves onto main when scripts/dotfiles-publish runs from it, or by `scripts/dotfiles-sync local`.
 # One box-cleanup schedule folds docker-cap, gocache-cap, nvme-cache-cap,
 # session-scratch-reap, session-tmp-reap, tmp-empty-prune and tmp-stale-reap together
 # (dispatch://INFRA-993/ask/d44b73ba-3ac6-4307-9dd7-065cb035ec9b). Each keeps its own script,
