@@ -13,7 +13,7 @@ Write, test, shorten or delete a skill so that an agent loads it for the right t
 
 - **Use these steps for an agent guide's rules too** (AGENTS.md, CLAUDE.md).
 
-1. **Find it twice.** Find the failure in at least two sessions with `tq search '<phrase of the failure>' --days 30` (`using-transcript-store`): one incident turned into one rule is how instruction files triple in size.
+1. **Find it twice.** Find the failure in at least two sessions with `tq search '<phrase of the failure>'` (`using-transcript-store`): one incident turned into one rule is how instruction files triple in size.
 2. **Run a control.** Run the task in a fresh session with no guidance.
 3. **Write the rule only if the control fails** in at least 2 of 3 runs: a rule the model follows anyway costs tokens on every load.
 4. **Prefer a program.** Fix the tool, or add a script or a hook, before you write prose: a check a program runs holds where prose does not.

@@ -74,7 +74,7 @@ Pick the route by what the change changes:
 | The change | Route |
 | --- | --- |
 | Harness behavior you can switch per session (an extension feature, a context line, an advisor) | Measure it on historical sessions, not live ones, with `reflect`'s weekly experiment readout (below). Commit no gate in `~/.dotfiles/omp/extensions/experiments/gates.json` as `random`, which draws the feature on or off in each of Sami's live sessions |
-| Skill or instruction text, every change | Fix each step the draft gets wrong in your next matching task |
+| Skill or instruction text, every change, beside any route below | Fix each step the draft gets wrong in your next matching task |
 | Skill or instruction text, to show that it changes behavior | Run the three arms of SKILL.md, "Step 3: Test it" |
 | Skill or instruction text, judged on the fleet's records | Compare the rate per 100 records of its failure type in `reflect`'s `counts.json`, before and after the change |
 | A gate or classifier that predicts Sami's decision | Re-run the stored cases with their `score.py` in the private `sjawhar/agent-eval-data`. `experiments/askgate/` and `experiments/forkgate/` take the run directory: `uv run python experiments/askgate/score.py runs/<run>`. `experiments/sami-proxy/eval/` takes two flags: `uv run python experiments/sami-proxy/eval/score.py --run-dir runs/<run> --cases experiments/sami-proxy/eval/cases.jsonl`. Report agreement with an interval, from a score that uses no LLM judge |
