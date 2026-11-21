@@ -921,6 +921,90 @@ class CacheOffTheRootDisk(unittest.TestCase):
             os.close(reader)
         self.assertEqual(lines.count(b"\n"), 2, "the decision lines were not written once the log could be")
 
+    def test_the_decision_log_writer_does_not_keep_a_lock_its_caller_passed_down(self):
+        # A mise that holds .dotfiles-install.lock on an inherited descriptor runs this command as
+        # its GitHub credential command; the detached log writer must not keep that lock while its
+        # write waits (dispatch://INFRA-4798). The pipe behind decisions.log is full and nobody
+        # reads it, so the writer waits in its write with the log open: the lock is probed then,
+        # and only after that is the pipe read, so the writer still writes its line.
+        import fcntl
+        home = self.root / "home"
+        cache = home / ".cache" / "gh-app-token"
+        cache.mkdir(parents=True, mode=0o700)
+        expires = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        (cache / "token-agent--app-123--acme.json").write_text(json.dumps({"token": "ghs_cached", "expires_at": expires}))
+        gitconfig = self.root / "gitconfig"
+        gitconfig.write_text('[gh-app "agent"]\n\tapp-id = 123\n')
+        log = cache / "decisions.log"
+        os.mkfifo(log)
+        # The test's own end, read-write so its open does not wait; filled, so a write waits.
+        pipe = os.open(log, os.O_RDWR | os.O_NONBLOCK)
+        self.addCleanup(os.close, pipe)
+        try:
+            while True:
+                os.write(pipe, b"x" * 4096)
+        except BlockingIOError:
+            pass
+        fifo = os.stat(log)
+        lock = self.root / "install.lock"
+        held = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "USER": "no-such-user-gh-app-token-test",
+               "GIT_CONFIG_GLOBAL": str(gitconfig), "GIT_CONFIG_NOSYSTEM": "1"}
+
+        def writer():
+            """The pid, other than this one, that has decisions.log open. Only processes of this
+            test are looked at: each has the test's HOME in its environment."""
+            marker = f"HOME={home}".encode()
+            for pid in filter(str.isdigit, os.listdir("/proc")):
+                if int(pid) == os.getpid():
+                    continue
+                try:
+                    if marker not in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"):
+                        continue
+                    fds = os.listdir(f"/proc/{pid}/fd")
+                except OSError:
+                    continue
+                for fd in fds:
+                    try:
+                        target = os.stat(f"/proc/{pid}/fd/{fd}")
+                    except OSError:
+                        continue
+                    if (target.st_dev, target.st_ino) == (fifo.st_dev, fifo.st_ino):
+                        return int(pid)
+            return None
+
+        lines = b""
+        try:
+            try:
+                result = subprocess.run([sys.executable, str(MODULE_PATH), "agent", "--owner", "acme"], env=env,
+                                        pass_fds=(held,), capture_output=True, text=True, timeout=60, check=False)
+            finally:
+                os.close(held)
+            self.assertEqual((result.returncode, result.stdout), (0, "ghs_cached\n"), result.stderr)
+            deadline = time.monotonic() + 60
+            while (pid := writer()) is None:
+                self.assertLess(time.monotonic(), deadline, "waited 60 s for the decision-log writer to open decisions.log")
+                time.sleep(0.05)
+            probe = os.open(lock, os.O_RDWR)
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                free = True
+            except BlockingIOError:
+                free = False
+            finally:
+                os.close(probe)
+            self.assertTrue(free, f"the decision-log writer (pid {pid}), waiting on decisions.log, still holds the lock its caller passed down")
+        finally:
+            # Drain the pipe: the writer's write ends, it writes its line and exits.
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and lines.count(b"\n") < 1:
+                try:
+                    lines += os.read(pipe, 65536)
+                except BlockingIOError:
+                    time.sleep(0.05)
+        self.assertEqual(lines.count(b"\n"), 1, "the decision line was not written once the log could be")
+
 
 if __name__ == "__main__":
     unittest.main()

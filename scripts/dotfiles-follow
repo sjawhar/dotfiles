@@ -36,8 +36,13 @@ What one run does:
      order does not matter. An empty or missing entry is handled as before. Lock entries without an
      installed marketplace record are skipped; install.sh bootstraps them.
      `mise install` holds `$MISE_DATA_DIR/.dotfiles-install.lock` (waiting for it at most
-     --mise-timeout), the lock dotfiles-sync's tools step and agent-session hold too, so installs
-     on one MISE_DATA_DIR never run side by side and a launch waits for a running install.
+     --mise-timeout), the lock dotfiles-sync's tools step, agent-session, shims/knives,
+     installers/mise.sh and installers/librarian-harness-host.sh hold too, so installs on one
+     MISE_DATA_DIR never run side by side and a launch waits for a running install. That
+     `mise install` alone gets DOTFILES_INSTALL_LOCK_HELD=1, so a knives call under it that lacks
+     its pin exits 127 at once instead of waiting on the lock. mise, Bun, the marketplace commands
+     and the pin check get the MISE_CACHE_DIR that the checkout's .bashrc gives a shell (read under
+     --check-timeout), so this mise and a session's take the same per-version lock in mise's cache.
   7. Every run, whatever the checkout's state: one pass of the leak check's hook sweep
      (sweep-hooks.sh of the leak-check tag, in ~/.local/share/public-leak-check-hooks, which
      devbox/sami-devbox-provision's step prepush installs) over its fast roots, under
@@ -506,6 +511,33 @@ def install_marketplace_plugins(
     return "\n".join(failures)
 
 
+# Sources the checkout's .bashrc ($1) as dotfiles-sync's tools step does, then prints the
+# MISE_CACHE_DIR it leaves and a NUL, and nothing else.
+BASHRC_MISE_CACHE_DIR = 'set +eu; source "$1/.bashrc" >/dev/null 2>&1; printf "%s\\0" "${MISE_CACHE_DIR-}"'
+
+
+def bashrc_mise_cache_dir(repo: Path, timeout: float) -> str:
+    """The MISE_CACHE_DIR a shell on this box gets from REPO's .bashrc, which keeps a value this run
+    already has. "" when REPO has no .bashrc or the .bashrc sets none; "" and one log line when
+    bash fails, prints no answer or takes longer than TIMEOUT. run_step gives bash this run's own
+    environment with DOTFILES_DIR=REPO, as the tools step exports it."""
+    bashrc = repo / ".bashrc"
+    if not bashrc.is_file():
+        return ""
+    started = time.monotonic()
+    code, out = run_step(["bash", "-c", BASHRC_MISE_CACHE_DIR, "_", str(repo)], repo, timeout)
+    # run_step puts stdout before stderr, and no message of bash holds a NUL, so the text before
+    # the first NUL is the answer whatever bash warns.
+    answer, nul, _ = out.partition("\0")
+    if code == 0 and nul:
+        return answer
+    # A .bashrc can run `exit 124` itself, so only a run that lasted TIMEOUT took longer than it.
+    timed_out = code == 124 and time.monotonic() - started >= timeout
+    how = f"took longer than {timeout:g} s" if timed_out else f"exited {code}" if code else "printed no answer"
+    log(f"tools: `bash` sourcing {display_path(bashrc)} {how}, so the tools commands get no MISE_CACHE_DIR from it")
+    return ""
+
+
 def install_tools(repo: Path, options: argparse.Namespace) -> str:
     """Return why the rule links, mise, Bun, marketplace plugins or the check's pin lines did not pass."""
     # Link omp/rules/*.md first, so a rule added by commit goes live on this pull even if a later
@@ -517,6 +549,11 @@ def install_tools(repo: Path, options: argparse.Namespace) -> str:
     # Every tools command gets this absolute directory, so it uses the same data as mise's lock.
     data = Path(os.environ.get("MISE_DATA_DIR") or Path.home() / ".mise").absolute()
     environment = {"MISE_DATA_DIR": str(data)}
+    # And the MISE_CACHE_DIR a shell on this box gets, as dotfiles-sync's tools step runs mise, so
+    # this mise and a session's take the same per-version lock in mise's cache.
+    cache = bashrc_mise_cache_dir(repo, options.check_timeout)
+    if cache:
+        environment["MISE_CACHE_DIR"] = cache
     lock = data / ".dotfiles-install.lock"
     wait_failure = (
         f"`mise install` in {display_path(repo)} did not start: another install held "
@@ -543,7 +580,12 @@ def install_tools(repo: Path, options: argparse.Namespace) -> str:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return wait_failure
-            code, out = run_step(["mise", "install"], repo, remaining, environment=environment)
+            # The marker on this command alone: a knives call under the install does not wait on
+            # the lock held here, and the commands after it get no marker.
+            code, out = run_step(
+                ["mise", "install"], repo, remaining,
+                environment={**environment, "DOTFILES_INSTALL_LOCK_HELD": "1"},
+            )
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)
     if code != 0:
@@ -694,7 +736,7 @@ def sweep_hooks(options: argparse.Namespace, kind: str, timeout: float) -> tuple
         return (
             f"{display_path(script)} is missing, so no checkout's pre-push hook was checked or installed"
             f" (this run's {label})."
-            " Install it from sami-rocqperf: devbox/sami-devbox-provision --only prepush."
+            " Install it with devbox/sami-devbox-provision --only prepush."
         ), False
     with tempfile.TemporaryDirectory(prefix="dotfiles-follow-sweep-") as tmp:
         sweep_log = Path(tmp) / "sweep.log"
