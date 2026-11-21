@@ -27,7 +27,7 @@ In `~/.dotfiles`, do not run `jj rebase` onto main, `git pull`, `git rebase`, `g
 - `vendor/` holds third-party clones the installers make: never edit them there.
 - Upgrade a pinned tool without asking, then say what changed and how to roll it back. Ask Sami first when running sessions must restart for it (bun, node, omp).
 - Two places build an agent session's environment: `scripts/agent-session`, which every host launcher execs, and `session_env()` in `scripts/agentbox`, for a box. A change every session needs goes in both: a launcher without it makes its sessions act as Sami on GitHub or Google Cloud.
-- This repository is public. The private terms the shims refuse in a commit, a push or a gh text are only in the encrypted list `leak-terms.sops.yaml`: change it only with `sops edit leak-terms.sops.yaml`, and never write a term in a file, an argument, a message or the environment.
+- This repository is public. The shims refuse a commit, a push or a gh text that holds a private term. This repository keeps its terms only in the encrypted `leak-terms.sops.yaml`: change it only with `sops edit leak-terms.sops.yaml`, and never put a term in a file, an argument or the environment.
 
 ## Tests and lint
 
@@ -45,7 +45,6 @@ In `~/.dotfiles`, do not run `jj rebase` onto main, `git pull`, `git rebase`, `g
 
 ## Commit signing and identity
 
-- jj and git both sign every commit with the machine's `~/.ssh/jj-signing`. A machine without that key fails to commit rather than commit unsigned.
 - Set a repository's commit identity with `scripts/git-identity`, which sets git and jj together. In one repository the two must agree: jj drops the signature of a commit whose author email is not its `user.email` when it rewrites it.
 
 Where this file and the code disagree, the code is right: follow the code and correct this file.

@@ -7,9 +7,7 @@
   a task limit and a timeout, so a shim that finds itself fails the case instead of forking
   without end on a machine other sessions share. Most shim tests call `subprocess.run`; do not
   copy that in a new one.
-- A shim test decides who its caller is: it starts from an environment without the session
-  markers and `SSH_*` variables of whoever runs the suite, and runs each case with
-  `run_with_tty` or `run_without_tty`. A case that commits brings its own HOME, git config and
-  author.
+- A shim test runs each case with `run_without_tty` or `run_with_tty`. A person's case drops
+  `SSH_CONNECTION`; one that commits brings its own HOME, git config and author.
 
 Where this file and the code disagree, the code is right: follow the code and correct this file.

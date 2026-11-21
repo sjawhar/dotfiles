@@ -17,7 +17,7 @@ agentbox runs each agent session in its own disposable [Sysbox](https://github.c
 - Root in the box is an unprivileged user on the host, so `sudo apt-get install`, an inner Docker daemon and
   nested containers work without host privileges.
 - A box's `/proc` lists only the box's processes. A tool in a box that sweeps scratch by testing pids in its own
-  `/proc` reads every host run as dead: never point an in-box tool's `TMPDIR` at a host run's, or the reverse.
+  `/proc` reads every host run as dead, so a sweeper keeps what it cannot prove dead, and an in-box tool's `TMPDIR` never points at a host run's, or the reverse.
 - Each box has its own cpu, memory, pids and disk limit. When the session ends, everything in the box is deleted:
   its clones (uncommitted changes and commits no remote has too), its home, `/tmp` and its inner Docker store.
   Push what you want kept before the session ends. A box whose launcher died is deleted later by the collector
