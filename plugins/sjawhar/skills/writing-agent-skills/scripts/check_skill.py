@@ -13,8 +13,8 @@ It prints a FAIL line and exits 1 when a skill breaks any of these:
 - A path that SKILL.md links or names does not exist.
 - With --old: SKILL.md is more than 200 bytes larger than the old copy.
 
-A reference is each markdown file (.md in any letter case) at any depth under the skill
-directory, other than the skill's own SKILL.md, that is not a template. A template is a file
+A reference is each markdown file (.md or .markdown, in any letter case) at any depth under the
+skill directory, other than the skill's own SKILL.md, that is not a template. A template is a file
 whose path below the skill directory has a directory named exactly "assets" or "templates":
 assets/brief.md, templates/x.md, references/templates/x.md. Only that path makes a template,
 never the words in the file. Templates, scripts and other files that are not markdown are not
@@ -40,6 +40,17 @@ GROWTH_ALLOWANCE = 200  # a rewrite may grow this much and no more
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 LINK_RE = re.compile(r"\]\(([^)#\s]+)\)|`((?:references|scripts|assets|templates)/[^`\s]+)`")
 TEMPLATE_DIRS = frozenset({"assets", "templates"})
+MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
+# A YAML scalar in double or single quotes, which may run over several lines: for each quote, the
+# pattern that finds the closing quote, and the pattern of what YAML rewrites between the quotes.
+# Each unescaped line break, with the white space around it, folds to one space, or to one newline
+# per blank line it spans; in double quotes \" and \\ stand for " and \, and a backslash at the
+# end of a line joins the next line with no space; in single quotes '' stands for '.
+_FOLD = r"[ \t]*\n((?:[ \t]*\n)*)[ \t]*"
+QUOTED = {
+    '"': (re.compile(r'"((?:[^"\\]|\\.)*)"', re.S), re.compile(r'\\\n[ \t]*|\\(["\\])|' + _FOLD)),
+    "'": (re.compile(r"'((?:[^']|'')*)'(?!')"), re.compile(r"'(')|" + _FOLD)),
+}
 
 
 class Stats(TypedDict):
@@ -51,6 +62,16 @@ class Stats(TypedDict):
     rule_lines: int
 
 
+def unquote(m: re.Match[str]) -> str:
+    """The text YAML reads for one match of a QUOTED rewrite pattern."""
+    char, blanks = m.group(1), m.group(2)
+    if char:
+        return char
+    if blanks is not None:
+        return "\n" * blanks.count("\n") or " "
+    return ""
+
+
 def split_frontmatter(text: str) -> tuple[dict[str, str], str]:
     if not text.startswith("---\n"):
         return {}, text
@@ -59,13 +80,21 @@ def split_frontmatter(text: str) -> tuple[dict[str, str], str]:
         return {}, text
     fields: dict[str, str] = {}
     key = None
-    for line in text[4:end].splitlines():
+    lines = text[4:end].splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        i += 1
         m = re.match(r"^([A-Za-z_][\w-]*):\s*(.*)$", line)
         if m:
             key, value = m.group(1), m.group(2).strip()
-            if value[:1] in "\"'" and value[-1:] == value[:1] and len(value) > 1:
-                value = value[1:-1]
-            fields[key] = "" if value in (">", "|", ">-", "|-") else value
+            quoted = QUOTED.get(value[:1])
+            # A quoted value runs to its closing quote, on this line or a later one.
+            if quoted and (scalar := quoted[0].match("\n".join([value, *lines[i:]]))):
+                i += scalar.group(0).count("\n")
+                fields[key] = quoted[1].sub(unquote, scalar.group(1))
+            else:
+                fields[key] = "" if value in (">", "|", ">-", "|-") else value
         elif key and line.startswith((" ", "\t")):
             fields[key] = (fields[key] + " " + line.strip()).strip()
     return fields, text[end + 4 :].lstrip("\n")
@@ -77,7 +106,7 @@ def references(skill_dir: Path) -> list[Path]:
     for path in sorted(skill_dir.rglob("*")):
         rel = path.relative_to(skill_dir)
         if (
-            path.suffix.lower() == ".md"
+            path.suffix.lower() in MARKDOWN_SUFFIXES
             and rel.parts != ("SKILL.md",)
             and not TEMPLATE_DIRS.intersection(rel.parts[:-1])
             and path.is_file()
