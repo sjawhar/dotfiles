@@ -16,11 +16,15 @@
 #   git-identity th|theorem      use sami@theorem.dev for this repo
 #   git-identity nr|noreply      use sjawhar@users.noreply.github.com for this repo
 #
-# sjawhar/legion (sami@thecybermonk.com) and every theorem-labs repository
-# (sami@theorem.dev) need none of these: they get their identity by rule in every
-# clone (.gitconfig matches the remote URL, .jjconfig.toml the jj checkouts' paths).
-# jj gets noreply by the same .jjconfig.toml rule in every workspace of
-# ~/src/oh-my-pi, `knives start` workspaces included.
+# Every theorem-labs repository (sami@theorem.dev) and every cybermonklabs
+# repository but oh-my-pi (sami@thecybermonk.com) get their identity by rule. git
+# matches a clone's remote URL (.gitconfig). jj has no remote condition, so
+# .jjconfig.toml matches a jj checkout, and every workspace of it, by path: under
+# ~/Code/personal/theorem, and at ~/src/legion or ~/Code/legion. A jj checkout of
+# such a repository elsewhere needs `git-identity th` or `cm`. oh-my-pi commits as
+# noreply: jj by the same rule in every workspace of ~/src/oh-my-pi, `knives start`
+# workspaces included, and git by that checkout's own config, so any other clone
+# of it needs `git-identity nr`.
 #
 # Elsewhere noreply is opt-in, for a checkout whose commits must carry no
 # personal address: a fork whose own forbidden-term list holds the default
@@ -68,7 +72,7 @@ case "${1-}" in
     th | theorem) EMAIL="$TH_EMAIL" ;;
     nr | noreply) EMAIL="$NR_EMAIL" ;;
     -h | --help)
-        sed -n '2,35p' "$0" | sed 's/^# \?//'
+        sed -n '2,39p' "$0" | sed 's/^# \?//'
         exit 0
         ;;
     *)
