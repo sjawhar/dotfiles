@@ -2,7 +2,7 @@
 
 Rewrite or shorten a skill so that it keeps each rule an agent needs and loses the rest.
 
-**Done when:** steps 1, 2 and 4 pass on each skill you rewrite, step 3 passes on the skills it selects, each step's output is in the commit message or the pull request, and the week of checks after it lands is posted.
+**Done when:** steps 1, 2 and 4 pass on each skill you rewrite, step 3 passes on the skills it selects, each step's output is in the commit message or the pull request, and the week of checks after it merges is posted.
 
 Have fresh agents run steps 1 and 2, never you: an author does not see the gaps in their own text.
 
@@ -10,10 +10,10 @@ Put each step's output in the commit message or the pull request, so that the ne
 
 ## Before you start
 
-1. **Copy the old text** to a scratch directory: `cp -r <skill> "$(mktemp -d)"/old`. Steps 1 and 3 compare against it.
+1. **Copy the old text** to a scratch directory: `old="$(mktemp -d)/old" && cp -r <skill> "$old"`. Steps 1 and 3 compare against `$old`.
 2. **Measure the old text** with step 4.
 3. **Keep that output:** the commit reports old and new numbers.
-4. **Find what the skill is for in practice.** `tq search --commands 'skill://<name>' --days 30 --limit 20` lists sessions that loaded it. Read two or three at the point of load, and list what each needed: a command, a fact, a correction the user gave.
+4. **Find what the skill is for in practice.** `tq search --commands 'skill://<name>' --days 30 --limit 20` lists sessions that loaded it. Read two or three at the point of load. List what each needed: a command, a fact, a correction the user gave.
 5. **Write rules for those needs**, not for what the old text says.
 
 ## Step 1: Map every instruction
@@ -32,7 +32,7 @@ Put each step's output in the commit message or the pull request, so that the ne
 
 2. **Brief a fresh agent** with the old text, the new text and the drop list, and not your reasoning:
 
-   > List every instruction in OLD: each thing it tells the agent to do, not do, check or know. For each one, give the line in NEW that carries the same meaning and scope, or the drop-list row that covers it, and mark it with a verdict: KEPT (NEW carries it), LOST (neither exists), NARROWED (NEW keeps the rule for fewer cases, or with a lost command, path or number), or BAD-DROP (the drop-list reason is not one of the codes, or its evidence does not show what it claims). Output a table: old line, instruction, new line or drop row, verdict.
+   > List every instruction in OLD: each thing it tells the agent to do, not do, check or know. For each one, give the line in NEW that carries the same meaning and scope, or the drop-list row that covers it. Mark it with a verdict: KEPT (NEW carries it), LOST (neither exists), NARROWED (NEW keeps the rule for fewer cases, or with a lost command, path or number), or BAD-DROP (the drop-list reason is not one of the codes, or its evidence does not show what it claims). Output a table: old line, instruction, new line or drop row, verdict.
 
 3. **Fix every LOST, NARROWED and BAD-DROP:** restore the rule, or drop it with a real reason. A narrowed rule fails where the old one held.
 4. **Map the changed rows again**, and only those.
@@ -55,7 +55,7 @@ Put each step's output in the commit message or the pull request, so that the ne
    | A sentence a careful engineer would read twice | Three rules packed into one sentence | Short sentences, one idea each |
    | A line that breaks a rule of `style.md` | A rule buried in a paragraph | The line in that rule's form |
 
-2. **Answer each finding:** fix it, or answer it with one line of evidence. Fix a finding by replacing words; where words cannot fix it, add a clause: a missing definition, a reason the rule needs, or the condition that separates two rules.
+2. **Answer each finding:** fix it, or answer it with one line of evidence. Fix a finding by replacing words. Where words cannot fix it, add a clause: a missing definition, a reason the rule needs, or the condition that separates two rules.
 3. **Check only the changed lines** in each later round.
 4. **Stop after three rounds.**
 5. **Report no finding twice.**
@@ -83,7 +83,7 @@ Run no control arm: this step compares old and new text, to show that the rewrit
 2. **Write each case as the raw task** the session got, with no hint of the expected answer.
 3. **Write the pass bar** for each case: an action or output a transcript shows.
 4. **Run both arms.** Run each case three times with the old text and three times with the new, each in a fresh session that is not told it is a test, as `testing.md`'s "Running a body test" says.
-5. **Score blind.** Give each transcript, under a random ID and with the pass bar from step 3, to a fresh scorer that does not know the arm (`testing.md`, "Scoring").
+5. **Score blind.** Give each transcript, under a random ID and with the pass bar from item 3, to a fresh scorer that does not know the arm (`testing.md`, "Scoring").
 6. **Report `old k/n, new k/n` per case.** The new text passes when, for every case, new k is at least old k minus 1.
 7. **Restore what a failing case needed:** the dropped rule that its failing transcripts show was needed.
 8. **Run that case again**, alone.
@@ -93,6 +93,6 @@ Run no control arm: this step compares old and new text, to show that the rewrit
 1. **Run `check_skill.py`** on each skill, as SKILL.md's "Step 5: Check the skill" says.
 2. **Move a rule that would not fit** into a reference, with its whole block, named at its step.
 3. **Never go over the limits** in SKILL.md's "Limits" to keep a rule.
-4. **Watch the week after it lands.** Run the check on each rewritten skill daily for a week, with `--log ~/.cache/skill-sizes.tsv` (one dated row per skill): rewritten instruction files regrow.
+4. **Watch the week after it merges.** Run the check on each rewritten skill daily for a week, with `--log ~/.cache/skill-sizes.tsv` (one dated row per skill): rewritten instruction files regrow.
 5. **Post the week's rows** on the rewrite's pull request.
 6. **Shrink a skill that goes over a limit** as SKILL.md, "Step 4: Remove rules", says.

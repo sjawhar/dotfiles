@@ -32,9 +32,9 @@ Use steps 1 and 3 for an agent guide's rules too.
 | A block that only some tasks need | Move it into `references/<topic>.md`, one level deep, and name it at the step that needs it, with its condition |
 | A reference that every task reads | Merge it into SKILL.md when the merged file stays within the limits |
 | A reference that nothing names | Delete it |
-| A file the skill tells an agent to copy whole into another place (a brief, a form) | It may go under `assets/`, where the Agent Skills specification puts templates; `check_skill.py` reads `templates/` the same way. Only those two directories make a file a template, and the limits do not hold a template |
+| A file the skill tells an agent to copy whole into another place (a brief, a form) | It may go under `assets/`, where the Agent Skills specification puts templates; `check_skill.py` reads `templates/` the same way. Only those two directories make a file a template. The limits do not hold a template |
 
-- **Before you rename, move or delete a skill, one of its paths or a frontmatter field, run `git grep -n <name>` and fix each namer in the same change:** each code, prompt or skill that uses the name breaks, and code reads some fields, such as `mcp:`.
+- **Before you rename, move or delete a skill, one of its paths or a frontmatter field such as `mcp:`, fix each code, prompt or skill that names it, in the same change:** `git grep -n <name>` finds them.
 
 ## Step 1: Decide that a rule is needed
 
@@ -79,7 +79,7 @@ Read its section "Measuring a harness change" when the change is to the harness 
 3. **Blind runs.** Run each case in a fresh session that gets the raw task, not your diagnosis, and is not told it is a test.
 4. **Three arms.** Run the old text, the new text and a no-guidance control 3 times each. Run 3 more of each when the arms differ by one or two runs.
 5. **Near misses.** For a description, also run near-miss prompts that must not load it.
-6. **Held-out cases.** Before you tune, set aside 40% of the cases (rounded down, at least one). Tune on the rest, and report the held-out ones: a variant tuned on the cases you report wins only those.
+6. **Held-out cases.** Before you tune, set aside 40% of the cases (rounded down, at least one). Tune on the rest. Report the held-out ones: a variant tuned on the cases you report wins only those.
 7. **Tuned-only gains.** Revert a change that improves only the tuned ones.
 8. **Three review rounds.** Stop a review loop after three rounds.
 9. **Only the change.** In each later round, check only what changed. Repeat no finding.
@@ -88,10 +88,10 @@ Read its section "Measuring a harness change" when the change is to the harness 
 
 | Situation | Do |
 | --- | --- |
-| Agents disobey a rule | Delete it, run the same task 3 times with the rest unchanged, and rewrite it only if the failure shows in 2 of the 3 |
+| Agents disobey a rule | Delete it. Run the same task 3 times with the rest unchanged. Rewrite it only if the failure shows in 2 of the 3 |
 | A rule's reason no longer holds: a duplicate, written for an older model, obeyed in a control run, one incident that never recurred, or now done by the code or the harness | Delete it |
 | A rule never fires, which is no reason by itself to delete it | Run the control first: deleting ignored rules can remove helpful ones |
-| You remove a required step | Name what now makes it happen (a script, a hook, another rule); if nothing does, keep the step, because a step left to choice gets skipped |
+| You remove a required step | Name what now makes it happen (a script, a hook, another rule). If nothing does, keep the step: a step left to choice gets skipped |
 | A skill is too long | Move or delete whole blocks, not words: squeezing wording drops rules unnoticed |
 
 ## Step 5: Check the skill
