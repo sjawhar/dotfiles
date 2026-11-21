@@ -33,6 +33,7 @@ from leak_terms_fixture import (  # noqa: E402 - found through the path above
     SCOPED_TEST_TERMS,
     TEST_TERMS,
     encrypt_yaml,
+    fixture_plaintext,
     leak_check_environment,
 )
 
@@ -46,21 +47,6 @@ SPLIT_FIRST, SPLIT_REST = TEST_TERMS[0].split(" ", 1)
 FOUND_EXIT = 3
 RECORD_EXIT = 2
 OTHER_KEY = "0" * 64
-
-
-def fixture_plaintext() -> str:
-    """The plaintext of the fixture's list, built as leak_terms_fixture builds it, so that a new encryption of it is the
-    same list in other bytes."""
-    plaintext = "terms: |\n  # test comment\n" + "".join(f"  {term}\n" for term in TEST_TERMS)
-    plaintext += "scoped:\n" + "".join(
-        f'  "{pattern}": |\n' + "".join(f"    {term}\n" for term in terms) for pattern, terms in SCOPED_TEST_TERMS.items()
-    )
-    plaintext += "allowed:\n" + "".join(
-        f'  "{pattern}": |\n    # a third-party npm package that holds the scoped term\n'
-        + "".join(f"    {token}\n" for token in tokens)
-        for pattern, tokens in ALLOWED_TEST_TOKENS.items()
-    )
-    return plaintext
 
 
 @lru_cache(maxsize=1)
@@ -120,7 +106,8 @@ class Record(unittest.TestCase):
     def run_check(self, *arguments: str, stdin: str = "", env: dict[str, str] | None = None
                   ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
         """Run the check in the work repository; return its result and, for each call of the diff producer that
-        GIT_TRACE2_EVENT saw, the pathspecs it was given (none for a commit read whole)."""
+        GIT_TRACE2_EVENT saw, the pathspecs it was given (none for a commit read whole). self.calls keeps the arguments
+        of every git call the check made."""
         descriptor, trace = tempfile.mkstemp(prefix="trace-", dir=self.root)
         os.close(descriptor)
         result = subprocess.run(
@@ -134,20 +121,21 @@ class Record(unittest.TestCase):
             check=False,
         )
         events = [json.loads(line) for line in Path(trace).read_text(encoding="utf-8").splitlines()]
-        calls: list[list[str]] = [event["argv"] for event in events if event.get("event") == "start"]
+        self.calls: list[list[str]] = [event["argv"] for event in events if event.get("event") == "start"]
         # The trace saw the check's other git calls, so it would have seen a diff.
-        self.assertTrue(calls, "GIT_TRACE2_EVENT recorded no git call")
-        diffs = [words for words in calls if "log" in words and "-U0" in words]
+        self.assertTrue(self.calls, "GIT_TRACE2_EVENT recorded no git call")
+        diffs = [words for words in self.calls if "log" in words and "-U0" in words]
         return result, [words[words.index("--") + 1:] if "--" in words else [] for words in diffs]
 
     def record(self, *revisions: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return self.run_check("record", "--url", self.url, *revisions, env=env)[0]
 
-    def push(self, commit: str, env: dict[str, str] | None = None
+    def push(self, commit: str, env: dict[str, str] | None = None, old: str | None = None
              ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
-        """The check as the pre-push hook runs it for a push of COMMIT to the destination's main, which holds base."""
+        """The check as the pre-push hook runs it for a push of COMMIT to the destination's main, which holds OLD (base
+        when not given)."""
         return self.run_check("push", "--remote", "origin", "--url", self.url,
-                              stdin=f"refs/heads/main {commit} refs/heads/main {self.base}\n", env=env)
+                              stdin=f"refs/heads/main {commit} refs/heads/main {old or self.base}\n", env=env)
 
     def blob(self, revision: str, path: str) -> str:
         return self.rev(f"{revision}:{path}")
@@ -171,9 +159,12 @@ class Record(unittest.TestCase):
         self.assertRegex(line, r"\Apass [0-9a-f]{64}\Z")
         return line
 
-    def assert_covered(self, result: subprocess.CompletedProcess[str], covered: int, seen: int) -> None:
+    def assert_covered(self, result: subprocess.CompletedProcess[str], covered: int, seen: int,
+                       read: int | None = None) -> None:
+        """The push's summary: the record covered COVERED of the SEEN file versions, and the push read READ of them
+        (by default every one it did not cover)."""
         self.assertIn(f"the record {REF} covered {covered} of the {seen} file versions the outgoing commits add or "
-                      f"change; read the other {seen - covered}", result.stderr)
+                      f"change; the push read {seen - covered if read is None else read} of them", result.stderr)
 
     def test_no_record_reads_every_file_and_says_nothing_of_it(self) -> None:
         commit = self.commit({"code.py": "print('nothing listed')\n"})
@@ -316,6 +307,86 @@ class Record(unittest.TestCase):
         self.assert_covered(result, 1, 2)
         self.assertEqual(diffs, [[":(literal)we\nird.txt"]])
 
+    def test_a_rename_is_not_followed_under_log_follow(self) -> None:
+        # With log.follow on, git follows a rename when one pathspec is given, even under --no-renames: a text file
+        # renamed from a binary one the destination holds showed as "Binary files differ", and its term went unread.
+        self.assertEqual(self.record(self.base).returncode, 0)
+        text = "".join(f"line {number} of the file\n" for number in range(40)) + f"a line with {TERM}\n"
+        (self.work / "old.bin").write_bytes(b"\0" + text.encode())
+        self.git("add", "old.bin")
+        self.git("commit", "-q", "-m", "a binary file")
+        held = self.rev("HEAD")
+        self.git("push", "-q", str(self.public), "main")
+        self.git("rm", "-q", "old.bin")
+        commit = self.commit({"new.txt": text, "kept.txt": "the first file\n"})
+        follow = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "log.follow", "GIT_CONFIG_VALUE_0": "true"}
+        result, diffs = self.push(commit, env=follow, old=held)
+        self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
+        self.assertIn(f"commit {commit[:12]} new.txt:41", result.stderr)
+        self.assert_covered(result, 1, 2)
+        self.assertEqual(diffs, [[":(literal)new.txt"]])
+
+    def test_a_push_under_literal_pathspecs_reads_the_files_it_names(self) -> None:
+        # `git --literal-pathspecs push` (Magit's default) exports GIT_LITERAL_PATHSPECS to the hook: git read
+        # `:(literal)new.txt` as a file of that name, matched nothing, and a clean push was refused (exit 4).
+        literal = {"GIT_LITERAL_PATHSPECS": "1"}
+        self.assertEqual(self.record(self.base).returncode, 0)
+        clean = self.commit({"kept.txt": "the first file\n", "new.txt": "nothing listed\n"})
+        result, diffs = self.push(clean, env=literal)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_covered(result, 1, 2)
+        self.assertEqual(diffs, [[":(literal)new.txt"]])
+        planted = self.commit({"copy.txt": "the first file\n", "planted.txt": f"a line with {TERM}\n"})
+        result, _ = self.push(planted, env=literal)
+        self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
+        self.assertIn(f"commit {planted[:12]} planted.txt:1", result.stderr)
+
+    def test_a_commit_with_fewer_covered_files_than_others_is_read_whole(self) -> None:
+        # A diff call of its own would cost more than the covered file saves; reading it is only stricter.
+        self.assertEqual(self.record(self.base).returncode, 0)
+        commit = self.commit({"kept.txt": "the first file\n", "a.txt": "nothing listed\n", "b.txt": "nor here\n"})
+        result, diffs = self.push(commit)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_covered(result, 1, 3, read=3)
+        self.assertEqual(diffs, [[]])
+
+    def test_many_commits_with_covered_files_are_read_in_one_call(self) -> None:
+        # The uncovered files of every commit some of whose files are covered are read in one diff call, and the empty
+        # attribute tree and info/attributes once for the push: a call for each commit made a push of 400 such commits
+        # take 17 s with the record, against 0.5 s without it.
+        self.assertEqual(self.record(self.base).returncode, 0)
+        commits = [self.commit({f"copy{number}.txt": "the first file\n", f"new{number}.txt": f"file {number}\n"})
+                   for number in range(3)]
+        result, diffs = self.push(commits[-1])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_covered(result, 1, 4)
+        self.assertEqual([sorted(diff) for diff in diffs], [[f":(literal)new{number}.txt" for number in range(3)]])
+        self.assertEqual(sum(words[1:2] == ["mktree"] for words in self.calls), 1, self.calls)
+        self.assertEqual(sum("info/attributes" in words for words in self.calls), 1, self.calls)
+
+    def test_a_folder_one_commit_names_is_read_in_another(self) -> None:
+        # One commit adds the file `d`; another, on a branch of its own, adds the covered file `d/f`. The pathspec of
+        # `d` names `d/f` too, so git shows the second commit as well, and the call expects it.
+        self.assertEqual(self.record(self.base).returncode, 0)
+        first = self.commit({"d": "nothing listed\n", "copy.txt": "the first file\n"})
+        self.git("checkout", "-q", "-b", "other", self.base)
+        second = self.commit({"d/f": "the first file\n", "copy2.txt": "the first file\n"})
+        result, diffs = self.run_check("push", "--remote", "origin", "--url", self.url,
+                                       stdin=f"refs/heads/main {first} refs/heads/main {self.base}\n"
+                                             f"refs/heads/other {second} refs/heads/other {'0' * 40}\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_covered(result, 1, 2, read=2)
+        self.assertEqual(diffs, [[":(literal)d"]])
+
+    def test_a_literal_pathspec_reaches_its_file_and_the_files_in_its_folder(self) -> None:
+        module = load_check()
+        self.assertTrue(module.pathspec_reaches({"d"}, "d"))
+        self.assertTrue(module.pathspec_reaches({"d"}, "d/f"))
+        self.assertTrue(module.pathspec_reaches({"d/e"}, "d/e/f/g"))
+        self.assertFalse(module.pathspec_reaches({"d"}, "dx"))
+        self.assertFalse(module.pathspec_reaches({"d/f"}, "d"))
+        self.assertFalse(module.pathspec_reaches({"d/e"}, "d/ef"))
+
     def test_a_commit_whose_files_are_covered_or_deleted_reads_no_diff(self) -> None:
         self.commit({"gone.txt": "to be deleted\n"})
         self.assertEqual(self.record(self.base).returncode, 0)
@@ -332,10 +403,11 @@ class Record(unittest.TestCase):
         paths = [f"dir/{index:05d}-{'x' * 200}.txt" for index in range(2000)]
         chunks = list(module.pathspec_chunks(paths))
         self.assertGreater(len(chunks), 1)
-        self.assertEqual([spec for chunk in chunks for spec in chunk], [f":(literal){path}" for path in paths])
-        self.assertTrue(all(sum(len(spec) + 1 for spec in chunk) <= module.PATHSPEC_BYTES for chunk in chunks))
+        self.assertEqual([path for chunk in chunks for path in chunk], paths)
+        self.assertTrue(all(sum(len(f":(literal){path}") + 1 for path in chunk) <= module.PATHSPEC_BYTES
+                            for chunk in chunks))
 
-    def test_record_keeps_allowed_tokens_and_keys_each_destination(self) -> None:
+    def test_record_keeps_allowed_tokens_and_keys_the_lists_a_destination_reads(self) -> None:
         (pattern, (token, _)), = ALLOWED_TEST_TOKENS.items()
         (scoped_term,), = SCOPED_TEST_TERMS.values()
         self.commit({"package.json": f'{{"dependency": "{token}"}}\n', "scoped.txt": f"a line with {scoped_term}\n"})
@@ -348,6 +420,59 @@ class Record(unittest.TestCase):
         result, _ = self.run_check("record", "--url", f"https://github.com/{pattern}.git", "main")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("found 0 covered, read 3, recorded 1, did not record 2", result.stdout)
+
+    def test_destinations_that_read_the_same_lists_share_a_key(self) -> None:
+        # The key names the scoped lists a destination reads, not the destination: a GitHub repository no scoped list
+        # reaches reads what the file:// destination reads, so its record covers a push there.
+        commit = self.commit({"code.py": "print('nothing listed')\n"})
+        result, _ = self.run_check("record", "--url", "https://github.com/upstream-fixture/elsewhere.git", "main")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result, diffs = self.push(commit)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_covered(result, 1, 1)
+        self.assertEqual(diffs, [])
+
+    def test_a_branch_named_like_the_record_leaves_the_record_used(self) -> None:
+        # rev-parse reads refs/notes/leak-terms-check as ambiguous beside refs/heads/refs/notes/leak-terms-check; the
+        # record is the ref of exactly that name.
+        line = self.key_line()
+        commit = self.commit({"kept.txt": f"a forged line with {TERM}\n"})
+        self.forge(self.blob("main", "kept.txt"), line)
+        self.git("update-ref", f"refs/heads/{REF}", self.base)
+        result, diffs = self.push(commit)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_covered(result, 1, 1)
+        self.assertEqual(diffs, [])
+
+    def test_a_tag_or_branch_named_like_the_record_covers_nothing(self) -> None:
+        line = self.key_line()
+        commit = self.commit({"kept.txt": f"a forged line with {TERM}\n"})
+        self.forge(self.blob("main", "kept.txt"), line)
+        notes = self.rev(REF)
+        self.git("update-ref", "-d", REF)
+        for name in (f"refs/tags/{REF}", f"refs/heads/{REF}"):
+            with self.subTest(name=name):
+                self.git("update-ref", name, notes)
+                result, diffs = self.push(commit)
+                self.git("update-ref", "-d", name)
+                self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
+                self.assertIn("kept.txt:1", result.stderr)
+                self.assertNotIn("the record", result.stderr)
+                self.assertEqual(diffs, [[]])
+
+    def test_a_symbolic_record_ref_covers_nothing_and_says_why(self) -> None:
+        line = self.key_line()
+        commit = self.commit({"kept.txt": f"a forged line with {TERM}\n"})
+        self.forge(self.blob("main", "kept.txt"), line)
+        self.git("update-ref", "refs/notes/other", self.rev(REF))
+        self.git("update-ref", "-d", REF)
+        self.git("symbolic-ref", REF, "refs/notes/other")
+        result, diffs = self.push(commit)
+        self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
+        self.assertIn(f"leak terms: cannot use the record {REF}, so every file version is read: it is a symbolic ref "
+                      "to refs/notes/other", result.stderr)
+        self.assertIn("kept.txt:1", result.stderr)
+        self.assertEqual(diffs, [[]])
 
     def test_a_covered_file_s_path_is_still_read(self) -> None:
         self.assertEqual(self.record(self.base).returncode, 0)

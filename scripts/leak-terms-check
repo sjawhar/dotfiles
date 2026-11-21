@@ -26,7 +26,7 @@ import urllib.parse
 from functools import lru_cache
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable, Iterator, Mapping, Sequence, cast
+from typing import Callable, Iterator, Mapping, Sequence, TypeVar, cast
 
 
 LIST_EXIT = 2
@@ -1256,13 +1256,22 @@ OBJECT_ID = re.compile(r"[0-9A-Fa-f]{40,64}\Z")
 TRANSPORT_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*::")
 
 
+# The variables that change how git reads a pathspec, which `git --literal-pathspecs` and its siblings export to every
+# git a command runs, the pre-push hook's included (Magit passes --literal-pathspecs by default). The check names files
+# by `:(literal)` pathspecs (pathspec_chunks); under GIT_LITERAL_PATHSPECS git reads that magic as part of the name, so
+# no file matches, and a push the record covers in part was refused as "malformed commit boundaries".
+PATHSPEC_VARIABLES = ("GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS")
+
+
 def git_environment() -> dict[str, str]:
-    """Disable replacement and system attributes so Git scans the objects it publishes.
+    """Disable replacement and system attributes so Git scans the objects it publishes, and leave out the caller's
+    pathspec settings (PATHSPEC_VARIABLES).
 
     Lazy fetch stays on for the reads of what a push sends: they need each object's bytes, so with it off an object a
     partial clone lacks would stop the check and refuse a clean push (git's diff fetches a commit's missing files in one
     request). Only the reads that ask what the clone holds turn it off (local_object_ids, listed_objects)."""
-    return {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_ATTR_NOSYSTEM": "1"}
+    environment = {name: value for name, value in os.environ.items() if name not in PATHSPEC_VARIABLES}
+    return {**environment, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_ATTR_NOSYSTEM": "1"}
 
 @lru_cache(maxsize=1)
 def pushing_repository_commit_encoding() -> str | None:
@@ -1712,28 +1721,46 @@ DIFF_OPTIONS = (
 )
 
 
-def scan_diff_arguments(command: str, command_arguments: Sequence[str]) -> list[str]:
-    """Return one text-only diff producer with the shared outgoing and staged attribute policy."""
+@dataclass(frozen=True)
+class DiffPolicy:
+    """The attribute policy every diff producer of one check shares (scan_diff_arguments), read once (diff_policy):
+    ATTRIBUTE_TREE, the empty tree Git takes attributes from, and EVERY_FILE_TEXT, whether a non-empty info/attributes,
+    the one attribute source Git cannot turn off, makes the check read every file as text."""
+
+    attribute_tree: str
+    every_file_text: bool
+
+
+def diff_policy() -> DiffPolicy:
+    return DiffPolicy(empty_attribute_tree(), info_attributes_present())
+
+
+def scan_diff_arguments(command: str, command_arguments: Sequence[str], policy: DiffPolicy) -> list[str]:
+    """Return one text-only diff producer with the shared outgoing and staged attribute policy. `log.follow` is off:
+    with it, git follows a rename when one pathspec is given (scan_covered_diffs), even under --no-renames, and the
+    file's diff then holds only what the rename changed."""
     arguments = [
         "-c",
         "core.attributesFile=/dev/null",
         "--attr-source",
-        empty_attribute_tree(),
+        policy.attribute_tree,
         "-c",
         "core.quotePath=false",
+        "-c",
+        "log.follow=false",
         command,
         *command_arguments,
         *DIFF_OPTIONS,
     ]
-    if info_attributes_present():
+    if policy.every_file_text:
         arguments.append("--text")
     return arguments
 
 
-def scan_outgoing_diffs(commits: Sequence[str], matcher: TermMatcher, findings: list[Finding],
+def scan_outgoing_diffs(commits: Sequence[str], matcher: TermMatcher, findings: list[Finding], policy: DiffPolicy,
                         pathspecs: Sequence[str] = ()) -> None:
     """Scan a byte-streamed diff producer of commits that are not merges, framing commits only outside hunk content;
-    with PATHSPECS, only the files they name (scan_covered_diffs), each of which every commit changes."""
+    with PATHSPECS, only the files they name, which each of COMMITS changes one of (scan_covered_diffs)."""
     if not commits:
         return
     arguments = scan_diff_arguments(
@@ -1747,6 +1774,7 @@ def scan_outgoing_diffs(commits: Sequence[str], matcher: TermMatcher, findings: 
             "--no-notes",
             "--no-decorate",
         ],
+        policy,
     )
     if pathspecs:
         arguments += ["--", *pathspecs]
@@ -1764,7 +1792,7 @@ def scan_outgoing_diffs(commits: Sequence[str], matcher: TermMatcher, findings: 
 def scan_staged_diff() -> list[Finding]:
     """Scan the staged diff under the same attribute policy and Git environment as an outgoing diff."""
     raw_diff = git_output(
-        scan_diff_arguments("diff", ["--cached"]),
+        scan_diff_arguments("diff", ["--cached"], diff_policy()),
         b"",
         "git could not read staged diff",
     )
@@ -1808,35 +1836,35 @@ class RawChange:
     result: str
 
 
-def raw_tree_diffs(inputs: Sequence[tuple[str, str]], kind: str, what: str) -> list[dict[str, RawChange]]:
-    """For each of INPUTS, (commit, the line of `git diff-tree --stdin` that reads it: the commit alone, against its
-    parent or as a root, or the commit and one parent), every file whose object or mode differs. KIND names the commit
-    in an error (`merge commit`), WHAT them all (`outgoing merges`).
+def raw_tree_diffs(pairs: Sequence[tuple[str, str | None]]) -> list[dict[str, RawChange]]:
+    """For each of PAIRS, (a commit, the parent to read it against, or None for its own parent, or for a root commit
+    its whole tree), every file whose object or mode differs.
 
-    One `git diff-tree --stdin` reads every line. `--always` prints the commit's id before each diff, an empty one
-    included, so each file is attributed to its line by position, never by counting.
+    One `git diff-tree --stdin` reads every pair. `--always` prints the commit's id before each diff, an empty one
+    included, so each file is attributed to its pair by position, never by counting.
     """
     output = git_output(
         ["diff-tree", "--stdin", "--always", "--root", "-r", "--raw", "-z", "--no-abbrev", "--no-renames",
          "--no-relative", "--ignore-submodules=none"],
-        "".join(f"{line}\n" for _, line in inputs).encode(),
-        f"git could not read the files of the {what}",
+        "".join(f"{commit}\n" if parent is None else f"{commit} {parent}\n" for commit, parent in pairs).encode(),
+        "git could not read the files of the outgoing commits",
     )
     records = output.split(b"\0")
     if records.pop() != b"":
-        raise TextError(f"git gave a malformed raw diff of the {what}")
+        raise TextError("git gave a malformed raw diff of the outgoing commits")
     diffs: list[dict[str, RawChange]] = []
     position = 0
-    for commit, _ in inputs:
+    for commit, _ in pairs:
+        malformed = f"git gave a malformed raw diff of commit {commit[:12]}"
         if position >= len(records) or records[position] != commit.encode():
-            raise TextError(f"git gave a malformed raw diff of {kind} {commit[:12]}")
+            raise TextError(malformed)
         position += 1
         files: dict[str, RawChange] = {}
         while position < len(records) and records[position].startswith(b":"):
             try:
                 fields = records[position].decode("ascii")[1:].split(" ")
             except UnicodeDecodeError as error:
-                raise TextError(f"git gave a malformed raw diff of {kind} {commit[:12]}") from error
+                raise TextError(malformed) from error
             path = records[position + 1].decode("utf-8", errors="surrogateescape") if position + 1 < len(records) else ""
             if (
                 len(fields) != 5
@@ -1846,20 +1874,20 @@ def raw_tree_diffs(inputs: Sequence[tuple[str, str]], kind: str, what: str) -> l
                 or not path
                 or path in files
             ):
-                raise TextError(f"git gave a malformed raw diff of {kind} {commit[:12]}")
+                raise TextError(malformed)
             files[path] = RawChange(fields[0], fields[2], fields[1], fields[3])
             position += 2
         diffs.append(files)
     if position != len(records):
-        raise TextError(f"git gave a malformed raw diff of the {what}")
+        raise TextError("git gave a malformed raw diff of the outgoing commits")
     return diffs
 
 
 def merge_changes(merges: Mapping[str, Sequence[str]]) -> dict[str, list[dict[str, RawChange]]]:
     """For each merge, in its parents' order, every file whose object or mode differs from that parent's
-    (raw_tree_diffs, one line for each merge and parent)."""
+    (raw_tree_diffs, one pair for each merge and parent)."""
     pairs = [(merge, parent) for merge, parents in merges.items() for parent in parents]
-    diffs = raw_tree_diffs([(merge, f"{merge} {parent}") for merge, parent in pairs], "merge commit", "outgoing merges")
+    diffs = raw_tree_diffs(pairs)
     changes: dict[str, list[dict[str, RawChange]]] = {merge: [] for merge in merges}
     for (merge, _), files in zip(pairs, diffs, strict=True):
         changes[merge].append(files)
@@ -1867,13 +1895,13 @@ def merge_changes(merges: Mapping[str, Sequence[str]]) -> dict[str, list[dict[st
 
 
 def scan_outgoing_merges(merges: Mapping[str, Sequence[str]], matcher: TermMatcher, findings: list[Finding],
-                         coverage: Coverage | None = None) -> None:
+                         policy: DiffPolicy, coverage: Coverage | None = None) -> None:
     """Scan what each merge adds itself: the path of each file that differs from every parent's, and each line of the
     merge's file that no parent's file at that path holds.
 
     A line the merge took from a parent is that parent's: it is scanned in the parent's own commit when the push sends
     that commit, and the destination holds it otherwise. The files are read as objects, so no attribute applies; a
-    file is text as the diff producer would read it: always under `--text` (a non-empty `info/attributes`), else when
+    file is text as the diff producer would read it: always under `--text` (POLICY's every_file_text), else when
     its object has no NUL byte in its first 8,000 bytes, Git's own test. Only a parent's text file holds a line: a
     binary one was never scanned, so a line of it that the merge writes into a text file is the merge's to scan.
 
@@ -1881,7 +1909,7 @@ def scan_outgoing_merges(merges: Mapping[str, Sequence[str]], matcher: TermMatch
     """
     if not merges:
         return
-    every_file_text = info_attributes_present()
+    every_file_text = policy.every_file_text
     for merge, parent_files in merge_changes(merges).items():
         prefix = f"commit {merge[:12]} "
         for path in sorted(set(parent_files[0]).intersection(*parent_files[1:])):
@@ -1897,8 +1925,10 @@ def scan_outgoing_merges(merges: Mapping[str, Sequence[str]], matcher: TermMatch
             findings.extend(name_findings(prefix + shown, path, path_spans))
             if result_mode == "160000":
                 continue
-            if coverage is not None and coverage.covers(result_mode, result):
-                continue
+            if coverage is not None:
+                if coverage.covers(result_mode, result):
+                    continue
+                coverage.read.add(result)
             sources = {change.source for change in changes if change.source_mode not in {"000000", "160000"}}
             try:
                 contents = blob_objects(sorted({result, *sources}))
@@ -1915,13 +1945,26 @@ def scan_outgoing_merges(merges: Mapping[str, Sequence[str]], matcher: TermMatch
             findings.extend(line_findings(own, matcher, is_prose(path), lambda number: f"{prefix}{shown}:{number}"))
 
 
+# The record (dispatch://INFRA-5140): a git note on each file version (blob) that `record` read whole and found to hold
+# no listed term, under a key (record_key) that names this program, its interpreter and the lists a push to one
+# destination reads. A push then reads no content of a recorded blob (scan_covered_diffs, scan_outgoing_merges), so a
+# release whose files the internal main already holds reads only the files its cut rewrote. It still reads every commit
+# message, tag, ref name and path, and every file or folder object pushed by itself (scan_outgoing_objects).
+#
+# Threat model: whoever can write RECORD_REF in the pushing clone, or in the repository it fetches the ref from, can
+# make a push skip a blob's content. A note is trusted as written; nothing here protects it.
+RECORD_REF = "refs/notes/leak-terms-check"
+
+
 @dataclass
 class Coverage:
-    """The file versions (blobs) the record covers for this push's key (record_key), and SEEN, those the outgoing
-    commits add or change, which `covers` tallies for the push's summary."""
+    """COVERED, the file versions (blobs) the record covers for this push's key (record_key); SEEN, those the outgoing
+    commits add or change, which `covers` tallies; and READ, those of SEEN whose content the push reads. The push's
+    summary counts them."""
 
     covered: set[str]
     seen: set[str] = field(default_factory=set)
+    read: set[str] = field(default_factory=set)
 
     def covers(self, mode: str, blob: str) -> bool:
         """Whether a push may leave unread the content of BLOB, a file of MODE that a commit adds or changes: never for
@@ -1933,95 +1976,150 @@ class Coverage:
         return blob in self.covered
 
     def summary(self) -> str:
-        count = len(self.seen & self.covered)
-        return (f"leak terms: the record {RECORD_REF} covered {count} of the {len(self.seen)} file versions the outgoing "
-                f"commits add or change; read the other {len(self.seen) - count}")
+        return (f"leak terms: the record {RECORD_REF} covered {len(self.seen & self.covered)} of the {len(self.seen)} "
+                f"file versions the outgoing commits add or change; the push read {len(self.read)} of them")
 
 
-def pathspec_chunks(paths: Sequence[str]) -> Iterator[list[str]]:
-    """PATHS as literal pathspecs (`:(literal)PATH`, which no wildcard or magic in a path can widen), in lists of at
-    most PATHSPEC_BYTES, each a command line far under the kernel's argument limit."""
-    chunk: list[str] = []
+Item = TypeVar("Item")
+
+
+def bounded_chunks(items: Sequence[Item], size_of: Callable[[Item], int], max_bytes: int,
+                   max_items: int | None = None) -> Iterator[list[Item]]:
+    """ITEMS in order, in lists of at most MAX_ITEMS items whose SIZE_OF adds up to at most MAX_BYTES; an item larger
+    than MAX_BYTES in a list of its own."""
+    chunk: list[Item] = []
     size = 0
-    for path in paths:
-        pathspec = f":(literal){path}"
-        length = len(os.fsencode(pathspec)) + 1
-        if chunk and size + length > PATHSPEC_BYTES:
+    for item in items:
+        length = size_of(item)
+        if chunk and (len(chunk) == max_items or size + length > max_bytes):
             yield chunk
             chunk, size = [], 0
-        chunk.append(pathspec)
+        chunk.append(item)
         size += length
     if chunk:
         yield chunk
 
 
-def scan_covered_diffs(commits: Sequence[str], matcher: TermMatcher, findings: list[Finding],
+# A push names the files it reads of the commits some of whose files are covered on git's command line, in calls of at
+# most this many bytes of pathspecs, far under the kernel's argument limit.
+PATHSPEC_BYTES = 128 << 10
+
+
+def literal_pathspec(path: str) -> str:
+    """PATH as a literal pathspec, which no wildcard or magic in a path can widen. It names the file PATH, and every
+    file in a folder PATH (pathspec_reaches)."""
+    return f":(literal){path}"
+
+
+def pathspec_reaches(named: set[str], path: str) -> bool:
+    """Whether a literal pathspec of one of NAMED names PATH: PATH itself, or a folder that holds it."""
+    if path in named:
+        return True
+    end = path.find("/")
+    while end >= 0:
+        if path[:end] in named:
+            return True
+        end = path.find("/", end + 1)
+    return False
+
+
+def pathspec_chunks(paths: Sequence[str]) -> Iterator[list[str]]:
+    """PATHS in lists whose literal pathspecs (literal_pathspec) take at most PATHSPEC_BYTES of a command line, far
+    under the kernel's argument limit."""
+    return bounded_chunks(paths, lambda path: len(os.fsencode(literal_pathspec(path))) + 1, PATHSPEC_BYTES)
+
+
+def scan_covered_diffs(commits: Sequence[str], matcher: TermMatcher, findings: list[Finding], policy: DiffPolicy,
                        coverage: Coverage) -> None:
     """scan_outgoing_diffs of COMMITS, none a merge, without the content of each file whose version COVERAGE covers.
 
     One raw tree diff of every commit (raw_tree_diffs, read as the diff producer reads it: no rename, every submodule)
-    names each file's version. A commit that changes no covered file is read whole, as with no record. For any other,
-    the path of each covered file is read (name_findings, as scan_diff reads the path of every file it keeps), and the
-    diff of each other file through the same producer and attribute policy, limited to their paths: a file's diff is the
-    same with or without the other files, since no rename is detected. A deleted file is not read, since scan_diff
-    finds nothing in one, so a commit whose every file is covered or deleted reads no diff.
+    names each file's version. A commit with fewer covered files than other files it adds or changes is read whole, as
+    with no record: reading its few covered files only makes the check stricter.
+
+    The others are read together, by the same producer and attribute policy, limited to the paths that one of them
+    adds or changes and does not cover (pathspec_chunks): a file's diff is the same with or without the other files,
+    since no rename is detected and log.follow is off (scan_diff_arguments). git shows each commit that changes a file
+    those paths name, which is the set each call expects (pathspec_reaches), and reads in it every file they name, a
+    covered one too where another commit names its path: that is only stricter. The path of each covered file read no
+    other way is read alone (name_findings, as scan_diff reads the path of every file it keeps). A deleted file is not
+    read, since scan_diff finds nothing in one, so a commit whose every file is covered or deleted reads no diff, unless
+    another commit names one of its paths.
     """
     if not commits:
         return
     whole: list[str] = []
-    for commit, files in zip(commits, raw_tree_diffs([(commit, commit) for commit in commits], "commit",
-                                                     "outgoing commits"), strict=True):
+    mixed: list[tuple[str, dict[str, RawChange], set[str]]] = []
+    for commit, files in zip(commits, raw_tree_diffs([(commit, None) for commit in commits]), strict=True):
         covered = {path for path, change in files.items() if coverage.covers(change.result_mode, change.result)}
-        if not covered:
-            whole.append(commit)
-            continue
-        prefix = f"commit {commit[:12]} "
-        for path in sorted(covered):
-            findings.extend(name_findings(prefix + c_escape(path), path, matcher.spans(path)))
         unread = [path for path, change in files.items() if change.result_mode != "000000" and path not in covered]
-        for pathspecs in pathspec_chunks(unread):
-            scan_outgoing_diffs([commit], matcher, findings, pathspecs)
-    scan_outgoing_diffs(whole, matcher, findings)
+        if len(covered) < len(unread):
+            whole.append(commit)
+            coverage.read.update(change.result for change in files.values()
+                                 if change.result_mode not in ("000000", "160000"))
+        else:
+            mixed.append((commit, files, covered))
+    paths = list(dict.fromkeys(path for _, files, covered in mixed for path, change in files.items()
+                               if change.result_mode != "000000" and path not in covered))
+    named = set(paths)
+    for commit, _, covered in mixed:
+        for path in sorted(covered):
+            if not pathspec_reaches(named, path):
+                findings.extend(name_findings(f"commit {commit[:12]} {c_escape(path)}", path, matcher.spans(path)))
+    for chunk in pathspec_chunks(paths):
+        chunk_named = set(chunk)
+        group: list[str] = []
+        for commit, files, _ in mixed:
+            reached = [change for path, change in files.items() if pathspec_reaches(chunk_named, path)]
+            if reached:
+                group.append(commit)
+                coverage.read.update(change.result for change in reached
+                                     if change.result_mode not in ("000000", "160000"))
+        scan_outgoing_diffs(group, matcher, findings, policy, [literal_pathspec(path) for path in chunk])
+    scan_outgoing_diffs(whole, matcher, findings, policy)
 
 
 def scan_outgoing_commits(commits: Sequence[str], matcher: TermMatcher, coverage: Coverage | None = None
                           ) -> list[Finding]:
     """Scan outgoing messages, the diffs of commits that are not merges, and what each merge adds, with separate
-    producers and verified boundaries; with COVERAGE, no content of a file version the record covers."""
+    producers and verified boundaries; with COVERAGE, no content of a file version the record covers. The attribute
+    policy is read once for every producer (diff_policy)."""
     if not commits:
         return []
     parents = commit_parents(commits)
     findings: list[Finding] = []
     scan_outgoing_messages(commits, matcher, findings)
+    policy = diff_policy()
     singles = [commit for commit in commits if len(parents[commit]) < 2]
     if coverage is None:
-        scan_outgoing_diffs(singles, matcher, findings)
+        scan_outgoing_diffs(singles, matcher, findings, policy)
     else:
-        scan_covered_diffs(singles, matcher, findings, coverage)
+        scan_covered_diffs(singles, matcher, findings, policy, coverage)
     scan_outgoing_merges({commit: parents[commit] for commit in commits if len(parents[commit]) >= 2}, matcher, findings,
-                         coverage)
+                         policy, coverage)
     return findings
 
 
-def object_types(object_ids: Sequence[str]) -> dict[str, str]:
-    """The type of each object, in one Git call; an object this repository lacks cannot be read, so it refuses."""
+def object_info(object_ids: Sequence[str], failure: str) -> dict[str, tuple[str, int]]:
+    """The type and size of each object, in one Git call; an object this repository lacks cannot be read, so it is
+    FAILURE, as is any answer git cannot have given."""
     if not object_ids:
         return {}
     output = git_output(
-        ["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+        ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
         ("\n".join(object_ids) + "\n").encode(),
-        "git could not read the outgoing objects",
+        failure,
     )
     lines = output.decode("utf-8", errors="surrogateescape").splitlines()
     if len(lines) != len(object_ids):
-        raise TextError("git gave an incomplete list of outgoing objects")
-    types: dict[str, str] = {}
+        raise TextError(failure)
+    info: dict[str, tuple[str, int]] = {}
     for object_id, line in zip(object_ids, lines, strict=True):
         fields = line.split()
-        if len(fields) != 2 or fields[1] == "missing" or fields[0].lower() != object_id.lower():
-            raise TextError("git could not read an outgoing object")
-        types[object_id] = fields[1]
-    return types
+        if len(fields) != 3 or fields[0].lower() != object_id.lower() or not fields[2].isdigit():
+            raise TextError(failure)
+        info[object_id] = (fields[1], int(fields[2]))
+    return info
 
 
 def batch_objects(
@@ -2100,7 +2198,8 @@ def tag_chains(starts: Sequence[tuple[str, str]], known: set[str]) -> TagWalk:
             if object_id not in seen:
                 unique.setdefault(object_id, name)
         seen.update(unique)
-        types = object_types(sorted(unique))
+        types = {object_id: kind for object_id, (kind, _) in
+                 object_info(sorted(unique), "git could not read the outgoing objects").items()}
         objects.update(types)
         contents = tag_objects(sorted(object_id for object_id in unique if types[object_id] == "tag"))
         pending = []
@@ -2255,76 +2354,52 @@ def repository_of(url: str) -> list[str]:
     return [] if value == "not-github" else [value]
 
 
-# The record (dispatch://INFRA-5140): a git note on each file version (blob) that `record` read whole and found to hold
-# no listed term, under a key (record_key) that names this program, its interpreter and the lists a push to one
-# destination reads. A push then reads no content of a recorded blob (scan_covered_diffs, scan_outgoing_merges), so a
-# release whose files the internal main already holds reads only the files its cut rewrote. It still reads every commit
-# message, tag, ref name and path, and every file or folder object pushed by itself (scan_outgoing_objects).
-#
-# Threat model: whoever can write RECORD_REF in the pushing clone, or in the repository it fetches the ref from, can
-# make a push skip a blob's content. A note is trusted as written; nothing here protects it.
-RECORD_REF = "refs/notes/leak-terms-check"
-RECORD_TAG = b"leak-terms-check record 1\0"
-# record: a run that did not read every blob it was given, or did not write the notes of those it found clean.
-RECORD_EXIT = 2
-# A note keeps the lines of this many keys, oldest first: a writer drops the oldest and adds its own line last.
-RECORD_KEYS = 8
-# record reads at most this many blobs, or this many bytes of them, in one git call; a larger blob alone.
-RECORD_BATCH_BLOBS = 256
-RECORD_BATCH_BYTES = 64 << 20
-# A push names the files it reads of a commit some of whose files are covered on git's command line, in calls of at
-# most this many bytes of pathspecs, far under the kernel's argument limit.
-PATHSPEC_BYTES = 128 << 10
-
-
 class RecordError(Exception):
     """The record could not be read, or record could not write it."""
 
 
-@lru_cache(maxsize=1)
-def script_digest() -> str | None:
-    """The sha256 of this program's bytes, None when it cannot read them. main reads it first in push and record mode,
-    so that it names the program that runs, not one written over it during the run."""
+def file_digest(path: Path) -> str | None:
+    """The sha256 of the bytes of the file at PATH, in lower-case hex; None when they cannot be read."""
     try:
-        return hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest()
+        return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return None
 
 
-def term_list_digest() -> str | None:
-    """The sha256 of the encrypted term list's bytes, None when they cannot be read."""
-    try:
-        return hashlib.sha256(term_file(os.environ).read_bytes()).hexdigest()
-    except OSError:
-        return None
+# The sha256 of this program's bytes, read once at import, so that a record's key names the program this process runs,
+# not one written over it during the run. None when it cannot be read: then there is no key, and no record is used.
+SCRIPT_DIGEST = file_digest(Path(__file__).resolve())
 
 
 def record_terms(repositories: Sequence[str], drop_allowed: bool) -> tuple[TermMatcher, str | None]:
-    """load_terms for REPOSITORIES, and the digest of the list it decrypted (term_list_digest). The list's bytes are
-    read before and after sops decrypts it, and a list that changed meanwhile gives None, so that no key names a list
-    other than the one the matcher holds."""
-    before = term_list_digest()
+    """load_terms for REPOSITORIES, and the digest of the encrypted list it decrypted (file_digest). The list's bytes
+    are read before and after sops decrypts it, and a list that changed meanwhile gives None, so that no key names a
+    list other than the one the matcher holds."""
+    before = file_digest(term_file(os.environ))
     matcher = load_terms(repositories=repositories, drop_allowed=drop_allowed)
-    return matcher, before if before is not None and before == term_list_digest() else None
+    return matcher, before if before is not None and before == file_digest(term_file(os.environ)) else None
 
 
-def record_key(list_digest: str | None, repositories: Sequence[str]) -> str:
+RECORD_TAG = b"leak-terms-check record 1\0"
+
+
+def record_key(matcher: TermMatcher, list_digest: str | None) -> str:
     """The key a note's line `pass <key>` names, in lower-case hex: the sha256 of RECORD_TAG and of these, each ended by
-    a NUL: the sha256 of this program's bytes (script_digest), the interpreter's major.minor and its Unicode version
+    a NUL: the sha256 of this program's bytes (SCRIPT_DIGEST), the interpreter's major.minor and its Unicode version
     (str.casefold and the `\\s` of paragraph_view follow it), the sha256 of the encrypted term list's bytes
-    (LIST_DIGEST, from record_terms), and the destination repositories whose scoped lists the push reads
-    (repository_of), sorted. A change of any of them gives a new key, so every blob is read again.
+    (LIST_DIGEST, from record_terms), and the labels of the scoped lists MATCHER reads (those that reach the
+    destination), sorted. A change of any of them gives a new key, so every blob is read again; two destinations that
+    read the same lists share one key.
 
     The push reads no knives list (load_terms(registry=False) in scan_push), so knives's fork registry is not part of
     the key: a push that reads one must add it here. RecordError where a part cannot be read."""
-    program = script_digest()
-    if program is None:
+    if SCRIPT_DIGEST is None:
         raise RecordError("this program cannot read its own file")
     if list_digest is None:
         raise RecordError("the term list changed while it was read")
     digest = hashlib.sha256(RECORD_TAG)
-    for part in (program, f"{sys.version_info.major}.{sys.version_info.minor}", unicodedata.unidata_version,
-                 list_digest, *sorted(repositories)):
+    for part in (SCRIPT_DIGEST, f"{sys.version_info.major}.{sys.version_info.minor}", unicodedata.unidata_version,
+                 list_digest, *sorted(matcher.scopes)):
         digest.update(part.encode("utf-8", errors="surrogateescape") + b"\0")
     return digest.hexdigest()
 
@@ -2345,50 +2420,48 @@ class Record:
 
 
 def read_record() -> Record | None:
-    """RECORD_REF, read whole: None when this repository has no such ref; RecordError when it names no commit, or a
-    note cannot be read. The notes tree is listed once and each distinct note read once. A note's path joins into the
-    blob it annotates (`ab/cdef…`, or any other fanout); an entry whose path joins into no object id is no note."""
+    """RECORD_REF, read whole: None when this repository has no ref of exactly that name (a symbolic ref to no ref is
+    listed as none); RecordError when it is a symbolic ref, names no commit, or a note cannot be read. for-each-ref
+    lists the ref by its full name, so a branch or tag whose name ends in it (refs/heads/refs/notes/…), which rev-parse
+    would read in its place, is never the record.
+    The notes tree is listed once and each distinct note read once. A note's path joins into the blob it annotates
+    (`ab/cdef…`, or any other fanout); an entry whose path joins into no object id is no note."""
     try:
-        named = subprocess.run(
-            ["git", "rev-parse", "--symbolic-full-name", "--verify", "--quiet", "--end-of-options", RECORD_REF],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=git_environment(),
-            check=False,
-        )
-    except OSError as error:
-        raise RecordError("git could not read the ref") from error
-    # For a name no ref has, rev-parse reads refs/heads/<name> and others, so the name it resolved must be the ref's.
-    if (named.returncode == 1 and not named.stdout) or (named.returncode == 0
-                                                        and named.stdout != f"{RECORD_REF}\n".encode()):
-        return None
-    if named.returncode:
-        raise RecordError("git could not read the ref")
-    try:
-        commit = git_output(["rev-parse", "--verify", "--quiet", "--end-of-options", RECORD_REF], b"",
-                            "git could not read the ref").decode("ascii").strip()
-        kind = git_output(["cat-file", "-t", commit], b"",
-                          f"it names {commit[:12]}, which this repository cannot read").decode("ascii").strip()
+        listed = git_output(["for-each-ref", "--format=%(refname)%00%(symref)%00%(objectname)%00%(objecttype)",
+                             RECORD_REF], b"", "git could not read the ref")
+        found = [fields for fields in (line.split(b"\0") for line in listed.split(b"\n") if line)
+                 if fields[0] == RECORD_REF.encode()]
+        if not found:
+            return None
+        if len(found) != 1 or len(found[0]) != 4:
+            raise RecordError("git gave a malformed list of refs")
+        _, symref, named, kind = (field.decode("utf-8", errors="replace") for field in found[0])
+        if symref:
+            raise RecordError(f"it is a symbolic ref to {symref}, not a ref of its own")
         if kind != "commit":
             raise RecordError(f"it names a {kind}, not a commit")
+        if OBJECT_ID.fullmatch(named) is None:
+            raise RecordError("git gave a malformed list of refs")
         notes = [(path.replace("/", ""), path, note)
-                 for kind, note, path in tree_listing(["-r", "--full-tree", commit], "git could not list the notes",
-                                                      "git gave a malformed notes tree")
-                 if kind == "blob" and OBJECT_ID.fullmatch(path.replace("/", ""))]
+                 for entry, note, path in tree_listing(["-r", "--full-tree", named], "git could not list the notes",
+                                                       "git gave a malformed notes tree")
+                 if entry == "blob" and OBJECT_ID.fullmatch(path.replace("/", ""))]
         contents = batch_objects(sorted({note for _, _, note in notes}), "blob", "git could not read a note",
                                  "git gave a malformed note")
-    except (TextError, UnicodeDecodeError) as error:
+    except TextError as error:
         raise RecordError(str(error)) from error
     texts = {note: content.decode("utf-8", errors="surrogateescape") for note, content in contents.items()}
-    return Record(commit, [(blob, path, texts[note]) for blob, path, note in notes])
+    return Record(named, [(blob, path, texts[note]) for blob, path, note in notes])
 
 
-def push_coverage(list_digest: str | None, repositories: Sequence[str]) -> Coverage | None:
+def push_coverage(matcher: TermMatcher, list_digest: str | None) -> Coverage | None:
     """What the record covers for this push (Coverage), or None, and the push reads every file version: silently where
     this repository has no record, else with one line that says why. A record never refuses a push or stops it."""
     try:
         record = read_record()
         if record is None:
             return None
-        return Coverage(record.covered(record_key(list_digest, repositories)))
+        return Coverage(record.covered(record_key(matcher, list_digest)))
     except RecordError as error:
         print(f"leak terms: cannot use the record {RECORD_REF}, so every file version is read: {error}",
               file=sys.stderr)
@@ -2424,42 +2497,14 @@ def record_commit(revision: str) -> str:
     return commit
 
 
-def object_sizes(object_ids: Sequence[str]) -> dict[str, int]:
-    """The size of each of OBJECT_IDS, every one a blob, in one Git call."""
-    if not object_ids:
-        return {}
-    output = git_output(["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
-                        ("\n".join(object_ids) + "\n").encode(), "git could not read the files to record")
-    lines = output.decode("ascii", errors="replace").splitlines()
-    if len(lines) != len(object_ids):
-        raise TextError("git gave an incomplete list of the files to record")
-    sizes: dict[str, int] = {}
-    for object_id, line in zip(object_ids, lines, strict=True):
-        fields = line.split()
-        if len(fields) != 3 or fields[0] != object_id or fields[1] != "blob" or not fields[2].isdigit():
-            raise TextError("git could not read a file to record")
-        sizes[object_id] = int(fields[2])
-    return sizes
-
-
-def record_batches(object_ids: Sequence[str], sizes: Mapping[str, int]) -> Iterator[list[str]]:
-    """OBJECT_IDS in batches of at most RECORD_BATCH_BLOBS blobs and RECORD_BATCH_BYTES bytes, a larger blob alone."""
-    batch: list[str] = []
-    size = 0
-    for object_id in object_ids:
-        if batch and (len(batch) == RECORD_BATCH_BLOBS or size + sizes[object_id] > RECORD_BATCH_BYTES):
-            yield batch
-            batch, size = [], 0
-        batch.append(object_id)
-        size += sizes[object_id]
-    if batch:
-        yield batch
-
-
 def clean_blobs(batch: Sequence[str], matcher: TermMatcher) -> list[str]:
     """The blobs of BATCH that hold no term (holds_no_term), read in one Git call; nothing of them is kept after."""
     contents = batch_objects(batch, "blob", "git could not read the files to record", "git gave a malformed file")
     return [blob for blob in batch if holds_no_term(contents[blob], matcher)]
+
+
+# A note keeps the lines of this many keys, oldest first: a writer drops the oldest and adds its own line last.
+RECORD_KEYS = 8
 
 
 def note_text(old: str | None, line: str) -> str:
@@ -2503,19 +2548,26 @@ def write_record(record: Record | None, blobs: Sequence[str], line: str) -> None
                           "or git failed; run record again")
 
 
+# record: a run that did not read every blob it was given, or did not write the notes of those it found clean.
+RECORD_EXIT = 2
+# record reads at most this many blobs, or this many bytes of them, in one git call; a larger blob alone.
+RECORD_BATCH_BLOBS = 256
+RECORD_BATCH_BYTES = 64 << 20
+
+
 def record_command(url: str, revisions: Sequence[str]) -> int:
     """`record --url URL REV...`: write the record a push to URL reads. Read every blob in the trees of REVISIONS' commits
     (gitlinks name commits and are left out), but those whose note already holds this run's key; read the others in
-    batches (record_batches), and write `pass <key>` into the note of each that holds no term (holds_no_term), all in
-    one notes commit (write_record). Print how many blobs it found covered, read, recorded and did not record.
+    batches (RECORD_BATCH_BLOBS, RECORD_BATCH_BYTES), and write `pass <key>` into the note of each that holds no term
+    (holds_no_term), all in one notes commit (write_record). Print how many blobs it found covered, read, recorded and
+    did not record.
 
     The matcher is the one scan_push builds for URL (the list every repository has, and the scoped lists URL reaches),
     with no allowed token dropped. Exit 0 when it read every blob and wrote every note; RECORD_EXIT, with nothing
     recorded, when the list, a blob or the record cannot be read, or another writer moved the ref meanwhile."""
     try:
-        repositories = repository_of(url)
-        matcher, list_digest = record_terms(repositories, drop_allowed=False)
-        key = record_key(list_digest, repositories)
+        matcher, list_digest = record_terms(repository_of(url), drop_allowed=False)
+        key = record_key(matcher, list_digest)
         record = read_record()
         commits = [record_commit(revision) for revision in revisions]
         blobs = list(dict.fromkeys(
@@ -2526,7 +2578,9 @@ def record_command(url: str, revisions: Sequence[str]) -> int:
         ))
         covered = record.covered(key) if record else set[str]()
         unread = [blob for blob in blobs if blob not in covered]
-        clean = [blob for batch in record_batches(unread, object_sizes(unread)) for blob in clean_blobs(batch, matcher)]
+        sizes = {blob: size for blob, (_, size) in object_info(unread, "git could not read the files to record").items()}
+        batches = bounded_chunks(unread, sizes.__getitem__, RECORD_BATCH_BYTES, RECORD_BATCH_BLOBS)
+        clean = [blob for batch in batches for blob in clean_blobs(batch, matcher)]
         if clean:
             write_record(record, clean, f"pass {key}")
     except ListError as error:
@@ -2552,9 +2606,8 @@ def scan_push(text: str, remote: str, url: str) -> list[Finding]:
     held = local_object_ids([*advertised, *prior_remote])
     commits = outgoing_commit_ids([object_id for _, object_id in local], sorted(held))
     tags, objects = outgoing_tag_messages(local, [*advertised, *prior_remote], held)
-    repositories = repository_of(url)
-    matcher, list_digest = record_terms(repositories, drop_allowed=True)
-    coverage = push_coverage(list_digest, repositories) if commits else None
+    matcher, list_digest = record_terms(repository_of(url), drop_allowed=True)
+    coverage = push_coverage(matcher, list_digest) if commits else None
     findings = scan_outgoing_commits(commits, matcher, coverage)
     if coverage is not None:
         print(coverage.summary(), file=sys.stderr)
@@ -5291,9 +5344,6 @@ def main(arguments: Sequence[str] | None = None) -> int:
         rest = arguments[1:]
         return gh_check(rest[1:] if rest[:1] == ["--"] else rest)
     args = parser().parse_args(arguments)
-    if args.mode in ("push", "record"):
-        # First, so that the record's key names the program that runs (script_digest).
-        script_digest()
     if args.mode == "record":
         return record_command(args.url, args.revisions)
     if args.mode == "jj-editor":

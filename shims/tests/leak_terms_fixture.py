@@ -117,6 +117,21 @@ def leak_check_environment(path: str) -> dict[str, str]:
     return {**fixture_environment(), "PATH": os.pathsep.join([path, sops_directory()])}
 
 
+def fixture_plaintext() -> str:
+    """The YAML of the test list, before sops encrypts it: TEST_TERMS, SCOPED_TEST_TERMS and ALLOWED_TEST_TOKENS. Each
+    encryption of it is the same list in other bytes."""
+    plaintext = "terms: |\n  # test comment\n" + "".join(f"  {term}\n" for term in TEST_TERMS)
+    plaintext += "scoped:\n" + "".join(
+        f'  "{pattern}": |\n' + "".join(f"    {term}\n" for term in terms) for pattern, terms in SCOPED_TEST_TERMS.items()
+    )
+    plaintext += "allowed:\n" + "".join(
+        f'  "{pattern}": |\n    # a third-party npm package that holds the scoped term\n'
+        + "".join(f"    {token}\n" for token in tokens)
+        for pattern, tokens in ALLOWED_TEST_TOKENS.items()
+    )
+    return plaintext
+
+
 @lru_cache(maxsize=1)
 def fixture_environment() -> dict[str, str]:
     """Build the encrypted list, and a knives registry whose oh-my-pi entry forbids REGISTRY_TEST_TERMS (one in
@@ -128,17 +143,8 @@ def fixture_environment() -> dict[str, str]:
     sops_home = root / "sops-home"
     sops_home.mkdir()
 
-    plaintext = "terms: |\n  # test comment\n" + "".join(f"  {term}\n" for term in TEST_TERMS)
-    plaintext += "scoped:\n" + "".join(
-        f'  "{pattern}": |\n' + "".join(f"    {term}\n" for term in terms) for pattern, terms in SCOPED_TEST_TERMS.items()
-    )
-    plaintext += "allowed:\n" + "".join(
-        f'  "{pattern}": |\n    # a third-party npm package that holds the scoped term\n'
-        + "".join(f"    {token}\n" for token in tokens)
-        for pattern, tokens in ALLOWED_TEST_TOKENS.items()
-    )
     term_file = root / "leak-terms.sops.yaml"
-    term_file.write_bytes(_encrypt_yaml(plaintext, _recipient(key_file)))
+    term_file.write_bytes(_encrypt_yaml(fixture_plaintext(), _recipient(key_file)))
     knives = root / "knives"
     knives.mkdir()
     public, private = REGISTRY_TEST_TERMS["oh-my-pi"]
