@@ -188,7 +188,11 @@ systemctl show tailscaled.service ssh.service -p Id -p LimitNOFILESoft
 # containers), and a new outgoing connection can take a published host port in that gap, which
 # leaves that container with no published ports. On a busy machine, put the published host ports
 # in net.ipv4.ip_local_reserved_ports for the restart, as the dispatch://INFRA-4893 window script
-# does.
+# does. The restart also leaves each running kind node (label io.x-k8s.kind.cluster) with no
+# Docker DNS: kind rewrites Docker's DNS jump rule inside the node, dockerd's restore does not find
+# the rule it wrote, and dockerd starts a container's DNS server only once. No rule change brings
+# it back; restart each node: `docker stop`, `docker network disconnect`, `docker network connect
+# --ip <its IP>` (so it keeps its address), `docker start`.
 docker_ce_version=5:29.9.3-1~ubuntu.24.04~noble
 # The version `docker version` reports for it (29.9.3): no epoch, no package revision.
 docker_server_version="${docker_ce_version#*:}"
