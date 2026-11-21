@@ -41,7 +41,7 @@ def preamble() -> str:
     itself."""
     text = AGENTBOX.read_text()
     match = re.search(
-        r'^if \[\[ "\$\{1:-\}" == new && -z "\$\{AGENTBOX_SELF_COPY:-\}" \]\]; then\n'
+        r'^if \[\[ \( "\$\{1:-\}" == new \|\| "\$\{1:-\}" == adopt \) && -z "\$\{AGENTBOX_SELF_COPY:-\}" \]\]; then\n'
         r"(?:.*?\n)*?^fi\n"
         r"(?:^#.*\n)*"
         r"^\[\[ -z \"\$\{AGENTBOX_SELF_COPY:-\}\" \]\] \|\| .*$",
