@@ -206,10 +206,10 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assert_tools_ran()
         self.assertEqual(self.calls("mise")[0].split("|")[-1], "fakehost")
 
-    def test_case_03b_remote_ssh_limit_covers_the_move_the_lock_wait_and_both_commands(self) -> None:
+    def test_case_03b_remote_ssh_limit_covers_the_move_the_lock_wait_and_every_command(self) -> None:
         # The ssh limit is the remote host's whole budget: 180 s move, 300 s sync-lock wait, and
-        # each tools command's limit plus its 10 s kill grace. Left at the move's 180 s, a remote
-        # install longer than that is killed mid-download.
+        # each tools command's limit plus its 10 s kill grace, for omp-link-rules, mise and Bun.
+        # Left at the move's 180 s, a remote install longer than that is killed mid-download.
         self._install_ssh()
         ssh = self.root / "bin" / "ssh"
         ssh.rename(self.root / "bin" / "ssh-step")
@@ -218,7 +218,7 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
             'echo >> "$SSH_RECORD.parent"\nexec "$(dirname "$0")/ssh-step" "$@"\n'
         )
         ssh.chmod(0o755)
-        for limit, outer in ((None, 1700), ("5", 510)):
+        for limit, outer in ((None, 2310), ("5", 525)):
             with self.subTest(DOTFILES_TOOLS_TIMEOUT=limit):
                 Path(f"{self.ssh_record}.parent").write_text("")
                 env = dict(self.env)
@@ -911,6 +911,56 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_tools_ran()
         self.assertEqual(self.calls("mise")[0].split("|")[1], str(self.checkout), self.records())
+
+    def with_rule_linker(self, rule: str = "new-rule.md") -> None:
+        """Main gains the real omp-link-rules, the installer helpers it sources, and one rule."""
+        for path in ("scripts/omp-link-rules", "installers/lib.sh"):
+            target = self.upstream / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((ROOT / path).read_bytes())
+            target.chmod((ROOT / path).stat().st_mode)
+        (self.upstream / "omp" / "rules").mkdir(parents=True, exist_ok=True)
+        (self.upstream / "omp" / "rules" / rule).write_text("---\nalwaysApply: true\n---\nA rule.\n")
+        self.commit_upstream("a new omp rule")
+
+    def test_case_32_a_rule_the_move_brings_is_linked_into_omp(self) -> None:
+        # With dotfiles-follow retired on sami-devbox, dotfiles-sync is what moves the checkout,
+        # and the rule of dotfiles#133 (omp/rules/codegraph.md) stayed dark until linked by hand.
+        self.with_rule_linker()
+        result = self.sync("local")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        link = self.home / ".omp" / "agent" / "rules" / "new-rule.md"
+        self.assertTrue(link.is_symlink(), result.stdout + result.stderr)
+        self.assertEqual(os.readlink(link), str(self.checkout / "omp" / "rules" / "new-rule.md"))
+        self.assertIn(f"tools: `omp-link-rules` passed in {self.checkout}\n", result.stdout)
+        self.assert_tools_ran()
+
+    def test_case_32a_a_failed_rule_link_is_reported_and_the_installs_still_run(self) -> None:
+        self.with_rule_linker()
+        rules = self.home / ".omp" / "agent" / "rules"
+        rules.mkdir(parents=True)
+        (rules / "new-rule.md").write_text("an edit made in place\n")
+        result = self.sync("local")
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("`omp-link-rules`", result.stderr)
+        self.assertIn("is a file that differs", result.stderr)
+        self.assertFalse((rules / "new-rule.md").is_symlink())
+        self.assert_tools_ran()
+
+    def test_case_32b_a_checkout_that_is_not_home_dotfiles_links_no_rule(self) -> None:
+        # A link made from another clone would point every session's rules at that clone.
+        self.with_rule_linker()
+        clone = self.root / "clone"
+        self.run_ok("git", "clone", "-q", str(self.origin), str(clone))
+        self._write_standin("mise", clone / "bin" / "mise")
+        result = self._run(SYNC, "--tools", str(clone))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"tools: {clone} is not ~/.dotfiles; omp rules not linked\n", result.stdout)
+        self.assertFalse((self.home / ".omp" / "agent" / "rules" / "new-rule.md").exists())
+        self.assert_tools_ran()
 
 
 if __name__ == "__main__":

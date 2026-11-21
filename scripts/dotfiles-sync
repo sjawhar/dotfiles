@@ -8,7 +8,10 @@
 # history is kept and named.
 #
 # After the move, each host path runs the tools step on the machine it moved, in the same ssh
-# session for a remote host: `mise install` in the checkout, then `bun install --frozen-lockfile`
+# session for a remote host: `scripts/omp-link-rules`, which links each omp/rules/*.md into
+# ~/.omp/agent/rules/ so a rule a move brought goes live (only for ~/.dotfiles itself, the
+# checkout every session runs; a failure is reported and the installs still run), then
+# `mise install` in the checkout, then `bun install --frozen-lockfile`
 # in omp/plugins when its package.json is there, with the mise binary and MISE_DATA_DIR (and
 # MISE_CACHE_DIR where it sets one) that the checkout's .bashrc gives a shell. It runs after every
 # move that ends on main, also when main brought nothing new, so a later sync installs a pin an
@@ -174,7 +177,7 @@ tools_run() {
 }
 
 tools_step() (
-  local dir limit lock mise bun
+  local dir limit lock mise bun rules_status=0
   # The checkout as an absolute path: mise reads the pins of the directory it runs in, so the
   # install runs there whatever the caller's directory, and DIR/bin/mise must still name it.
   # shellcheck disable=SC1007
@@ -196,6 +199,16 @@ tools_step() (
   # A directory it cannot make is reported below, as flock's failure to open the lock.
   mkdir -p "$MISE_DATA_DIR" 2>/dev/null || true
   limit="$(tools_limit)"
+  # The rules first, so a rule a move brought goes live even when an install below fails or hangs.
+  # Only from ~/.dotfiles, the checkout every session runs: a link made from another checkout
+  # would point every session's rules at it.
+  if [[ ! "$dir" -ef "$HOME/.dotfiles" ]]; then
+    printf 'tools: %s is not ~/.dotfiles; omp rules not linked\n' "$dir"
+  elif [[ ! -x "$dir/scripts/omp-link-rules" ]]; then
+    printf 'tools: %s has no scripts/omp-link-rules; omp rules not linked\n' "$dir"
+  else
+    tools_run "omp-link-rules" "$dir" "$limit" env DOTFILES_DIR="$dir" "$dir/scripts/omp-link-rules" || rules_status=$?
+  fi
   lock="$MISE_DATA_DIR/.dotfiles-install.lock"
   if [[ -x "$dir/bin/mise" ]]; then
     mise="$dir/bin/mise"
@@ -206,13 +219,14 @@ tools_step() (
   [[ "$mise" = /* ]] || mise="$PWD/$mise"
   tools_run "mise install" "$dir" "$limit" flock "$lock" "$mise" install || return $?
 
-  [[ -f "$dir/omp/plugins/package.json" ]] || return 0
+  [[ -f "$dir/omp/plugins/package.json" ]] || return "$rules_status"
   if ! bun="$(command -v bun 2>/dev/null)"; then
     tools_error "bun install --frozen-lockfile" "$dir/omp/plugins" 127 "$limit" <(printf 'bun: command not found\n')
     return 127
   fi
   [[ "$bun" = /* ]] || bun="$PWD/$bun"
-  tools_run "bun install --frozen-lockfile" "$dir/omp/plugins" "$limit" "$bun" install --frozen-lockfile
+  tools_run "bun install --frozen-lockfile" "$dir/omp/plugins" "$limit" "$bun" install --frozen-lockfile || return $?
+  return "$rules_status"
 )
 
 sync_here() {
@@ -400,7 +414,8 @@ tools_timeout="$(tools_limit)"
 remote_move_timeout=180
 remote_sync_lock_wait=300
 remote_tools_grace="$tools_grace"
-remote_tools_commands=2
+# omp-link-rules, mise install and bun install, each with the same limit.
+remote_tools_commands=3
 remote_limit=$((remote_move_timeout + remote_sync_lock_wait + remote_tools_commands * (tools_timeout + remote_tools_grace)))
 
 status=0
