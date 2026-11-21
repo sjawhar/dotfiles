@@ -14,6 +14,7 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parent / "check_skill.py"
 NAME = "demo-skill"
 DESC = "Use when a test needs a skill that passes every check."
+WARN_41 = "warn 41 rules, over 40: split or delete"
 
 
 def head(desc: str = DESC) -> str:
@@ -273,9 +274,13 @@ def warns(tmp_path: Path, body: str) -> list[str]:
     return [line.strip() for line in out.splitlines() if line.strip().startswith("warn ")]
 
 
-def as_items(count: int) -> str:
-    """`count` one-sentence rules as list items, each wrapped onto a continuation line."""
-    return "- A rule is\n  one sentence.\n" * count
+def as_items(count: int, marker: str = "-") -> str:
+    """`count` one-sentence rules as list items marked `marker`, each wrapped onto a continuation line.
+
+    A numbered marker ("1." or "1)") numbers the items 1, 2, 3 ... with its punctuation.
+    """
+    marks = [f"{i}{marker[-1]}" for i in range(1, count + 1)] if marker[:-1].isdigit() else [marker] * count
+    return "".join(f"{mark} A rule is\n  one sentence.\n" for mark in marks)
 
 
 def as_paragraphs(*sizes: int) -> str:
@@ -284,11 +289,11 @@ def as_paragraphs(*sizes: int) -> str:
 
 
 def test_41_rules_as_list_items_warn(tmp_path: Path) -> None:
-    assert warns(tmp_path, as_items(41)) == ["warn 41 rules, over 40: split or delete"]
+    assert warns(tmp_path, as_items(41)) == [WARN_41]
 
 
 def test_41_rules_as_paragraphs_warn(tmp_path: Path) -> None:
-    assert warns(tmp_path, as_paragraphs(*[5] * 8, 1)) == ["warn 41 rules, over 40: split or delete"]
+    assert warns(tmp_path, as_paragraphs(*[5] * 8, 1)) == [WARN_41]
 
 
 def test_40_rules_as_list_items_do_not_warn(tmp_path: Path) -> None:
@@ -301,16 +306,41 @@ def test_40_rules_as_paragraphs_do_not_warn(tmp_path: Path) -> None:
 
 def test_41_rules_as_plus_list_items_warn(tmp_path: Path) -> None:
     # Markdown makes a list item of "+ " as of "- ".
-    assert warns(tmp_path, "".join(f"+ Check file {i} before you merge.\n" for i in range(1, 42))) == [
-        "warn 41 rules, over 40: split or delete"
-    ]
+    assert warns(tmp_path, as_items(41, "+")) == [WARN_41]
 
 
 def test_41_rules_as_list_items_numbered_with_a_parenthesis_warn(tmp_path: Path) -> None:
     # Markdown makes a numbered list item of "1) " as of "1. ".
-    assert warns(tmp_path, "".join(f"{i}) Check file {i} before you merge.\n" for i in range(1, 42))) == [
-        "warn 41 rules, over 40: split or delete"
-    ]
+    assert warns(tmp_path, as_items(41, "1)")) == [WARN_41]
+
+
+def forty_items_and(case: str) -> str:
+    """40 one-sentence list items, then `case`: the body is over 40 rules if `case` adds a rule."""
+    return as_items(40) + case
+
+
+def test_an_indented_paragraph_after_a_blank_line_in_an_item_is_not_a_rule(tmp_path: Path) -> None:
+    assert warns(tmp_path, forty_items_and("\n  A paragraph inside the last item. It has two sentences.\n")) == []
+
+
+def test_a_blockquote_is_not_a_rule(tmp_path: Path) -> None:
+    assert warns(tmp_path, forty_items_and("\n> A quoted brief. It has two sentences.\n")) == []
+
+
+def test_a_lazy_continuation_line_of_a_blockquote_is_not_a_rule(tmp_path: Path) -> None:
+    assert warns(tmp_path, forty_items_and("\n> A quoted brief\nwraps lazily. It has two sentences.\n")) == []
+
+
+def test_a_lazy_continuation_line_of_an_item_is_not_a_rule(tmp_path: Path) -> None:
+    assert warns(tmp_path, forty_items_and("An unindented line of the last item. It has two sentences.\n")) == []
+
+
+def test_a_thematic_break_of_dashes_is_not_a_rule(tmp_path: Path) -> None:
+    assert warns(tmp_path, forty_items_and("\n---\n")) == []
+
+
+def test_a_thematic_break_of_spaced_stars_is_not_a_rule(tmp_path: Path) -> None:
+    assert warns(tmp_path, forty_items_and("\n* * *\n")) == []
 
 
 def test_a_table_and_a_fenced_block_are_not_rules(tmp_path: Path) -> None:

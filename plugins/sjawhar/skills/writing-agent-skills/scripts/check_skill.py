@@ -22,8 +22,11 @@ never the words in the file. Templates, scripts and other files that are not mar
 measured.
 
 It prints a warn line and still passes when the body has more than 40 rules, or when the name
-differs from the directory. A rule is a list item, or a sentence of a paragraph; headings, tables
-and fenced code are not counted. Run it with `uv run --script`, which installs PyYAML from the
+differs from the directory. A list item counts 1 rule with every line inside it: each indented
+line up to the next item or the end of its list, blank lines between them allowed, and each
+unindented line that continues its text (a lazy continuation); a nested list item counts 1 more.
+A paragraph counts 1 rule for each sentence. Headings, tables, fenced code, blockquotes, thematic
+breaks and blank lines count 0. Run it with `uv run --script`, which installs PyYAML from the
 block above; the frontmatter is read with yaml.safe_load, as a YAML reader of a host reads it.
 """
 
@@ -43,6 +46,8 @@ RULES = 40  # every-rule-obeyed rates collapse between 40 and 80 rules
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 LINK_RE = re.compile(r"\]\(([^)#\s]+)\)|`((?:references|scripts|assets|templates)/[^`\s]+)`")
 LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
+# A thematic break: a line of three or more -, * or _, all the same, with spaces between them allowed.
+THEMATIC_BREAK_RE = re.compile(r"^\s*([-*_])(?:[ \t]*\1){2,}\s*$")
 FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 # A sentence ends at . ! or ? that whitespace and then a capital, a backtick, a quote or * follow.
 SENTENCE_END_RE = re.compile(r"[.!?]\s+(?=[A-Z`\"'\u201c\u2018*])")
@@ -100,12 +105,20 @@ def references(skill_dir: Path) -> list[Path]:
 
 
 def count_rules(body: str) -> int:
-    """Each list item counts 1 and each paragraph its sentences; headings, tables, fenced code and blank lines count 0."""
+    """The rules of a SKILL.md body: a list item counts 1, and a paragraph counts its sentences.
+
+    Every line inside a list item adds nothing. That is each indented line while its list is open,
+    blank lines between them allowed, and each lazy continuation: an unindented line right after a
+    line of the item outside its fenced code, that is not a list item, heading, table row, fence,
+    blockquote or thematic break. A nested list item counts 1, and an unindented line that is
+    neither a list item nor a lazy continuation ends the list. Headings, tables, fenced code,
+    blockquotes with their lazy continuation lines, thematic breaks and blank lines count 0.
+    """
     items = 0
     paragraphs: list[list[str]] = []
     fence = ""  # the open code fence's marker; "" outside a fence
-    in_item = False  # the line before is a list item or one of its continuation lines
-    in_paragraph = False  # the line before is a line of paragraphs[-1]
+    in_list = False  # a list item is above, and no line since has ended its list
+    block = ""  # the block the next line can continue: "item", "quote", "paragraph", or "" for none
     for line in body.splitlines():
         stripped = line.strip()
         if fence:
@@ -113,21 +126,32 @@ def count_rules(body: str) -> int:
                 fence = ""
             continue
         opener = FENCE_RE.match(line)
-        if opener:
-            fence = opener.group(1)
-            in_paragraph = False
-        elif not stripped or stripped.startswith(("#", "|")):
-            in_item = in_paragraph = False
+        if not stripped:
+            block = ""  # a blank line ends a paragraph or a blockquote, but not a list
+        elif in_list and line[0].isspace():
+            # An indented line in an open list is inside its last item; only a nested list item counts.
+            if opener:
+                fence, block = opener.group(1), ""
+            else:
+                block = "item"
+                if LIST_ITEM_RE.match(line) and not THEMATIC_BREAK_RE.match(line):
+                    items += 1
+        elif opener:
+            fence, in_list, block = opener.group(1), False, ""
+        elif THEMATIC_BREAK_RE.match(line) or stripped.startswith(("#", "|")):
+            in_list, block = False, ""
+        elif stripped.startswith(">"):
+            in_list, block = False, "quote"
         elif LIST_ITEM_RE.match(line):
             items += 1
-            in_item, in_paragraph = True, False
-        elif in_item and line[0].isspace():
-            pass  # a continuation line belongs to its item and adds nothing
-        elif in_paragraph:
+            in_list, block = True, "item"
+        elif block in ("item", "quote"):
+            pass  # a lazy continuation line stays in its list item or blockquote and adds nothing
+        elif block == "paragraph":
             paragraphs[-1].append(stripped)
         else:
             paragraphs.append([stripped])
-            in_item, in_paragraph = False, True
+            in_list, block = False, "paragraph"
     return items + sum(1 + len(SENTENCE_END_RE.findall(" ".join(lines))) for lines in paragraphs)
 
 
