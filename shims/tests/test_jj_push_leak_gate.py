@@ -666,10 +666,11 @@ class JjPushLeakGateTest(unittest.TestCase):
         return subprocess.run(["/usr/bin/git", "--git-dir", str(repo), "cat-file", "-e", commit], capture_output=True).returncode == 0
 
     def install_git_hook(self):
-        """Installs the pre-push hook install-prepush-hook.sh installs, so a plain git push gives the verdict to match."""
-        installer = self.check.parent / "install-prepush-hook.sh"
+        """Installs the pre-push hook install-prepush-hook.sh installs, so a plain git push gives the verdict to match.
+        The installer is the one beside install-global-hooks.sh (global_hooks_source), where provisioning puts it."""
+        installer = global_hooks_source() / "install-prepush-hook.sh"
         if not installer.is_file():
-            self.skipTest("no install-prepush-hook.sh beside the check")
+            self.skipTest(f"no install-prepush-hook.sh beside {installer.parent}/install-global-hooks.sh")
         self.env["XDG_CONFIG_HOME"] = str(self.tmp / "config")
         subprocess.run([str(installer), str(self.repo)], cwd=self.tmp, env=self.env, check=True, capture_output=True)
         self.assertIn("PUBLIC-LEAK-CHECK-WRAPPER", (self.repo / ".git" / "hooks" / "pre-push").read_text(encoding="utf-8"))
@@ -893,11 +894,11 @@ class JjPushLeakGateTest(unittest.TestCase):
         # sweep (sweep-hooks.sh, in theorem-labs/agent-infra, which cannot call a dotfiles script) each decide by a
         # checkout's remote URLs and their visibility, with readers of their own. Each GUARD_TABLE row is a real
         # checkout. The gate's own functions judge its `git remote -v` and must give the table's answer. When
-        # sweep-hooks.sh is beside the check, its own code, loaded as its three callers load it (everything above
-        # `i=0`), with the same cache, fake gh and fake ssh, must give the same answer for every row: its `verdict` on
-        # the checkout's URLs; its config prefilter (`config_may_guard`) must pass every checkout the gate guards, since
-        # it only narrows; and a whole `sweep` over the checkouts must install the hook in exactly the guarded ones, and
-        # defer none. So a change to either reader fails here until the other follows.
+        # sweep-hooks.sh is beside install-global-hooks.sh (global_hooks_source), its own code, loaded as its three
+        # callers load it (everything above `i=0`), with the same cache, fake gh and fake ssh, must give the same answer
+        # for every row: its `verdict` on the checkout's URLs; its config prefilter (`config_may_guard`) must pass every
+        # checkout the gate guards, since it only narrows; and a whole `sweep` over the checkouts must install the hook
+        # in exactly the guarded ones, and defer none. So a change to either reader fails here until the other follows.
         self.keep_cache_fresh()
         # The sweep trusts a cached private for 60 s from the entry's mtime, and one of the bash calls below can take
         # longer than that on a busy machine: the entries' mtimes are refreshed every 5 s until the test ends.
@@ -932,9 +933,9 @@ class JjPushLeakGateTest(unittest.TestCase):
                      '  if jj_push_guarded "$(/usr/bin/git -C "$co" remote -v)"; then echo Y; else echo N; fi; done\n',
                      *checkouts)
         self.assertEqual(list(zip(gate, rows)), list(zip(want, rows)))
-        sweeper = self.check.parent / "sweep-hooks.sh"
+        sweeper = global_hooks_source() / "sweep-hooks.sh"
         if not sweeper.is_file():
-            self.skipTest("no sweep-hooks.sh beside the check to compare with")
+            self.skipTest(f"no sweep-hooks.sh beside {sweeper.parent}/install-global-hooks.sh to compare with")
         text = sweeper.read_text(encoding="utf-8")
         missing = [f for f in ("verdict", "config_may_guard", "config_of", "sweep") if not re.search(rf"(?m)^{f}\(\) \{{", text)]
         self.assertEqual(missing, [], f"{sweeper} has no such functions: it predates the sweep of dispatch://BET-706; install that one")
