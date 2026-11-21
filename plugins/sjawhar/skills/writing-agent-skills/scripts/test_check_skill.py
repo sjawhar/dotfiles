@@ -299,6 +299,20 @@ def test_40_rules_as_paragraphs_do_not_warn(tmp_path: Path) -> None:
     assert warns(tmp_path, as_paragraphs(*[5] * 7, 4, 1)) == []
 
 
+def test_41_rules_as_plus_list_items_warn(tmp_path: Path) -> None:
+    # Markdown makes a list item of "+ " as of "- ".
+    assert warns(tmp_path, "".join(f"+ Check file {i} before you merge.\n" for i in range(1, 42))) == [
+        "warn 41 rules, over 40: split or delete"
+    ]
+
+
+def test_41_rules_as_list_items_numbered_with_a_parenthesis_warn(tmp_path: Path) -> None:
+    # Markdown makes a numbered list item of "1) " as of "1. ".
+    assert warns(tmp_path, "".join(f"{i}) Check file {i} before you merge.\n" for i in range(1, 42))) == [
+        "warn 41 rules, over 40: split or delete"
+    ]
+
+
 def test_a_table_and_a_fenced_block_are_not_rules(tmp_path: Path) -> None:
     # Each would be over 40 rules if it were counted: the table as a paragraph, the fenced block as list items.
     rows = "".join(f"| {i} | Rule {i} is one sentence. Rule {i} has a second. |\n" for i in range(1, 46))
