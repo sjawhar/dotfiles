@@ -1,3 +1,9 @@
+# shims/omp loads this file into every omp session as a PI_CONFIG_FILES overlay, on top of the profile's own
+# ~/.omp/agent/config.yml. omp never writes it, and its values win on every key both set: `/model` picks and TUI
+# toggles land in the profile's file and lose to this one at the next start, so a choice that should stick is an
+# edit here. Interactive and RPC sessions watch the file, so an edit saved in a machine's ~/.dotfiles is live at
+# once in every running session there. The machine's gitignored omp/config.local.yml (omp/config.<profile>.local.yml
+# for a named profile) loads after this file and wins on the keys it sets.
 modelRoles:
   # Sami, 2026-11-01 22:30Z (dispatch://INFRA-26/ask/d42777be-b790-4abe-b540-9d77146f2ba2): "can we
   # get all the agents that are running on the dev box switched over to Opus 5.5". This replaces

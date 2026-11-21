@@ -18,7 +18,7 @@ set -euo pipefail
 
 # This shim's own directory, through a link to it: a caller may run the shim by a link in a
 # directory of its own, and scripts/ and the hook dirs are beside the shim, not beside the link
-# (shims/AGENTS.md, "A moved HOME").
+# (shims/tests/test_shim_moved_home.py).
 _shim_dir="${BASH_SOURCE[0]}"
 [[ ! -L "$_shim_dir" ]] || _shim_dir="$(command -p readlink -f -- "$_shim_dir")"
 _shim_dir="${_shim_dir%/*}"
