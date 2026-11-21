@@ -1,0 +1,30 @@
+name: scripts-tests
+
+# The tests under scripts/tests that pass on a stock runner, on each change under scripts/. The push
+# trigger checks main as merged, since a squash merge can land on a main that moved under its pull
+# request.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - ".claude/settings.json"
+      - ".github/workflows/scripts-tests.yml"
+  pull_request:
+    paths:
+      - "scripts/**"
+      - ".claude/settings.json"
+      - ".github/workflows/scripts-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  scripts-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      # The file runs itself (unittest.main), so scripts/tests/conftest.py, which needs age and
+      # sops, does not load; the hook needs only bash, jq and coreutils, which the runner has.
+      - name: agent-secrets-name-session
+        run: python3 scripts/tests/test_agent_secrets_name_session.py -v
