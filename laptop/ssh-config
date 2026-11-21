@@ -33,26 +33,34 @@ Host trajectory-route
 # Oryx has one SSH hostname: oryx.thecybermonk.com. Cloudflare Access sends it
 # to sshd on oryx's port 22. This host is the way in to oryx; the phone setup
 # (phone/termux-setup) is the backup. The host-key alias is only the label under
-# which known_hosts holds oryx's key.
+# which known_hosts holds oryx's key. ssh offers the keys turned on in
+# 1Password's SSH agent first, then the YubiKey key file. Touch the YubiKey
+# when it blinks. Naming a key file here also stops ssh trying the default
+# ~/.ssh/id_* files for oryx. If ssh says "Too many authentication failures",
+# turn off in 1Password the keys that are not for oryx.
 Host oryx
   HostName oryx.thecybermonk.com
   User agent
+  IdentityFile ~/.ssh/id_ed25519_sk_oryx_sami
   ForwardAgent yes
   ProxyCommand cloudflared access ssh --hostname %h
   HostKeyAlias oryx.tail12ec1c.ts.net
   IPQoS lowdelay throughput
 
 # Oryx over AWS Session Manager. The host-key alias is only the label under
-# which known_hosts holds oryx's key.
+# which known_hosts holds oryx's key. ssh offers the same keys in the same order
+# as Host oryx.
 Host oryx-ssm
   HostName mi-0c13e59d491bb8ade
   User agent
+  IdentityFile ~/.ssh/id_ed25519_sk_oryx_sami
   ForwardAgent yes
   HostKeyAlias oryx.tail12ec1c.ts.net
   ProxyCommand aws ssm start-session --profile personal --region us-west-2 --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p
   IPQoS lowdelay throughput
 
-# Every login key lives in 1Password, except trajectory-route's key file.
+# Login keys come from 1Password's SSH agent. oryx and oryx-ssm then offer the
+# YubiKey key file. trajectory-route uses only its own key file.
 Host *
   IdentityAgent ~/.1password/agent.sock
   Compression yes
