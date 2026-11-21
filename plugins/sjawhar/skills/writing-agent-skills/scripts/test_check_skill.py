@@ -1,9 +1,10 @@
-"""Tests for check_skill.py: each limit it fails a skill on, and the files it does not measure.
+"""Tests for check_skill.py: each limit it fails or warns a skill on, and the files it does not measure.
 
 Run: uvx pytest plugins/sjawhar/skills/writing-agent-skills/scripts
 Each test builds a skill under tmp_path that passes every check but the one under test, runs the
-script on it, and reads its exit status and FAIL lines. The script runs with the interpreter uv
-builds from its own `# /// script` block (it needs PyYAML), never the one running the tests.
+script on it, and reads its exit status and its FAIL or warn lines. The script runs with the
+interpreter uv builds from its own `# /// script` block (it needs PyYAML), never the one running
+the tests.
 """
 
 import functools
@@ -23,12 +24,11 @@ def head(desc: str = DESC) -> str:
 GOOD = head() + "State the one fact the agent lacks.\n"
 
 
-def text_of(lines: int, size: int, start: str = "", final_newline: bool = True) -> str:
+def text_of(lines: int, size: int, start: str = "") -> str:
     """`start`, then lines of x: `lines` lines by str.splitlines() and `size` UTF-8 bytes in all."""
     body = ["x"] * (lines - len(start.splitlines()))
-    end = "\n" if final_newline else ""
-    body[-1] += "x" * (size - len((start + "\n".join(body) + end).encode()))
-    text = start + "\n".join(body) + end
+    body[-1] += "x" * (size - len((start + "\n".join(body) + "\n").encode()))
+    text = start + "\n".join(body) + "\n"
     assert (len(text.splitlines()), len(text.encode())) == (lines, size)
     return text
 
@@ -59,13 +59,13 @@ def run(tmp_path: Path, files: dict[str, str], args: tuple[str, ...] = ()) -> tu
     return proc.returncode, fails, proc.stdout + proc.stderr
 
 
-def assert_passes(tmp_path: Path, files: dict[str, str], args: tuple[str, ...] = ()) -> None:
-    code, fails, out = run(tmp_path, files, args)
+def assert_passes(tmp_path: Path, files: dict[str, str]) -> None:
+    code, fails, out = run(tmp_path, files)
     assert (code, fails) == (0, []), out
 
 
-def assert_fails(tmp_path: Path, files: dict[str, str], fail: str, args: tuple[str, ...] = ()) -> None:
-    code, fails, out = run(tmp_path, files, args)
+def assert_fails(tmp_path: Path, files: dict[str, str], fail: str) -> None:
+    code, fails, out = run(tmp_path, files)
     assert (code, fails) == (1, [f"FAIL {fail}"]), out
 
 
@@ -153,24 +153,8 @@ def test_a_name_that_yaml_reads_as_a_list_fails(tmp_path: Path) -> None:
     assert_fails(tmp_path, {"SKILL.md": skill_md}, "name is not a string: YAML reads it as list")
 
 
-def test_skill_md_of_150_lines_passes(tmp_path: Path) -> None:
-    assert_passes(tmp_path, {"SKILL.md": text_of(150, 2_000, head())})
-
-
-def test_skill_md_of_151_lines_fails(tmp_path: Path) -> None:
-    assert_fails(
-        tmp_path,
-        {"SKILL.md": text_of(151, 2_000, head())},
-        "SKILL.md has 151 lines, over the 150-line limit",
-    )
-
-
-def test_skill_md_of_151_lines_with_no_final_newline_fails(tmp_path: Path) -> None:
-    assert_fails(
-        tmp_path,
-        {"SKILL.md": text_of(151, 2_000, head(), final_newline=False)},
-        "SKILL.md has 151 lines, over the 150-line limit",
-    )
+def test_a_300_line_skill_md_under_8000_bytes_passes(tmp_path: Path) -> None:
+    assert_passes(tmp_path, {"SKILL.md": text_of(300, 2_000, head())})
 
 
 def test_skill_md_of_8000_bytes_passes(tmp_path: Path) -> None:
@@ -185,16 +169,8 @@ def test_skill_md_of_8001_bytes_fails(tmp_path: Path) -> None:
     )
 
 
-def test_a_reference_of_150_lines_passes(tmp_path: Path) -> None:
-    assert_passes(tmp_path, {"references/a.md": text_of(150, 2_000)})
-
-
-def test_a_reference_of_151_lines_fails(tmp_path: Path) -> None:
-    assert_fails(
-        tmp_path,
-        {"references/a.md": text_of(151, 2_000)},
-        "references/a.md has 151 lines, over the 150-line limit",
-    )
+def test_a_300_line_reference_under_8000_bytes_passes(tmp_path: Path) -> None:
+    assert_passes(tmp_path, {"references/a.md": text_of(300, 2_000)})
 
 
 def test_a_reference_of_8000_bytes_passes(tmp_path: Path) -> None:
@@ -290,23 +266,52 @@ def test_a_missing_template_path_fails(tmp_path: Path) -> None:
     )
 
 
-def old_copy(tmp_path: Path) -> tuple[str, ...]:
-    """An old copy of the good skill, as the --old arguments that name it."""
-    old = tmp_path / "old"
-    old.mkdir()
-    _ = (old / "SKILL.md").write_bytes(GOOD.encode())
-    return ("--old", str(old))
+def warns(tmp_path: Path, body: str) -> list[str]:
+    """The warn lines for the good skill with `body` below its title; the skill must still pass."""
+    code, fails, out = run(tmp_path, {"SKILL.md": head() + body})
+    assert (code, fails) == (0, []), out
+    return [line.strip() for line in out.splitlines() if line.strip().startswith("warn ")]
 
 
-def test_a_rewrite_that_grows_200_bytes_passes(tmp_path: Path) -> None:
-    assert_passes(tmp_path, {"SKILL.md": GOOD + "x" * 199 + "\n"}, old_copy(tmp_path))
+def as_items(count: int) -> str:
+    """`count` one-sentence rules as list items, each wrapped onto a continuation line."""
+    return "".join(f"- Rule {i} is\n  one sentence.\n" for i in range(1, count + 1))
 
 
-def test_a_rewrite_that_grows_201_bytes_fails(tmp_path: Path) -> None:
-    old = len(GOOD.encode())
-    assert_fails(
-        tmp_path,
-        {"SKILL.md": GOOD + "x" * 200 + "\n"},
-        f"SKILL.md grew from {old} to {old + 201} bytes, over the 200-byte allowance",
-        old_copy(tmp_path),
-    )
+def as_paragraphs(*sizes: int) -> str:
+    """One-sentence rules as paragraphs of `sizes` sentences, each sentence wrapped onto two lines."""
+    paragraphs: list[str] = []
+    first = 1
+    for size in sizes:
+        paragraphs.append("".join(f"Rule {i} is\none sentence.\n" for i in range(first, first + size)))
+        first += size
+    return "\n".join(paragraphs)
+
+
+def test_45_rules_as_list_items_warn(tmp_path: Path) -> None:
+    assert warns(tmp_path, as_items(45)) == ["warn 45 rules, over 40: split or delete"]
+
+
+def test_45_rules_as_paragraphs_warn(tmp_path: Path) -> None:
+    assert warns(tmp_path, as_paragraphs(*[5] * 9)) == ["warn 45 rules, over 40: split or delete"]
+
+
+def test_39_rules_as_list_items_do_not_warn(tmp_path: Path) -> None:
+    assert warns(tmp_path, as_items(39)) == []
+
+
+def test_39_rules_as_paragraphs_do_not_warn(tmp_path: Path) -> None:
+    assert warns(tmp_path, as_paragraphs(*[5] * 7, 4)) == []
+
+
+def test_a_table_and_a_fenced_block_are_not_rules(tmp_path: Path) -> None:
+    # Each would be over 40 rules if it were counted: the table as a paragraph, the fenced block as list items.
+    rows = "".join(f"| {i} | Rule {i} is one sentence. Rule {i} has a second. |\n" for i in range(1, 46))
+    table = "| Rule | Text |\n| --- | --- |\n" + rows
+    fenced = "```text\n" + "".join(f"- Rule {i} is one sentence.\n" for i in range(1, 46)) + "```\n"
+    assert warns(tmp_path, table + "\n" + fenced) == []
+
+
+def test_old_is_not_an_option(tmp_path: Path) -> None:
+    code, _, out = run(tmp_path, {}, ("--old", "x"))
+    assert code == 2 and "unrecognized arguments: --old" in out, out
