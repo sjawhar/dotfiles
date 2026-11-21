@@ -169,8 +169,9 @@ case "$*" in
         ;;
     *) echo "fake systemctl: unexpected call: $*" >&2; exit 2 ;;
 esac''',
-    # `sysctl -q -p FILE` writes each `key = value` line of FILE to INSTALL_ROOT/proc/sys, and fails
-    # as sysctl does when that path is missing; SYSCTL_IGNORED: it exits 0 and writes nothing.
+    # `sysctl -q -p FILE` writes each `key = value` line of FILE to INSTALL_ROOT/proc/sys, and, as
+    # procps sysctl does, fails with status 1 when that entry does not exist (procfs makes no new
+    # one); SYSCTL_IGNORED: it exits 0 and writes nothing.
     "sysctl": r'''echo "sysctl $*" >> "$CALL_LOG"
 [[ $# == 3 && "$1" == -q && "$2" == -p ]] || { echo "fake sysctl: unexpected call: $*" >&2; exit 2; }
 [[ "${SYSCTL_IGNORED:-}" != 1 ]] || exit 0
@@ -179,7 +180,9 @@ while read -r key equals value; do
         continue
     fi
     [[ "$equals" == "=" ]] || { echo "fake sysctl: unexpected line in $3: $key $equals $value" >&2; exit 2; }
-    printf '%s\n' "$value" > "$INSTALL_ROOT/proc/sys/${key//.//}"
+    entry="$INSTALL_ROOT/proc/sys/${key//.//}"
+    [[ -f "$entry" ]] || { echo "sysctl: cannot stat ${entry#"$INSTALL_ROOT"}: No such file or directory" >&2; exit 1; }
+    printf '%s\n' "$value" > "$entry"
 done < "$3"''',
     # The running dockerd's live-restore, as the last reload left it.
     "docker": r'''echo "docker $*" >> "$CALL_LOG"
@@ -765,6 +768,18 @@ class ConntrackTimeWait(InstallerCase):
 
         self.assert_failed(result)
         self.assertIn("is 120, not 15", result.stderr)
+
+    def test_a_kernel_without_the_setting_fails_the_install(self) -> None:
+        """No nf_conntrack in the kernel: sysctl -p fails, and so does the install."""
+        m = self.machine()
+        m.time_wait.unlink()
+
+        result = m.install(DOCKER_CONNTRACK_TIME_WAIT="1")
+
+        self.assert_failed(result)
+        self.assertIn("cannot stat /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_time_wait", result.stderr)
+        self.assertFalse(m.time_wait.exists())
+        self.assertEqual(m.calls_of("sudo sysctl"), [f"sudo sysctl -q -p {m.conntrack_conf}"])
 
     def test_the_rollback_value_is_applied_from_the_file(self) -> None:
         """The header's rollback: 120 in the file; the next run writes it and the kernel takes it."""
