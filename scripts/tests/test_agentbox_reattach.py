@@ -55,6 +55,8 @@ def write_stub(directory: Path, name: str, body: str) -> None:
 #   ps       `--format {{.State}}` prints the container's state word, `{{.Names}}` its name;
 #            nothing for a container that is gone.
 #   rm       forgets the container. kill, with STUB_KILL_RELEASES set, makes STUB_RUN_UNTIL.
+# With STUB_LAST_READ_GATE set, the first `ps` after box_client said it gives up (the launcher's own
+# last read) logs `last read waits` and waits (60 s at most) until that file exists.
 DOCKER_STUB = r'''
 echo "docker $*" >>"$STUB_LOG"
 state="$(cat "$STUB_STATE")"
@@ -89,6 +91,11 @@ case "$1" in
         [[ "$STUB_ATTACH_END" == eof ]] && { echo "error: unexpected EOF" >&2; exit 1; }
         ending "$STUB_ATTACH_END" ;;
     ps)
+        if [[ -n "${STUB_LAST_READ_GATE:-}" ]] && grep -qs "did not say within" "$HOME/.cache/omp/agentbox/$box.log" \
+            && ! grep -qx "last read waits" "$STUB_LOG"; then
+            echo "last read waits" >>"$STUB_LOG"
+            for _ in $(seq 600); do [[ -e "$STUB_LAST_READ_GATE" ]] && break; /bin/sleep 0.1; done
+        fi
         down && exit 1
         [[ "$state" == gone ]] && exit 0
         case "$*" in
@@ -101,6 +108,7 @@ case "$1" in
         code=0; [[ "$state" == exited\ * ]] && code="${state#* }"
         case "$*" in
             *State.Running*) [[ "$state" == running ]] && echo true || echo false ;;
+            *"State.Status}} {{.State.ExitCode"*) echo "${state%% *} $code" ;;
             *State.Status*) echo "${state%% *}" ;;
             *State.ExitCode*) echo "$code" ;;
             *State.Pid*) echo 0 ;;
@@ -143,8 +151,15 @@ class Fixture(unittest.TestCase):
         self.state.write_text("running\n", encoding="utf-8")
         stubs = self.root / "bin"
         write_stub(stubs, "docker", DOCKER_STUB)
-        # A real pause, short: the launcher's own polls sleep while the client lives.
-        write_stub(stubs, "sleep", 'echo "sleep $*" >>"$STUB_LOG"; exec /bin/sleep 0.02')
+        # A real pause, short: the launcher's own polls sleep while the client lives. With
+        # STUB_PAUSE_GATE set, box_client's pause before an attach (`sleep 5`) logs `pause waits`
+        # and lasts until that file exists (60 s at most).
+        write_stub(stubs, "sleep", 'echo "sleep $*" >>"$STUB_LOG"\n'
+                   'if [[ -n "${STUB_PAUSE_GATE:-}" && "$*" == 5 ]]; then\n'
+                   '    echo "pause waits" >>"$STUB_LOG"\n'
+                   '    for _ in $(seq 600); do [[ -e "$STUB_PAUSE_GATE" ]] && break; /bin/sleep 0.1; done\n'
+                   'fi\n'
+                   'exec /bin/sleep 0.02')
         write_stub(stubs, "systemctl", 'echo "systemctl $*" >>"$STUB_LOG"; exit 0')
         write_stub(stubs, "mountpoint", "exit 1")
         write_stub(stubs, "sudo", 'echo "sudo $*" >>"$STUB_LOG"; exit 1')
@@ -291,33 +306,83 @@ class Reattach(Fixture):
         self.assertEqual(self.box_log(), "")
         self.assert_closed(result, 3)
 
-    def test_a_launcher_told_to_end_attaches_no_more(self) -> None:
-        """TERM to the launcher (a move, a person): its trap hangs the box up, and here the client
-        ends with 125 while the container still runs. The box is being ended, so the launcher
-        attaches no more and closes it as before (60 s of waiting, then `docker rm -fv`). An
-        attach made anyway would end at once with the box (STUB_ATTACH_END), so a launcher that
-        attaches fails this test at once and does not hang it."""
-        release = self.root / "release"
+    def term_when(self, mark: str, gate: Path | None = None, **stubs: str) -> tuple[str, str]:
+        """cmd_new as `launch` does, with `stubs`; once the call log holds a line starting with
+        `mark`, TERM to the launcher, as a move or a person sends it; then, 0.5 s later, `gate` is
+        made, when there is one. Returns the launcher's stdout and stderr."""
         proc = subprocess.Popen(
             ["bash", "-c", self.script()],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env={**self.env, "STUB_RUN_END": "eof", "STUB_RUN_UNTIL": str(release), "STUB_KILL_RELEASES": "1",
-                 "STUB_ATTACH_END": "exit 0"},
+            env={**self.env, **stubs},
             start_new_session=True,
         )
         end = time.monotonic() + 60
-        while not self.calls("docker run") and time.monotonic() < end:
+        while not self.calls(mark) and time.monotonic() < end:
             time.sleep(0.05)
-        self.assertTrue(self.calls("docker run"), "docker run never started")
+        self.assertTrue(self.calls(mark), f"no '{mark}' in the call log")
         os.kill(proc.pid, signal.SIGTERM)
-        stdout, stderr = proc.communicate(timeout=120)
+        if gate is not None:
+            time.sleep(0.5)
+            gate.touch()
+        return proc.communicate(timeout=120)
+
+    def test_a_launcher_told_to_end_attaches_no_more(self) -> None:
+        """TERM to the launcher: its trap hangs the box up, and here the client ends with 125
+        while the container still runs. The box is being ended, so the launcher attaches no more
+        and closes it as before (60 s of waiting, then `docker rm -fv`). An attach made anyway
+        would end at once with the box (STUB_ATTACH_END), so a launcher that attaches fails this
+        test at once and does not hang it."""
+        release = self.root / "release"
+        stdout, stderr = self.term_when(
+            "docker run", STUB_RUN_END="eof", STUB_RUN_UNTIL=str(release), STUB_KILL_RELEASES="1",
+            STUB_ATTACH_END="exit 0",
+        )
         box = self.box()
         self.assertTrue(release.exists(), stdout + stderr)
         self.assertEqual(self.calls("docker attach"), [], stdout + stderr)
         self.assertEqual(self.calls("docker rm"), [f"docker rm -fv {box}"], stdout + stderr)
         self.assertFalse((self.boxes / box).exists(), stdout + stderr)
+
+    def test_a_launcher_told_to_end_during_the_pause_before_an_attach_attaches_no_more(self) -> None:
+        """The client ends with 125 while the box runs, and the TERM comes during box_client's
+        pause before its attach. The USR1 the trap sends runs its handler only once the pause
+        ends; the launcher still attaches no more, and closes the box as before."""
+        gate = self.root / "pause-gate"
+        stdout, stderr = self.term_when(
+            "pause waits", gate, STUB_RUN_END="eof", STUB_PAUSE_GATE=str(gate), STUB_ATTACH_END="exit 0",
+        )
+        box = self.box()
+        self.assertEqual(self.calls("docker attach"), [], stdout + stderr)
+        self.assertEqual(self.calls("docker rm"), [f"docker rm -fv {box}"], stdout + stderr)
+        self.assertFalse((self.boxes / box).exists(), stdout + stderr)
+
+    def test_a_signal_during_the_launchers_last_read_closes_the_box(self) -> None:
+        """Docker does not answer, box_client gives up, and the TERM comes while the launcher's
+        own last read runs. The box is being ended, so it is closed as before (with Docker away
+        that removes no container), and not left as it is."""
+        gate = self.root / "read-gate"
+        stdout, stderr = self.term_when(
+            "last read waits", gate, STUB_RUN_END="eof", STUB_DOWN="1", AGENTBOX_REATTACH_WAIT="1",
+            STUB_LAST_READ_GATE=str(gate),
+        )
+        box = self.box()
+        self.assertNotIn("left as it is", stderr, stdout + stderr)
+        self.assertFalse((self.boxes / box).exists(), stdout + stderr)
+        self.assertFalse((self.run_base / box).exists(), stdout + stderr)
+
+    def test_a_launcher_told_to_end_records_the_exit_code_docker_recorded(self) -> None:
+        """TERM to the launcher, and the client ends with 125 as dockerd stops the container
+        (exited 137). The exit row carries Docker's 137, not the client's 125."""
+        release = self.root / "release"
+        stdout, stderr = self.term_when(
+            "docker run", STUB_RUN_END="eof-stopped 137", STUB_RUN_UNTIL=str(release), STUB_KILL_RELEASES="1",
+        )
+        box = self.box()
+        self.assertEqual(self.calls("docker attach"), [], stdout + stderr)
+        self.assertEqual(self.calls("docker rm"), [f"docker rm -v {box}"], stdout + stderr)
+        self.assertEqual([(row[1], row[3]) for row in self.exit_rows()], [(box, "137")], stdout + stderr)
 
 
 class ContainerState(Fixture):
