@@ -161,16 +161,20 @@ if [[ -z "$_knives" ]]; then
     # (mise_paths), given the configuration and data dir above. A call that fails or outlives
     # the timeout is tried once more (a reinstall's window, a lock).
     _mise="$_mise_bin"
+    # Whole seconds, as the install's wait and cap, so the timeout check below can compare it.
     _mise_timeout="${DOTFILES_KNIVES_MISE_TIMEOUT:-20}"
+    [[ "$_mise_timeout" =~ ^[1-9][0-9]*$ ]] || _mise_timeout=20
     _why=""
     for _attempt in 1 2; do
         _rc=0
+        _start="${EPOCHSECONDS:-$(date +%s)}"
         _knives="$(MISE_DATA_DIR="$_mise_root" MISE_GLOBAL_CONFIG_FILE="$_config" timeout "$_mise_timeout" "$_mise" which -C / knives --tool github:sjawhar/knives </dev/null)" || _rc=$?
         if (( _rc == 0 )) && [[ -n "$_knives" ]]; then
             break
         fi
         _knives=""
-        if (( _rc == 124 )); then
+        # mise can exit 124 itself; only a call that lasted the whole timeout timed out.
+        if (( _rc == 124 && ${EPOCHSECONDS:-$(date +%s)} - _start >= _mise_timeout )); then
             _why+="${_why:+; }attempt $_attempt timed out after ${_mise_timeout}s"
         else
             _why+="${_why:+; }attempt $_attempt exited $_rc"
@@ -280,7 +284,8 @@ if [[ -z "$_knives" ]]; then
                 pid=$!
                 deadline=$(( ${EPOCHSECONDS:-$(date +%s)} + wait ))
                 # rc is 0 here. out_of_time says this call's own wait ran out. A wrapper that
-                # ended reports its own status; 124 there means timeout stopped mise at the cap.
+                # ended reports mise's status, which is 124 also where timeout stopped mise at
+                # the cap.
                 while :; do
                     if (( ${EPOCHSECONDS:-$(date +%s)} >= deadline )); then
                         rc=1 out_of_time=1

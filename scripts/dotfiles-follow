@@ -524,13 +524,18 @@ def bashrc_mise_cache_dir(repo: Path, timeout: float) -> str:
     bashrc = repo / ".bashrc"
     if not bashrc.is_file():
         return ""
-    code, out = run_step(["bash", "-c", BASHRC_MISE_CACHE_DIR, "_", str(repo)], repo, timeout)
+    argv = ["bash", "-c", BASHRC_MISE_CACHE_DIR, "_", str(repo)]
+    code, out = run_step(argv, repo, timeout)
     # run_step puts stdout before stderr, and no message of bash holds a NUL, so the text before
     # the first NUL is the answer whatever bash warns.
     answer, nul, _ = out.partition("\0")
     if code == 0 and nul:
         return answer
-    how = f"took longer than {timeout:g} s" if code == 124 else f"exited {code}" if code else "printed no answer"
+    # run_step returns 124 when its timeout fires and when bash exits 124 (a .bashrc that runs
+    # `exit 124`). Only run_step's timeout message can end the output: bash sends the .bashrc's
+    # output to /dev/null.
+    timed_out = code == 124 and out.endswith(f"\n{' '.join(argv)}: timed out after {timeout:.0f}s")
+    how = f"took longer than {timeout:g} s" if timed_out else f"exited {code}" if code else "printed no answer"
     log(f"tools: `bash` sourcing {display_path(bashrc)} {how}, so the tools commands get no MISE_CACHE_DIR from it")
     return ""
 
