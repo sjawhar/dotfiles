@@ -1995,8 +1995,8 @@ class GhLeakTerms(unittest.TestCase):
         # exit 4 before gh runs, the refusal naming the line and why, whatever the alias sends: `co 1`, `pp`, which
         # sends a listed term to a public repository, and `pi`, a clean comment to a private one. One such form gh
         # writes itself: the `? |` key of a name that ends with a line feed, as `gh alias set $'trail\n' 'pr view'`
-        # wrote it after `co`, `pp` and `pi` (measured 2026-11-20 with gh 2.98.0; the key stays so only while it is
-        # the last alias set). The others gh does not write. Beside each, a call that runs no alias is judged as any
+        # wrote it after `co`, `pp` and `pi` (measured 2026-11-20 with gh 2.98.0; the key stays so through later
+        # writes). The others gh does not write. Beside each, a call that runs no alias is judged as any
         # call: a clean `pr comment` to a public repository, `pr view 1`, and `zz 1`, a name that stands nowhere in
         # config.yml, go out, and the same comment with a term is refused for the term.
         pp = f"pp: issue comment 1 -R {PUBLIC} --body {CANARY}"
@@ -2057,6 +2057,46 @@ class GhLeakTerms(unittest.TestCase):
         with self.subTest(row="a name inside a value", call="more"):
             self.assert_alias_refused(["more"], env, f"leak terms: gh more: {env['GH_CONFIG_DIR']}/config.yml holds a "
                                                      "value on line 9, a form the check does not read")
+        # The `? |+` key gh writes for a name that ends with two line feeds puts an empty line between the name and the
+        # `:`: `gh alias set $'trail\n\n' 'issue comment 1 -R o/pub'` wrote `? |+`, `        trail`, an empty line and
+        # `    : issue comment 1 -R o/pub`, and gh ran `gh trail` as that alias (measured 2026-11-21 with gh 2.98.0).
+        # `gh trail --body <term>` is refused. Control: the `? |` key of `$'trail\n'`, one line feed, refuses it too.
+        for number, (row, key) in enumerate((("two line feeds, `? |+`", "? |+\n        trail\n"),
+                                             ("control: one line feed, `? |`", "? |\n        trail"))):
+            env = self.gh_config(f"unread-trail-{number}", None, gh_config_yml(
+                f"\n    co: pr checkout\n    {key}\n    : issue comment 1 -R {PUBLIC}"))
+            with self.subTest(row=row, call="trail"):
+                self.assert_alias_refused(["trail", "--body", TEXT], env, (
+                    f"leak terms: gh trail: {env['GH_CONFIG_DIR']}/config.yml holds an alias key on line 9, a form the "
+                    "check does not read"))
+
+    def test_an_alias_key_whose_name_holds_a_line_break_refuses_each_call_whose_name_stands_in_it(self) -> None:
+        # gh writes the key of an alias name that holds a line break after `? `, double-quoted with yaml.v3's escape of
+        # the break, in a flow mapping and, for a carriage return, in a block mapping, and runs the alias as the words
+        # around the break. Measured 2026-11-21 with gh 2.98.0, under `env -i` with no token in a scratch
+        # GH_CONFIG_DIR: after `gh alias delete co`, the last alias, `gh alias set $'pr say\n' …` wrote
+        # `aliases: {? "pr say\n" : …}`, and so `$'\nlead'` and `$'trail\n\n'` wrote `? "\nlead"` and `? "trail\n\n"`;
+        # `gh alias set $'cr\r' …` wrote `    ? "cr\r"`, then `    : …`; gh ran `gh pr say`, `gh lead`, `gh trail`
+        # and `gh cr` as those aliases. Such a key is a form the reader does not read (gh_aliases), and its name
+        # stands in config.yml before a `:` with the escape before or after it (gh_alias_named), so each call through
+        # it is refused with exit 4, the refusal naming the line. Control: a flow mapping with only a key past 128
+        # bytes, which gh writes after `? ` too and the reader reads, sends `gh pr say` and `gh trail` to gh.
+        for number, (row, aliases, argv, line) in enumerate((
+                ('flow, `? "pr say\\n"`', f' {{? "pr say\\n" : issue comment 1 -R {PUBLIC}}}', ["pr", "say"], 7),
+                ('flow, `? "\\nlead"`', f' {{? "\\nlead" : issue comment 1 -R {PUBLIC}}}', ["lead"], 7),
+                ('flow, `? "trail\\n\\n"`', f' {{? "trail\\n\\n" : issue comment 1 -R {PUBLIC}}}', ["trail"], 7),
+                ('block, `? "cr\\r"`', f'\n    co: pr checkout\n    ? "cr\\r"\n    : issue comment 1 -R {PUBLIC}',
+                 ["cr"], 9))):
+            env = self.gh_config(f"break-key-{number}", None, gh_config_yml(aliases))
+            with self.subTest(row=row, call=" ".join(argv)):
+                self.assert_alias_refused([*argv, "--body", "x"], env, (
+                    f"leak terms: gh {' '.join(argv)}: {env['GH_CONFIG_DIR']}/config.yml holds an alias key that holds "
+                    f"a line break on line {line}, a form the check does not read"))
+        env = self.gh_config("break-key-control", None, gh_config_yml(f" {{? pr {'x' * 130} : pr comment}}"))
+        for argv in (["pr", "say", "--body", "x"], ["trail", "--body", "x"]):
+            with self.subTest(control="a key past 128 bytes alone", call=argv[0]):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=env), argv)
 
     def test_the_files_and_standard_input_of_a_call_through_an_alias_are_read(self) -> None:
         # A call through an alias has its files and standard input read as any call does (gh_contents): a
@@ -2217,6 +2257,40 @@ class GhLeakTerms(unittest.TestCase):
             self.setUp_calls()
             self.assert_sent(self.run_gh(argv, env=env), argv)
 
+    def test_shims_gh_starts_the_check_for_each_question_mark_key_gh_writes(self) -> None:
+        # gh writes an alias key after `? ` where yaml.v3 does not write it as a simple key: `? |` in a block mapping
+        # for a name that ends with a line feed, and a key past 128 bytes, in a block and in a flow mapping. Measured
+        # 2026-11-21 with gh 2.98.0: `gh alias set $'pr say\n' …` wrote `    ? |`, `        pr say`, then `    : …`,
+        # and gh ran `gh pr say` as that alias. shims/gh starts the check for a call under a gh command whenever
+        # config.yml holds a `? ` key (gh_shim_has_nested_alias, NestedAliases): `gh pr say 1 -R o/pub --body <term>`
+        # is refused (exit 2) on the `? |` config, which the check does not read, and the call through the 128-byte
+        # key, which it reads, is refused for the term it sends to o/pub. In each, gh never runs. Control: with no
+        # term, the call through the 128-byte key goes out.
+        env = self.gh_config("question-say", None, gh_config_yml(
+            "\n    co: pr checkout\n    ? |\n        pr say\n    : pr comment"))
+        with self.subTest(key="? |, pr say"):
+            self.setUp_calls()
+            result = self.run_gh(["pr", "say", "1", "-R", PUBLIC, "--body", TEXT], env=env)
+            stderr = result.stderr.decode("utf-8", "replace")
+            self.assertEqual(result.returncode, 2, stderr)
+            self.assertEqual(self.gh_calls(), [])
+            self.assertIn(f"leak terms: gh pr say: {env['GH_CONFIG_DIR']}/config.yml holds an alias key on line 9, a "
+                          "form the check does not read", stderr)
+        long = "x" * 130
+        for number, (form, aliases) in enumerate((
+                ("block", f"\n    co: pr checkout\n    ? pr {long}\n    : pr comment"),
+                ("flow", f" {{? pr {long} : pr comment}}"))):
+            env = self.gh_config(f"question-long-{number}", None, gh_config_yml(aliases))
+            with self.subTest(key=f"past 128 bytes, {form}"):
+                self.setUp_calls()
+                refused = self.run_gh(["pr", long, "1", "-R", PUBLIC, "--body", TEXT], env=env)
+                self.assert_refused(refused, "--body", line=1)
+                self.assertIn(f"to {PUBLIC} (public):", refused.stderr.decode())
+            with self.subTest(key=f"past 128 bytes, {form}", control="no term"):
+                argv = ["pr", long, "1", "-R", PUBLIC, "--body", CLEAN]
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=env), argv)
+
     def test_a_crlf_config_yml_is_read_as_with_line_feeds(self) -> None:
         # yaml.v3 reads a carriage return and a line feed as one line break (is_crlf), and so does the check
         # (gh_config_text). With a gh-written config.yml whose lines end in CRLF, as an editor may save it, the aliases
@@ -2309,6 +2383,14 @@ class GhLeakTerms(unittest.TestCase):
         with self.subTest(control="no apostrophe", term=False):
             self.setUp_calls()
             self.assert_sent(self.run_gh(["note"], CLEAN.encode(), env), ["note"], CLEAN.encode())
+        # gh refuses a call that leaves an alias's `$N` unfilled itself (`not enough arguments for alias`), so the check
+        # tests the `$N` before it splits the alias: with `z: "api -X GET zen --jq $1 # Sami's"`, which shlex cannot
+        # split, `gh z` with no argument goes out to gh (measured 2026-11-21 with gh 2.98.0, which refused it, exit 1).
+        env = self.gh_config("unsplit-unfilled", None, gh_config_yml(
+            "\n    co: pr checkout\n    z: \"api -X GET zen --jq $1 # Sami's\""))
+        with self.subTest(row="an unfilled $N", call="z"):
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(["z"], env=env), ["z"])
 
     def test_an_argument_that_makes_an_alias_unsplittable_refuses_the_call_and_names_the_arguments(self) -> None:
         # gh puts a call's arguments in place of an alias's `$N` before it splits the alias as a shell line, and so
@@ -2322,8 +2404,8 @@ class GhLeakTerms(unittest.TestCase):
         with self.subTest(call="note it's"):
             self.assert_alias_refused(argv, env, (
                 "leak terms: gh note: the call's arguments, put in place of the $N of gh's alias note (line 9 of "
-                f"{env['GH_CONFIG_DIR']}/config.yml), make what it runs a text shlex cannot split as a shell line (No "
-                "closing quotation), so the check cannot read what it runs: change the arguments"))
+                f"{env['GH_CONFIG_DIR']}/config.yml), make its expansion a text shlex cannot split as a shell line (No "
+                "closing quotation), so the check cannot judge the call: change the arguments"))
             self.assertNotIn("fix that line", self.check(argv, env).stderr.decode("utf-8", "replace"))
         with self.subTest(control="note ok"):
             self.setUp_calls()
@@ -3044,6 +3126,27 @@ class NestedAliases(unittest.TestCase):
                 self.assertTrue(self.has_nested_alias(command, f"aliases: {{prc: pr checkout, {command} say: x}}\n"))
             with self.subTest(command=command, control="the command only in a value"):
                 self.assertFalse(self.has_nested_alias(command, f"aliases: {{say: {command} say}}\n"))
+
+    def test_a_question_mark_key_starts_the_check(self) -> None:
+        # gh writes an alias key after `? ` where yaml.v3 does not write it as a simple key, a key past 128 bytes or a
+        # name that holds a line break, at a line's start in a block mapping and after the `{` or a `,` of a flow
+        # mapping (measured 2026-11-21 with gh 2.98.0). The pattern for a key under a command finds none of them, so
+        # a config.yml that holds a `? ` key starts the check. Control: a config with no `? ` key and no key under
+        # `pr`, in each form, does not.
+        long = "pr " + "x" * 130
+        for form, config in (
+                ("block, `? |`", "aliases:\n    co: pr checkout\n    ? |\n        pr say\n    : pr comment\n"),
+                ("block, past 128 bytes", f"aliases:\n    co: pr checkout\n    ? {long}\n    : pr comment\n"),
+                ('flow, `? "pr say\\n"`', 'aliases: {? "pr say\\n" : pr comment}\n'),
+                ('flow, `? "pr say\\n"` after another key',
+                 'aliases: {prc: pr checkout, ? "pr say\\n" : pr comment}\n'),
+                ("flow, past 128 bytes", f"aliases: {{? {long} : pr comment}}\n")):
+            with self.subTest(form=form):
+                self.assertTrue(self.has_nested_alias("pr", config))
+        for form, config in (("block", "aliases:\n    co: pr checkout\n    say: issue comment 1 -R o/pub\n"),
+                             ("flow", "aliases: {co: pr checkout, say: issue comment 1 -R o/pub}\n")):
+            with self.subTest(control=form):
+                self.assertFalse(self.has_nested_alias("pr", config))
 
 
 if __name__ == "__main__":
