@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# claude and codex wrapper (shims/codex is a link to this file): the model-spend environment
-# (scripts/agent-spend-env.sh, dispatch://INFRA-165), then the real binary of the name it was called
-# by, with its arguments, stdin and PATH untouched.
+# claude and codex wrapper (shims/codex is a link to this file): the private-project check
+# (scripts/agent-private-check, below), the model-spend environment (scripts/agent-spend-env.sh,
+# dispatch://INFRA-165), then the real binary of the name it was called by, with its arguments,
+# stdin and PATH untouched.
 #
 # It is for a claude or codex that something starts by name: a script or a session's bash tool running
 # `claude -p`. Those inherit their parent's collector and an omp parent's `OTEL_LOGS_EXPORTER=none`,
 # and without this Claude Code sent no record. scripts/cld still starts Claude Code through
-# scripts/agent-session, which skips this file and sets the same spend environment itself.
-# This does only the spend part of agent-session, not all of it: agent-session also registers the
-# process as a secrets-broker host session (agent-secrets-session), and a scripted run's workers
-# would each register, wait on the helper, and lose the identity they inherit from their parent.
+# scripts/agent-session, which skips this file and runs the same check and sets the same spend
+# environment itself. This does only those two parts of agent-session, not all of it: agent-session
+# also registers the process as a secrets-broker host session (agent-secrets-session), and a scripted
+# run's workers would each register, wait on the helper, and lose the identity they inherit from their parent.
 set -euo pipefail
 
 name="${BASH_SOURCE[0]##*/}"
@@ -131,6 +132,54 @@ if [[ -z "$real" ]]; then
         exit 127
     }
 fi
+
+# >>> private-project check (scripts/agent-private-check)
+# A claude or codex started by name, not through scripts/agent-session, gets the check every
+# launcher runs (its header has the rule): exit 2 with the reason when the session's Dispatch bearer
+# lists a private project, or when Dispatch cannot say; while no project is private it makes no
+# Dispatch call. claude's bearer is the claude-envoy bridge's envoy.json: $CLAUDE_CONFIG_DIR's, else
+# the one ENVOY_CONFIG_FILE names, else the neutral one. codex uses the Dispatch client's command
+# config order. Its -C/--cd directory, including the checkout's bearer, is checked before it starts.
+# The check is the one in this file's checkout, through a link to it.
+private_self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")"
+private_envoy_json=""
+if [[ "$name" == claude && -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+    private_envoy_json="$CLAUDE_CONFIG_DIR/envoy.json"
+elif [[ "$name" == claude ]]; then
+    private_envoy_json="${ENVOY_CONFIG_FILE:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/legion/envoy.json}"
+fi
+private_cwd="$PWD"
+if [[ "$name" == codex ]]; then
+    private_prev=""
+    for private_arg in "$@"; do
+        [[ "$private_arg" == -- ]] && break
+        case "$private_prev" in
+            -C|--cd) private_cwd="$private_arg"; private_prev=""; continue ;;
+        esac
+        case "$private_arg" in
+            --cd=*|-C=*) private_cwd="${private_arg#*=}" ;;
+            -C?*) private_cwd="${private_arg#-C}" ;;
+        esac
+        private_prev="$private_arg"
+    done
+fi
+# The system's python3 when there is one: the caller's PATH can hold none, or only mise's shim.
+private_python=/usr/bin/python3
+[[ -x "$private_python" ]] || private_python=python3
+private_status=0
+private_answer="$(AGENT_PRIVATE_ENVOY_JSON="$private_envoy_json" AGENT_PRIVATE_CWD="$private_cwd" \
+    AGENT_PRIVATE_HARNESS="$name" "$private_python" \
+    "${private_self%/shims/*}/scripts/agent-private-check" < /dev/null)" || private_status=$?
+if (( private_status != 0 )) || [[ "$private_answer" != start ]]; then
+    if [[ "$private_answer" == "refuse "* ]]; then
+        echo "$name: ${private_answer#refuse }" >&2
+    else
+        echo "$name: scripts/agent-private-check gave no answer (exit $private_status), so $name does not start; retry" >&2
+    fi
+    exit 2
+fi
+unset private_self private_envoy_json private_python private_status private_answer private_cwd private_prev private_arg
+# <<< private-project check
 
 # The spend library of the dotfiles checkout this file is in, through a link to it (shims/codex),
 # not the one under HOME: a caller may give the shim a HOME of its own (shims/AGENTS.md, "A moved HOME").

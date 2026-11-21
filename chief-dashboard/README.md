@@ -122,6 +122,11 @@ and links his Dispatch Inbox.
 
 The Dispatch URL and token, and the Envoy hub URL, come from `~/.config/legion/envoy.json`. The page is standard-library
 Python; only `chief-dashboard sami-messages` needs PyYAML (in `pyproject.toml`; the system python3 has it).
+Every Dispatch request first runs the dotfiles' `scripts/agent-private-guard` with the token it sends
+(`sources.private_guard`): once any project is private, or when the private-projects flag cannot be read, a token
+that lists a private project, or one Dispatch does not answer for, stops the command with exit 2 before the request
+(`scripts/agent-private-check`'s header has the rule). The page's server does not stop: its refresh and standup
+threads log the refusal and run the guard again at their next read, and a standup line it refuses answers "Not sent".
 
 ## Run
 

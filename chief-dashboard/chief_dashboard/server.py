@@ -28,7 +28,7 @@ from . import model, render, rounds, standup, v2_model, v2_render, v3_render, vi
 from .collect import VersionCache, collect
 from .paths import chief_state
 from .prs import PrCache
-from .sources import Dispatch, envoy_send
+from .sources import Dispatch, PrivateProjectRefused, envoy_send
 from .videos import VideoStore
 
 log = logging.getLogger(__name__)
@@ -226,7 +226,8 @@ class Dashboard:
         while True:
             try:
                 self.refresh()
-            except Exception:
+            # A refusal is a SystemExit, which would end this thread for good; the next pass runs the guard again.
+            except (Exception, PrivateProjectRefused):
                 log.exception("refresh failed")
             time.sleep(REFRESH_SECONDS)
 
@@ -604,7 +605,7 @@ def make_handler(dash: Dashboard, proxy_uid: int = 0):
                 msg = (f"Said in the room, and delivered to {n} session{'' if n == 1 else 's'} as your own words"
                        + (f"; {len(r['missed'])} not listening now." if r["missed"] else "."))
                 ok = True
-            except Exception as exc:
+            except (Exception, PrivateProjectRefused) as exc:  # a refusal, a SystemExit, would drop the connection
                 log.exception("the standup line failed")
                 msg, ok = f"Not sent: {exc}", False
             if wants_json:

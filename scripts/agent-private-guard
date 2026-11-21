@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""agent-private-guard DISPATCH_URL < BEARER: may this bearer be sent to the Dispatch at DISPATCH_URL?
+
+Exits 0, or 2 with the reason on stderr. The rule is scripts/agent-private-check's (its header): the
+private-projects flag first, then Dispatch's whoami for the bearer, failing closed, with a refusing
+answer kept for 24 hours. A reader that sends a bearer to Dispatch outside its client runs this with
+that bearer before every /api/v1/ request and before it opens /ws/live or /ws/doc/, and stops on any
+exit but 0: scripts/sami-said, chief-dashboard's sources, the reflect skill's Dispatch reader.
+scripts/tests/test_dispatch_readers_use_the_guard.py names a reader that does not.
+"""
+
+import importlib.machinery
+import importlib.util
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+loader = importlib.machinery.SourceFileLoader("agent_private_check", str(Path(__file__).resolve().parent / "agent-private-check"))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+assert spec is not None
+check = importlib.util.module_from_spec(spec)
+loader.exec_module(check)
+sys.exit(check.guard_main(sys.argv[1:]))

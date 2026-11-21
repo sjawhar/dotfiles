@@ -5,8 +5,10 @@ into the user role. Fixtures are an omp agent directory shaped as omp writes it:
 entries with a top-level ISO timestamp), the terminal's prompt history (history.db, the `history`
 table omp creates), a subagent file below a session, and a shake log. Entry shapes are copied from
 real sessions of 2026-10-27/28; ids and texts are invented. --dispatch runs against a local fake of
-Dispatch's routes: /api/v1/issues, /api/v1/issues/<key>/events and the event feed on the GET
-/ws/live socket, served by a small WebSocket server of the fake's own.
+Dispatch's routes: /api/v1/issues, /api/v1/issues/<key>/events, /api/v1/whoami (scripts/agent-private-guard's
+question before each request) and the event feed on the GET /ws/live socket, served by a small WebSocket
+server of the fake's own. The guard reads a stand-in private-projects flag (private_project_stubs.py),
+`{"enabled": false}` unless a case says otherwise.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import hashlib
 import http.server
 import json
 import os
+import shutil
 import sqlite3
 import struct
 import subprocess
@@ -26,6 +29,9 @@ import unittest
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from gce_metadata_stub import MetadataStub
+from private_project_stubs import FLAG_OFF, FLAG_ON, PRIV_TOKEN, PUB_TOKEN, WHOAMI, WHOAMI_PRIV, WHOAMI_PUB, FlagObject, flag_env
 
 SCRIPT = Path(__file__).parents[1] / "sami-said"
 UTC = timezone.utc
@@ -539,6 +545,10 @@ WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 class FakeDispatch(http.server.BaseHTTPRequestHandler):
     events: list[dict] = []
     seen: list[str] = []
+    paths: list[str] = []  # every request's path, whoami's included
+    whoami = {PRIV_TOKEN: WHOAMI_PRIV, PUB_TOKEN: WHOAMI_PUB}
+    # From this whoami on (1-based), every bearer reads as listing PRIV: a token changed mid-run.
+    private_from: int | None = None
     subscribes: list[dict] = []  # every frame a live socket read first, a subscribe
     pongs: list[bytes] = []  # every pong's payload
     faults: list[str] = []  # what the client sent against RFC 6455 or the live socket's frames
@@ -559,10 +569,24 @@ class FakeDispatch(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    @classmethod
+    def requests(cls) -> list[str]:
+        """The paths sami-said requested, the guard's whoami left out."""
+        return [p for p in cls.paths if p != WHOAMI]
+
     def do_GET(self):
         url = urllib.parse.urlsplit(self.path)
         self.seen.append(self.headers.get("Authorization", ""))
-        if url.path == "/api/v1/issues":
+        self.paths.append(url.path)
+        if url.path == WHOAMI:
+            who = self.whoami.get(self.headers.get("Authorization", "").removeprefix("Bearer "))
+            if who and self.private_from is not None and self.paths.count(WHOAMI) >= self.private_from:
+                who = WHOAMI_PRIV
+            if who:
+                self.reply(who)
+            else:
+                self.send_error(401)
+        elif url.path == "/api/v1/issues":
             self.reply([] if self.mode == "no-head" else [{"key": "LINUX-1157", "updated_at": "2026-10-28T02:59:00Z"}])
         elif url.path == "/api/v1/issues/LINUX-1157/events":
             self.reply([max(self.events, key=lambda e: e["id"])])
@@ -688,6 +712,7 @@ def start_dispatch(base: Path) -> tuple[http.server.ThreadingHTTPServer, dict]:
     older = [event(i, at(-300 + i), "artifact.version", {"name": "spec.md"}) for i in range(1, 200)]
     FakeDispatch.mode = None
     FakeDispatch.seen, FakeDispatch.subscribes, FakeDispatch.pongs, FakeDispatch.faults = [], [], [], []
+    FakeDispatch.paths = []
     FakeDispatch.events = older + [
         event(300, at(-65), "comment.created", {"id": "c-early", "body": "before the window"}),
         event(301, at(5), "message.created", {"id": "407cb29c-fcc3-406e-8fd8-ecc6d9076ba4", "body": "I'm getting super excited.",
@@ -714,7 +739,14 @@ def start_dispatch(base: Path) -> tuple[http.server.ThreadingHTTPServer, dict]:
     config = base / "envoy.json"
     config.write_text(json.dumps({"dispatch": {"enabled": True, "serverUrl": f"http://127.0.0.1:{server.server_port}",
                                                "token": "test-token"}}))
-    return server, {"ENVOY_CONFIG_FILE": str(config), "DISPATCH_URL": "", "DISPATCH_TOKEN": "", "DISPATCH_TOKEN_FILE": ""}
+    FLAG.body = FLAG_OFF
+    return server, {"ENVOY_CONFIG_FILE": str(config), "DISPATCH_URL": "", "DISPATCH_TOKEN": "", "DISPATCH_TOKEN_FILE": "",
+                    **flag_env(FLAG, METADATA.host, str(base / "cache"))}
+
+
+# The private-projects flag and the metadata server whose token reads it, for every --dispatch run.
+FLAG = FlagObject(FLAG_OFF)
+METADATA = MetadataStub.start()
 
 
 DISPATCH_ROWS = [
@@ -887,6 +919,63 @@ class DispatchFeedFaults(unittest.TestCase):
         self.assertEqual(self.dispatch_rows(found), [])
         self.assertIn("Dispatch refused the events subscription on its live socket: INVALID_FRAME", done.stderr)
         self.assertTrue(done.stderr.rstrip().endswith("exit status 1"), done.stderr)
+
+
+class PrivateProjects(unittest.TestCase):
+    """agent-private-guard before every Dispatch request and the live socket: a bearer that lists a
+    private project stops the run with exit 2 before its first request, and with a public one the
+    requests are those of a run with no private project (the flag false: no whoami at all)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        base = Path(cls.tmp.name)
+        cls.root = base / "agent"
+        Store(cls.root)
+        cls.server, cls.env = start_dispatch(base)
+        cls.cache = base / "cache"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.tmp.cleanup()
+
+    def run_as(self, token: str, flag: dict[str, object]) -> subprocess.CompletedProcess[str]:
+        FLAG.body = flag
+        FakeDispatch.paths, FakeDispatch.subscribes = [], []
+        shutil.rmtree(self.cache / "agent-private", ignore_errors=True)
+        return run(self.root, "--json", "--dispatch", env={**self.env, "DISPATCH_TOKEN": token})
+
+    def test_a_priv_bearer_exits_2_before_its_first_request(self):
+        done = self.run_as(PRIV_TOKEN, FLAG_ON)
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("PRIV is private", done.stderr)
+        self.assertEqual(FakeDispatch.requests(), [])
+        self.assertEqual(FakeDispatch.subscribes, [])
+        self.assertEqual(done.stdout, "")
+
+    def test_a_pub_bearer_makes_the_requests_of_a_run_with_no_private_project(self):
+        base = self.run_as(PUB_TOKEN, FLAG_OFF)
+        self.assertEqual(base.returncode, 0, base.stderr)
+        before = FakeDispatch.requests()
+        self.assertNotIn(WHOAMI, FakeDispatch.paths)
+        done = self.run_as(PUB_TOKEN, FLAG_ON)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(FakeDispatch.requests(), before)
+        self.assertIn(WHOAMI, FakeDispatch.paths)
+        self.assertEqual(done.stdout, base.stdout)
+
+    def test_a_bearer_that_turns_private_before_the_live_socket_never_opens_it(self):
+        # whoami answers PUB for the two reads that find the head, then PRIV: the socket's own guard refuses.
+        FakeDispatch.private_from = 3
+        try:
+            done = self.run_as(PUB_TOKEN, FLAG_ON)
+        finally:
+            FakeDispatch.private_from = None
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("PRIV is private", done.stderr)
+        self.assertEqual(FakeDispatch.requests(), ["/api/v1/issues", "/api/v1/issues/LINUX-1157/events"])
+        self.assertEqual(FakeDispatch.subscribes, [])
 
 
 if __name__ == "__main__":

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -241,6 +243,47 @@ class DispatchSettings(unittest.TestCase):
         self.assertNotIn("file token", message)
         self.refused("DISPATCH_TOKEN holds whitespace or a control character", DISPATCH_TOKEN="a\nb")
         self.refused("DISPATCH_URL must be an http or https URL", DISPATCH_URL="localhost:8766", DISPATCH_TOKEN="t")
+
+
+class PrivateProjectGuard(unittest.TestCase):
+    """Every request first runs scripts/agent-private-guard: a PRIV bearer exits 2 before the
+    script's first request (Dispatch sees only the guard's whoami), and a PUB one reads as before."""
+
+    def setUp(self) -> None:
+        from gce_metadata_stub import MetadataStub
+        from private_project_stubs import FLAG_ON, PRIV_TOKEN, PUB_TOKEN, WHOAMI_PRIV, WHOAMI_PUB, DispatchStub, FlagObject
+
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        root = Path(self.temp_dir.name)
+        self.priv, self.pub = PRIV_TOKEN, PUB_TOKEN
+        self.metadata, self.flag = MetadataStub.start(), FlagObject(FLAG_ON)
+        self.dispatch = DispatchStub({PRIV_TOKEN: WHOAMI_PRIV, PUB_TOKEN: WHOAMI_PUB}, {"/api/v1/projects": {"projects": []}})
+        for server in (self.metadata, self.flag, self.dispatch):
+            self.addCleanup(server.stop)
+        config = root / "envoy.json"
+        config.write_text(json.dumps({"dispatch": {"enabled": True, "serverUrl": self.dispatch.url}}), encoding="utf-8")
+        self.root = root
+        self.env = {"HOME": str(root), "PATH": "/usr/bin:/bin", "ENVOY_CONFIG_FILE": str(config),
+                    "AGENT_PRIVATE_FLAG_URL": self.flag.url, "GCE_METADATA_HOST": self.metadata.host,
+                    "XDG_CACHE_HOME": str(root / "cache")}
+
+    def extract(self, token: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([sys.executable, str(SCRIPT), "--since", "2026-11-01T00:00:00Z", "--out",
+                               str(self.root / "out.jsonl"), "--text", str(self.root / "out.md")],
+                              env={**self.env, "DISPATCH_TOKEN": token}, capture_output=True, text=True, timeout=120)
+
+    def test_a_priv_bearer_exits_2_before_the_first_request(self) -> None:
+        done = self.extract(self.priv)
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("PRIV is private", done.stderr)
+        self.assertEqual(self.dispatch.others(), [])
+        self.assertFalse((self.root / "out.jsonl").exists())
+
+    def test_control_a_pub_bearer_reads_as_before(self) -> None:
+        done = self.extract(self.pub)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.dispatch.others(), ["/api/v1/projects"])
 
 
 if __name__ == "__main__":
