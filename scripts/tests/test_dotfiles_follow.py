@@ -5,14 +5,16 @@ SECRET_FILES copies, and refuses, changing nothing, on every other change.
 Each case builds a throwaway origin and a clone of it at $HOME/.dotfiles in a temp dir, with the
 real devbox/sami-devbox-provision (so the kept files are read from its SECRET_FILES) and the real
 devbox/sami-devbox-check (so the pin lines that run are the check's own), and stand-in `mise` and
-`knives` on PATH. Envoy is a fake that records each message. A refusal case prints the alert text
-and asserts that HEAD, the index and every file of the checkout are as they were.
+`knives` on PATH. A run's reports are what run_once returns (it writes them to its log too). A
+refusal case prints the report and asserts that HEAD, the index and every file of the checkout are
+as they were.
 """
 
 import argparse
 import fcntl
 import gc
 import hashlib
+import http.server
 import importlib.machinery
 import importlib.util
 import json
@@ -23,6 +25,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import unittest.mock
@@ -100,6 +103,7 @@ sweep() {
       echo "2026-11-03T00:00:00Z sweep [$*]: 41 checkouts hooked or public or unreadable, 1 deferred, 40 installed, 0 failed" >> "$log" ;;
     deferred_count) echo "2026-11-03T00:00:00Z sweep [$*]: 41 checkouts hooked or public or unreadable, 2 deferred, 39 installed, 0 failed" >> "$log" ;;
     hang) sleep 60 ;;
+    hang_logged) echo "2026-11-03T00:00:00Z FAILED /src/stuck" >> "$log"; echo "still walking"; sleep 60 ;;
     broken) echo "sweep: cannot walk a root"; exit 3 ;;
     nosummary) echo "2026-11-03T00:00:00Z INSTALLED /src/one" >> "$log" ;;
   esac
@@ -107,19 +111,6 @@ sweep() {
 i=0
 while true; do sweep "${fast_roots[@]}"; i=$((i + 1)); sleep 300; done
 """
-
-
-class FakeEnvoy:
-    def __init__(self, timeout: float = 8.0) -> None:
-        FakeEnvoy.instances.append(self)
-        self.published: list[tuple[str, str]] = []
-
-    def publish(self, topic: str, message: str) -> bool:
-        self.published.append((topic, message))
-        return True
-
-    def send(self, session_id: str, message: str) -> bool:
-        raise AssertionError("the role answered; nothing goes to a session")
 
 
 class Harness(unittest.TestCase):
@@ -147,7 +138,7 @@ class Harness(unittest.TestCase):
         env = {
             key: value
             for key, value in os.environ.items()
-            if not key.startswith(("GIT_", "BOX_HEALTH", "ENVOY", "MISE_", "DOTFILES_", "XDG_CONFIG", "XDG_STATE"))
+            if not key.startswith(("GIT_", "ENVOY", "MISE_", "DOTFILES_", "XDG_CONFIG", "XDG_STATE"))
         }
         env.update(fixture_environment())
         env.update(
@@ -166,9 +157,6 @@ class Harness(unittest.TestCase):
         (root / "gitconfig").write_text("[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n")
         self.env_patch = unittest.mock.patch.dict(os.environ, env, clear=True)
         self.env_patch.start()
-        self.envoy_patch = unittest.mock.patch.object(FOLLOW, "Envoy", FakeEnvoy)
-        self.envoy_patch.start()
-        FakeEnvoy.instances = []
 
         self.sh("git", "init", "-q", "--bare", str(self.origin))
         self.sh("git", "clone", "-q", str(self.origin), str(self.upstream))
@@ -201,7 +189,6 @@ class Harness(unittest.TestCase):
         self.state.write_text(json.dumps({"slow_sweep_at": 999_000.0}))
 
     def tearDown(self) -> None:
-        self.envoy_patch.stop()
         self.env_patch.stop()
         self.tmp.cleanup()
 
@@ -244,31 +231,23 @@ class Harness(unittest.TestCase):
             "branch": "main",
             "provision": self.repo / "devbox/sami-devbox-provision",
             "state": self.state,
-            "escalate": 7200.0,
             "fetch_grace": 3,
             "fetch_timeout": 60.0,
             "mise_timeout": 60.0,
             "check_timeout": 60.0,
-            "http_timeout": 1.0,
-            "print_alert": False,
             "hooks_dir": self.hooks_dir,
             "sweep_timeout": 30.0,
             "slow_sweep_interval": self.slow_sweep_interval,
             "slow_sweep_timeout": 30.0,
             "run_limit": 1170.0,
             "no_hook_sweep": False,
-            "box_health_role": "",
         }
         values.update(overrides)
         return argparse.Namespace(**values)
 
     def run_follow(self, now: float = 1_000_000.0, **overrides) -> list[str]:
         with unittest.mock.patch.object(FOLLOW.time, "time", lambda: now):
-            self.assertEqual(FOLLOW.run_once(self.options(**overrides)), 0)
-        envoy = FakeEnvoy.instances[-1]
-        for topic, _ in envoy.published:
-            self.assertEqual(topic, "notifications.role.lead-box-health")
-        return [message for _, message in envoy.published]
+            return FOLLOW.run_once(self.options(**overrides))
 
     def state_data(self) -> dict:
         import json
@@ -281,7 +260,7 @@ class Harness(unittest.TestCase):
         self.state.write_text(json.dumps({"tools_ok_head": self.head(), **data}))
 
     def show(self, case: str, messages: list[str], before: dict, after: dict) -> None:
-        print(f"\n===== {case}: {len(messages)} message(s) to notifications.role.lead-box-health", file=sys.stderr)
+        print(f"\n===== {case}: {len(messages)} report(s) in the run's log", file=sys.stderr)
         for text in messages:
             print(text, file=sys.stderr)
             print("-----", file=sys.stderr)
@@ -305,7 +284,7 @@ class Harness(unittest.TestCase):
         self.assertIn("It changed nothing in the checkout", messages[0])
         self.assertNotEqual(self.state_data()["last_outcome"], "ok")
         self.assertNotIn("install", self.fake_log.read_text() if self.fake_log.exists() else "")
-        # Said once: the next run, ten minutes later, sends nothing and still changes nothing.
+        # Reported once: the next run, ten minutes later, reports nothing and still changes nothing.
         self.assertEqual(self.run_follow(now=1_000_600.0), [])
         self.assertEqual(self.snapshot(), before)
         return messages
@@ -425,6 +404,27 @@ class InstallTools(Harness):
         )
         self.assertFalse(self.fake_log.exists(), "mise install ran without its lock")
 
+    def bashrc_log(self, bashrc: str, timeout: float) -> list[str]:
+        """What bashrc_mise_cache_dir logs for a checkout whose .bashrc is BASHRC."""
+        (self.repo / ".bashrc").write_text(bashrc)
+        with unittest.mock.patch.object(FOLLOW, "log") as logged:
+            self.assertEqual(FOLLOW.bashrc_mise_cache_dir(self.repo, timeout), "")
+        return [call.args[0] for call in logged.call_args_list]
+
+    def test_a_bashrc_that_exits_124_is_not_reported_as_a_timeout(self) -> None:
+        bashrc = FOLLOW.display_path(self.repo / ".bashrc")
+        self.assertEqual(
+            self.bashrc_log("exit 124\n", 30),
+            [f"tools: `bash` sourcing {bashrc} exited 124, so the tools commands get no MISE_CACHE_DIR from it"],
+        )
+
+    def test_a_bashrc_that_takes_longer_than_the_timeout_is_reported_as_one(self) -> None:
+        bashrc = FOLLOW.display_path(self.repo / ".bashrc")
+        self.assertEqual(
+            self.bashrc_log("sleep 30\n", 1),
+            [f"tools: `bash` sourcing {bashrc} took longer than 1 s, so the tools commands get no MISE_CACHE_DIR from it"],
+        )
+
 
 class Follows(Harness):
     def test_secret_files_come_from_the_provision_script(self) -> None:
@@ -460,12 +460,9 @@ class Refuses(Harness):
         (self.repo / "scripts/tool").write_text("edited here\n")
         messages = self.assert_refused("uncommitted change", "UNCOMMITTED CHANGES", " M scripts/tool")
         self.assertIn("Kept on purpose and not judged: secrets.env", messages[0])
-        # Said again once after --escalate, then not again.
-        again = self.run_follow(now=1_000_000.0 + 7200)
-        self.assertEqual(len(again), 1)
-        self.assertIn("STILL NOT FOLLOWING MAIN", again[0])
-        self.assertEqual(self.run_follow(now=1_000_000.0 + 7800), [])
-        # The owner puts the file back: the next run fast-forwards and says it cleared.
+        # Not reported again while it holds, even two hours later.
+        self.assertEqual(self.run_follow(now=1_000_000.0 + 7200), [])
+        # The owner puts the file back: the next run fast-forwards and reports that it cleared.
         (self.repo / "scripts/tool").write_text("v1\n")
         cleared = self.run_follow(now=1_000_000.0 + 8400)
         self.assertEqual(len(cleared), 1)
@@ -596,7 +593,7 @@ class PrePushHooks(Harness):
         self.assertEqual(self.state_data()["last_outcome"], "ok")
         self.assertEqual(self.state_data()["slow_sweep_at"], 1_000_000.0)
 
-    def test_a_checkout_it_cannot_hook_alerts_once_and_clears(self) -> None:
+    def test_a_checkout_it_cannot_hook_is_reported_once_and_clears(self) -> None:
         os.environ["FAKE_SWEEP"] = "failed"
         messages = self.run_follow()
         self.assertEqual(len(messages), 1)
@@ -610,7 +607,7 @@ class PrePushHooks(Harness):
         self.assertEqual(len(cleared), 1)
         self.assertIn("PRE-PUSH HOOK NOT INSTALLED cleared", cleared[0])
 
-    def test_a_pass_past_its_bound_is_killed_and_alerts(self) -> None:
+    def test_a_pass_past_its_bound_is_killed_and_reported(self) -> None:
         # A fast-root pass is bounded by --sweep-timeout, not --slow-sweep-timeout.
         self.tools_passed(slow_sweep_at=999000.0)
         os.environ["FAKE_SWEEP"] = "hang"
@@ -623,12 +620,36 @@ class PrePushHooks(Harness):
         self.assertIn("did not end in 1s and was killed", messages[0])
         self.assertEqual(self.state_data()["slow_sweep_at"], 999000.0)
 
-    def test_a_missing_sweep_alerts(self) -> None:
+    def test_a_killed_pass_keeps_its_log_and_only_the_newest_few(self) -> None:
+        # The pass's log lives in a temporary directory removed when the pass ends; a killed pass's
+        # log, and what it printed, are kept beside the state file, and only the newest
+        # KILLED_SWEEP_LOGS of them stay. Control: before this change the report named no log and
+        # nothing was kept.
+        self.tools_passed(slow_sweep_at=999000.0)
+        os.environ["FAKE_SWEEP"] = "hang_logged"
+        keep = self.state.parent / "killed-sweeps"
+        with unittest.mock.patch.object(FOLLOW, "KILLED_SWEEP_LOGS", 2):
+            messages = self.run_follow(sweep_timeout=1.0, slow_sweep_timeout=30.0)
+            first = sorted(keep.glob("*Z-fast.log"))
+            self.assertEqual(len(first), 1)
+            self.assertEqual(len(messages), 1)
+            self.assertIn(f"Its log is kept at {FOLLOW.display_path(first[0])}.", messages[0])
+            self.assertIn("FAILED /src/stuck", first[0].read_text())
+            self.assertIn("still walking", first[0].read_text())
+            for now in (1_000_600.0, 1_001_200.0):
+                self.run_follow(now=now, sweep_timeout=1.0, slow_sweep_timeout=30.0)
+        left = sorted(keep.glob("*Z-*.log"))
+        self.assertEqual(len(left), 2)
+        self.assertNotIn(first[0], left)
+        self.assertEqual(list(keep.glob("*.new")), [])
+
+    def test_a_missing_sweep_is_reported(self) -> None:
         (self.hooks_dir / "sweep-hooks.sh").unlink()
         messages = self.run_follow()
         self.assertEqual(len(messages), 1)
         self.assertIn("sweep-hooks.sh is missing", messages[0])
-        self.assertIn("--only prepush", messages[0])
+        self.assertIn("Install it with devbox/sami-devbox-provision --only prepush.", messages[0])
+        self.assertNotIn("Install it from", messages[0])
 
     def test_a_pass_with_zero_deferred_is_complete(self) -> None:
         os.environ["FAKE_SWEEP"] = "complete"
@@ -798,11 +819,11 @@ class SlowRoots(Harness):
         self.assertEqual(self.sweeps()[-1], f"sweep /fast here={self.hooks_dir}")
 
     # Round 2, the review's finding 2: every pass ends before the run's deadline (--run-limit less
-    # the reserve for the state and alerts), and a slow-root pass starts only with its whole budget.
+    # the reserve for the state write), and a slow-root pass starts only with its whole budget.
     def timed_run(self, costs: dict[str, float], now: float = 1_000_000.0, **overrides) -> tuple[list, list[str]]:
         """A run whose clock moves by COSTS (seconds) on `git fetch`, on `git merge` (which then
         refuses, as when costs has "merge"), and on the tools step; returns ([(kind, budget) of each
-        hook sweep pass], the messages)."""
+        hook sweep pass], the reports)."""
         clock = [5000.0]
         passes: list = []
         git, sweep, tools = FOLLOW.git, FOLLOW.sweep_hooks, FOLLOW.install_tools
@@ -823,7 +844,7 @@ class SlowRoots(Harness):
             passes.append((kind, budget[0] if budget else options.slow_sweep_timeout if kind == "slow" else options.sweep_timeout))
             return sweep(options, kind, *budget)
 
-        values = {"sweep_timeout": 420.0, "slow_sweep_timeout": 1000.0, "http_timeout": 8.0, **overrides}
+        values = {"sweep_timeout": 420.0, "slow_sweep_timeout": 1000.0, **overrides}
         with unittest.mock.patch.object(FOLLOW, "monotonic", lambda: clock[0], create=True), \
                 unittest.mock.patch.object(FOLLOW, "git", timed_git), \
                 unittest.mock.patch.object(FOLLOW, "install_tools", timed_tools), \
@@ -833,7 +854,7 @@ class SlowRoots(Harness):
 
     def test_a_slow_pass_does_not_start_after_a_slow_fetch_and_merge(self) -> None:
         # The review's reproducer: fetch 119 s and a merge refusal 119 s, with a slow-root pass due.
-        # 1170 - 60 (reserve) - 238 = 872 s left: under 1000, so a fast-root pass of 420 s.
+        # 1170 - 12 (reserve) - 238 = 920 s left: under 1000, so a fast-root pass of 420 s.
         self.tools_passed()
         self.commit_upstream("new tool", scripts__tool="v2\n")
         passes, messages = self.timed_run({"fetch": 119.0, "merge": 119.0})
@@ -850,9 +871,9 @@ class SlowRoots(Harness):
         self.assertEqual(self.state_data()["slow_sweep_at"], 1_000_600.0)
 
     def test_a_fast_pass_is_cut_to_the_time_left(self) -> None:
-        # 1170 - 60 (reserve) - 700 = 410 s left, under the fast pass's 420.
+        # 1170 - 12 (reserve) - 748 = 410 s left, under the fast pass's 420.
         self.stamp(1_000_000.0 - 3600)
-        passes, _ = self.timed_run({"fetch": 700.0})
+        passes, _ = self.timed_run({"fetch": 748.0})
         self.assertEqual(passes, [("fast", 410.0)])
         self.assertEqual(self.state_data()["slow_sweep_at"], 1_000_000.0 - 3600)
 
@@ -860,20 +881,16 @@ class SlowRoots(Harness):
         self.state.write_text(json.dumps({"slow_sweep_at": 1_000_000.0 - 60}))
         self.commit_upstream("new tool", scripts__tool="v2\n")
         passes, _ = self.timed_run({"tools": 800.0})
-        self.assertEqual(passes, [("fast", 310.0)])
+        self.assertEqual(passes, [("fast", 358.0)])
 
     def test_no_pass_runs_without_the_time_for_one_and_that_is_reported(self) -> None:
         self.stamp(1_000_000.0 - 3600)
-        passes, messages = self.timed_run({"fetch": 1090.0})
+        passes, messages = self.timed_run({"fetch": 1138.0})
         self.assertEqual(passes, [])
         self.assertEqual(self.sweeps(), [])
         self.assertEqual(len(messages), 1)
         self.assertIn("PRE-PUSH HOOK NOT INSTALLED: no hook sweep pass ran", messages[0])
         self.assertEqual(self.state_data()["slow_sweep_at"], 1_000_000.0 - 3600)
-
-    def test_the_reserve_covers_three_messages_over_both_routes_and_the_state_write(self) -> None:
-        self.assertEqual(FOLLOW.alert_reserve(self.options(http_timeout=8.0)), 3 * 2 * 8.0 + FOLLOW.STATE_RESERVE)
-        self.assertEqual(FOLLOW.alert_reserve(self.options(http_timeout=8.0)), 60.0)
 
     # Round 2, the review's finding 3: a tools step that fails, or runs after every fast-forward, does
     # not keep the slow roots unswept; a run never runs the tools step and a slow-root pass both.
@@ -1151,7 +1168,7 @@ class TargetBytes(Harness):
         path.chmod(0o755)
         self.assert_refused("equal bytes, other mode", "UNCOMMITTED CHANGES", " M omp/plugins/package.json")
 
-    def test_a_frozen_plugin_install_failure_alerts(self) -> None:
+    def test_a_frozen_plugin_install_failure_is_reported(self) -> None:
         self.pin_upstream()
         os.environ["FAKE_BUN_RC"] = "1"
         messages = self.run_follow()
@@ -1161,6 +1178,73 @@ class TargetBytes(Harness):
         self.assertIn("TOOLS NOT INSTALLED", messages[0])
         self.assertIn("bun install --frozen-lockfile", messages[0])
         self.assertIn("lockfile is frozen", messages[0])
+
+
+class SendsNothing(Harness):
+    """dotfiles-follow sends no alert and no message
+    (dispatch://INFRA-2022/comment/0f96263e-1a85-4f29-85b3-ec713e6acf7b): a run that opens a
+    condition, started as each unit starts it, makes no request to an Envoy listener, and its report
+    is in its own output, which journald keeps."""
+
+    # Each command line a unit runs, with the routes the removed alert code took from it: the
+    # dev box's unit with a BOX_HEALTH_OWNER drop-in, and oryx's drop-in as its user manager loaded
+    # it before this change (which still passes --box-health-role until oryx reloads it).
+    UNITS = (
+        ("devbox/dotfiles-follow.service", [], {"BOX_HEALTH_OWNER": "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"}),
+        ("oryx's loaded drop-in", ["--no-hook-sweep", "--box-health-role", "legion-home-controller"], {}),
+    )
+
+    def test_a_refusal_reaches_no_envoy_listener(self) -> None:
+        requests: list[str] = []
+
+        class Listener(http.server.BaseHTTPRequestHandler):
+            def answer(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                requests.append(f"{self.command} {self.path} {self.rfile.read(length).decode(errors='replace')}")
+                body = b"{}"
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            do_GET = do_POST = do_PUT = answer
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Listener)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.commit_upstream("change a tool", scripts__tool="v2\n")
+        (self.repo / "scripts/tool").write_text("edited here\n")
+        driver = "from scripts.tests.test_dotfiles_follow import FOLLOW; raise SystemExit(FOLLOW.main())"
+        for unit, argv, routes in self.UNITS:
+            with self.subTest(unit=unit):
+                requests.clear()
+                # A fresh state for each, so the condition opens in each run.
+                state = self.state.with_name(f"state-{len(argv)}.json")
+                env = {
+                    **os.environ,
+                    "ENVOY_URL": f"http://127.0.0.1:{server.server_address[1]}",
+                    "ENVOY_TOKEN": "test-token",
+                    "PYTHONPATH": str(DOTFILES),
+                    **routes,
+                }
+                run = subprocess.run(
+                    [sys.executable, "-c", driver, "--repo", str(self.repo), "--state", str(state),
+                     "--hooks-dir", str(self.hooks_dir), *argv],
+                    cwd=DOTFILES, env=env, capture_output=True, text=True, timeout=300,
+                )
+                output = run.stdout + run.stderr
+                print(f"\n===== {unit}: the run's output, as journald keeps it:\n{output}", file=sys.stderr)
+                self.assertEqual(run.returncode, 0, output)
+                # The condition opened, so the removed code would have sent here.
+                self.assertIn("dirty", json.loads(state.read_text())["incidents"])
+                self.assertEqual(requests, [], "dotfiles-follow sent a request to Envoy")
+                self.assertIn("DOTFILES NOT FOLLOWING MAIN", run.stdout)
+                self.assertIn("UNCOMMITTED CHANGES", run.stdout)
 
 
 if __name__ == "__main__":

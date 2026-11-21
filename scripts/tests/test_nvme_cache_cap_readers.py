@@ -194,6 +194,27 @@ class NvmeCacheCapReaders(unittest.TestCase):
         self.assertTrue(cache.exists(), r.stdout)
         self.assertIn(f"removed {left}", r.stdout)
 
+    def test_a_cache_with_a_filesystem_mounted_inside_is_kept(self) -> None:
+        """rm -rf would delete a filesystem mounted inside a cache over its cap. The cache is kept,
+        not renamed, and the mounted file stays. Run in a user and mount namespace of its own,
+        where this user may mount a tmpfs."""
+        if shutil.which("unshare") is None or subprocess.run(
+                ["unshare", "-rm", "true"], capture_output=True, check=False).returncode != 0:
+            self.skipTest("needs `unshare -rm` to mount a tmpfs without root")
+        files = self.fill("nvme/cache/bun", "")
+        (files / "mnt").mkdir()
+        mounted = files / "mnt" / "data"
+        script = ('mount -t tmpfs none "$1" && echo precious > "$2" || exit 9\n'
+                  '"$3"; rc=$?\nif [ -f "$2" ]; then echo "MOUNTED FILE SURVIVED"; fi\nexit $rc\n')
+        r = subprocess.run(["unshare", "-rm", "sh", "-c", script, "sh", str(files / "mnt"), str(mounted),
+                            str(DEVBOX / "nvme-cache-cap")], capture_output=True, text=True, check=False, timeout=600,
+                           env=dict(self.env, BUN_CACHE_CAP_BYTES="0", NVME_CACHE_PROC=str(self.root / "no-proc")))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("MOUNTED FILE SURVIVED", r.stdout)
+        self.assertIn(f"kept {self.root / 'nvme/cache/bun'}: a filesystem is mounted inside it, at {files}/mnt",
+                      r.stdout)
+        self.assertTrue((files / "later").exists(), r.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

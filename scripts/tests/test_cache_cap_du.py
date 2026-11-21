@@ -43,6 +43,9 @@ class CacheCapDu(unittest.TestCase):
         (self.nvme / "cache" / "uv").mkdir(parents=True)
         self.gocache = self.root / "gocache"
         self.gocache.mkdir()
+        (self.gocache / "trim.txt").write_text("1794800777", encoding="utf-8")
+        (self.gocache / "README").write_text("This directory holds cached build artifacts from the Go build system.\n",
+                                             encoding="utf-8")
         self.env = {"HOME": str(self.root), "PATH": f"{stubs}:{os.environ['PATH']}", "TMPDIR": str(self.root)}
 
     def tearDown(self) -> None:
@@ -51,7 +54,7 @@ class CacheCapDu(unittest.TestCase):
     def run_unit(self, name: str, err: str, rc: int) -> subprocess.CompletedProcess:
         env = dict(self.env, STUB_DU_ERR=err, STUB_DU_RC=str(rc), STUB_DU_SIZE="1000",
                    NVME_CACHE_ROOT=str(self.nvme), SCRATCH_CACHE_ROOT=str(self.root / "none"),
-                   GOCACHE_CAP_DIR=str(self.gocache))
+                   GOCACHE_CAP_ROOTS=str(self.gocache), PROC_ROOT=str(self.root / "no-proc"))
         return subprocess.run([str(DEVBOX / name), "--dry-run"] if name == "nvme-cache-cap" else [str(DEVBOX / name)],
                               capture_output=True, text=True, env=env, check=False, timeout=60)
 
@@ -68,7 +71,8 @@ class CacheCapDu(unittest.TestCase):
     def test_gocache_cap_takes_the_total_when_an_entry_vanishes(self) -> None:
         r = self.run_unit("gocache-cap", VANISHED.format(d=self.gocache), 1)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn(f"gocache-cap: {self.gocache} is 1000 bytes, at or under the trim size", r.stdout)
+        self.assertIn(f"gocache-cap: 1 Go build cache under {self.gocache} (to depth 4) holds 1000 bytes, "
+                      "at or under the trim size", r.stdout)
 
     def test_gocache_cap_still_fails_on_another_du_error(self) -> None:
         r = self.run_unit("gocache-cap", UNREADABLE.format(d=self.gocache), 1)

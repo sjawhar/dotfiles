@@ -36,8 +36,8 @@
         "description": "gmail.send, chat.messages.create and chat.spaces.readonly: +send, post Google Chat messages and list Chat spaces (cannot read mail or Chat messages); one approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
       },
       "admin": {
-        "command": ["secret-run", "--reason", "gws theorem admin", "--wait", "4m", "GWS_THEOREM_ADMIN_OAUTH", "--"],
-        "description": "Admin SDK Directory (users, groups, org units, roles) and Groups Settings, consented by sami@theorem.dev. gws cannot call it: use the google-workspace skill's recipe for APIs gws lacks. One approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
+        "command": ["secret-run", "--reason", "gws theorem admin", "--wait", "4m", "--ttl", "1h", "GWS_THEOREM_ADMIN_OAUTH", "--"],
+        "description": "Admin SDK Directory (users, groups, org units, roles) and Groups Settings, consented by sami@theorem.dev. gws cannot call it: use the google-workspace skill's recipe for APIs gws lacks. One approval per hour at most: a Dispatch grant from the credential broker that ends after one hour (--ttl 1h), or a YubiKey touch where the broker does not serve the session"
       }
     }
   },

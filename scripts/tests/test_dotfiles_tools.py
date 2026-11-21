@@ -13,8 +13,12 @@ import fcntl
 import importlib.machinery
 import importlib.util
 import os
+import re
+import shlex
+import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -23,6 +27,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SYNC = ROOT / "scripts" / "dotfiles-sync"
 PUBLISH = ROOT / "scripts" / "dotfiles-publish"
+# The limit on a sync, a publish or a git setup call: it only stops a stuck run. On a dev box at
+# load average 900-1500 (288 CPUs, 2026-11-20) one run took up to 52 s, and a 15 s limit failed
+# nine cases that do not hang. The limits under test (DOTFILES_TOOLS_TIMEOUT, the kill grace) stay
+# short; a case whose limit fails runs into this guard and fails.
+HANG_GUARD = 180
 _SYNC_LOADER = importlib.machinery.SourceFileLoader("dotfiles_sync_fixture", str(Path(__file__).with_name("test_dotfiles_sync.py")))
 _SYNC_SPEC = importlib.util.spec_from_loader(_SYNC_LOADER.name, _SYNC_LOADER)
 assert _SYNC_SPEC is not None
@@ -119,7 +128,7 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         )
         ssh.chmod(0o755)
 
-    def _run(self, script: Path, *args: str, env: dict[str, str] | None = None, cwd: Path | None = None, timeout: float = 15) -> subprocess.CompletedProcess[str]:
+    def _run(self, script: Path, *args: str, env: dict[str, str] | None = None, cwd: Path | None = None, timeout: float = HANG_GUARD) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash", str(script), *args],
             cwd=cwd,
@@ -129,7 +138,7 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
             timeout=timeout,
         )
 
-    def sync(self, *args: str, env: dict[str, str] | None = None, timeout: float = 15) -> subprocess.CompletedProcess[str]:
+    def sync(self, *args: str, env: dict[str, str] | None = None, timeout: float = HANG_GUARD) -> subprocess.CompletedProcess[str]:
         return self._run(SYNC, *args, env=env, timeout=timeout)
 
     def publish(self, rev: str, env: dict[str, str] | None = None, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -161,7 +170,7 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         checkout = home / ".dotfiles"
         env = {**self.env, "HOME": str(home)}
         cloned = subprocess.run(
-            ["git", "clone", "-q", str(self.origin), str(checkout)], env=env, capture_output=True, text=True, timeout=10
+            ["git", "clone", "-q", str(self.origin), str(checkout)], env=env, capture_output=True, text=True, timeout=HANG_GUARD
         )
         self.assertEqual(cloned.returncode, 0, cloned.stderr)
         self._write_standin("mise", checkout / "bin" / "mise")
@@ -201,10 +210,10 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assert_tools_ran()
         self.assertEqual(self.calls("mise")[0].split("|")[-1], "fakehost")
 
-    def test_case_03b_remote_ssh_limit_covers_the_move_the_lock_wait_and_both_commands(self) -> None:
+    def test_case_03b_remote_ssh_limit_covers_the_move_the_lock_wait_and_every_command(self) -> None:
         # The ssh limit is the remote host's whole budget: 180 s move, 300 s sync-lock wait, and
-        # each tools command's limit plus its 10 s kill grace. Left at the move's 180 s, a remote
-        # install longer than that is killed mid-download.
+        # each tools command's limit plus its 10 s kill grace, for omp-link-rules, mise and Bun.
+        # Left at the move's 180 s, a remote install longer than that is killed mid-download.
         self._install_ssh()
         ssh = self.root / "bin" / "ssh"
         ssh.rename(self.root / "bin" / "ssh-step")
@@ -213,7 +222,7 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
             'echo >> "$SSH_RECORD.parent"\nexec "$(dirname "$0")/ssh-step" "$@"\n'
         )
         ssh.chmod(0o755)
-        for limit, outer in ((None, 1700), ("5", 510)):
+        for limit, outer in ((None, 2310), ("5", 525)):
             with self.subTest(DOTFILES_TOOLS_TIMEOUT=limit):
                 Path(f"{self.ssh_record}.parent").write_text("")
                 env = dict(self.env)
@@ -231,9 +240,9 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         destinations = [line.split("|", 1)[0] for line in self.ssh_record.read_text().splitlines()]
-        self.assertEqual(destinations, ["sami@sami", "sami@sami-leanperf", "sami@sami-rocqperf"])
-        self.assertEqual(len(self.calls("mise")), 3, self.records())
-        self.assertEqual(len(self.calls("bun")), 3, self.records())
+        self.assertEqual(destinations, ["sami@sami"])
+        self.assertEqual(len(self.calls("mise")), 1, self.records())
+        self.assertEqual(len(self.calls("bun")), 1, self.records())
 
     def test_case_05_plain_git_checkout_runs_tools(self) -> None:
         _, env = self.plain_checkout("plain")
@@ -270,11 +279,11 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         local, local_env = self.plain_checkout("local")
         (local / "local.txt").write_text("local\n")
         committed = subprocess.run(
-            ["git", "add", "local.txt"], cwd=local, env=local_env, capture_output=True, text=True, timeout=10
+            ["git", "add", "local.txt"], cwd=local, env=local_env, capture_output=True, text=True, timeout=HANG_GUARD
         )
         self.assertEqual(committed.returncode, 0, committed.stderr)
         committed = subprocess.run(
-            ["git", "commit", "-q", "-m", "local"], cwd=local, env=local_env, capture_output=True, text=True, timeout=10
+            ["git", "commit", "-q", "-m", "local"], cwd=local, env=local_env, capture_output=True, text=True, timeout=HANG_GUARD
         )
         self.assertEqual(committed.returncode, 0, committed.stderr)
         local_result = self.sync("local", env=local_env)
@@ -313,11 +322,14 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assertEqual(len(self.calls("bun")), 1, self.records())
 
     def test_case_10_mise_and_bun_timeouts_leave_the_move(self) -> None:
+        # The limit under test is DOTFILES_TOOLS_TIMEOUT=2. The stand-in's sleep outlives its shell,
+        # so the step also waits out its 10 s grace before it kills the group. A run that returns
+        # before the 600 s install would end shows the limit worked; HANG_GUARD only stops a stuck run.
         started = time.monotonic()
         mise = self.sync(
-            "local", env={**self.env, "DOTFILES_TOOLS_TIMEOUT": "2", "FAKE_MISE_SLEEP": "30"}, timeout=15
+            "local", env={**self.env, "DOTFILES_TOOLS_TIMEOUT": "2", "FAKE_MISE_SLEEP": "600"}
         )
-        self.assertLess(time.monotonic() - started, 15)
+        self.assertLess(time.monotonic() - started, HANG_GUARD)
         self.assertNotEqual(mise.returncode, 0, mise.stdout + mise.stderr)
         self.assertIn("`mise install`", mise.stderr)
         self.assertIn("exited 124", mise.stderr)
@@ -330,13 +342,22 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.clear_records()
         started = time.monotonic()
         bun = self.sync(
-            "local", env={**self.env, "DOTFILES_TOOLS_TIMEOUT": "2", "FAKE_BUN_SLEEP": "30"}, timeout=15
+            "local", env={**self.env, "DOTFILES_TOOLS_TIMEOUT": "2", "FAKE_BUN_SLEEP": "600"}
         )
-        self.assertLess(time.monotonic() - started, 15)
+        self.assertLess(time.monotonic() - started, HANG_GUARD)
         self.assertNotEqual(bun.returncode, 0, bun.stdout + bun.stderr)
         self.assertIn("`bun install --frozen-lockfile`", bun.stderr)
         self.assertIn("exited 124", bun.stderr)
         self.assertIn("past its limit of 2 s", bun.stderr)
+
+    def test_case_10a_a_mise_that_exits_124_at_once_is_not_past_its_limit(self) -> None:
+        # mise can exit 124 itself; the note is only for a run that lasted the limit.
+        result = self.sync("local", env={**self.env, "DOTFILES_TOOLS_TIMEOUT": "2", "FAKE_MISE_RC": "124"})
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("`mise install`", result.stderr)
+        self.assertIn("exited 124", result.stderr)
+        self.assertNotIn("past its limit", result.stderr)
 
     def test_case_11_host_loop_continues_after_a_failure(self) -> None:
         self._install_ssh()
@@ -377,12 +398,14 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         fcntl.flock(held, fcntl.LOCK_EX)
         try:
             started = time.monotonic()
-            result = self.sync("local", env={**self.env, "DOTFILES_TOOLS_TIMEOUT": "2"}, timeout=15)
+            # The lock stays held until the run returns, so only the 2 s limit under test can end
+            # the wait; HANG_GUARD stops the run if it does not.
+            result = self.sync("local", env={**self.env, "DOTFILES_TOOLS_TIMEOUT": "2"})
         finally:
             fcntl.flock(held, fcntl.LOCK_UN)
             held.close()
 
-        self.assertLess(time.monotonic() - started, 15)
+        self.assertLess(time.monotonic() - started, HANG_GUARD)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("`mise install`", result.stderr)
         self.assertIn("exited 124", result.stderr)
@@ -409,7 +432,9 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         )
         pid = None
         try:
-            for _ in range(100):
+            # Reaching the install step is not under test; the grace after it starts is.
+            deadline = time.monotonic() + HANG_GUARD
+            while time.monotonic() < deadline:
                 if pid_file.exists() and pid_file.read_text().strip():
                     break
                 time.sleep(0.1)
@@ -418,13 +443,13 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
             # inside the grace with 2 s of margin on one side and 8 s on the other.
             time.sleep(4)
             self.assertTrue(Path(f"/proc/{pid}").exists(), "the survivor was killed before the grace ended")
-            during = subprocess.run(["flock", "-n", "-E", "75", str(lock), "true"], capture_output=True, text=True, timeout=3)
+            during = subprocess.run(["flock", "-n", "-E", "75", str(lock), "true"], capture_output=True, text=True, timeout=HANG_GUARD)
             self.assertEqual(during.returncode, 75, "the lock was free while the survivor still ran")
-            stdout, stderr = sync.communicate(timeout=40)
+            stdout, stderr = sync.communicate(timeout=HANG_GUARD)
             self.assertNotEqual(sync.returncode, 0, stdout + stderr)
             self.assertIn("exited 124", stderr)
             self.assertFalse(Path(f"/proc/{pid}").exists(), f"survivor {pid} remains")
-            after = subprocess.run(["flock", "-n", str(lock), "true"], capture_output=True, text=True, timeout=3)
+            after = subprocess.run(["flock", "-n", str(lock), "true"], capture_output=True, text=True, timeout=HANG_GUARD)
             self.assertEqual(after.returncode, 0, after.stderr)
         finally:
             if sync.poll() is None:
@@ -527,7 +552,7 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
             env=env,
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=HANG_GUARD,
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -704,7 +729,7 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
             env=env,
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=HANG_GUARD,
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -899,6 +924,186 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_tools_ran()
         self.assertEqual(self.calls("mise")[0].split("|")[1], str(self.checkout), self.records())
+
+    def with_rule_linker(self, rule: str = "new-rule.md") -> None:
+        """Main gains the real omp-link-rules, the installer helpers it sources, and one rule."""
+        for path in ("scripts/omp-link-rules", "installers/lib.sh"):
+            target = self.upstream / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((ROOT / path).read_bytes())
+            target.chmod((ROOT / path).stat().st_mode)
+        (self.upstream / "omp" / "rules").mkdir(parents=True, exist_ok=True)
+        (self.upstream / "omp" / "rules" / rule).write_text("---\nalwaysApply: true\n---\nA rule.\n")
+        self.commit_upstream("a new omp rule")
+
+    def test_case_32_a_rule_the_move_brings_is_linked_into_omp(self) -> None:
+        # With dotfiles-follow retired on sami-devbox, dotfiles-sync is what moves the checkout,
+        # and the rule of dotfiles#133 (omp/rules/codegraph.md) stayed dark until linked by hand.
+        self.with_rule_linker()
+        result = self.sync("local")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        link = self.home / ".omp" / "agent" / "rules" / "new-rule.md"
+        self.assertTrue(link.is_symlink(), result.stdout + result.stderr)
+        self.assertEqual(os.readlink(link), str(self.checkout / "omp" / "rules" / "new-rule.md"))
+        self.assertIn(f"tools: `omp-link-rules` passed in {self.checkout}\n", result.stdout)
+        self.assert_tools_ran()
+
+    def test_case_32a_a_failed_rule_link_is_reported_and_the_installs_still_run(self) -> None:
+        self.with_rule_linker()
+        rules = self.home / ".omp" / "agent" / "rules"
+        rules.mkdir(parents=True)
+        (rules / "new-rule.md").write_text("an edit made in place\n")
+        result = self.sync("local")
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("`omp-link-rules`", result.stderr)
+        self.assertIn("is a file that differs", result.stderr)
+        self.assertFalse((rules / "new-rule.md").is_symlink())
+        self.assert_tools_ran()
+
+    def test_case_32b_a_checkout_that_is_not_home_dotfiles_links_no_rule(self) -> None:
+        # A link made from another clone would point every session's rules at that clone.
+        self.with_rule_linker()
+        clone = self.root / "clone"
+        self.run_ok("git", "clone", "-q", str(self.origin), str(clone))
+        self._write_standin("mise", clone / "bin" / "mise")
+        result = self._run(SYNC, "--tools", str(clone))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"tools: {clone} is not ~/.dotfiles; omp rules not linked\n", result.stdout)
+        self.assertFalse((self.home / ".omp" / "agent" / "rules" / "new-rule.md").exists())
+        self.assert_tools_ran()
+
+
+def tools_functions() -> str:
+    """tools_error and tools_run as scripts/dotfiles-sync defines them: each from its `NAME() {`
+    line to the first `}` that starts a line."""
+    source = SYNC.read_text(encoding="utf-8")
+    definitions: list[str] = []
+    for name in ("tools_error", "tools_run"):
+        matches = re.findall(rf"^{name}\(\) \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL)
+        if len(matches) != 1:
+            raise AssertionError(f"scripts/dotfiles-sync: {name}: found {len(matches)} definitions")
+        definitions.append(matches[0])
+    return "".join(definitions)
+
+
+class ToolsRunClock(unittest.TestCase):
+    """The clock of tools_run, read through the note of tools_error. The two functions run alone,
+    in a bash that sets what they need as scripts/dotfiles-sync sets it, so a test can choose when
+    the run starts and which locale the bash has."""
+
+    def scratch(self) -> Path:
+        """A directory of the test's own, removed after it."""
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        return Path(temp_dir.name)
+
+    def tools_run(
+        self, root: Path, command: str, before: str = "", after: str = "", env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        """BEFORE, then `tools_run t ROOT 2 bash -c COMMAND` as tools_step calls it, then AFTER. The
+        last line of stdout is `status <its status>`."""
+        script = "\n".join(
+            [
+                "set -euo pipefail",
+                "tools_grace=10",
+                tools_functions(),
+                before,
+                "status=0",
+                f"tools_run t {shlex.quote(str(root))} 2 bash -c {shlex.quote(command)} || status=$?",
+                after,
+                'printf "status %s\\n" "$status"',
+            ]
+        )
+        return subprocess.run(
+            ["bash", "-c", script],
+            env={"PATH": "/usr/bin:/bin", "HOME": str(root), "TMPDIR": str(root), **(env or {})},
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=30,
+        )
+
+    def test_case_10b_a_run_shorter_than_its_limit_is_not_past_it_whatever_second_it_starts_in(self) -> None:
+        # The run starts 0.8 to 0.9 s into a second and lasts 1.3 s, so it ends two seconds later. A
+        # clock of whole seconds reads that as the whole limit of 2 s and prints the note; the clock
+        # in microseconds reads 1.3 s. A run that starts before 0.8 can end in the next second, and
+        # after 0.9 tools_run can read its start in the next second; either way a clock of whole
+        # seconds reads 1 s.
+        # On a loaded machine, the start of timeout, bash and sleep can make a run last the whole
+        # 2 s, and then a correct clock prints the note too. So the test bash times each call of
+        # tools_run from outside, and the test keeps the first run that lasted less than 2 s: the
+        # clock inside tools_run then reads less than 2 s too.
+        wait = (
+            "while :; do\n"
+            "    fraction=$(( 10#${EPOCHREALTIME: -6} ))\n"
+            "    if (( fraction >= 800000 && fraction < 900000 )); then break; fi\n"
+            "    sleep 0.01\n"
+            "done\n"
+            "outer=${EPOCHREALTIME//[!0-9]/}"
+        )
+        outer = 'printf "outer %s\\n" "$(( ${EPOCHREALTIME//[!0-9]/} - outer ))"'
+        root = self.scratch()
+        for _ in range(5):
+            result = self.tools_run(root, "sleep 1.3; exit 124", before=wait, after=outer)
+            lasted = re.search(r"^outer ([0-9]+)$", result.stdout, re.MULTILINE)
+            self.assertIsNotNone(lasted, result.stdout + result.stderr)
+            assert lasted is not None
+            if int(lasted.group(1)) < 2_000_000:
+                break
+        else:
+            self.skipTest(
+                "this machine was too slow: each of 5 runs lasted the whole 2 s limit, so the test did"
+                " not check the note"
+            )
+
+        self.assertEqual(result.stdout.splitlines()[-1:], ["status 124"], result.stdout + result.stderr)
+        self.assertIn(f"tools step: `t` in {root} exited 124", result.stderr)
+        self.assertNotIn("past its limit", result.stderr)
+
+    def test_case_10c_a_locale_whose_decimal_point_is_neither_a_dot_nor_a_comma(self) -> None:
+        # Bash puts the locale's decimal point into EPOCHREALTIME; for ps_AF it puts the first byte
+        # of U+066B. A clock that drops only a `.` or a `,` then holds no number, and its arithmetic
+        # error stops the call of tools_run before it reports the status.
+        localedef = shutil.which("localedef")
+        if localedef is None:
+            self.skipTest("localedef is not installed")
+        source = Path("/usr/share/i18n/locales/ps_AF")
+        if not source.is_file():
+            self.skipTest(f"the locale source {source} is not installed")
+        charmaps = (Path("/usr/share/i18n/charmaps/UTF-8.gz"), Path("/usr/share/i18n/charmaps/UTF-8"))
+        if not any(path.is_file() for path in charmaps):
+            self.skipTest(f"the charmap {charmaps[0]} (or {charmaps[1]}) is not installed")
+        root = self.scratch()
+        locales = root / "locales"
+        locales.mkdir()
+        built = subprocess.run(
+            [localedef, "-i", "ps_AF", "-f", "UTF-8", str(locales / "ps_AF.UTF-8")],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        locale = {"LOCPATH": str(locales), "LC_ALL": "ps_AF.UTF-8"}
+        # Control: under this locale, the separator in bash's EPOCHREALTIME is neither `.` nor `,`.
+        clock = subprocess.run(
+            ["bash", "-c", 'printf %s "$EPOCHREALTIME"'],
+            env={"PATH": "/usr/bin:/bin", **locale},
+            capture_output=True,
+            timeout=30,
+        )
+        separator = re.fullmatch(rb"[0-9]+([^0-9]+)[0-9]{6}", clock.stdout)
+        self.assertIsNotNone(separator, repr(clock))
+        assert separator is not None
+        self.assertNotIn(separator.group(1), (b".", b","), repr(clock))
+
+        result = self.tools_run(root, "exit 124", env=locale)
+
+        self.assertEqual(result.stdout.splitlines()[-1:], ["status 124"], result.stdout + result.stderr)
+        self.assertIn(f"tools step: `t` in {root} exited 124", result.stderr)
+        self.assertNotIn("past its limit", result.stderr)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 """Marketplace pins upgrade, report failures and recover a dirty follow-managed lock.
 
 Run with: python3 -m unittest -v scripts.tests.test_dotfiles_follow_marketplace
-The shared follower harness supplies throwaway git repositories and fake mise/bun/Envoy;
+The shared follower harness supplies throwaway git repositories and fake mise and bun;
 only the shim below handles marketplace commands, with no real omp or network access.
 """
 
@@ -478,7 +478,7 @@ class MarketplacePlugins(Harness):
         self.assertEqual(len(self.calls()), 8)
         self.assert_clean_lock()
 
-    def test_post_update_alerts_escalate_once_with_on_main_headline(self) -> None:
+    def test_post_update_report_opens_once_with_on_main_headline(self) -> None:
         os.environ["FAKE_OMP_FAIL"] = "dev-infra"
         os.environ["FAKE_SWEEP"] = "failed"
         opened = self.run_follow()
@@ -489,12 +489,8 @@ class MarketplacePlugins(Harness):
         self.assertIn("PRE-PUSH HOOK NOT INSTALLED", opened[0])
         self.assertEqual(self.head(), self.target)
         self.assertEqual(self.run_follow(now=1_000_600.0), [])
-        escalated = self.run_follow(now=1_007_200.0)
-        self.assertEqual(len(escalated), 1)
-        self.assertIn("is on main, but a post-update step is still failing", escalated[0].splitlines()[0])
-        self.assertNotIn("NOT FOLLOWING MAIN", escalated[0].splitlines()[0])
-        self.assertIn("2.0h after the first alert", escalated[0])
-        self.assertEqual(self.run_follow(now=1_007_800.0), [])
+        # Not reported again while it holds, even two hours later.
+        self.assertEqual(self.run_follow(now=1_007_200.0), [])
         os.environ["FAKE_OMP_FAIL"] = ""
         os.environ["FAKE_SWEEP"] = "ok"
         cleared = self.run_follow(now=1_008_400.0)
@@ -642,11 +638,7 @@ class MarketplacePlugins(Harness):
             + f"    Path({str(marker)!r}).write_text(str(os.getpid()))\n"
             + "    time.sleep(30)\n"
         )
-        driver = (
-            "from scripts.tests.test_dotfiles_follow import FOLLOW, FakeEnvoy; "
-            "FakeEnvoy.instances = []; FOLLOW.Envoy = FakeEnvoy; "
-            "raise SystemExit(FOLLOW.main())"
-        )
+        driver = "from scripts.tests.test_dotfiles_follow import FOLLOW; raise SystemExit(FOLLOW.main())"
         proc = subprocess.Popen([
             sys.executable, "-c", driver,
             "--repo", str(self.repo), "--state", str(self.state), "--hooks-dir", str(self.hooks_dir),
@@ -788,12 +780,17 @@ class MarketplacePlugins(Harness):
 
     def test_marketplace_budget_stops_launching_commands_and_restores_lock(self) -> None:
         self.take_upstream()
-        os.environ["FAKE_OMP_DELAY"] = "0.5"
-        start = time.monotonic()
-        with unittest.mock.patch.object(FOLLOW, "MARKETPLACE_TIMEOUT", 0.2, create=True):
-            why = FOLLOW.install_tools(self.repo, self.options())
+        # The 2 s budget gives a loaded machine time to start the fake omp and log its call.
+        # The delay is far past the budget, so the step ends early only when the budget stops it.
+        delay = 10
+        os.environ["FAKE_OMP_DELAY"] = str(delay)
+        timeout = self.options().mise_timeout
+        with unittest.mock.patch.object(FOLLOW, "MARKETPLACE_TIMEOUT", 2.0):
+            start = time.monotonic()
+            why = FOLLOW.install_marketplace_plugins(self.repo, timeout)
+            elapsed = time.monotonic() - start
         self.assertIn("budget", why)
-        self.assertLess(time.monotonic() - start, 2)
+        self.assertLess(elapsed, delay)
         self.assertEqual(self.calls(), [["plugin", "marketplace", "update", "verification-skills"]])
         self.assert_clean_lock()
 

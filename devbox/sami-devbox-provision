@@ -99,10 +99,8 @@ SECRET_FILES=(
 # The standalone installers sami-rocqperf runs that install.sh and devbox/install.sh do not
 # (spec "Software"; the inventory's user units). Left out on purpose: forward's laptop roles,
 # chathub, voxtype, ghostty (laptop programs); transcript-store-jobs, whose units move with their
-# owner at step 4; omp-login-watch, which reads omp's credential store (~/.omp/agent/agent.db)
-# and so arms at step 5, when the global omp state copies; and pulumi-drift-watch, which mints
-# its token from the `theorem` gcloud configuration, a person's login that this machine never
-# holds.
+# owner at step 4; and omp-login-watch, which reads omp's credential store
+# (~/.omp/agent/agent.db) and so arms at step 5, when the global omp state copies.
 EXTRA_INSTALLERS=(
     disk-fill-watch load-swap-watch envoy-role-holder-watch session-cpu-record
     # No gateway credential installer: every gateway provider mints this box's own identity token

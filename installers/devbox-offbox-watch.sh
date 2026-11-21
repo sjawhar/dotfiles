@@ -51,12 +51,5 @@ case "$hub" in
     *) echo "$name: Envoy's hub is $hub, which is not $host, so its alerts survive $host." ;;
 esac
 
-# Respect a deliberate stop: a timer someone disabled after it was armed stays off.
-if [ -L "$HOME/.config/systemd/user/$name.timer" ] \
-    && ! systemctl --user is-enabled --quiet "$name.timer" 2>/dev/null; then
-    echo "$name: timer is linked but disabled; leaving it off (enable it by hand to re-arm)"
-    exit 0
-fi
-
 ensure_box_health_owner "$name" || exit 1
 arm_user_timer omp "$name"

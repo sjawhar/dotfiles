@@ -661,6 +661,28 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertIn(cause, stderr)
         self.assertEqual(self.secrets_calls(), [])
 
+    def test_the_clients_enrollment_wait_notices_are_never_the_cause(self):
+        # The client says it waits for a launcher still enrolling the box before its own
+        # refusal; the cause is the refusal, whether the launcher finished in that wait and a
+        # later step failed, or the wait ran out.
+        notices = (
+            "agent-secrets: the launcher is still enrolling this process (/run/user/1/agent-secrets/enrollment.pending is there); waiting up to 20s for its key.pem and enrollment\n"
+            "agent-secrets: still waiting for the launcher's enrollment\n"
+        )
+        for cause in (
+            "agent-secrets: nothing answered at 127.0.0.1:9: the connection was refused",
+            "agent-secrets: /run/user/1/agent-secrets/key.pem: not a PEM file (waited 20s while /run/user/1/agent-secrets/enrollment.pending was there)",
+        ):
+            with self.subTest(cause=cause), patch.dict(
+                os.environ, {"SECRET_RUN_STUB_EXIT": "1", "SECRET_RUN_STUB_STDERR": notices + cause}
+            ):
+                rc, stdout, stderr = self.run_main(
+                    ["agent", "get"], stdin="host=github.com\npath=sjawhar/dotfiles.git\n\n"
+                )
+                self.assertEqual((rc, stdout), (1, "quit=1\n"))
+                self.assertIn(f"failed (exit 1): {cause}", stderr)
+        self.assertEqual(self.secrets_calls(), [])
+
     def test_uninstalled_owner_without_fallback_secret_quits(self):
         del self.git_config["gh-app.agent.fallback-secret"]
 
@@ -863,9 +885,11 @@ class BoxEnrollmentWait(unittest.TestCase):
         self.key_dir.mkdir()
         self.marker = self.key_dir / gh_app_token.ENROLLMENT_MARKER
 
-    def wait(self, sleep, key_dir=True):
-        """wait_for_box_enrollment with `sleep` standing in for time.sleep; returns its stderr."""
-        environment = {"AGENT_SECRETS_KEY_DIR": str(self.key_dir)} if key_dir else {}
+    def wait(self, sleep, environment=None):
+        """wait_for_box_enrollment with `sleep` standing in for time.sleep, in environment (by
+        default one naming this test's key dir); returns its stderr."""
+        if environment is None:
+            environment = {"AGENT_SECRETS_KEY_DIR": str(self.key_dir)}
         err = io.StringIO()
         with (
             patch.dict(os.environ, environment, clear=True),
@@ -879,8 +903,13 @@ class BoxEnrollmentWait(unittest.TestCase):
         self.fail(f"waited {seconds}s where nothing says an enrollment is under way")
 
     def test_a_host_session_never_waits(self):
+        """A host session's key dir is its runtime dir's agent-secrets, which holds the helper's
+        socket and no marker; a marker in another dir holds nothing."""
         self.marker.touch()
-        self.assertEqual(self.wait(self.never_sleeps, key_dir=False), "")
+        host = Path(self.temp_dir.name) / "host-runtime"
+        (host / "agent-secrets").mkdir(parents=True)
+        (host / "agent-secrets" / "helper.sock").touch()
+        self.assertEqual(self.wait(self.never_sleeps, environment={"XDG_RUNTIME_DIR": str(host)}), "")
 
     def test_a_box_whose_enrollment_has_ended_never_waits(self):
         self.assertEqual(self.wait(self.never_sleeps), "")
@@ -920,6 +949,35 @@ class BoxEnrollmentWait(unittest.TestCase):
         self.assertEqual(clock[0], gh_app_token.ENROLLMENT_WAIT_SECONDS)
         # Long enough for the 116 s a box took to enroll on 2026-11-01.
         self.assertGreaterEqual(gh_app_token.ENROLLMENT_WAIT_SECONDS, 160)
+
+    def test_an_environment_without_the_key_dir_variable_waits_on_the_clients_default(self):
+        """An environment that dropped AGENT_SECRETS_* (omp's eval kernel) still reaches the
+        box's key dir: the agent-secrets client falls back to $XDG_RUNTIME_DIR/agent-secrets, so
+        the wait does too, or the client would meet the marker with only its own 20 s."""
+        self.marker.touch()
+        slept = []
+
+        def sleep(seconds):
+            slept.append(seconds)
+            self.marker.unlink()
+
+        stderr = self.wait(sleep, environment={"XDG_RUNTIME_DIR": self.temp_dir.name})
+        self.assertEqual(len(slept), 1)
+        self.assertEqual(stderr.count("still being enrolled"), 1)
+
+    def test_a_named_key_dir_is_the_only_one_read(self):
+        """The client reads the default only when AGENT_SECRETS_KEY_DIR is unset, so a marker in
+        the default dir does not hold a call whose named key dir has none."""
+        self.marker.touch()
+        named = Path(self.temp_dir.name) / "named"
+        named.mkdir()
+        environment = {"AGENT_SECRETS_KEY_DIR": str(named), "XDG_RUNTIME_DIR": self.temp_dir.name}
+        self.assertEqual(self.wait(self.never_sleeps, environment=environment), "")
+
+    def test_with_neither_variable_the_key_dir_is_the_clients_last_default(self):
+        """The client's last default is helper.DefaultSocket's directory under /run/user/<uid>."""
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(gh_app_token.box_key_dir(), Path(f"/run/user/{os.getuid()}") / "agent-secrets")
 
 
 
@@ -1055,6 +1113,90 @@ class CacheOffTheRootDisk(unittest.TestCase):
                 time.sleep(0.05)
             os.close(reader)
         self.assertEqual(lines.count(b"\n"), 2, "the decision lines were not written once the log could be")
+
+    def test_the_decision_log_writer_does_not_keep_a_lock_its_caller_passed_down(self):
+        # A mise that holds .dotfiles-install.lock on an inherited descriptor runs this command as
+        # its GitHub credential command; the detached log writer must not keep that lock while its
+        # write waits (dispatch://INFRA-4798). The pipe behind decisions.log is full and nobody
+        # reads it, so the writer waits in its write with the log open: the lock is probed then,
+        # and only after that is the pipe read, so the writer still writes its line.
+        import fcntl
+        home = self.root / "home"
+        cache = home / ".cache" / "gh-app-token"
+        cache.mkdir(parents=True, mode=0o700)
+        expires = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        (cache / "token-agent--app-123--acme.json").write_text(json.dumps({"token": "ghs_cached", "expires_at": expires}))
+        gitconfig = self.root / "gitconfig"
+        gitconfig.write_text('[gh-app "agent"]\n\tapp-id = 123\n')
+        log = cache / "decisions.log"
+        os.mkfifo(log)
+        # The test's own end, read-write so its open does not wait; filled, so a write waits.
+        pipe = os.open(log, os.O_RDWR | os.O_NONBLOCK)
+        self.addCleanup(os.close, pipe)
+        try:
+            while True:
+                os.write(pipe, b"x" * 4096)
+        except BlockingIOError:
+            pass
+        fifo = os.stat(log)
+        lock = self.root / "install.lock"
+        held = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "USER": "no-such-user-gh-app-token-test",
+               "GIT_CONFIG_GLOBAL": str(gitconfig), "GIT_CONFIG_NOSYSTEM": "1"}
+
+        def writer():
+            """The pid, other than this one, that has decisions.log open. Only processes of this
+            test are looked at: each has the test's HOME in its environment."""
+            marker = f"HOME={home}".encode()
+            for pid in filter(str.isdigit, os.listdir("/proc")):
+                if int(pid) == os.getpid():
+                    continue
+                try:
+                    if marker not in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"):
+                        continue
+                    fds = os.listdir(f"/proc/{pid}/fd")
+                except OSError:
+                    continue
+                for fd in fds:
+                    try:
+                        target = os.stat(f"/proc/{pid}/fd/{fd}")
+                    except OSError:
+                        continue
+                    if (target.st_dev, target.st_ino) == (fifo.st_dev, fifo.st_ino):
+                        return int(pid)
+            return None
+
+        lines = b""
+        try:
+            try:
+                result = subprocess.run([sys.executable, str(MODULE_PATH), "agent", "--owner", "acme"], env=env,
+                                        pass_fds=(held,), capture_output=True, text=True, timeout=60, check=False)
+            finally:
+                os.close(held)
+            self.assertEqual((result.returncode, result.stdout), (0, "ghs_cached\n"), result.stderr)
+            deadline = time.monotonic() + 60
+            while (pid := writer()) is None:
+                self.assertLess(time.monotonic(), deadline, "waited 60 s for the decision-log writer to open decisions.log")
+                time.sleep(0.05)
+            probe = os.open(lock, os.O_RDWR)
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                free = True
+            except BlockingIOError:
+                free = False
+            finally:
+                os.close(probe)
+            self.assertTrue(free, f"the decision-log writer (pid {pid}), waiting on decisions.log, still holds the lock its caller passed down")
+        finally:
+            # Drain the pipe: the writer's write ends, it writes its line and exits.
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and lines.count(b"\n") < 1:
+                try:
+                    lines += os.read(pipe, 65536)
+                except BlockingIOError:
+                    time.sleep(0.05)
+        self.assertEqual(lines.count(b"\n"), 1, "the decision line was not written once the log could be")
 
 
 if __name__ == "__main__":

@@ -26,8 +26,11 @@
 # box-identity/agentazure.go, theorem-labs/agent-infra#1146), whose federated credential trusts the
 # Google ID tokens of the VM's account dev-sjawhar@ (subject its unique id, audience
 # api://AzureADTokenExchange). The shim signs in with `az login --service-principal
-# --federated-token`, the token straight from the metadata server, no secret anywhere. az keeps
-# that token as the client assertion it trades for access tokens (azure/cli/core/auth/identity.py,
+# --federated-token`, the token straight from the metadata server, no secret anywhere. Once the
+# host's relay serves dev-box@theorem-agent-infra (installers/agent-identity.sh), that server's
+# ID token is dev-box@'s, which the credential does not trust, so the sign-in is refused: an Azure
+# read then goes through scripts/az-reader, and a write through a one-hour AZURE_ADMIN grant. az
+# keeps the token as the client assertion it trades for access tokens (azure/cli/core/auth/identity.py,
 # client_assertion), and Google issues it for one hour, so the shim signs in again whenever the
 # last sign-in is 20 minutes old or more, under a lock, so concurrent calls neither race nor ever
 # hold an assertion near its expiry. The client id is Azure's, known once #1146 is applied (its

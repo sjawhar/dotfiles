@@ -119,6 +119,14 @@ describe("the Python eval kernel's environment", () => {
 	// eval.envPassthrough in config.yml admits. A variable this extension exports that neither
 	// admits never reaches a command run from an eval cell: agent-secrets lost the session that way.
 	const OMP_BUILTIN_PREFIXES = ["LC_", "XDG_", "PI_"];
+	const droppedByKernel = async (keys: string[]) => {
+		const config = Bun.YAML.parse(await Bun.file(path.join(import.meta.dir, "..", "..", "config.yml")).text()) as {
+			eval?: { envPassthrough?: { names?: string[]; prefixes?: string[] } };
+		};
+		const { names = [], prefixes = [] } = config.eval?.envPassthrough ?? {};
+		const allowedPrefixes = [...OMP_BUILTIN_PREFIXES, ...prefixes];
+		return keys.filter(key => !names.includes(key) && !allowedPrefixes.some(prefix => key.startsWith(prefix)));
+	};
 
 	test("admits every variable session-env exports", async () => {
 		const source = await Bun.file(path.join(import.meta.dir, "..", "session-env.ts")).text();
@@ -126,13 +134,43 @@ describe("the Python eval kernel's environment", () => {
 		expect(exported).toEqual(
 			expect.arrayContaining(["OMP_SESSION_ID", "PI_COMMIT_TRAILERS", "JJ_CONFIG", "GH_CONFIG_DIR", "GOOGLE_APPLICATION_CREDENTIALS"]),
 		);
-		const config = Bun.YAML.parse(await Bun.file(path.join(import.meta.dir, "..", "..", "config.yml")).text()) as {
-			eval?: { envPassthrough?: { names?: string[]; prefixes?: string[] } };
-		};
-		const { names = [], prefixes = [] } = config.eval?.envPassthrough ?? {};
-		const allowedPrefixes = [...OMP_BUILTIN_PREFIXES, ...prefixes];
-		const dropped = exported.filter(key => !names.includes(key) && !allowedPrefixes.some(prefix => key.startsWith(prefix)));
-		expect(dropped).toEqual([]);
+		expect(await droppedByKernel(exported)).toEqual([]);
+	});
+
+	test("admits the cache directories and session paths the session launchers set", async () => {
+		// scripts/agent-session and .bashrc put each tool's cache on the big disk, and give the
+		// session its own scratch. A name the kernel drops sends a tool run from an eval cell back
+		// to its home default: on 2026-11-21 `go test` from eval cells filled ~/.cache/go-build to
+		// 475 GB, and without PLAYWRIGHT_SKIP_BROWSER_GC a `playwright install` from a cell deletes
+		// browsers in the directory agent boxes share.
+		const sessionVariables = [
+			"GOCACHE",
+			"GOMODCACHE",
+			"UV_CACHE_DIR",
+			"UV_LINK_MODE",
+			"CARGO_HOME",
+			"PIP_CACHE_DIR",
+			"BUN_INSTALL_CACHE_DIR",
+			"HF_HOME",
+			"AGENT_SESSION_SCRATCH",
+			"GOTMPDIR",
+			"MISE_DATA_DIR",
+			"MISE_CACHE_DIR",
+			"PLAYWRIGHT_BROWSERS_PATH",
+			"PLAYWRIGHT_SKIP_BROWSER_GC",
+			"PUPPETEER_CACHE_DIR",
+			"NPM_CONFIG_PREFIX",
+		];
+		expect(await droppedByKernel(sessionVariables)).toEqual([]);
+		// Each one has a value to pass: a launcher exports it.
+		const repo = path.join(import.meta.dir, "..", "..", "..");
+		const launchers = (
+			await Promise.all(
+				[".bashrc", "scripts/agent-session"].map(file => Bun.file(path.join(repo, file)).text()),
+			)
+		).join("\n");
+		const unset = sessionVariables.filter(name => !new RegExp(`\\bexport\\b[^\\n]*\\b${name}=`).test(launchers));
+		expect(unset).toEqual([]);
 	});
 });
 

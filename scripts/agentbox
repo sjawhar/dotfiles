@@ -42,6 +42,9 @@
 #                                       ask each host session over Envoy to run
 #                                       `agentbox move --self` when safe; --now relaunches
 #                                       its pane at once
+#   agentbox adopt <box>                put a running box under a launcher of this version, in
+#                                       its own pane, stopping nothing in it (the launcher a box
+#                                       started with stays its launcher otherwise)
 #
 # Each <repo> is a canonical checkout under ~/src. The box holds a git clone of
 # its own of each, from the canonical checkout's origin, at <boxes>/<box>/<repo>
@@ -58,6 +61,11 @@
 # launcher died: a box with no container or an exited one, whose launcher is not
 # running, whose newest file is over an hour old and in which no process stands,
 # holds a file open or runs its program.
+#
+# A box ends when its container stops, not when the launcher's attached Docker client does
+# (box_client, dispatch://INFRA-4893). A client that ends while the container runs (a dockerd
+# restart under live-restore, an upgrade) is replaced by `docker attach` in the same pane. A box
+# Docker does not answer about within a few minutes is left as it is, never removed.
 #
 # A session whose work is NOT a checkout — a lane's scratch tree, a directory of
 # worktrees, a coordination root — names it with --dir instead of a repo
@@ -474,6 +482,17 @@ mounts_of() {
     local files=("$MOUNTS_FILE")
     [[ -r "$PRIVATE_MOUNTS_FILE" ]] && files+=("$PRIVATE_MOUNTS_FILE")
     awk -v m="$1" '$1 == m { print $2 }' "${files[@]}"
+}
+
+# home_dotfiles_link P: when the home path P is a symlink into ~/.dotfiles (installers link
+# ~/.gitconfig so), the path that link names inside a box, where ~/.dotfiles is a directory bind
+# at its own path and the box's home is the host's $HOME path. Status 1 for any other path.
+home_dotfiles_link() {
+    local target dot
+    [[ -L "$HOME/$1" ]] || return 1
+    target="$(readlink -f "$HOME/$1")" && dot="$(readlink -f "$HOME/.dotfiles")" || return 1
+    [[ -n "$dot" && "$target" == "$dot"/* && -e "$target" ]] || return 1
+    printf '%s\n' "$HOME/.dotfiles/${target#"$dot"/}"
 }
 
 # MOVE_SAID: a refusal was printed, so the exit is explained (cmd_move --to checks it).
@@ -952,9 +971,10 @@ enroll_failed() {
 }
 
 # Wait for the container to be Running (docker exec needs that) for as long as the launcher's
-# docker run child lives: a box can take minutes to reach Running when several start at once, and
-# the child's exit is the only sign that it never will. Each pass renews the enrollment.pending
-# marker, so a client that starts with the box finds it fresh however long the start took.
+# Docker client (box_client) lives: a box can take minutes to reach Running when several start at
+# once, and the client's end is the only sign that it never will. Each pass renews the
+# enrollment.pending marker, so the agent-secrets client that starts with the box finds it fresh
+# however long the start took.
 wait_for_running() {
     local box="$1" child="$2"
     while :; do
@@ -1305,8 +1325,8 @@ reenroll_if_not_live() {
     return 0
 }
 
-# box_wait BOX CHILD: the launcher's wait for an enrolled box while CHILD, its `docker run` (a
-# child of this shell), lives. Each pass runs reenroll_if_not_live, then waits for the child or
+# box_wait BOX CHILD: the launcher's wait for an enrolled box while CHILD, its client (box_client,
+# a child of this shell), lives. Each pass runs reenroll_if_not_live, then waits for the child or
 # 10 s, whichever ends first, so a box that ends is closed at once and a renew refused as not
 # live is acted on within 10 s. A trapped HUP, TERM or INT ends the wait with 128+n and its trap
 # acts at once, as in the blocking `wait`; the loop goes on while the child lives. `wait -n` with
@@ -1327,6 +1347,130 @@ box_wait() {
         wait "$sleep_pid" || true
     done
 }
+
+# THE BOX'S CLIENT (dispatch://INFRA-4893). The launcher's `docker run` is attached to the box: it
+# carries the pane's keys to the box and the box's output to the pane. It is a client of dockerd
+# and nothing more, and it ends when dockerd stops: `error waiting for container: unexpected EOF`,
+# status 125 (docker-ce 29.9.2, measured on a scratch VM on 2026-11-20). With dockerd's
+# live-restore on, the container runs on through a dockerd restart (an upgrade, a crash). Before
+# this change the launcher took the client's end for the box's end: close_box waited 60 s, found
+# the container still running, and removed it and its disk. box_client is the box's client for the
+# box's whole life instead. Each time a client ends it asks Docker about the container
+# (box_container_state):
+#   - running: it attaches to the same container again in the same pane (`docker attach`, which
+#     takes the tty and stdin settings the container was made with, and the same detach keys from
+#     the Docker config as `docker run`), and waits on that client in the same way;
+#   - stopped: it ends, with the exit code Docker recorded for the container (the client's own
+#     status when Docker has none, as for a container that is gone), and the launcher closes the
+#     box as before;
+#   - unknown (Docker does not answer, or gives a state such as paused): it asks again every
+#     BOX_CLIENT_RETRY s until the window ends, then ends, and the launcher leaves the box as it is.
+# The window is BOX_REATTACH_WAIT s from the end of a client that was attached at least that long.
+# A client that ends sooner spends what is left of its window, so an attach that keeps ending
+# (Docker answers but each attach fails, or a person presses the detach keys again and again) also
+# ends in "left as it is", and never loops without end. The launcher's HUP, TERM and INT traps send
+# it USR1: from then on it attaches no more and ends with its client, and the launcher closes the
+# box as before. Each step is said on stderr (the pane) and in the box's log (box_client_say).
+BOX_REATTACH_WAIT="${AGENTBOX_REATTACH_WAIT:-300}"
+BOX_CLIENT_RETRY=5
+box_client() {
+    local box="$1" rc=0 state="" started=$SECONDS deadline=0 asked stop=0
+    shift
+    trap 'stop=1' USR1
+    "$@" || rc=$?
+    while (( ! stop )); do
+        if (( deadline == 0 || SECONDS - started >= BOX_REATTACH_WAIT )); then
+            deadline=$(( SECONDS + BOX_REATTACH_WAIT ))
+        fi
+        asked=0
+        while :; do
+            state="$(box_container_state "$box")"
+            if [[ "$state" != unknown ]] || (( SECONDS >= deadline || stop )); then break; fi
+            if (( ! asked )); then
+                asked=1
+                box_client_say "$box" "its Docker client ended (status $rc), and Docker does not say whether the box still runs; asking again every ${BOX_CLIENT_RETRY}s for up to $(( deadline - SECONDS ))s"
+            fi
+            sleep "$BOX_CLIENT_RETRY"
+        done
+        (( ! stop )) || break
+        case "$state" in
+            stopped) break ;;
+            running)
+                # An attach that ended at once is not made again at once. A USR1 runs its trap only
+                # once the command in hand ends (the pause, a log line's date or write), so stop is
+                # read after each, the last time just before the attach.
+                (( SECONDS - started >= BOX_CLIENT_RETRY )) || sleep "$BOX_CLIENT_RETRY"
+                (( ! stop )) || break
+                if (( SECONDS >= deadline )); then
+                    box_client_say "$box" "the box still runs, but every attach to it ended within ${BOX_REATTACH_WAIT}s; no more attaches"
+                    break
+                fi
+                box_client_say "$box" "its Docker client ended (status $rc), and the box still runs; attaching to it again"
+                (( ! stop )) || break
+                started=$SECONDS
+                rc=0
+                docker attach "$box" || rc=$?
+                ;;
+            *)
+                box_client_say "$box" "Docker did not say within ${BOX_REATTACH_WAIT}s whether the box still runs"
+                break
+                ;;
+        esac
+    done
+    if (( stop )) || [[ "$state" == stopped ]]; then rc="$(box_exit_code "$box" "$rc")"; fi
+    return "$rc"
+}
+
+# box_exit_code BOX RC: the exit code Docker recorded for BOX's container when it has exited (or is
+# dead), else RC: for a container that is gone, never started or still running, and when Docker
+# does not answer. A client that lost dockerd ends with 125 whatever the box did.
+box_exit_code() {
+    local out
+    out="$(timeout "$BOX_DOCKER_READ_TIMEOUT" docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$1" 2>/dev/null)" || out=""
+    if [[ "$out" =~ ^(exited|dead)\ ([0-9]+)$ ]]; then echo "${BASH_REMATCH[2]}"; else echo "$2"; fi
+}
+
+# box_container_state BOX: Docker's answer about BOX's container, in one word. running; stopped
+# (exited, dead, made but never started, being removed, or no container of that name); unknown
+# (Docker did not answer within BOX_DOCKER_READ_TIMEOUT s, or gave another state, such as paused).
+# A read that fails is unknown, never stopped: only Docker's own answer closes a box. `docker ps`
+# and not `docker inspect`, because inspect fails in the same way for a container that is gone and
+# for a Docker that does not answer.
+BOX_DOCKER_READ_TIMEOUT="${AGENTBOX_DOCKER_READ_TIMEOUT:-20}"
+box_container_state() {
+    local out
+    if ! out="$(timeout "$BOX_DOCKER_READ_TIMEOUT" docker ps -a --filter "name=^$1\$" --format '{{.State}}' 2>/dev/null)"; then
+        echo unknown
+        return 0
+    fi
+    case "$out" in
+        running) echo running ;;
+        "" | exited | dead | created | removing) echo stopped ;;
+        *) echo unknown ;;
+    esac
+}
+
+# box_client_say BOX TEXT: one line about BOX's client on stderr, which is the box's pane, and in
+# the box's log, where agentbox-run.ts writes its own lines (~/.cache/omp/agentbox/<box>.log). A
+# failed write fails nothing: the pane can be gone.
+BOX_LOG_DIR="$HOME/.cache/omp/agentbox"
+box_client_say() {
+    local line
+    line="agentbox $(date -u +%FT%TZ) $1: $2"
+    printf '%s\n' "$line" >&2 2>/dev/null || :
+    { mkdir -p "$BOX_LOG_DIR" && printf '%s\n' "$line" >>"$BOX_LOG_DIR/$1.log"; } 2>/dev/null || :
+}
+
+# The traps of a launcher in a box's pane (cmd_new, cmd_adopt_pane), for HUP and for TERM and INT.
+# Each sets `interrupted` (and HUP `hung_up`), tells the box's client (box_client, once there is
+# one, `child`) to attach no more, reclaims the box's page cache (box_reclaim) and hangs the box up,
+# so it ends and its launcher closes it. The launcher declares `interrupted`, `hung_up` and
+# `child` as locals; a trap reads them in the scope it runs in. After a hangup the terminal is
+# gone, and the HUP trap sends the launcher's output nowhere (see cmd_new).
+# shellcheck disable=SC2016  # the trap text, expanded when the trap runs
+BOX_HUP_TRAP='interrupted=1; hung_up=1; [[ -z "${child:-}" ]] || kill -USR1 "$child" 2>/dev/null || true; box_reclaim "$box"; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true; exec >/dev/null 2>&1'
+# shellcheck disable=SC2016
+BOX_STOP_TRAP='interrupted=1; [[ -z "${child:-}" ]] || kill -USR1 "$child" 2>/dev/null || true; box_reclaim "$box"; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true'
 
 # Enroll a box from `new` once it is up, then start its renew: for omp once its session file names
 # its session (box_session_id; the box's omp writes it at its start, fresh or resumed, before any
@@ -2301,12 +2445,23 @@ mount_args() {
     # from the host home into every box, ~/.omp (every session's transcripts) and ~/.ssh among
     # them. Under --no-host-writes each is read-only, so the box still READS the logins and
     # settings it needs to work and can change none of them.
-    local home_mode=""
+    local home_mode="" link
     $NO_HOST_WRITES && home_mode=":ro"
     while read -r p; do
         if [[ ! -e "$HOME/$p" ]]; then
             case "$p" in .npmrc|.gitconfig) continue ;; esac
             mkdir -p "$HOME/$p"
+        fi
+        # A link into ~/.dotfiles (~/.gitconfig) is the same link in the box's own home, where it
+        # resolves through the ~/.dotfiles directory bind above, so the box reads the live file.
+        # A bind of the file itself holds the inode of the box's start, and every move of the
+        # checkout and every `git config --global` replaces that file with a new one: on
+        # 2026-11-21 every box on sami-devbox read a ~/.gitconfig of 2026-11-15 or older, without
+        # the core.excludesFile of dotfiles#133. Under --no-host-writes it stays a read-only bind.
+        if ! $NO_HOST_WRITES && link="$(home_dotfiles_link "$p")"; then
+            mkdir -p "$(dirname "$BOXES/$box/home/$p")"
+            ln -sfn "$link" "$BOXES/$box/home/$p"
+            continue
         fi
         a+=(-v "$(readlink -f "$HOME/$p"):$HOME/$p$home_mode")
     done < <(mounts_of rw)
@@ -2441,6 +2596,14 @@ session_env() {
     # ~/.cache/ms-playwright is mounted rw from the host; without this, a box's `playwright
     # install` deletes the browser builds of every checkout it cannot see (agentbox/AGENTS.md).
     e+=(-e PLAYWRIGHT_SKIP_BROWSER_GC=1)
+    # gcloud's file logging off, as scripts/agent-session sets it for a host session: a gcloud run
+    # past shims/gcloud and ~/.gcloud's installation property copies a printed token into a log
+    # file (dispatch://INFRA-4824). The launcher's own value wins, as the shim keeps a caller's.
+    e+=(-e "CLOUDSDK_CORE_DISABLE_FILE_LOGGING=${CLOUDSDK_CORE_DISABLE_FILE_LOGGING:-true}")
+    # CodeGraph's usage telemetry off, as scripts/agent-session sets it for a host session; a box's
+    # ~/.codegraph is its own, so no `codegraph telemetry off` on the host reaches it. The
+    # launcher's own value wins.
+    e+=(-e "CODEGRAPH_TELEMETRY=${CODEGRAPH_TELEMETRY:-0}")
     # Machine-local session environment (dispatch://BET-765), the same file scripts/agent-session
     # sources for a host session. A box builds its variables from scratch and never runs
     # agent-session, so without this the file is visible in the box (agentbox/mounts has
@@ -2480,7 +2643,9 @@ session_env() {
     e+=(-e "AGENTBOX_IMDS_FORWARDER=$NETWORK_GATEWAY:$IMDS_PORT")
     # On a Google VM the same relay reaches Google's metadata server, which is also
     # 169.254.169.254:80 (dispatch://INFRA-993): gcloud, google-auth and Go's compute/metadata
-    # then act as the VM's attached account with no credential file. Each reads its own name:
+    # then act as the account the relay serves (the VM's attached account, or the account
+    # ~/.config/agent-identity/account names, scripts/agentbox-gce-metadata-relay) with no
+    # credential file. Each reads its own name:
     # gcloud GCE_METADATA_ROOT (core/credentials/gce_read.py), google-auth GCE_METADATA_HOST then
     # GCE_METADATA_ROOT, and GCE_METADATA_IP for its probe (compute_engine/_metadata.py), Go
     # GCE_METADATA_HOST, which alone also makes it decide it is on GCE. On another machine none is
@@ -3438,6 +3603,362 @@ collect_start() {
     return 0
 }
 
+# box_run BOX USE_BROKER CMD CLIENT…: a launcher's life with its box, from the start of the box's
+# Docker client to its close, in the box's pane. box_client runs CLIENT… (`docker run` for `new`,
+# `docker attach` for `adopt`) and attaches to the box again whenever its client ends while the
+# container still runs (a dockerd restart under live-restore), so the child lives as long as the
+# box does. CMD is the box's command (omp, …), for enroll_when_up; USE_BROKER 1 enrolls the box.
+# It never returns: it closes the box and exits with its status, or leaves it as it is and exits.
+# Not exec'd: close_box must run after the container exits, whatever the exit reason. The caller
+# has set its traps (EXIT closes the box; BOX_HUP_TRAP, BOX_STOP_TRAP) and declared `interrupted`
+# and `hung_up`.
+box_run() {
+    local box="$1" use_broker="$2" cmd1="$3" rc=0 child sid="" stdin_fd
+    shift 3
+    # The explicit stdin dup matters: a job-control-less background child gets
+    # /dev/null for stdin, which -it refuses ("stdin is not a terminal").
+    exec {stdin_fd}<&0
+    box_client "$box" "$@" <&"$stdin_fd" &
+    child=$!
+    # The broker identity first (enroll_when_up), when the host can give one.
+    if (( use_broker )); then enroll_when_up "$box" "$child" "$cmd1" || true; fi
+    # An omp inside reveals its session id once up; close releases that session's knives claims.
+    # Other commands have none, so for them this poll lasts the box's whole life. Each pass also
+    # enrolls the box again when its renew loop has marked its enrollment not live
+    # (reenroll_if_not_live).
+    while kill -0 "$child" 2>/dev/null; do
+        reenroll_if_not_live "$box"
+        sid="$(box_session_id "$box")"
+        [[ -n "$sid" ]] && break
+        sleep 2
+    done
+    # Now the box's record names its session.
+    if [[ -n "$sid" ]]; then
+        box_record_session "$box" "$sid"
+    fi
+    # A box with a broker identity is waited for by box_wait, which goes on enrolling it again
+    # while it runs and returns once the child has exited. A box with none goes straight to the
+    # wait below. The last attempt comes before close_box below, which ends every enrollment the
+    # box can hold (unenroll_box). An interrupted wait re-waits: the first return after a signal
+    # carries 128+sig, the child's real status arrives once it is reaped.
+    if [[ "$ENROLLED_BOX" == "$box" ]]; then box_wait "$box" "$child"; fi
+    while :; do
+        if wait "$child"; then rc=0; else rc=$?; fi
+        kill -0 "$child" 2>/dev/null || break
+    done
+    # box_client ends once Docker says the container is not running, once it gave up asking, or
+    # after a HUP, TERM or INT here. The first and the last close the box. A box that Docker does
+    # not say has stopped is left as it is: its container, disk, directory, runtime directory and
+    # relay stay, and the collector keeps a box whose container runs. The state is read before
+    # `interrupted` is tested, so a signal during the read closes the box. Once the box is to be
+    # left the signals are ignored, and one that came just before that closes it.
+    local state
+    state="$(box_container_state "$box")"
+    if (( ! interrupted )) && [[ "$state" != stopped ]]; then
+        trap '' HUP TERM INT
+        if (( ! interrupted )); then
+            trap - EXIT
+            box_client_say "$box" "the box is left as it is, and nothing of it was removed. Attach to it: docker attach $box. End it: docker stop $box (the collector that the next \`agentbox new\` starts then deletes it)"
+            exit "$rc"
+        fi
+    fi
+    # Record the status before anything else: close_box and the exit below are where it would be
+    # lost, and a box that aborted is exactly the one whose cleanup is most likely to go wrong.
+    record_box_exit "$box" "$sid" "$rc"
+    # The pane can go away while close is still running (a pane kill, a server
+    # exit). That must not stop the box's removal: the launcher ignores the
+    # hangup from here on (knives runs in its own session, see `detached`), and
+    # its output goes through a reader that writes to the terminal while it
+    # exists and drops the rest - a direct write to a hung-up pty fails with
+    # EIO, which set -e would turn into an exit before the rm -rf.
+    trap - TERM INT EXIT
+    trap '' HUP
+    exec > >(while IFS= read -r line; do printf '%s\n' "$line" 2>/dev/null || :; done) 2>&1
+    close_box "$box" "$sid"
+    exit "$rc"
+}
+
+# AGENTBOX ADOPT (dispatch://INFRA-4893). A launcher keeps the copy of this file it started from
+# (the self-copy at the end of this file), so a box started before a change to the launcher runs
+# under the old code for its whole life. A launcher from before box_client takes the end of its
+# Docker client for the end of the box, so a dockerd restart (a Docker upgrade) removes the box.
+# `agentbox adopt <box>` puts a running box under a launcher of this version and stops nothing in
+# it: the container and every process in it (the inner dockerd, the omp session) keep running,
+# its disk stays mounted, and it keeps its tmux pane.
+#   1. It finds the box's Docker client (this user's `docker run … --name <box>`), the client's
+#      parent, which is the box's launcher (`bash <copy> new …`), and the launcher's pane and tmux
+#      server (TMUX_PANE and TMUX in its environment).
+#   2. It ends the launcher with SIGKILL, then at once the client with SIGKILL. No trap of the
+#      launcher runs: TERM or HUP would hang the box up, and a launcher alive when its client ends
+#      closes the box. The client gets SIGKILL because `docker run` passes a TERM, or any signal
+#      it can catch, on to the box (its signal proxy), which ended the box's command on the test
+#      VM on 2026-11-21 (exit 143). The container runs on: it has no --rm, and Docker does not
+#      close a tty container's stdin when its client goes. Each pid is checked against its start
+#      time just before its signal; one adopt of a box runs at a time; a launcher that is its
+#      pane's own command is refused.
+#   3. It respawns that pane (`tmux respawn-pane -k`, which keeps the pane's id and place) into
+#      `agentbox adopt --pane <box>` with the old launcher's AGENTBOX_* settings, so with the same
+#      box tree, disks and runtime directory. That launcher names itself in the box's record,
+#      attaches to the box (box_client with `docker attach`), and from then on waits on the box
+#      and closes it as `new` does.
+#   4. It makes each home entry that is a link into ~/.dotfiles on the host (~/.gitconfig) that
+#      same link in the box, as a new box has it (adopt_link_home), so the box reads the live file
+#      and no longer the copy of its start.
+# A box whose client's parent is box_client (a subshell of a launcher of this version) needs no
+# new launcher and is left alone, apart from step 4. The old launcher held the box's enrollment
+# only in memory (ENROLLED_*); the new one rebuilds it from what the host recorded
+# (adopt_enrolled), so a box enrolled as its session is enrolled again when the broker refuses its
+# renew as not live (reenroll_if_not_live),
+# as a box this launcher started is. A box enrolled under its own name has no host record of its
+# key's thumbprint, so it is not enrolled again; the launcher says so when it takes the box.
+ADOPT_GONE_WAIT=10
+cmd_adopt() {
+    if [[ "${1:-}" == --pane ]]; then
+        shift
+        cmd_adopt_pane "$@"
+    fi
+    local usage="usage: agentbox adopt <box>  (the full name of a running box, agentbox-<12 hex>)"
+    local box="${1:-}" state p client="" launcher upper cstart lstart pane="" server="" cwd kv inner
+    local args=() largs=() uargs=() carry=()
+    (( $# == 1 )) && [[ "$box" =~ ^agentbox-[0-9a-f]{12}$ ]] || die "$usage"
+    [[ ! -e "$AGENTBOX_IDENTITY_FILE" ]] || die "adopt runs on the host, where the box's launcher runs"
+    state="$(box_container_state "$box")"
+    [[ "$state" == running ]] || die "Docker says $box is $state, not running; nothing was done"
+    local attach=""
+    for p in "$PROC"/[0-9]*; do
+        [[ -O "$p" ]] || continue
+        mapfile -d '' -t args <"$p/cmdline" 2>/dev/null || continue
+        [[ "${args[0]:-}" == docker || "${args[0]:-}" == */docker ]] || continue
+        # `docker attach <box>` is the client of a launcher of this version (box_client): of an
+        # adopted box, or of any box after a dockerd restart.
+        if [[ "${args[1]:-}" == attach && "${args[*]: -1}" == "$box" ]]; then attach="${p##*/}"; continue; fi
+        if [[ "${args[1]:-}" != run ]] || ! adopt_names "$box" "${args[@]}"; then continue; fi
+        [[ -z "$client" ]] || die "two docker clients run $box (pids $client and ${p##*/}); nothing was done"
+        client="${p##*/}"
+    done
+    if [[ -z "$client" && -n "$attach" ]]; then
+        echo "agentbox: $box already runs under a launcher that attaches to it again (its docker attach is pid $attach); nothing to do"
+        adopt_link_home "$box"
+        return 0
+    fi
+    [[ -n "$client" ]] || die "no launcher's docker run of $box runs on this host, so there is no launcher to replace; attach to it by hand: docker attach $box"
+    launcher="$(adopt_ppid "$client")" || die "cannot read the parent of $box's docker client (pid $client); nothing was done"
+    mapfile -d '' -t largs <"$PROC/$launcher/cmdline" 2>/dev/null || die "cannot read the command of pid $launcher, the parent of $box's docker client; nothing was done"
+    [[ "${largs[0]:-}" == *bash && "${largs[1]:-}" == */agentbox* && "${largs[2]:-}" == new ]] \
+        || die "pid $launcher, the parent of $box's docker client, is not an agentbox launcher (${largs[*]:0:3}); nothing was done"
+    upper="$(adopt_ppid "$launcher")" || upper=""
+    if [[ -n "$upper" ]] && mapfile -d '' -t uargs <"$PROC/$upper/cmdline" 2>/dev/null && [[ "${uargs[*]}" == "${largs[*]}" ]]; then
+        echo "agentbox: $box already runs under a launcher that attaches to it again (pid $upper); nothing to do"
+        adopt_link_home "$box"
+        return 0
+    fi
+    [[ -r "$PROC/$launcher/environ" ]] || die "cannot read the environment of $box's launcher (pid $launcher); nothing was done"
+    local tmux_env="" spid
+    while IFS= read -r -d '' kv; do
+        case "$kv" in
+            TMUX_PANE=*) pane="${kv#*=}" ;;
+            TMUX=*) tmux_env="${kv#*=}" ;;
+            AGENTBOX_SELF_COPY=*) ;;
+            AGENTBOX_*=*) carry+=("$kv") ;;
+        esac
+    done <"$PROC/$launcher/environ"
+    # TMUX is "<socket>,<server pid>,<session>"; the server is asked with its own binary
+    # (move_tmux_bin), as a client of another version cannot talk to it.
+    server="${tmux_env%%,*}" spid="${tmux_env#*,}" spid="${spid%%,*}"
+    [[ "$pane" =~ ^%[0-9]+$ && -S "$server" ]] || die "$box's launcher (pid $launcher) names no tmux pane and server (TMUX_PANE='$pane', TMUX='$tmux_env'), so its pane cannot be given to a new launcher; nothing was done"
+    move_tmux_bin "$spid"
+    # The box's runtime directory and record are where its launcher put them: its own
+    # AGENTBOX_RUN_BASE, AGENTBOX_DISKS and AGENTBOX_RECORDS, when it had them, not this shell's.
+    local rb="" dk="" rc=""
+    for kv in ${carry[@]+"${carry[@]}"}; do
+        case "$kv" in
+            AGENTBOX_RUN_BASE=*) rb="${kv#*=}" ;;
+            AGENTBOX_DISKS=*) dk="${kv#*=}" ;;
+            AGENTBOX_RECORDS=*) rc="${kv#*=}" ;;
+        esac
+    done
+    [[ -z "$rb" ]] || RUN_BASE="$rb"
+    [[ -z "$dk" ]] || BOX_DISKS="$dk" BOX_RECORDS="$dk"
+    [[ -z "$rc" ]] || BOX_RECORDS="$rc"
+    # One adopt of a box at a time, from its first read to its respawn: a second adopt that also
+    # found the old launcher would respawn the pane again, and that respawn's hangup reaches the
+    # first adopt's new launcher, whose HUP trap hangs the box up. The lock is in the box's
+    # runtime directory, which no box reaches; the respawned launcher does not inherit it.
+    local lock_fd
+    [[ -d "$RUN_BASE/$box" ]] || die "$box has no runtime directory $RUN_BASE/$box on this host; nothing was done"
+    exec {lock_fd}>>"$RUN_BASE/$box/adopt.lock" || die "cannot open $RUN_BASE/$box/adopt.lock; nothing was done"
+    flock -n "$lock_fd" || die "another agentbox adopt of $box runs; nothing was done"
+    cwd="$(readlink "$PROC/$launcher/cwd" 2>/dev/null)" || cwd="$HOME"
+    if ! cstart="$(proc_start "$PROC/$client")" || ! lstart="$(proc_start "$PROC/$launcher")"; then
+        die "$box's launcher (pid $launcher) or client (pid $client) ended while it was read; nothing was done"
+    fi
+    # The box's record names its launcher by pid and start time (box_record_write); a record from
+    # before that names none. A parent that is not that process is not the box's launcher.
+    local rec_pid rec_start
+    rec_pid="$(box_record_get "$box" launcher)"
+    rec_start="$(box_record_get "$box" launcher_start)"
+    if [[ -n "$rec_pid" ]] && [[ "$rec_pid" != "$launcher" || "$rec_start" != "$lstart" ]]; then
+        die "$box's record names launcher pid $rec_pid (start $rec_start), not pid $launcher (start $lstart), the parent of its docker client; nothing was done"
+    fi
+    # A launcher that is its pane's own command (the session leader) cannot end without hanging up
+    # the pane's terminal: the pane closes before it can be respawned, and the kernel's SIGHUP to
+    # the foreground job reaches the box's client, which passes it on to the box.
+    local lsid
+    lsid="$(adopt_session "$launcher")" || die "cannot read the session of $box's launcher (pid $launcher); nothing was done"
+    [[ "$lsid" != "$launcher" ]] || die "$box's launcher (pid $launcher) is its pane's own command, so ending it would close the pane and hang the box up; nothing was done. Move the box at a safe point instead (agentbox move --self), which resumes its session in a new box"
+    # The new launcher runs this checkout's agentbox, with this checkout as its DOTFILES_DIR (the
+    # script reads files beside itself through it), and the old launcher's AGENTBOX_* settings.
+    inner="env DOTFILES_DIR=$(printf '%q' "$DOTFILES_DIR")"
+    if (( ${#carry[@]} )); then inner+="$(printf ' %q' "${carry[@]}")"; fi
+    inner+=" $(printf '%q' "$DOTFILES_DIR/scripts/agentbox") adopt --pane $box"
+    inner="$inner; echo; echo 'agentbox: the box has exited; this pane is a shell again'; exec bash -i"
+    echo "agentbox: $box: launcher pid $launcher, docker client pid $client, pane $pane; ending both, then respawning the pane into: $inner"
+    # Who acts when. A SIGKILL'd launcher runs no trap and, once kill returns, runs no more of its
+    # code, so it cannot take its client's end for the box's end. The client is sent its SIGKILL at
+    # once after, before the pane's shell takes the terminal back from the launcher's process group,
+    # which the client is still in. No SIGSTOP of the launcher: on the test VM on 2026-11-21 a
+    # stopped launcher let the pane's interactive bash go on to its `exec bash -i`, and a SIGTERM
+    # then reached the box through the client and ended it (exit 143); bash's exec ends its stopped
+    # jobs with SIGTERM.
+    [[ "$(proc_start "$PROC/$launcher")" == "$lstart" && "$(proc_start "$PROC/$client")" == "$cstart" ]] \
+        || die "pid $launcher or $client is no longer $box's launcher or client; nothing was done"
+    kill -KILL "$launcher" || die "could not end $box's launcher (pid $launcher); nothing was done"
+    kill -KILL "$client" 2>/dev/null || true
+    adopt_gone "$launcher" || die "$box's launcher (pid $launcher) did not end after SIGKILL; the pane was left as it was"
+    adopt_gone "$client" || die "$box's docker client (pid $client) did not end after SIGKILL; its launcher is gone, and the pane was left as it was"
+    "$MOVE_TMUX_BIN" -S "$server" respawn-pane -k -t "$pane" -c "$cwd" bash -i -c "$inner" \
+        || die "$box's launcher and client are gone, and pane $pane would not respawn; the box runs on with no launcher. Start a launcher in a pane: $inner"
+    echo "agentbox: $box now runs under a new launcher in pane $pane; Docker says it is $(box_container_state "$box")"
+    adopt_link_home "$box"
+}
+
+# adopt_link_home BOX: in the running BOX, make each rw home entry that is a link into ~/.dotfiles
+# on the host (home_dotfiles_link) that same link, as mount_args does for a new box. A box started
+# before that has a bind of the file as it was at the box's start: root in the box unmounts it
+# lazily (Sysbox lets root in a box unmount the binds of its start; tried on sami-devbox on
+# 2026-11-21), so a process that holds the old file open keeps it, and the link takes its place.
+# A read-only bind (--no-host-writes) and a file of the box's own are left as they are. One line
+# per entry it changes or leaves; a failure is said and does not fail the adopt.
+adopt_link_home() {
+    local box="$1" p link out
+    while read -r p; do
+        link="$(home_dotfiles_link "$p")" || continue
+        # shellcheck disable=SC2016  # expanded by the box's sh
+        if out="$(docker exec -u root "$box" sh -c '
+            p="$1" link="$2" user="${AGENTBOX_USER:-ubuntu}"
+            [ "$(readlink "$p" 2>/dev/null)" = "$link" ] && exit 0
+            if mountpoint -q "$p"; then
+                case ",$(findmnt -no OPTIONS -M "$p")," in
+                    *,ro,*) echo "$p is a read-only bind (--no-host-writes); left as it is"; exit 0 ;;
+                esac
+                umount -l "$p" || exit 1
+            elif [ -e "$p" ] || [ -L "$p" ]; then
+                echo "$p is a file of the box'"'"'s own, not a bind of the host'"'"'s; left as it is"
+                exit 0
+            fi
+            ln -sfn "$link" "$p.agentbox-link" && chown -h "$user" "$p.agentbox-link" \
+                && mv -Tf "$p.agentbox-link" "$p" || exit 1
+            echo "$p is now a link to $link, which follows the host file"
+        ' sh "$HOME/$p" "$link" 2>&1)"; then
+            [[ -z "$out" ]] || echo "agentbox: $box: $out"
+        else
+            echo "agentbox: $box: could not make $HOME/$p a link to $link: $out" >&2
+        fi
+    done < <(mounts_of rw)
+}
+
+# adopt_names BOX ARG…: the arguments of a `docker run` name the container BOX.
+adopt_names() {
+    local box="$1" prev="" a
+    shift
+    for a in "$@"; do
+        [[ "$a" == "--name=$box" || ( "$prev" == --name && "$a" == "$box" ) ]] && return 0
+        prev="$a"
+    done
+    return 1
+}
+
+# adopt_ppid PID: the parent of PID (move_stat reads its stat). Status 1 when PID is gone.
+adopt_ppid() {
+    move_stat "$1" && [[ "$MOVE_PPID" =~ ^[0-9]+$ ]] && printf '%s\n' "$MOVE_PPID"
+}
+
+# adopt_session PID: the session id of PID, field 6 of its stat (after the command name, which can
+# hold spaces and parentheses). Status 1 when PID is gone.
+adopt_session() {
+    local s f=()
+    s="$(cat "$PROC/$1/stat" 2>/dev/null)" || return 1
+    read -r -a f <<<"${s##*) }"
+    [[ "${f[3]:-}" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "${f[3]}"
+}
+
+# adopt_gone PID: wait up to ADOPT_GONE_WAIT s for PID to end; status 1 if it has not. A zombie
+# (state Z in the kernel's own /proc, not $PROC) has ended: only its parent's wait is left.
+adopt_gone() {
+    local i s
+    for (( i = 0; i < ADOPT_GONE_WAIT * 10; i++ )); do
+        kill -0 "$1" 2>/dev/null || return 0
+        s="$(cat "/proc/$1/stat" 2>/dev/null)" || return 0
+        s="${s##*) }"
+        [[ "${s%% *}" != Z ]] || return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+# cmd_adopt_pane BOX: the new launcher that `agentbox adopt` respawns the box's pane into. It
+# takes the box as `new` would at the start of its client: the same traps, its own name in the
+# box's record, then box_run with `docker attach`.
+cmd_adopt_pane() {
+    local box="${1:-}" launcher_pid=$BASHPID
+    [[ "$box" =~ ^agentbox-[0-9a-f]{12}$ ]] || die "usage: agentbox adopt --pane <box>"
+    # shellcheck disable=SC2064
+    trap "[[ \$BASHPID == $launcher_pid ]] && close_box '$box' ''" EXIT
+    local interrupted=0 hung_up=0
+    # shellcheck disable=SC2064  # the trap text is BOX_HUP_TRAP's, expanded when it runs
+    trap "$BOX_HUP_TRAP" HUP
+    # shellcheck disable=SC2064
+    trap "$BOX_STOP_TRAP" TERM INT
+    box_record_launcher "$box"
+    box_client_say "$box" "launcher pid $launcher_pid runs the box from now on (agentbox adopt); attaching to it"
+    if [[ -s "$RUN_BASE/$box/enrollment-id" ]] && ! adopt_enrolled "$box"; then
+        box_client_say "$box" "its broker enrollment is not a session's on record, so it is not enrolled again if the broker refuses its renew as not live; its renew goes on"
+    fi
+    box_run "$box" 0 "" docker attach "$box"
+}
+
+# adopt_enrolled BOX: the ENROLLED_* globals of BOX's session enrollment, from the host's record of
+# it: the session ($RUN_BASE/<box>/enrollment-session, which enroll_attempts writes only for an
+# enrollment of the session's key), the enrollment id ($RUN_BASE/<box>/enrollment-id) and the
+# thumbprint of the session's key, the key the box holds (session_keydir; enroll_key copied it
+# in). Status 1, and the globals untouched, when any of them is missing or malformed.
+adopt_enrolled() {
+    local box="$1" sid="" eid="" tp="" skd
+    read -r sid 2>/dev/null <"$RUN_BASE/$box/enrollment-session" || return 1
+    read -r eid 2>/dev/null <"$RUN_BASE/$box/enrollment-id" || return 1
+    [[ "$sid" =~ $BOX_SID_RE && -n "$eid" ]] || return 1
+    skd="$(session_keydir "$sid")"
+    read -r tp 2>/dev/null <"$skd/thumbprint" || return 1
+    [[ "$tp" =~ ^[A-Za-z0-9_-]{43}$ ]] || return 1
+    ENROLLED_BOX="$box" ENROLLED_SID="$sid" ENROLLED_RUNTIME="session-$sid" ENROLLED_TP="$tp"
+    ENROLLED_SKD="$skd" ENROLLED_ID="$eid"
+}
+
+# box_record_launcher BOX: the box's record names this launcher (its pid and start time), which
+# the collector reads to tell a box whose launcher works on it from one whose launcher died.
+box_record_launcher() {
+    local box="$1" rec tmp start me=$BASHPID
+    rec="$(box_record "$box")"
+    [[ -f "$rec" ]] || return 0
+    start="$(proc_start "/proc/$me")" || start=""
+    tmp="$rec.$$"
+    sed -e "s|^launcher=.*|launcher=$me|" -e "s|^launcher_start=.*|launcher_start=$start|" "$rec" >"$tmp" 2>/dev/null \
+        && mv -f "$tmp" "$rec" 2>/dev/null \
+        || { rm -f "$tmp"; echo "agentbox: could not name this launcher in $box's record $rec" >&2; }
+    return 0
+}
+
 cmd_new() {
     local usage="usage: agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--pids N] [--disk SIZE] [--dir PATH]… [--no-host-writes] [--drop-gone-dirs] [<repo>…] -- <cmd> [args…]"
     local user_env=() box_repos=() repo a drop_gone=false dirs_seen=0
@@ -3632,9 +4153,13 @@ cmd_new() {
     # their boxes. Nothing printed from here on has a reader. hung_up tells
     # reenroll_if_not_live to make the HUP trap's redirect again after a call
     # whose own redirect undid it.
+    # Each trap also tells the box's client (box_client, once there is one) to attach no more: the
+    # box is being ended, so a client that ends now is not replaced (BOX_HUP_TRAP, BOX_STOP_TRAP).
     local interrupted=0 hung_up=0
-    trap 'interrupted=1; hung_up=1; box_reclaim "$box"; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true; exec >/dev/null 2>&1' HUP
-    trap 'interrupted=1; box_reclaim "$box"; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true' TERM INT
+    # shellcheck disable=SC2064  # the trap text is BOX_HUP_TRAP's, expanded when it runs
+    trap "$BOX_HUP_TRAP" HUP
+    # shellcheck disable=SC2064
+    trap "$BOX_STOP_TRAP" TERM INT
     # The box's record (box_record_write), beside its image and under the same trap: a launch
     # that fails from here on takes it away with the image. After open_box_disk, since the
     # record lives in the images directory that step makes, and a box with no image gets none.
@@ -3694,60 +4219,13 @@ cmd_new() {
     # (ensure_tailnet_serve), so a dashboard URL a session was given works inside the box.
     local add_hosts=()
     mapfile -t add_hosts < <(box_tailnet_hosts)
-    # Not exec'd: close_box must run after the container exits, whatever the
-    # exit reason.
-    local rc=0 child sid="" stdin_fd
-    # The explicit stdin dup matters: a job-control-less background child gets
-    # /dev/null for stdin, which -it refuses ("stdin is not a terminal").
-    exec {stdin_fd}<&0
     # --log-driver none: stdout is the omp TUI's redraw stream, gigabytes a day
     # per box that nothing reads (the transcript is in ~/.omp; attach is live).
-    docker run --init --runtime "$RUNTIME" --name "$box" --hostname "$box" --log-driver none \
+    box_run "$box" "$use_broker" "$1" docker run --init --runtime "$RUNTIME" --name "$box" --hostname "$box" --log-driver none \
         --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
         "${RESOURCE_ARGS[@]}" \
         -w "$workdir" "${tty[@]}" ${add_hosts[@]+"${add_hosts[@]}"} \
-        "${mounts[@]}" "${env[@]}" "${user_env[@]}" "$tag" "${cmd[@]}" <&"$stdin_fd" &
-    child=$!
-    # The broker identity first (enroll_when_up), when the host can give one.
-    if (( use_broker )); then enroll_when_up "$box" "$child" "$1" || true; fi
-    # An omp inside reveals its session id once up; close releases that session's knives claims.
-    # Other commands have none, so for them this poll lasts the box's whole life. Each pass also
-    # enrolls the box again when its renew loop has marked its enrollment not live
-    # (reenroll_if_not_live).
-    while kill -0 "$child" 2>/dev/null; do
-        reenroll_if_not_live "$box"
-        sid="$(box_session_id "$box")"
-        [[ -n "$sid" ]] && break
-        sleep 2
-    done
-    # Now the box's record names its session.
-    if [[ -n "$sid" ]]; then
-        box_record_session "$box" "$sid"
-    fi
-    # A box with a broker identity is waited for by box_wait, which goes on enrolling it again
-    # while it runs and returns once the child has exited. A box with none goes straight to the
-    # wait below. The last attempt comes before close_box below, which ends every enrollment the
-    # box can hold (unenroll_box). An interrupted wait re-waits: the first return after a signal
-    # carries 128+sig, the child's real status arrives once it is reaped.
-    if [[ "$ENROLLED_BOX" == "$box" ]]; then box_wait "$box" "$child"; fi
-    while :; do
-        if wait "$child"; then rc=0; else rc=$?; fi
-        kill -0 "$child" 2>/dev/null || break
-    done
-    # Record the status before anything else: close_box and the exit below are where it would be
-    # lost, and a box that aborted is exactly the one whose cleanup is most likely to go wrong.
-    record_box_exit "$box" "$sid" "$rc"
-    # The pane can go away while close is still running (a pane kill, a server
-    # exit). That must not stop the box's removal: the launcher ignores the
-    # hangup from here on (knives runs in its own session, see `detached`), and
-    # its output goes through a reader that writes to the terminal while it
-    # exists and drops the rest - a direct write to a hung-up pty fails with
-    # EIO, which set -e would turn into an exit before the rm -rf.
-    trap - TERM INT EXIT
-    trap '' HUP
-    exec > >(while IFS= read -r line; do printf '%s\n' "$line" 2>/dev/null || :; done) 2>&1
-    close_box "$box" "$sid"
-    exit "$rc"
+        "${mounts[@]}" "${env[@]}" "${user_env[@]}" "$tag" "${cmd[@]}"
 }
 
 # The box a target names: a running box (exact name or unique prefix), or the session id (or
@@ -3829,8 +4307,22 @@ cmd_rebuild() {
 
 # What a path uses, for a listing: never a failure, since `set -o pipefail` would otherwise make
 # one unreadable directory inside a box tree end the whole command (it did, on the ext4 image's
-# root-owned lost+found, before open_box_disk gave that one to the user).
-dir_size() { du -sh --one-file-system "$1" 2>/dev/null | cut -f1 || true; }
+# root-owned lost+found, before open_box_disk gave that one to the user). du walks every file, so
+# it has LS_DU_WAIT seconds; past that the line says the size was not measured.
+LS_DU_WAIT="${AGENTBOX_LS_DU_WAIT:-10}"
+dir_size() {
+    local size
+    size="$(timeout "$LS_DU_WAIT" du -sh --one-file-system "$1" 2>/dev/null | cut -f1 || true)"
+    printf '%s\n' "${size:-size not measured in $LS_DU_WAIT s}"
+}
+# What a box tree on its own filesystem uses, as that filesystem counts it: one statfs, where du
+# walked every file. On sami-devbox on 2026-11-21 two left trees (119 GiB and 3 million inodes in
+# one) took du 41-58 s each, after the table had printed, and `agentbox ls` ran into a 300 s limit.
+fs_used() {
+    local used
+    used="$(df -h --output=used "$1" 2>/dev/null | tail -n 1 | tr -d ' ' || true)"
+    printf '%s\n' "${used:-size unknown (df failed)}"
+}
 
 # Running boxes, then any box tree with no container: one whose launcher was killed before it
 # could close (the trap cannot run on a SIGKILL, and a reboot drops the loop mount while the image
@@ -3848,7 +4340,7 @@ cmd_ls() {
         if grep -qxF "$box" <<<"$running"; then continue; fi
         img="$BOX_DISKS/$box.img"
         if mountpoint -q "$dir" 2>/dev/null; then
-            left+=("$box  $(dir_size "$dir") on its own filesystem; release: sudo umount '$dir' && rm -f '$img' && rmdir '$dir'")
+            left+=("$box  $(fs_used "$dir") on its own filesystem; release: sudo umount '$dir' && rm -f '$img' && rmdir '$dir'")
         elif [[ -s "$img" ]]; then
             left+=("$box  an unmounted filesystem image ($(dir_size "$img") used); read it: sudo mount -o loop '$img' '$dir'")
         else
@@ -6213,9 +6705,11 @@ move_relaunch() {
 # (CALLER, its ancestors and descendants). A server, a watcher or a dashboard started from a tool
 # call is a child of the omp, and a hang-up ends it: KNOTCURVE's dashboard, started by hand from
 # its session, died with the move at 16:21Z on 2026-11-02 and was down about four hours. One row
-# per top process, with how many processes are under it. A process `setsid` detached - its own
-# session leader, so the pane's hang-up does not reach it - is not an orphan, and neither is what
-# it started; nor is a systemd unit, which is not under the omp at all.
+# per top process, with how many processes are under it. Leading a session of its own saves
+# nothing: omp's hang-up teardown signals what is still reachable from it BY PARENT LINK, and
+# plain `setsid` changes the session but not the parent (move_orphans_gate has the measurement),
+# so a plain-setsid child and what it started are listed. What `setsid --fork` started, or a
+# systemd unit, has a parent other than the omp, so this walk down from the omp never reaches it.
 move_orphans() {
     local omp="$1" caller="${2:-}" p q cmd n
     local -A skip=()
@@ -6245,24 +6739,10 @@ move_orphans() {
         case "$cmd" in
             *__omp_worker*|*/omp-python-runner*/runner-*.py*) skip[$p]=helper ;;
         esac
-        # Field 6 of /proc/<pid>/stat is the session id: its own means `setsid`, and SIGHUP of the
-        # pane's session does not reach it.
-        if [[ -z "${skip[$p]:-}" ]]; then
-            local stat_line sess
-            if stat_line="$(<"$PROC/$p/stat")" 2>/dev/null; then
-                stat_line="${stat_line##*) }"
-                set -- $stat_line
-                sess="${4:-}"
-                [[ "$sess" == "$p" ]] && skip[$p]=detached
-            fi
-        fi
         if [[ -n "${skip[$p]:-}" ]]; then
-            # A detached process takes its own children with it: the hang-up reaches none of them.
-            # omp's helpers and the move's own chain do not, so what they started is still listed.
-            if [[ "${skip[$p]}" != detached ]]; then
-                read -r -a q <<<"${MOVE_KIDS[$p]:-}"
-                queue+=(${q[@]+"${q[@]}"})
-            fi
+            # omp's helpers and the move's own chain are not listed, but what they started is.
+            read -r -a q <<<"${MOVE_KIDS[$p]:-}"
+            queue+=(${q[@]+"${q[@]}"})
             continue
         fi
         n="$(move_descendants "$p" | wc -l)"
@@ -6758,7 +7238,7 @@ cmd_move_notify() {
         # What dies with the hang-up, so the session decides before it runs the move.
         local orphans
         orphans="$(move_orphans "$pid")"
-        [[ -z "$orphans" ]] || notice+=" Your move refuses until you deal with these: the hang-up ends them: $(move_orphans_list "$orphans"). Start each one detached (\`setsid <command> </dev/null >>log 2>&1 &\`) or as an omp background job, stop it, or run the move with --accept-orphans."
+        [[ -z "$orphans" ]] || notice+=" Your move refuses until you deal with these: the hang-up ends them: $(move_orphans_list "$orphans"). Start each one with \`setsid --fork <command> </dev/null >>log 2>&1\`, which makes init its parent (plain \`setsid\` does not save it, and an omp background job is a child of your omp too), stop it, or run the move with --accept-orphans."
         if $dry; then
             echo "agentbox: would notify $sid (pane $pane, $at): $notice"
             continue
@@ -10165,9 +10645,10 @@ MOVE_USAGE='usage:
   agentbox move --to <machine> --clear-halt        the box-health lead lets moves to <machine> go
                                                     on after a halt (two failed moves in a row, or
                                                     a session found running on both machines)
-Every move refuses before the hang-up while the session has a process that is not a systemd unit
-and would die with it (a server, a watcher, a dashboard started from a tool call); the plans list
-them. Make each a unit, stop it, or pass --accept-orphans.
+Every move refuses before the hang-up while the session has a process still under its omp by
+parent link, which dies with it (a server, a watcher, a dashboard started from a tool call, even
+one plain `setsid` started); the plans list them. Start each with `setsid --fork`, which makes init
+its parent, make it a unit, stop it, or pass --accept-orphans.
 More than one `move --plan` may run at once: it writes only this host'"'"'s plan files, one per
 session, each renamed into place.'
 
@@ -10337,6 +10818,12 @@ sdk="$HOME/.gcloud/google-cloud-sdk"
 mounted() { awk -v t="$1" "\$5 == t { f = 1 } END { exit !f }" /proc/self/mountinfo; }
 writable() { if [ -d "$1" ]; then touch "$1/.doctor.$$" 2>/dev/null && rm -f "$1/.doctor.$$"; else (: >>"$1") 2>/dev/null; fi; }
 while read -r m p; do
+    # A link into ~/.dotfiles (mount_args makes ~/.gitconfig one) reads the live host file.
+    if [ "$m" = rw ] && [ -L "$HOME/$p" ]; then
+        l="$(readlink "$HOME/$p")"
+        [ -e "$HOME/$p" ] && ! mounted "$HOME/$p" && writable "$HOME/$p" && ok "rw $p: a link to $l, which follows the host file" || fail "rw $p: a link to $l that is not a writable file"
+        continue
+    fi
     case "$p" in .npmrc|.gitconfig) [ -e "$HOME/$p" ] || { echo "note box: optional config $p absent"; continue; } ;; esac
     case "$m" in
         rw) mounted "$HOME/$p" && writable "$HOME/$p" && ok "rw $p" || fail "rw $p: not a writable mount (mounts entry newer than this box: relaunch to pick it up)";;
@@ -10635,7 +11122,7 @@ cmd_doctor_here() {
 # and the copy removes that file as it starts (below). The variable also stops a second re-exec.
 # A copy that cannot be made is not fatal: the launch goes on from the live file, as before, since
 # refusing to start a session is worse than the hazard.
-if [[ "${1:-}" == new && -z "${AGENTBOX_SELF_COPY:-}" ]]; then
+if [[ ( "${1:-}" == new || "${1:-}" == adopt ) && -z "${AGENTBOX_SELF_COPY:-}" ]]; then
     _self_copy="$(mktemp "${TMPDIR:-/tmp}/agentbox-self-XXXXXX" 2>/dev/null || true)"
     if [[ -n "$_self_copy" ]] \
         && cat "$(readlink -f "${BASH_SOURCE[0]}")" >"$_self_copy" 2>/dev/null \
@@ -10664,7 +11151,8 @@ case "${1:-}" in
     # Started by `new` itself, detached, for every box (collect_start).
     collect) shift; cmd_collect "$@" ;;
     move)    shift; cmd_move "$@" ;;
+    adopt)   shift; cmd_adopt "$@" ;;
     # The usage block at the top of this file, which every command above is listed in: a
     # command missing from this case would otherwise print its own documentation as the usage.
-    *) sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac

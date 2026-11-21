@@ -77,6 +77,12 @@ class AgentboxDirs(unittest.TestCase):
         (self.root / "dotfiles" / "agentbox" / "mounts").symlink_to(DOTFILES / "agentbox" / "mounts")
         (self.root / "dotfiles" / "agent-secrets").symlink_to(DOTFILES / "agent-secrets")
         self.run_args = self.root / "run-args"
+        # A stand-in secretsd socket, which every launch names through SECRETSD_SOCK (launch): the
+        # script binds secretsd's socket into a box and stops when it is missing, and without this
+        # a test passed only on a host that runs secretsd.
+        self.secretsd = self.root / "secretsd.sock"
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.bind(str(self.secretsd))
         self.boxes = self.root / "boxes"
         self.env = {
             # These tests run INSIDE a box themselves (every session does now), and the script
@@ -118,7 +124,8 @@ class AgentboxDirs(unittest.TestCase):
 
     def launch(self, *options: str, prelude: str = "", **extra_env: str) -> subprocess.CompletedProcess[str]:
         """cmd_new with `options`, after `prelude`: shell lines run once the script is sourced."""
-        script = f'source "{AGENTBOX}"\n{prelude}{NO_HOST}cmd_new {" ".join(options)} -- omp\n'
+        script = (f'source "{AGENTBOX}"\nSECRETSD_SOCK="{self.secretsd}"\n'
+                  f'{prelude}{NO_HOST}cmd_new {" ".join(options)} -- omp\n')
         return subprocess.run(
             ["bash", "-c", script],
             capture_output=True,
@@ -564,10 +571,7 @@ class AgentboxDirs(unittest.TestCase):
         directory above it. The key dir was run-user/agent-secrets before, inside the source of
         the box's /run/user/<uid>. The secretsd socket is the fixture's, so the launch does not
         depend on this host's."""
-        secretsd = self.root / "secretsd.sock"
-        with socket.socket(socket.AF_UNIX) as sock:
-            sock.bind(str(secretsd))
-        args = self.run_args_of("--dir", str(self.lane), prelude=f'SECRETSD_SOCK="{secretsd}"\n')
+        args = self.run_args_of("--dir", str(self.lane))
         box = args[args.index("--name") + 1]
         found = subprocess.run(
             ["bash", "-c", f'source "{AGENTBOX}"\nbox_keydir "{box}"'],

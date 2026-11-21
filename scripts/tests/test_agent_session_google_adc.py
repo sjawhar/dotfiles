@@ -23,18 +23,23 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
 import stat
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from gce_metadata_stub import MetadataStub
+from iam_credentials_stub import IamCredentialsStub
 
 DOTFILES = Path(__file__).resolve().parents[2]
 SCRIPT = DOTFILES / "scripts" / "agent-session"
 BOX_ACCOUNT = "agent@example-project.iam.gserviceaccount.com"
 LIVE_ACCOUNT = "dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com"
+DEV_BOX = "dev-box@theorem-agent-infra.iam.gserviceaccount.com"
 LIVE_GCLOUD = Path(os.environ.get("HOME", "/nonexistent")) / ".config" / "gcloud"
 
 AGENT = """
@@ -56,6 +61,12 @@ if "--refresh" in sys.argv and out["kind"] == "google.auth.identity_pool.Credent
     info = requests.get("https://oauth2.googleapis.com/tokeninfo",
                         params={"access_token": creds.token}, timeout=60).json()
     out["tokeninfo_email"] = info.get("email")
+# The metadata server's credential, refreshed: its account and token come from that server.
+if "--refresh-gce" in sys.argv and out["kind"] == "google.auth.compute_engine.credentials.Credentials":
+    from google.auth.transport.requests import Request
+    creds.refresh(Request())
+    out["service_account_email"] = creds.service_account_email
+    out["token"] = creds.token
 print(json.dumps(out))
 """
 EXTERNAL = "google.auth.identity_pool.Credentials"
@@ -177,6 +188,42 @@ class AgentSessionGoogleAdcTest(unittest.TestCase):
         self.well_known.unlink()
         out = self.agent(self.google_vm())
         self.assertEqual((out["kind"], out["file"]), (GCE, None))
+
+    def test_a_google_vm_session_behind_the_relay_acts_as_the_account_it_serves(self) -> None:
+        """After the switch the metadata server a session reads is the box's relay, which serves dev-box@ with tokens
+        it mints (scripts/agentbox-gce-metadata-relay, installers/agent-identity.sh). google-auth's metadata-server
+        credential, refreshed, names dev-box@ and carries the relay's minted token, not the VM's own."""
+        metadata = MetadataStub.start()  # the VM's own account, dev-sjawhar@
+        self.addCleanup(metadata.stop)
+        iam = IamCredentialsStub.start()
+        self.addCleanup(iam.stop)
+        relay_home = self.root / "relay-home"
+        (relay_home / ".config" / "agent-identity").mkdir(parents=True)
+        (relay_home / ".config" / "agent-identity" / "account").write_text(DEV_BOX + "\n")
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        relay = subprocess.Popen(
+            [sys.executable, str(DOTFILES / "scripts" / "agentbox-gce-metadata-relay"), "127.0.0.1", str(port),
+             "127.0.0.1/32"],
+            env={**os.environ, "HOME": str(relay_home), "AGENTBOX_GCE_METADATA_UPSTREAM": metadata.host,
+                 "AGENTBOX_IAM_CREDENTIALS_URL": iam.url},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(relay.wait, 10)
+        self.addCleanup(relay.terminate)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+                break
+            except OSError:
+                time.sleep(0.05)
+        self.well_known.unlink()
+        host = f"127.0.0.1:{port}"
+        out = self.agent({"GCE_METADATA_HOST": host, "GCE_METADATA_IP": host}, "--refresh-gce")
+        self.assertEqual((out["kind"], out["service_account_email"]), (GCE, DEV_BOX))
+        self.assertEqual(out["token"], "stub-minted-access-0")
+        self.assertEqual([call[:2] for call in iam.calls], [("generateAccessToken", DEV_BOX)])
 
     def test_a_google_vm_session_keeps_a_callers_own_file(self) -> None:
         own = self.gcloud / "legacy_credentials" / "someone@example.com" / "adc.json"

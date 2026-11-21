@@ -1,0 +1,6 @@
+# Global ignore for every repository on a machine with these dotfiles: .gitconfig's
+# core.excludesFile names this file, and git and jj both read it.
+
+# CodeGraph's index (the omp `codegraph` tool, mise.toml). Its own .codegraph/.gitignore leaves
+# itself visible.
+.codegraph/

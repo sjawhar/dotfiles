@@ -3,15 +3,19 @@
 
 Claude Code's async SessionStart hook (.claude/settings.json) runs it with the hook's JSON on
 stdin. It runs `agent-secrets register --session-id <session_id>` only after `agent-secrets
-identity` exits 0 (dispatch://INFRA-3848). It does nothing in an agent box, with no helper socket,
-or with no session id. A refusal writes one line on stderr and exits 0. Claude owns the background
-process and collects its output without delaying session start; the script keeps its parent link.
-The hook is registered for the sources startup, resume and clear and not compact, so it fires
-once for each session id in a process; SessionStart does not fire for a subagent.
+identity` exits 0 (dispatch://INFRA-3848), and not when `agent-secrets-helper sessions` shows the
+nearest session root above it named already or an omp process: a claude process names one id,
+`/clear` gives it another, and an omp root is another session, which a claude id must never name.
+It does nothing in an agent box, with no helper socket, or with no session id. A refusal
+writes one line on stderr and exits 0. Claude owns the background process and collects its output
+without delaying session start; the script keeps its parent link. The hook is registered for the
+sources startup, resume and clear and not compact; SessionStart does not fire for a subagent.
 
 Technique: assert the native async setting, then keep the real script as a child while the fake
-helper delays each call. The fake helper logs argv, returns controlled status, and a listening
-Unix socket stands in for the helper's. Hung calls must still end at the script's own deadlines.
+helper delays each call. The fake client logs argv and returns controlled status, the fake
+`agent-secrets-helper sessions` prints the rows a test gives it, with this test process standing
+where claude does as the hook's parent, and a listening Unix socket stands in for the helper's.
+Hung calls must still end at the script's own deadlines.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ DOTFILES = Path(__file__).resolve().parents[2]
 SCRIPT = DOTFILES / "scripts" / "agent-secrets-name-session"
 SETTINGS = DOTFILES / ".claude" / "settings.json"
 SESSION = "6f1c2b7e-1d1a-4c55-9a8e-0b2d3f4a5c6d"
+FIRST = "0c9d8e7f-6a5b-4c3d-8e2f-1a0b9c8d7e6f"
 STUB = """#!/bin/sh
 printf '%s\\n' "$*" >> "$CALLS"
 case "$1" in
@@ -42,6 +47,33 @@ register)
     ;;
 esac
 """
+# `agent-secrets-helper sessions` prints FAKE_SESSIONS, the helper's rows (root pid, runtime id,
+# enrollment id, state), and exits FAKE_SESSIONS_EXIT.
+HELPER_STUB = """#!/bin/sh
+[ "$1" = sessions ] || exit 2
+sleep "${FAKE_SESSIONS_DELAY:-0}"
+[ -n "${FAKE_SESSIONS:-}" ] && printf '%s\\n' "$FAKE_SESSIONS"
+exit "${FAKE_SESSIONS_EXIT:-0}"
+"""
+# A process above the hook, installed as `omp` and as `claude`: its kernel comm is its file's name,
+# and it adds itself to FAKE_SESSIONS as a session root that no register has named. It runs the
+# hook as a child, never by exec, so it stays in the hook's ancestry.
+ROOT_STUB = """#!/bin/sh
+FAKE_SESSIONS="${FAKE_SESSIONS:+$FAKE_SESSIONS
+}$$\thost:$$:138752288\t7d8bb9de-bea6-4c08-ad54-0470028a348a\tenrolled"
+export FAKE_SESSIONS
+"$@"
+exit $?
+"""
+
+
+def session_row(pid: int, runtime_id: str) -> str:
+    return f"{pid}\t{runtime_id}\t7d8bb9de-bea6-4c08-ad54-0470028a348a\tenrolled"
+
+
+# The session the launcher registered: this test process stands where claude does, the parent of
+# the hook, and no register has named it yet.
+UNNAMED_ROOT = session_row(os.getpid(), f"host:{os.getpid()}:138752288")
 
 
 class NameSessionTest(unittest.TestCase):
@@ -50,9 +82,10 @@ class NameSessionTest(unittest.TestCase):
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)], check=False))
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
-        stub = self.bin / "agent-secrets"
-        stub.write_text(STUB)
-        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+        for name, text in (("agent-secrets", STUB), ("agent-secrets-helper", HELPER_STUB), ("omp", ROOT_STUB), ("claude", ROOT_STUB)):
+            stub = self.bin / name
+            stub.write_text(text)
+            stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
         self.calls = self.tmp / "calls"
         self.sock = self.tmp / "h.sock"
         self.listener = socket.socket(socket.AF_UNIX)
@@ -67,14 +100,16 @@ class NameSessionTest(unittest.TestCase):
             "CALLS": str(self.calls),
             "AGENT_SECRETS_HELPER_SOCK": str(self.sock),
             "XDG_RUNTIME_DIR": str(self.tmp / "run"),
+            "FAKE_SESSIONS": UNNAMED_ROOT,
         }
         base.update(env)
         return base
 
-    def run_hook(self, payload: dict, timeout: float = 30, **env: str) -> subprocess.CompletedProcess[str]:
+    def run_hook(self, payload: dict, timeout: float = 30, above: tuple[str, ...] = (), **env: str) -> subprocess.CompletedProcess[str]:
+        """Run the hook, under the root stubs `above` names, outermost first."""
         return subprocess.run(
-            [str(SCRIPT)], input=json.dumps(payload), env=self.hook_env(**env),
-            capture_output=True, text=True, timeout=timeout,
+            [*(str(self.bin / name) for name in above), str(SCRIPT)], input=json.dumps(payload),
+            env=self.hook_env(**env), capture_output=True, text=True, timeout=timeout,
         )
 
     def logged(self) -> list[str]:
@@ -110,7 +145,7 @@ class NameSessionTest(unittest.TestCase):
                 self.assertEqual(self.logged(), ["identity", f"register --session-id {SESSION}"])
 
     def test_each_helper_call_keeps_its_own_deadline(self) -> None:
-        for delayed_call in ("IDENTITY", "REGISTER"):
+        for delayed_call in ("IDENTITY", "SESSIONS", "REGISTER"):
             with self.subTest(delayed_call=delayed_call):
                 self.calls.unlink(missing_ok=True)
                 started = time.monotonic()
@@ -122,8 +157,10 @@ class NameSessionTest(unittest.TestCase):
                 self.assertEqual(done.returncode, 0, done.stderr)
                 self.assertEqual(done.stdout, "")
                 expected = ["identity"]
-                if delayed_call == "REGISTER":
+                if delayed_call != "IDENTITY":
+                    # A sessions read that hangs is no evidence of a name, so the hook registers.
                     expected.append(f"register --session-id {SESSION}")
+                if delayed_call == "REGISTER":
                     self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
                     self.assertIn(f"register --session-id {SESSION} failed", done.stderr)
                 else:
@@ -144,6 +181,54 @@ class NameSessionTest(unittest.TestCase):
     def test_does_not_register_outside_a_registered_session(self) -> None:
         self.run_hook({"session_id": SESSION, "source": "startup"}, FAKE_IDENTITY_EXIT="1")
         self.assertEqual(self.logged(), ["identity"])
+
+    def test_a_clear_in_a_process_already_named_does_not_name_it_again(self) -> None:
+        # /clear gives this claude process a new id and runs the hook again; the helper named its
+        # session FIRST at its start, and refuses it any other id.
+        refusal = f"agent-secrets register: BAD_REQUEST: this process is in session {FIRST}, which cannot become session {SESSION}"
+        done = self.run_hook(
+            {"session_id": SESSION, "source": "clear"},
+            FAKE_SESSIONS=session_row(os.getpid(), f"session-{FIRST}"),
+            FAKE_REGISTER_EXIT="1", FAKE_REGISTER_ERR=refusal,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((done.stdout, done.stderr), ("", ""))
+        self.assertEqual(self.logged(), ["identity"])
+
+    def test_names_a_new_process_whatever_other_sessions_are_named(self) -> None:
+        # Control: a process whose own session has no name yet is named, even when a session that
+        # is not its own (a pid that is no ancestor of the hook) has one.
+        rows = "\n".join([session_row(4194303, f"session-{FIRST}"), UNNAMED_ROOT])
+        done = self.run_hook({"session_id": SESSION, "source": "startup"}, FAKE_SESSIONS=rows)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.logged(), ["identity", f"register --session-id {SESSION}"])
+
+    def test_never_names_an_omp_session_above_the_hook(self) -> None:
+        # claude run from an omp session's shell, with no session of its own: the nearest root above
+        # the hook is that omp, whose session no register has named. The claude id must not name it.
+        done = self.run_hook({"session_id": SESSION, "source": "startup"}, above=("omp",))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((done.stdout, done.stderr), ("", ""))
+        self.assertEqual(self.logged(), ["identity"])
+
+    def test_names_its_own_session_under_an_omp_session(self) -> None:
+        # Control: scripts/cld run from an omp session's shell registers claude as a session of its
+        # own, below the omp's; the nearest root is that claude, so the hook names it.
+        done = self.run_hook({"session_id": SESSION, "source": "startup"}, above=("omp", "claude"))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.logged(), ["identity", f"register --session-id {SESSION}"])
+
+    def test_registers_when_the_sessions_cannot_be_read(self) -> None:
+        # An unread list is no evidence of a name: the hook registers, as it did before the read.
+        for name, env in {
+            "the helper refuses the list": {"FAKE_SESSIONS": "", "FAKE_SESSIONS_EXIT": "2"},
+            "the list names no root above the hook": {"FAKE_SESSIONS": session_row(4194303, f"session-{FIRST}")},
+        }.items():
+            with self.subTest(name):
+                self.calls.unlink(missing_ok=True)
+                done = self.run_hook({"session_id": SESSION, "source": "clear"}, **env)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual(self.logged(), ["identity", f"register --session-id {SESSION}"])
 
     def test_does_nothing_in_a_box_with_no_socket_or_with_no_id(self) -> None:
         cases = {

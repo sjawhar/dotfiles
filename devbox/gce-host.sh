@@ -12,8 +12,10 @@
 #      the user manager and Docker from starting before it (devbox/gce-disks-ready.conf); and
 #      journald's cap on the boot disk (devbox/journald-cap.conf); the open-file limit of
 #      tailscaled's and sshd's sessions (devbox/nofile.conf);
-#   3. Docker (installers/docker.sh, for the user), then Sysbox (installers/sysbox.sh), which
-#      registers itself with Docker;
+#   3. Docker (installers/docker.sh, for the user): docker-ce and docker-ce-cli pinned at one
+#      version, dockerd's live-restore on, and conntrack's TCP TIME_WAIT at 15 s
+#      (devbox/sysctl-conntrack.conf); then Sysbox (installers/sysbox.sh), which registers itself
+#      with Docker;
 #   4. Tailscale, joined as Sami's own node by his interactive login (installers/tailscale.sh
 #      prints the login URL and waits until he signs in);
 #   5. systemd lingering for the user, so user services outlive the last login;
@@ -179,13 +181,38 @@ done
 systemctl show tailscaled.service ssh.service -p Id -p LimitNOFILESoft
 
 # --- 3. Docker, then Sysbox -----------------------------------------------------------------------
+# docker-ce and docker-ce-cli at exactly this version, with dockerd's live-restore on
+# (dispatch://INFRA-4893). Both scratch-VM proofs of that issue upgraded 29.9.2 to this version
+# with live-restore on. On a machine at another version, installers/docker.sh installs this one,
+# which restarts dockerd: with live-restore on, containers keep running, but connections through
+# their published ports drop until dockerd has restored them (tens of seconds with about 280
+# containers), and a new outgoing connection can take a published host port in that gap, which
+# leaves that container with no published ports. On a busy machine, put the published host ports
+# in net.ipv4.ip_local_reserved_ports for the restart, as the dispatch://INFRA-4893 window script
+# does. The restart also leaves each running kind node (label io.x-k8s.kind.cluster) with no
+# Docker DNS: kind rewrites Docker's DNS jump rule inside the node, dockerd's restore does not find
+# the rule it wrote, and dockerd starts a container's DNS server only once. No rule change brings
+# it back; restart each node: `docker stop`, `docker network disconnect`, `docker network connect
+# --ip <its IP>` (so it keeps its address), `docker start`.
+docker_ce_version=5:29.9.3-1~ubuntu.24.04~noble
+# The version `docker version` reports for it (29.9.3): no epoch, no package revision.
+docker_server_version="${docker_ce_version#*:}"
+docker_server_version="${docker_server_version%%-*}"
+# conntrack's TCP TIME_WAIT at 15 s, not 120 s (devbox/sysctl-conntrack.conf says why).
 # installers/docker.sh is a user installer: USER names whom it adds to the docker group.
-USER="$devbox_user" bash "${DOTFILES_DIR}/installers/docker.sh"
+USER="$devbox_user" DOCKER_LIVE_RESTORE=1 DOCKER_CE_VERSION="$docker_ce_version" DOCKER_CONNTRACK_TIME_WAIT=1 \
+    bash "${DOTFILES_DIR}/installers/docker.sh"
 # shellcheck source=installers/sysbox.sh
 source "${DOTFILES_DIR}/installers/sysbox.sh"
 systemctl is-active --quiet docker.service || die "docker.service is not active"
 systemctl is-active --quiet sysbox.service || die "sysbox.service is not active"
-docker info --format 'docker: root {{.DockerRootDir}}, runtimes {{range $k, $v := .Runtimes}}{{$k}} {{end}}'
+# After Sysbox: its package's install script rewrites /etc/docker/daemon.json (jq merges that keep
+# the other keys) and restarts dockerd.
+live_restore="$(docker info -f '{{.LiveRestoreEnabled}}')" || die "docker info failed"
+[[ "$live_restore" == true ]] || die "dockerd's live-restore is $live_restore, not true (/etc/docker/daemon.json)"
+server_version="$(docker version -f '{{.Server.Version}}')" || die "docker version failed"
+[[ "$server_version" == "$docker_server_version" ]] || die "dockerd is version $server_version, not $docker_server_version"
+docker info --format 'docker: root {{.DockerRootDir}}, live-restore {{.LiveRestoreEnabled}}, runtimes {{range $k, $v := .Runtimes}}{{$k}} {{end}}'
 
 # --- 4. Tailscale ---------------------------------------------------------------------------------
 # shellcheck source=installers/tailscale.sh
