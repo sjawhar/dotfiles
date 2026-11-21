@@ -9,7 +9,7 @@ moves a session (step 5).
 | File | Runs where | What |
 | --- | --- | --- |
 | `devbox/gce-disks`, `gce-disks.service`, `gce-disks-ready.conf` | sami-devbox, root, every boot | local-SSD RAID 0 at `/mnt/scratch` with a 256 GiB swap file; state disk at `/mnt/nvme`; cold disk at `/mnt/durable`; `/home`, `/theorem`, `/theorem-ext4` and `/theorem-xfs` bound from `/mnt/nvme/<name>`; Docker, containerd and Sysbox data on the state disk; `/tmp` and `/var/tmp` bound from the scratch at boot only ("The boot disk holds the OS only"). Ordered before `user@1000`, ssh, Docker. |
-| `devbox/gce-host.sh` | sami-devbox, sudo, once | packages, the disk units, journald's cap (`devbox/journald-cap.conf`), Docker, Sysbox (`installers/sysbox.sh`), Tailscale (`installers/tailscale.sh`), linger, sysstat |
+| `devbox/gce-host.sh` | sami-devbox, sudo, once | packages, the disk units, journald's cap (`devbox/journald-cap.conf`), Docker (`installers/docker.sh`: docker-ce and docker-ce-cli pinned at 29.9.3, dockerd's live-restore on), Sysbox (`installers/sysbox.sh`), Tailscale (`installers/tailscale.sh`), linger, sysstat |
 | `devbox/sami-devbox-provision` | sami-rocqperf | the whole provisioning run, step by step (its header lists the steps) |
 | `devbox/sami-devbox-model-routes` | sami-devbox, by `sami-devbox-provision` step install | omp's OpenAI agents and roles (openai-codex/ and openai/) go to the gateway's openai/ group as `model-gateway/openai/<id>`, since this machine holds no ChatGPT login; edits only its own `omp/models.local.yml` and `omp/config.local.yml` |
 | `devbox/sami-devbox-check` | sami-devbox | A2, and the disks half of A5; `--mark-ready` writes `/mnt/nvme/sami/cutover/target-ready`, which `agentbox move --to sami-devbox` requires |
