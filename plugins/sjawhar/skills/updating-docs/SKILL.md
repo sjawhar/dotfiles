@@ -10,7 +10,7 @@ A skill's own limits, structure and tests are in `writing-agent-skills`.
 ## Write what is true now
 
 - Describe current behavior, in code comments too: readers act on the doc, and git log is the changelog. Delete on sight PR or issue breadcrumbs ("as of #1234"), migration trails ("previously X, now Y"), "NEW:" or "UPDATED:" markers and dated notes.
-- Keep provenance (who, when, the incident) in the commit message or PR body. Outside agent guides and skills, a rule may carry a one-line citation (a link, `file:line`), never a dated story, tally or justifying quote.
+- Keep provenance (who, when, the incident) in the commit message or PR body. Outside agent guides and skills, a rule may carry a one-line citation (a link, `file:line`), never a dated story, tally or justifying quote. Record what changed in the commit message, not in a note beside the corrected text: readers take the note as current.
 
 ## The test for every line
 
@@ -49,7 +49,6 @@ Move a fact to a README or `docs/` page only when that page is where an engineer
 - Correct every copy in place (headings, titles, flags, acceptance rows, downstream steps): a correction under a heading that still asserts the old model has not landed.
 - Grep misses a copy that shares no words with the claim, so also list and check each file, flag, test or step that assumed the old state.
 - Apply the corrected rule to the case that prompted it; do not only restate it.
-- Record what changed in the commit message, not in a note beside the corrected text: readers take the note as current.
 - Mark each claim you did not observe as inferred: a correction's overreach spreads faster than the original error.
 - When a decision says what code may accept, make the code refuse the rest in the same change; a spec alone changes nothing it accepts.
 

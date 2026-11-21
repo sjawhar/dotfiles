@@ -27,8 +27,8 @@ thing. Report what you ran, what you saw, and every defect.
 
 - Every change to what runs needs them, a pin, prompt, grader or workflow included. The affected scenarios are the ones the change adds, changes or claims to fix, and every existing one that exercises what it changed. Run each at the head under review.
 - In `## Verification`, record per scenario what ran and where, the outcome, the duration, a link, and one marker:
-  - `RAN`: observed through the real surface.
-  - `BLOCKED`: the failed command and its authoritative record. Not merge-ready.
+  - `RAN`: observed through the real surface (the command, URL or record a user touches, not a test, a fixture or a log line).
+  - `BLOCKED`: the failed command and its authoritative record (the CI run, issue or record, linked), never a person's name. Check a blocker another session reports against that record. Not merge-ready.
   - `WAIVED-BY-SAMI`: a named blocker that Sami explicitly waived, linked to his words. It covers that blocker on that change only.
 - Size, kind, green CI and approvals are not waivers. Never skip a scenario because it is slow.
 - This adds to the repository's required checks and replaces none of them.

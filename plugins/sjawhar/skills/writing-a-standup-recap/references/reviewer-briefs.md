@@ -29,9 +29,8 @@ title states the point, the axis is honest, the point is obvious. Check that the
 
 ## Fact check
 Use a reviewer from another model family, which does not share the drafter's blind spots. For a part that carries
-HDO material (a transcript of a model run on Theorem's HDO accounts at Anthropic, a `-hdo` repository, or a result
-from either; OSS Verify work is not HDO material, except a `-hdo` repository and HDO run results inside it), use a
-fresh Claude reviewer instead: HDO material never goes to another model family.
+HDO material as `skill-librarian`'s Rules define it (`skill://skill-librarian`), use a fresh Claude reviewer
+instead: HDO material never goes to another model family.
 Check every number, date and weekend label against every stream draft and the chart script. For each: OK, or
 WRONG or OVERSTATED with the source text and a corrected sentence. Open the cited record itself when a claim is
 load-bearing (an item's result or number rests on it) or unsupported, or when two drafts disagree: agreement with a

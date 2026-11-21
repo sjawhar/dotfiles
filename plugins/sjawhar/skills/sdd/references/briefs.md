@@ -25,6 +25,6 @@ fetch_part() {
 
 ## While the workers run
 
-- A worker is silent when it has sent nothing and `history://<id>` shows its last activity more than 10 minutes ago; while it runs a build or a test suite, more than that build's or suite's last run time (from CI or your own last run) plus 10 minutes, as `using-subagents`' `references/waiting.md` says. Message it once with a direct question, and redispatch the same brief only if it has not answered after that same wait.
+- When a worker looks silent, follow `using-subagents`' `references/waiting.md` ("A lane that looks stalled"): message it once with a direct question, and redispatch the same brief only if it has not answered after the wait that section sets.
 - A `deep` worker has no eval tool: when its bash breaks, give it a shell tool from your kernel (`using-subagents`).
 - While a PR waits for merge or deploy, continue from its branch or a dependency's branch, unless you are revising it. Post-merge production proof runs beside the next work, not instead of it.

@@ -7,19 +7,17 @@
 
 ## Conflict chains
 
-- When a rebase across a moved trunk re-conflicts each commit on the same hunks, squash your branch to one commit, then rebase and resolve once. Keep a series of commits only when the layers help review: a reviewer asked for them, or each layer is one complete change whose commit builds and passes the tests without the layers above it.
+- When a rebase across a moved trunk re-conflicts each commit on the same hunks, squash your branch to one commit, then rebase and resolve once; keep a series of commits only where `squash-stack` says (step 4 of "Collapse the stack").
 - The members of an octopus merge share one fork point: rebase each from it, not from the member's own base.
 - Do not restructure a shared stack (duplicate instead) or a fork branch whose release pin follows the change ID.
 
 ## Resolving conflicts
 
 1. Run `jj log` to see what diverged.
-2. List what each side adds. After you resolve, check that each item is still in the result. Delete a local change only after its owner says yes.
+2. Delete a local change only after its owner says yes.
 3. When one side is the old version and the other the new version of the same logic, keep only the new. Then scan for duplicated blocks.
-4. Compare the diff against main with the pre-rebase diff, so nothing was lost or reverted.
-5. Run tests, lint and format before you squash commits together.
 
-The `resolve-conflicts` skill has the rest.
+The `resolve-conflicts` skill has the rest: it maps both sides, checks for dropped hunks, and runs the checks as CI does.
 
 ## After a squash merge
 
