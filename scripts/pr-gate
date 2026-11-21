@@ -175,7 +175,10 @@ fi
 # `Verdict: clean` is the repo's claude-pr-review app's positive form (TRAJECTORY_CLAUDE_REVIEW success); it was in
 # neither set and read GREEN as a neutral, for the wrong reason (agent-c#20291, 2026-09-26). A verdict in NEITHER set
 # is now NOT green: read it. `\**` admits a bold verdict line on both sides.
-NEG='(?i)(request[_ ]changes|changes requested|do not merge) +at +[0-9a-f]|verdict:? *\**(request[_ ]changes|changes requested|changes\b|do not merge|fail\b|block|hold\b|reject|not ready)'
+# A rejection's sha may sit in a code span or in bold ('Changes requested at `<sha>`', as the verdict-line scan below
+# already reads it). Without that, legion-reviewer's CHANGES_REQUESTED review on agent-infra#4645 missed NEG, its later
+# 'which I approved in round 1' hit POS, and the review read as an APPROVE of the old sha (2026-11-21).
+NEG='(?i)(request[_ ]changes|changes requested|do not merge) +at +\**`?[0-9a-f]|verdict:? *\**(request[_ ]changes|changes requested|changes\b|do not merge|fail\b|block|hold\b|reject|not ready)'
 POS='(?i)approve|accept(ed)? +at +[0-9a-f]|merge +at|lgtm|verdict:? *\**(approve|accept|merge|ship|clean)|^[ \t]*\**(merge|approve|accept(ed)?)(-with-nits)?\**:? +(at +)?[0-9a-f]{7,40}|^reviewed `?[0-9a-f]{7,40}`? \(`?[0-9a-f]{40}`?\): \**clean, no findings'
 # THE CI REVIEW APP'S REVIEW IS READ FROM ITS MARKERS, NOT ITS PROSE. Its body (agent-infra's .github/scripts/ci-review-body)
 # has line 2 `<!-- ci-review-verdict {"head":"<sha>","blocking":[..],"person":[..],"missing":[..]} -->` and a last line

@@ -78,6 +78,12 @@ tp neg  "Verdict: BLOCK at b2183a5f -- NEW-6 from the body claims; NEW-4/NEW-5 f
 tp none "Verdict: PASS at 36ae1e27 (tester run)"
 tp pos  "MERGE-WITH-NITS 143425f5 - one non-blocking hardening nit; my earlier REQUEST_CHANGES at 0000aaaa is cleared"
 tp pos  'Reviewed `a96869d` (`a96869d5b02f9a367d1414eb6a3d2e0ba58b1f3e`): **clean, no findings.**'
+# A rejection naming its sha in a code span: legion-reviewer's 'Changes requested at `<sha>`' missed the negative set, so its
+# later 'which I approved in round 1' made the CHANGES_REQUESTED review read as an APPROVE of the old sha (agent-infra#4645).
+C4=8e4f40648cfe6d0f37673d8a74e7994d007e13fc
+CRB=$(printf 'Changes requested at `%s`. The one blocking item is the gate, not the code.\n\n**What I reviewed.** Only what changed since `3e05f653`, which I approved in round 1.\n [review state REQUEST_CHANGES at %s]' "$C4" "$C4")
+tp neg  "$CRB"
+t "g=true p=true n=true sha=$C4"         "$CRB"
 echo "== the oracle's DOES NOT BLOCK is verdict-bearing, in neither polarity set by itself (agent-c#20410, AGENTC-1070) =="
 t "g=true p=false n=false sha=4f659f925529e430a0497de212dbaec240397ee1" "Verdict: DOES NOT BLOCK at 4f659f925529e430a0497de212dbaec240397ee1 (UNPROVEN CLAIMS: 5, none blocking) Oracle re-judge after the owner's census. This supersedes the BLOCKS verdict in 5861618968."
 t "g=true p=false n=true sha=4f659f925529e430a0497de212dbaec240397ee1" "Verdict: BLOCKS at 4f659f925529e430a0497de212dbaec240397ee1 (UNPROVEN CLAIMS: 7, 1 blocking: staging only)"
@@ -138,6 +144,9 @@ tv "blocked at-head"   "$NEW" "$(appseq "$RC1" "$AP2" "$(app "$NEW" '["2"]' "$PN
 # agent-infra#3861: the App approved the head, then a later verdict named only a Dispatch ask link. Its sha is none, so the
 # gate runs no carry compare against the UUID (the old read: not-at-head, a 404 and a false CHANGED).
 tv "green no-sha"      "$NEW" "$(appseq "$(app "$NEW" '[]' "$PA" APPROVED)" "**Verdict: APPROVE**, on Sami's answer dispatch://INFRA-1478/ask/$U")"
+# agent-infra#4645's shape: an approve of an old head, then a change request AT the head whose prose recounts that approve. It
+# blocks; read as an approve of the old sha, a diff identical since then would have carried it to green.
+tv "blocked at-head"   "$C4" "$(appseq "$(printf 'Approved at `3e05f653786fd6259ce666dea6146b8655584f1f`. I find no correctness defect in this head.\n [review state APPROVED at 3e05f653786fd6259ce666dea6146b8655584f1f]')" "$CRB")"
 echo "== check-run aggregation reads the WHOLE list, not a page (#20057: 198 runs, one verdict line per page) =="
 CSQ=$(grep -oP "^CSQ='\K.*(?=')" "$F"); [ -n "$CSQ" ] || { echo "could not extract CSQ from $F"; exit 1; }
 # tc <expected> <jq program building the slurped check-run array>
