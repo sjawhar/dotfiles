@@ -64,9 +64,12 @@ the dirty-lock anomaly that stopped the follower after a marketplace install on 
 Git mode follows any `--repo`, and `DOTFILES_DIR` names the default one. One rule says what a run
 of a checkout other than `~/.dotfiles` does:
 
-- **(A) Machine writes run only for `~/.dotfiles`.** These are the knives registry copy (step 6),
-  the omp rule links and the marketplace plugins (step 7). Another checkout logs each one it skips
-  and goes on.
+- **(A) Guarded writes run only for `~/.dotfiles`; additive writes run for any checkout.** A
+  guarded write from another checkout would point the machine at that checkout. The guarded
+  writes are the knives registry copy (step 6), and the omp rule links and the marketplace plugins
+  (step 7). Another checkout logs each one it skips and goes on. The additive writes are
+  `mise install` of the checkout's own pins into the shared `MISE_DATA_DIR`, under the install
+  lock (step 7); Bun's cache (step 7); and the fast-root pass of the hook sweep (step 8, rule C).
 - **(B) Judgments and records go to the state file the run uses.** On a file other than
   `~/.dotfiles`' (its own, by default) another checkout opens and clears its own conditions,
   `TOOLS NOT INSTALLED` included, as `~/.dotfiles` does on its file. It records its own tools pass
