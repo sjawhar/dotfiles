@@ -2040,7 +2040,9 @@ class AgentboxMove(unittest.TestCase):
         tests that rule) and no GitHub lookup leaves the machine."""
         write_stub(self.stubs, "gh", "echo private")
         origin = self.root / "origin.git"
-        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        # HEAD names main, the branch pushed below: with git's own default (master, where no
+        # init.defaultBranch says main) a clone warns that HEAD refers to a nonexistent ref.
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
         repo = self.checkout("cloneme")
         self.git("remote", "add", "origin", "https://github.com/x/cloneme", cwd=repo)
         self.git("push", "-q", str(origin), "HEAD:refs/heads/main", cwd=repo)
