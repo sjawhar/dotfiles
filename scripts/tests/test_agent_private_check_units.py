@@ -561,6 +561,16 @@ class NoSessionWords(unittest.TestCase):
                 words.update(line.split()[0].split("|"))
         return words
 
+    @staticmethod
+    def help_text(binary: str) -> str:
+        """BINARY's `--help`, through a file: Claude Code exits before a pipe takes all of its help
+        (8190 of 8 KiB+ bytes seen)."""
+        with tempfile.TemporaryFile() as out:
+            subprocess.run([binary, "--help"], stdout=out, stderr=subprocess.STDOUT, timeout=60,
+                           stdin=subprocess.DEVNULL, check=False)
+            out.seek(0)
+            return out.read().decode(errors="replace")
+
     def test_each_no_session_word_is_a_command_of_the_installed_harness(self) -> None:
         check = load_check(Path(self.enterContext(tempfile.TemporaryDirectory())))
         ran = 0
@@ -569,12 +579,7 @@ class NoSessionWords(unittest.TestCase):
             if binary is None:
                 continue
             ran += 1
-            # Through a file: Claude Code exits before a pipe takes all of its help (8190 of 8 KiB+ bytes seen).
-            with tempfile.TemporaryFile() as out:
-                subprocess.run([binary, "--help"], stdout=out, stderr=subprocess.STDOUT, timeout=60,
-                               stdin=subprocess.DEVNULL, check=False)
-                out.seek(0)
-                text = out.read().decode(errors="replace")
+            text = self.help_text(binary)
             listed = self.commands(text)
             with self.subTest(harness=harness, binary=binary):
                 self.assertTrue(listed, f"{binary} --help listed no commands to compare with")
@@ -590,6 +595,67 @@ class NoSessionWords(unittest.TestCase):
         listed = self.commands("Commands:\n  mcp          Configure MCP\n  update|upgrade  Update\n\nArguments:\n  prompt\n")
         self.assertEqual(listed, {"mcp", "update", "upgrade"})
         self.assertNotIn("config", listed)
+
+
+# An option line of Claude Code's `--help`: its names (`-x, --long`, or two long ones), then its
+# value, `<v>` (required, `<v...>` too) or `[v]` (optional), or none (a flag).
+CLAUDE_OPTION = re.compile(r"^((?:-{1,2}[\w-]+)(?:, -{1,2}[\w-]+)*)(?: ([<\[]).*[>\]])?$")
+
+
+def claude_option_tables(help_text: str) -> tuple[set[str], set[str], dict[str, str | None]]:
+    """The no-value long options, the optional-value long options and the short options (letter:
+    None, "required" or "optional") of a Claude Code `--help`, --help and --version set aside."""
+    section = help_text.split("\nOptions:\n", 1)[1].split("\nCommands:\n", 1)[0]
+    no_value: set[str] = set()
+    optional: set[str] = set()
+    short: dict[str, str | None] = {}
+    for line in section.splitlines():
+        if not line.startswith("  -"):
+            continue
+        head = re.split(r"\s{2,}", line.strip())[0]
+        match = CLAUDE_OPTION.match(head)
+        assert match, f"an option line the parse does not know: {head!r}"
+        names = match[1].split(", ")
+        if {"--help", "--version"} & set(names):
+            continue
+        kind = {"<": "required", "[": "optional", None: None}[match[2]]
+        for name in names:
+            if name.startswith("--"):
+                if kind is None:
+                    no_value.add(name)
+                elif kind == "optional":
+                    optional.add(name)
+            else:
+                short[name[1:]] = kind
+    return no_value, optional, short
+
+
+class ClaudeOptionTables(unittest.TestCase):
+    """agent_private_launch's tables of Claude Code's options, which prints() reads print mode with,
+    are the installed claude's own `--help`: Claude Code updates itself, and an option that moves
+    between tables would let a value read as `-p`, or `-p` read as a value. Skipped where claude is
+    not installed."""
+
+    def tables(self) -> tuple[Any, tuple[set[str], set[str], dict[str, str | None]]]:
+        binary = NoSessionWords.binary("claude")
+        if binary is None:
+            self.skipTest("claude is not installed here")
+        launching_module = launching(load_check(Path(self.enterContext(tempfile.TemporaryDirectory()))))
+        return launching_module, claude_option_tables(NoSessionWords.help_text(binary))
+
+    def test_the_option_tables_are_the_installed_claudes(self) -> None:
+        module, (no_value, optional, short) = self.tables()
+        self.assertEqual(set(module.CLAUDE_NO_VALUE), no_value)
+        self.assertEqual(set(module.CLAUDE_OPTIONAL_VALUE), optional)
+        self.assertEqual(module.CLAUDE_SHORT, short)
+
+    def test_control_a_flag_swapped_for_an_option_with_a_value_is_caught(self) -> None:
+        module, (no_value, _, _) = self.tables()
+        swapped = (set(module.CLAUDE_NO_VALUE) - {"--verbose"}) | {"--effort"}
+        self.assertNotEqual(swapped, no_value)
+        # What the swap would do: a value read as print mode, and print mode read as a value.
+        self.assertFalse(module.prints(["--effort", "-p", "hi"]))
+        self.assertTrue(module.prints(["--verbose", "-p", "hi"]))
 
 
 if __name__ == "__main__":
