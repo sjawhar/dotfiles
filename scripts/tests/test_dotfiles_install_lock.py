@@ -779,6 +779,9 @@ class InstallLock(unittest.TestCase):
             body = STAND_IN_TOOL.replace("@TOOL@", shlex.quote(name)).replace("@LOG@", log)
             executable(path, body.replace("@THEN@", then))
 
+        # Follow runs the marketplace step only for ~/.dotfiles (rule A in scripts/dotfiles-follow's
+        # docstring), so here ~/.dotfiles is a symlink to the scratch checkout.
+        (self.home / ".dotfiles").symlink_to(self.checkout)
         # package.json makes follow run Bun. A lock entry above the installed record makes the
         # marketplace step run `shims/omp plugin marketplace update` and `shims/omp plugin upgrade`;
         # it runs them because XDG_CONFIG_HOME holds no omp/profile, so the profile is not legion.

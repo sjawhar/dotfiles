@@ -26,10 +26,28 @@ What one run does:
   4. Refuse when the commits to take change an exception file that is modified here. (`git merge
      --ff-only` keeps a modified file that the merge does not touch, and refuses one it does.)
   5. `git merge --ff-only origin/main`.
-  6. After a fast-forward or marketplace-lock recovery, and on later runs until it passes at HEAD:
-     `mise install`, `bun install --frozen-lockfile` in omp/plugins, marketplace catalog refresh and
-     upgrade for registered marketplace plugins below the lowest version their committed lock entries
-     require (a best-effort lock restore afterward). A plugin at or above its entry gets no upgrade or
+  6. On every run that leaves HEAD at origin/main (in git mode, with no uncommitted change), after
+     any fast-forward or jj move: `scripts/knives-registry-render --if-changed`. It renders
+     knives/repos.toml into ~/.config/knives/repos.toml unless the copy is a plain file and the
+     record the step wrote at its last render holds the file's sha256, the oh-my-pi workspaces
+     path this run would write and the render script's own sha256, so a merged change to the
+     registry reaches this machine with no person's command, a copy rendered while the big local
+     disk's directory was absent is rendered again once it is there, and a merged change to the
+     render script renders again. A failed render is a condition and stops nothing: the tools
+     step still runs. ~/.dotfiles with no scripts/knives-registry-render (a main older than the
+     step) or no knives/repos.toml skips it, and an open condition clears. Only ~/.dotfiles
+     renders (rule A, below), since scripts/leak-terms-check reads the copy: another --repo logs
+     that the copy is not written.
+  7. After a fast-forward or marketplace-lock recovery, and on later runs until it passes at HEAD:
+     `scripts/omp-link-rules`, which links omp/rules/*.md into ~/.omp/agent/rules/, only for
+     ~/.dotfiles (rule A, below; another --repo logs that the omp rules are not linked, and goes
+     on), then `mise install`, `bun install --frozen-lockfile` in omp/plugins, then, only for
+     ~/.dotfiles, marketplace catalog refresh and upgrade for registered marketplace plugins below
+     the lowest version their committed lock entries require (a best-effort lock restore
+     afterward).
+     ~/.omp/plugins links to ~/.dotfiles/omp/plugins (installers/omp.sh), so another --repo's
+     upgrade would write this machine's plugins: it logs that the marketplace plugins are not
+     upgraded, runs no omp command, and goes on. A plugin at or above its entry gets no upgrade or
      version failure; one below is a version failure only if it is still below after its refresh and
      upgrade, and a failed omp command is a failure whatever the version. Dotted-number strings
      compare numerically; any other pair must be equal JSON values of the same type, and object key
@@ -43,23 +61,26 @@ What one run does:
      its pin exits 127 at once instead of waiting on the lock. mise, Bun, the marketplace commands
      and the pin check get the MISE_CACHE_DIR that the checkout's .bashrc gives a shell (read under
      --check-timeout), so this mise and a session's take the same per-version lock in mise's cache.
-  7. Every run, whatever the checkout's state: one pass of the leak check's hook sweep
+     The run judges TOOLS NOT INSTALLED and records a pass at HEAD (tools_ok_head) in the state
+     file it uses (rule B, below). Its pass line names the tools step's parts, whether or not each
+     had work, and in another --repo the parts it skipped there.
+  8. Every run, whatever the checkout's state: one pass of the leak check's hook sweep
      (sweep-hooks.sh of the leak-check tag, in ~/.local/share/public-leak-check-hooks, which
      devbox/sami-devbox-provision's step prepush installs) over its fast roots, under
-     --sweep-timeout; at most once per --slow-sweep-interval, and not in a run whose tools step
-     ran, a pass over its fast and slow roots together instead, under --slow-sweep-timeout. Every
-     pass ends before the run's deadline (--run-limit less the time kept for the state write): a
-     slow-root pass starts only with its whole budget left, a fast-root pass is cut to
-     the time left, and none runs with under 30 s left. A slow-root pass overdue by twice its
-     interval is made before the tools step, which that run leaves to the next, at most once per
-     interval (slow_sweep_priority_at, written before the pass starts). It installs the
-     pre-push hook in every checkout of a public repository under those roots that lacks it; a
-     checkout it cannot hook, a checkout it deferred to a later pass (its cap on GitHub visibility
-     lookups, dispatch://BET-706), a pass that does not end within its timeout, a pass that could
-     not run for lack of time, or a missing sweep is a condition.
-  8. Log each new condition once, all of one run's in one report, and log when it clears. When HEAD
-     is at origin/main and only tools/hooks remain open, the report says a post-update step
-     failed, not that the checkout failed to follow. Any open follow failure keeps the
+     --sweep-timeout; only for ~/.dotfiles (rule C, below), at most once per --slow-sweep-interval
+     and not in a run whose tools step ran, a pass over its fast and slow roots together instead,
+     under --slow-sweep-timeout. Every pass ends before the run's deadline (--run-limit less the
+     time kept for the state write): a slow-root pass starts only with its whole budget left, a
+     fast-root pass is cut to the time left, and none runs with under 30 s left. A slow-root pass
+     overdue by twice its interval is made before the tools step, which that run leaves to the
+     next, at most once per interval (slow_sweep_priority_at, written before the pass starts). It
+     installs the pre-push hook in every checkout of a public repository under those roots that
+     lacks it; a checkout it cannot hook, a checkout it deferred to a later pass (its cap on GitHub
+     visibility lookups, dispatch://BET-706), a pass that does not end within its timeout, a pass
+     that could not run for lack of time, or a missing sweep is a condition.
+  9. Log each new condition once, all of one run's in one report, and log when it clears. When HEAD
+     is at origin/main and only tools/registry/hooks remain open, the report says a post-update
+     step failed, not that the checkout failed to follow. Any open follow failure keeps the
      not-following headline.
 
 In git mode, it never stashes, resets, rebases or abandons. In jj mode, dotfiles-sync rebases
@@ -69,6 +90,33 @@ commands. Other edits are discarded only when origin/main already holds their by
 the fast-forward. Apart from that lock recovery, a refusal leaves HEAD, the index and every file
 as they were. It sends no alert and no message: its reports go to its own log (the unit's journal),
 and the state file holds the conditions still open.
+
+The state file is DEFAULT_STATE for ~/.dotfiles, by any spelling of its path. A run of any other
+checkout with no --state keeps a file of its own beside it, named for the checkout's resolved path
+(default_state), so nothing that run judges or records reaches ~/.dotfiles's state, and it never
+holds ~/.dotfiles's state lock. The killed-sweeps/ directory beside the state files
+(keep_killed_sweep_log) is one directory for both: every checkout's run keeps its killed passes'
+logs there, as before.
+
+One rule says what a run of a checkout other than ~/.dotfiles does (git mode takes any --repo,
+and DOTFILES_DIR names the default one):
+  (A) Guarded writes run only for ~/.dotfiles, because one from another checkout would point the
+      machine at that checkout: the knives registry copy (step 6), and the omp rule links and the
+      marketplace plugins (step 7). Another checkout logs each one it skips. Additive writes run
+      for any checkout: `mise install` of its own pins into the shared MISE_DATA_DIR, under the
+      install lock (step 7); Bun's cache (step 7); and the fast-root pass of the hook sweep
+      (step 8, rule C).
+  (B) Judgments and records go to the state file the run uses. On a file other than DEFAULT_STATE
+      (its own, by default) another checkout opens and clears its conditions and records its
+      tools pass (tools_ok_head) as ~/.dotfiles does on DEFAULT_STATE, so after a pass it skips
+      its tools step at that HEAD. It never renders, so it never judges KNIVES REGISTRY NOT
+      WRITTEN. A run of another checkout on DEFAULT_STATE, named by --state, takes that file's
+      lock and reads it, and commits nothing to it (a State that is not writable): ~/.dotfiles's
+      conditions and records stay byte for byte as they were, each problem the run found is
+      logged as not recorded, and it runs its tools step on every run until ~/.dotfiles passes at
+      that HEAD; after that it skips the step.
+  (C) Only ~/.dotfiles makes slow-root hook sweep passes (step 8). Another checkout makes
+      fast-root passes only, and never leaves its tools step to the next run for a slow-root pass.
 """
 
 from __future__ import annotations
@@ -76,6 +124,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import getpass
+import hashlib
 import json
 import math
 import os
@@ -84,12 +133,14 @@ import signal
 import socket
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 
-# Where the state file goes, as the sibling watches place theirs: the big disk where there is one,
-# ~/.local/state elsewhere. devbox/sami-devbox-check reads it for A2.
+# Where ~/.dotfiles's state file goes, as the sibling watches place theirs: the big disk where there
+# is one, ~/.local/state elsewhere. Each checkout other than ~/.dotfiles keeps a file of its own
+# beside it (default_state).
 _NVME_TMP = Path(f"/mnt/nvme/{getpass.getuser()}/tmp")
 DEFAULT_STATE = (
     _NVME_TMP / "dotfiles-follow/state.json"
@@ -106,10 +157,11 @@ HEADLINE = {
     "kept-file": "MAIN CHANGES A KEPT FILE",
     "merge": "FAST-FORWARD FAILED",
     "tools": "TOOLS NOT INSTALLED",
+    "registry": "KNIVES REGISTRY NOT WRITTEN",
     "hooks": "PRE-PUSH HOOK NOT INSTALLED",
 }
 KINDS = tuple(HEADLINE)
-POST_FOLLOW_KINDS = {"tools", "hooks"}
+POST_FOLLOW_KINDS = {"tools", "registry", "hooks"}
 # A tracked exception file may differ from its commit in the work tree or the index; any other
 # status of it (deleted, renamed, in conflict) is a change like any other.
 KEPT_STATUSES = {" M", "M ", "MM"}
@@ -206,15 +258,26 @@ def kept_paths(repo: Path, provision: Path) -> tuple[set[str], str]:
     """(repo-relative paths that may differ from their commit, a note when the list is unread).
 
     SECRET_FILES' paths are relative to $HOME; those inside this checkout that git tracks are kept.
-    Untracked ones need no exception: git ignores them (.gitignore) or this tool refuses them.
+    An entry is inside when its directory, resolved, lies in the checkout's resolved path, so a
+    ~/.dotfiles that is a symlink to a directory outside HOME keeps .dotfiles/secrets.env whether
+    the run names it ~/.dotfiles or by its real path. The entry's last part is never resolved: a
+    kept file that is itself a link is still its path in the checkout. Untracked ones need no
+    exception: git ignores them (.gitignore) or this tool refuses them.
     """
     try:
         entries = secret_files(provision)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         return set(), f"SECRET_FILES could not be read, so no file is kept: {error}"
-    prefix = os.path.relpath(repo.resolve(), Path.home().resolve()) + "/"
-    inside = [entry[len(prefix):] for entry in entries if entry.startswith(prefix)]
-    inside = [entry for entry in inside if entry]
+    root = repo.resolve()
+    inside = []
+    for entry in entries:
+        path = Path.home() / entry
+        try:
+            relative = (path.parent.resolve() / path.name).relative_to(root)
+        except ValueError:
+            continue
+        if relative.parts:
+            inside.append(relative.as_posix())
     if not inside:
         return set(), ""
     done = git(repo, "ls-files", "-z", "--", *inside)
@@ -302,6 +365,29 @@ def display_path(path: Path) -> str:
     home = str(Path.home())
     text = str(path)
     return "~" + text[len(home):] if text == home or text.startswith(home + "/") else text
+
+
+def is_home_dotfiles(repo: Path) -> bool:
+    """True when REPO is ~/.dotfiles, by any spelling of its path: both are resolved, so a
+    ~/.dotfiles that is a symlink counts by its real path too. Only that checkout writes this
+    machine's places, ~/.config/knives/repos.toml, ~/.omp/agent/rules/ and ~/.omp/plugins, and
+    makes slow-root hook sweep passes (the one rule, A and C, in the module docstring): git mode
+    takes any --repo."""
+    return repo.resolve() == (Path.home() / ".dotfiles").resolve()
+
+
+def default_state(repo: Path) -> Path:
+    """The state file of a run with no --state. ~/.dotfiles, by any spelling of its path, keeps
+    DEFAULT_STATE, the timer's file. Any other checkout gets a file of its own beside it, named for
+    its resolved path: the first 16 hex digits of the sha256 of that path's bytes, which are what
+    `printf %s "$(realpath <checkout>)" | sha256sum` hashes, a path that is not UTF-8 included. So
+    a run of it neither opens, clears nor overwrites anything in ~/.dotfiles's state and never
+    holds its lock. The name is the same on every run of one checkout and differs between
+    checkouts."""
+    if is_home_dotfiles(repo):
+        return DEFAULT_STATE
+    key = hashlib.sha256(os.fsencode(repo.resolve())).hexdigest()[:16]
+    return DEFAULT_STATE.with_name(f"state-{key}.json")
 
 
 # ------------------------------------------------------------------------------- tools
@@ -539,13 +625,20 @@ def bashrc_mise_cache_dir(repo: Path, timeout: float) -> str:
 
 
 def install_tools(repo: Path, options: argparse.Namespace) -> str:
-    """Return why the rule links, mise, Bun, marketplace plugins or the check's pin lines did not pass."""
+    """Return why the rule links, mise, Bun, marketplace plugins or the check's pin lines did not
+    pass. The rule links and the marketplace plugins are made only from ~/.dotfiles (the one rule,
+    A, in the module docstring)."""
     # Link omp/rules/*.md first, so a rule added by commit goes live on this pull even if a later
     # tool step is stuck (a new rule used to stay dark until someone re-ran install.sh).
-    code, out = run_step([str(repo / "scripts/omp-link-rules")], repo, options.check_timeout)
-    if code != 0:
-        return f"`scripts/omp-link-rules` in {display_path(repo)} exited {code}:\n{tail(out)}"
-    log("rules: omp/rules/*.md linked into ~/.omp/agent/rules/")
+    # Only from ~/.dotfiles (rule A): a link made from another checkout would point every session's rules at it.
+    home = is_home_dotfiles(repo)
+    if not home:
+        log(f"rules: {display_path(repo)} is not ~/.dotfiles; omp rules not linked")
+    else:
+        code, out = run_step([str(repo / "scripts/omp-link-rules")], repo, options.check_timeout)
+        if code != 0:
+            return f"`scripts/omp-link-rules` in {display_path(repo)} exited {code}:\n{tail(out)}"
+        log("rules: omp/rules/*.md linked into ~/.omp/agent/rules/")
     # Every tools command gets this absolute directory, so it uses the same data as mise's lock.
     data = Path(os.environ.get("MISE_DATA_DIR") or Path.home() / ".mise").absolute()
     environment = {"MISE_DATA_DIR": str(data)}
@@ -601,14 +694,24 @@ def install_tools(repo: Path, options: argparse.Namespace) -> str:
         )
         if code != 0:
             return f"`bun install --frozen-lockfile` in {display_path(plugins)} exited {code}:\n{tail(out)}"
-    why = install_marketplace_plugins(repo, options.mise_timeout, environment=environment)
-    if why:
-        return why
+    # Only from ~/.dotfiles (rule A): ~/.omp/plugins links to its omp/plugins (installers/omp.sh), which another checkout's upgrade would write.
+    if not home:
+        log(f"plugins: {display_path(repo)} is not ~/.dotfiles; marketplace plugins not upgraded")
+    else:
+        why = install_marketplace_plugins(repo, options.mise_timeout, environment=environment)
+        if why:
+            return why
     check = repo / "devbox/sami-devbox-check"
     code, out = run_step([str(check), "--pins"], repo, options.check_timeout, environment=environment)
     if code != 0:
         return f"`mise install` and the plugin installs passed, but `devbox/sami-devbox-check --pins` exited {code}:\n{tail(out)}"
-    log(f"tools: mise install, frozen Bun install, marketplace pins and {check.name} --pins passed")
+    if home:
+        log(f"tools: mise install, frozen Bun install, marketplace pins and {check.name} --pins passed")
+    else:
+        log(
+            f"tools: mise install, frozen Bun install and {check.name} --pins passed;"
+            f" rules and marketplace plugins skipped: {display_path(repo)} is not ~/.dotfiles"
+        )
     for line in out.strip().splitlines():
         log(f"  {line}")
     return ""
@@ -713,8 +816,9 @@ def sweep_hooks(options: argparse.Namespace, kind: str, timeout: float) -> tuple
     one STARTED (OnUnitActiveSec=10min), and at once after a run longer than that: from 10:35Z to
     12:02Z each run took 14 min 32 s and the next began the second it ended, so the walk of all
     roots ran almost without a break. So every run sweeps the fast roots, where sessions'
-    checkouts are made, under --sweep-timeout (420 s), and a run at most once per
-    --slow-sweep-interval (3600 s) sweeps both kinds of root under --slow-sweep-timeout (1000 s).
+    checkouts are made, under --sweep-timeout (420 s), and a run of ~/.dotfiles at most once per
+    --slow-sweep-interval (3600 s) sweeps both kinds of root under --slow-sweep-timeout (1000 s);
+    another checkout sweeps the fast roots only (the one rule, C, in the module docstring).
     The time is recorded only when a slow pass ends with its summary line, so a killed one is tried
     again on the next run. A killed pass's log is kept (keep_killed_sweep_log), so the next look at
     a kill can read what the pass did before it.
@@ -833,10 +937,15 @@ class State:
     the complete new one, never a part. The lock is not on the state file because that file's
     inode changes at every commit: a second run would lock the new inode while the first still
     held the old one.
+
+    A State that is not WRITABLE (a run of another checkout on ~/.dotfiles's file, the one rule, B,
+    in the module docstring) takes the same lock and reads the same file, and its commit writes
+    nothing, so every commit of the run, mid-run ones included, leaves the file as it was.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, writable: bool = True) -> None:
         self.path = path
+        self.writable = writable
         path.parent.mkdir(parents=True, exist_ok=True)
         self.handle = open(path.with_name(path.name + ".lock"), "a")  # noqa: SIM115 -- held open for the run's flock
         try:
@@ -852,6 +961,8 @@ class State:
             self.data = {}
 
     def commit(self) -> None:
+        if not self.writable:
+            return
         fd, temporary = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}.", suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as handle:
@@ -902,17 +1013,23 @@ def run_tools_step(
 ) -> None:
     """The post-update tools step at HEAD, shared by git mode and jj mode.
 
-    A run on which a slow-root pass takes priority (slow_sweep_takes_priority: overdue, and no run
-    has left its tools for one in the last interval), and the time left still holds that whole
-    pass, leaves the tools step to the next run and makes the slow-root pass instead (sweep_hooks):
-    otherwise a tools step that fails, or runs after every fast-forward, would keep the slow roots
-    unswept for as long as it does. That run's time is on disk before the pass starts, so a pass
-    that never completes, even one whose whole run is killed, takes at most one run's tools step
-    per interval. With --no-hook-sweep there is no pass, so the tools step always runs."""
+    A run of ~/.dotfiles on which a slow-root pass takes priority (slow_sweep_takes_priority:
+    overdue, and no run has left its tools for one in the last interval), and the time left still
+    holds that whole pass, leaves the tools step to the next run and makes the slow-root pass
+    instead (sweep_hooks): otherwise a tools step that fails, or runs after every fast-forward,
+    would keep the slow roots unswept for as long as it does. That run's time is on disk before the
+    pass starts, so a pass that never completes, even one whose whole run is killed, takes at most
+    one run's tools step per interval. With --no-hook-sweep there is no pass, so the tools step
+    always runs. Another checkout makes no slow-root pass, so it never leaves its tools step for one
+    (the one rule, C, in the module docstring).
+
+    The run judges TOOLS NOT INSTALLED and records a pass (tools_ok_head) in the state file it uses
+    (rule B): a State that is not writable commits neither."""
     data = state.data
     now = time.time()
     if (
-        not getattr(options, "no_hook_sweep", False)
+        is_home_dotfiles(repo)
+        and not getattr(options, "no_hook_sweep", False)
         and slow_sweep_takes_priority(options, data, now)
         and deadline - monotonic() >= options.slow_sweep_timeout
     ):
@@ -921,12 +1038,68 @@ def run_tools_step(
         state.commit()
         log(f"tools: left to the next run, which retries them at {short(head)}: this run makes the overdue slow-root hook sweep pass")
         return
+    facts["tools_ran"] = True
     judged.add("tools")
     why = install_tools(repo, options)
     if why:
         found["tools"] = why + f"\n  {display_path(repo)} is at {short(head)}. The next run tries again."
     else:
         data["tools_ok_head"] = head
+
+
+def path_identity(path: Path) -> tuple[int, int] | None:
+    """(inode, mtime in ns) of the entry at PATH itself, or None when there is none."""
+    try:
+        st = path.lstat()
+    except OSError:
+        return None
+    return st.st_ino, st.st_mtime_ns
+
+
+def run_registry_step(
+    repo: Path, options: argparse.Namespace, found: dict[str, str], judged: set[str], facts: dict,
+) -> None:
+    """Render knives/repos.toml into this machine's copy, ~/.config/knives/repos.toml, at HEAD
+    (scripts/knives-registry-render --if-changed), shared by git mode and jj mode.
+
+    Only ~/.dotfiles writes the copy (the one rule, A, in the module docstring):
+    scripts/leak-terms-check reads it, so a render from another checkout (git mode takes any
+    --repo) would put that checkout's registry there. For another checkout the step logs that it
+    wrote no copy and renders nothing, so it never judges KNIVES REGISTRY NOT WRITTEN, on any
+    state file.
+
+    The render writes the copy when the copy is missing or not a plain file, or when the record it
+    wrote beside the copy at its last render does not hold the file's sha256, the oh-my-pi
+    workspaces path this run would write (the big local disk's directory where it exists) and the
+    render script's own sha256. So every run at HEAD runs it, whatever the tools step does: a copy
+    with no record (one only an install wrote) is rendered once, and after that a run renders when
+    the file changed, by any route, or the workspaces path or the render script did. A ~/.dotfiles
+    with no render script or no knives/repos.toml has nothing to render, so it judges the condition
+    and an open one clears. The run's footer names a write of the copy, judged by the copy's inode
+    and mtime before and after the render."""
+    if not is_home_dotfiles(repo):
+        log(f"registry: {display_path(repo)} is not ~/.dotfiles; knives registry copy not written")
+        return
+    judged.add("registry")
+    render = repo / "scripts/knives-registry-render"
+    if not render.exists() or not (repo / "knives/repos.toml").exists():
+        return
+    copy = Path.home() / ".config/knives/repos.toml"
+    before = path_identity(copy)
+    code, out = run_step([str(render), "--if-changed"], repo, options.check_timeout)
+    written = path_identity(copy) != before
+    if written:
+        facts["registry_written"] = True
+    if code != 0:
+        # A render stopped after it replaced the copy (before its record) did write it.
+        held = "was replaced before the render failed" if written else "keeps what it held"
+        found["registry"] = (
+            f"`scripts/knives-registry-render --if-changed` in {display_path(repo)} exited {code}:\n{tail(out)}"
+            f"\n  {display_path(copy)} {held}. The next run tries again."
+        )
+        return
+    for line in out.strip().splitlines():
+        log(f"registry: {line}")
 
 
 def restore_marketplace_lock(
@@ -969,12 +1142,13 @@ def assess_jj_and_follow(
     data = state.data
     display = display_path(repo)
     found: dict[str, str] = {}
-    judged = set(KINDS) - {"tools", "hooks"}
+    # The post-update conditions are judged only by their own steps, which run at main: an early
+    # return below (a refused or failed sync) must not clear one that is still open.
+    judged = set(KINDS) - POST_FOLLOW_KINDS
     facts: dict = {"fast_forwarded": False}
-    home_repo = (Path.home() / ".dotfiles").resolve()
-    if repo.resolve() != home_repo:
+    if not is_home_dotfiles(repo):
         found["sync"] = (
-            f"{display} is a colocated jj checkout, but only {display_path(home_repo)} may be moved"
+            f"{display} is a colocated jj checkout, but only ~/.dotfiles may be moved"
             " by dotfiles-sync; this checkout stays in place."
         )
         return found, judged, facts
@@ -1038,6 +1212,10 @@ def assess_jj_and_follow(
     facts["fast_forwarded"] = head != before
     if facts["fast_forwarded"]:
         log(f"moved colocated jj checkout {display} from {short(before)} to {short(head)}")
+    # The registry render runs on every run at main; it writes the copy only when it is missing or
+    # not a plain file, or when knives/repos.toml, the oh-my-pi workspaces path or the render script
+    # changed since the last render (run_registry_step).
+    run_registry_step(repo, options, found, judged, facts)
     if data.get("tools_ok_head") != head:
         run_tools_step(repo, options, state, deadline, head, found, judged, facts)
     return found, judged, facts
@@ -1179,37 +1357,51 @@ def assess_and_follow(
                 log(f"fast-forwarded {display} from {short(head)} to {short(facts['head'])}: {behind} commit(s)")
                 head = facts["head"]
 
-    # The tools step runs after a fast-forward, and again on each run until it passes at HEAD.
-    if head == target and "dirty" not in found and (
-        facts["fast_forwarded"] or data.get("tools_ok_head") != head
-    ):
-        run_tools_step(repo, options, state, deadline, head, found, judged, facts)
+    # At HEAD with nothing uncommitted: the registry render on every run (it writes the copy only
+    # when it is missing or not a plain file, or when knives/repos.toml, the oh-my-pi workspaces
+    # path or the render script changed since the last render), then the tools step after a
+    # fast-forward, and again on each run until it passes at HEAD.
+    if head == target and "dirty" not in found:
+        run_registry_step(repo, options, found, judged, facts)
+        if facts["fast_forwarded"] or data.get("tools_ok_head") != head:
+            run_tools_step(repo, options, state, deadline, head, found, judged, facts)
     return found, judged, facts
 
 
-def choose_sweep(options: argparse.Namespace, data: dict, judged: set[str], now: float,
+def choose_sweep(options: argparse.Namespace, data: dict, tools_ran: bool, now: float,
                  deadline: float) -> tuple[str, float]:
     """(the kind of hook sweep pass this run makes, its budget in seconds; 0 for none).
 
-    A slow-root pass when one is due, no tools step ran this run, and the time left before DEADLINE
-    holds its whole --slow-sweep-timeout: never a shortened walk of the slow roots. Otherwise a
-    fast-root pass bounded by the smaller of --sweep-timeout and the time left, or none when the
-    time left is under MIN_SWEEP_SECONDS."""
+    A slow-root pass only in a run of ~/.dotfiles (the one rule, C, in the module docstring), when
+    one is due, no tools step ran this run (TOOLS_RAN, the run's fact), and the time left before
+    DEADLINE holds its whole --slow-sweep-timeout: never a shortened walk of the slow roots.
+    Otherwise a fast-root pass bounded by the smaller of --sweep-timeout and the time left, or none
+    when the time left is under MIN_SWEEP_SECONDS."""
     left = deadline - monotonic()
-    if "tools" not in judged and slow_sweep_due(options, data, now) and left >= options.slow_sweep_timeout:
+    if (
+        is_home_dotfiles(options.repo)
+        and not tools_ran
+        and slow_sweep_due(options, data, now)
+        and left >= options.slow_sweep_timeout
+    ):
         return "slow", options.slow_sweep_timeout
     return "fast", min(options.sweep_timeout, left) if left >= MIN_SWEEP_SECONDS else 0.0
 
 
 def run_once(options: argparse.Namespace) -> list[str]:
     """One run. Returns its reports, each also written to the log: none when nothing opened or
-    cleared, or when another run holds the state lock."""
+    cleared, when the run records nothing (the one rule, B), or when another run holds the state
+    lock."""
     # The run's deadline: systemd kills the unit at --run-limit (TimeoutStartSec) after its start;
     # the last STATE_RESERVE seconds of that are kept for the state write.
     deadline = monotonic() + options.run_limit - STATE_RESERVE
     now = time.time()
     repo = options.repo
-    state = State(options.state)
+    # The one rule, B, in the module docstring: judgments and records go to the run's own state
+    # file, unless a checkout other than ~/.dotfiles runs on ~/.dotfiles's file, DEFAULT_STATE
+    # named by --state. Such a run takes that file's lock and reads it, and commits nothing to it.
+    owns_state = is_home_dotfiles(repo) or options.state.resolve() != DEFAULT_STATE.resolve()
+    state = State(options.state, writable=owns_state)
     if not state.locked:
         log(f"another run holds {options.state}; skipping this period")
         return []
@@ -1221,7 +1413,7 @@ def run_once(options: argparse.Namespace) -> list[str]:
         sweep_kind, completed, why = "", False, ""
         judged.add("hooks")
     else:
-        sweep_kind, budget = choose_sweep(options, data, judged, now, deadline)
+        sweep_kind, budget = choose_sweep(options, data, bool(facts.get("tools_ran")), now, deadline)
         if budget:
             why, completed = sweep_hooks(options, sweep_kind, budget)
         else:
@@ -1242,23 +1434,32 @@ def run_once(options: argparse.Namespace) -> list[str]:
 
     opened: dict[str, str] = {}
     cleared: list[str] = []
-    for kind in KINDS:
-        why = found.get(kind)
-        incident = incidents.get(kind)
-        if why:
-            if not incident:
-                incidents[kind] = {"opened_at": now, "why": why}
-                opened[kind] = why
-            else:
-                incident["why"] = why
-        elif incident and kind in judged:
-            cleared.append(
-                f"{HEADLINE[kind]} cleared after {human_time(now - incident['opened_at'])}"
-                f" (opened {iso(incident['opened_at'])})."
-            )
-            incidents.pop(kind)
-    if "hooks" in found:
-        incidents["hooks"]["pass"] = "slow" if sweep_kind == "slow" or (hooks_incident or {}).get("pass") == "slow" else "fast"
+    if not owns_state:
+        not_recorded = (
+            f"not recorded: {display_path(repo)} is not ~/.dotfiles, and {display_path(options.state)}"
+            " is ~/.dotfiles's state file, which only a ~/.dotfiles run writes"
+        )
+        for kind in KINDS:
+            if kind in found:
+                log(f"{not_recorded}. This run found {HEADLINE[kind]}: {found[kind]}")
+    else:
+        for kind in KINDS:
+            why = found.get(kind)
+            incident = incidents.get(kind)
+            if why:
+                if not incident:
+                    incidents[kind] = {"opened_at": now, "why": why}
+                    opened[kind] = why
+                else:
+                    incident["why"] = why
+            elif incident and kind in judged:
+                cleared.append(
+                    f"{HEADLINE[kind]} cleared after {human_time(now - incident['opened_at'])}"
+                    f" (opened {iso(incident['opened_at'])})."
+                )
+                incidents.pop(kind)
+        if "hooks" in found:
+            incidents["hooks"]["pass"] = "slow" if sweep_kind == "slow" or (hooks_incident or {}).get("pass") == "slow" else "fast"
 
     host = socket.gethostname().split(".")[0]
     display = display_path(repo)
@@ -1274,15 +1475,16 @@ def run_once(options: argparse.Namespace) -> list[str]:
         return "\n\n".join(f"{HEADLINE[kind]}: {why}" for kind, why in chosen.items())
 
     messages: list[str] = []
-    changed = (
-        f"It fast-forwarded the checkout to {short(facts.get('head', ''))} and changed nothing else"
-        if facts["fast_forwarded"]
-        else "It changed nothing in the checkout"
-    )
+    # One sentence of what the run did, each clause true: "It A", "It A and B", "It A, B and C".
+    moved = f"fast-forwarded the checkout to {short(facts.get('head', ''))}"
+    wrote = ["wrote ~/.config/knives/repos.toml from knives/repos.toml"] if facts.get("registry_written") else []
     if facts.get("restored_marketplace_lock"):
-        changed = "It restored the follow-managed marketplace lock to HEAD"
-        if facts["fast_forwarded"]:
-            changed += f" and fast-forwarded the checkout to {short(facts.get('head', ''))}"
+        did = ["restored the follow-managed marketplace lock to HEAD", *([moved] if facts["fast_forwarded"] else []), *wrote]
+    elif facts["fast_forwarded"]:
+        did = [moved, *wrote, "changed nothing else"]
+    else:
+        did = ["changed nothing in the checkout", *wrote]
+    changed = "It " + (f"{', '.join(did[:-1])} and {did[-1]}" if len(did) > 1 else did[0])
     footer = (
         f"From dotfiles-follow on {host} (scripts/dotfiles-follow.md). {changed}:"
         " in git mode it never stashes, resets, rebases or abandons. In jj mode dotfiles-sync"
@@ -1309,10 +1511,14 @@ def run_once(options: argparse.Namespace) -> list[str]:
     state.commit()
     state.close()
 
+    recorded = (
+        f" open: {', '.join(sorted(incidents)) or 'none'}; new: {len(opened)}; cleared: {len(cleared)}"
+        if owns_state
+        else f" found: {', '.join(kind for kind in KINDS if kind in found) or 'none'}; {not_recorded}"
+    )
     log(
         f"{where}; relation {facts.get('relation', '?')}; fast-forwarded: {facts['fast_forwarded']};"
-        f" kept: {', '.join(facts.get('kept_modified', [])) or 'none'}; open: {', '.join(sorted(incidents)) or 'none'};"
-        f" new: {len(opened)}; cleared: {len(cleared)}"
+        f" kept: {', '.join(facts.get('kept_modified', [])) or 'none'};{recorded}"
     )
     for text in messages:
         log(text)
@@ -1333,7 +1539,16 @@ def main() -> int:
         default=None,
         help="the script whose SECRET_FILES names the kept files (default <repo>/devbox/sami-devbox-provision)",
     )
-    parser.add_argument("--state", type=Path, default=DEFAULT_STATE, help=f"state file (default {DEFAULT_STATE})")
+    parser.add_argument(
+        "--state",
+        type=Path,
+        default=None,
+        help=(
+            f"state file (default {DEFAULT_STATE} for ~/.dotfiles; for any other checkout"
+            f" {DEFAULT_STATE.parent}/state-<first 16 hex digits of the sha256 of its resolved path>.json;"
+            " a run of another checkout with ~/.dotfiles's file here records nothing in it)"
+        ),
+    )
     parser.add_argument("--fetch-grace", type=int, default=3, help="runs in a row a fetch may fail before it is reported (default 3)")
     parser.add_argument("--fetch-timeout", type=float, default=120.0)
     parser.add_argument("--mise-timeout", type=float, default=600.0)
@@ -1356,6 +1571,12 @@ def main() -> int:
     parser.add_argument("--box-health-role", help=argparse.SUPPRESS)
     options = parser.parse_args()
     options.repo = options.repo.absolute()
+    # A checkout path that is not UTF-8 goes to the log as its own bytes: a stdout that refuses them
+    # (one under a UTF-8 locale) would stop the run at its first line that names the checkout.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="surrogateescape")
+    if options.state is None:
+        options.state = default_state(options.repo)
     if options.provision is None:
         options.provision = options.repo / "devbox/sami-devbox-provision"
     run_once(options)
