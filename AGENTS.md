@@ -27,7 +27,7 @@ In `~/.dotfiles`, do not run `jj rebase` onto main, `git pull`, `git rebase`, `g
 - `vendor/` holds third-party clones the installers make: never edit them there.
 - Upgrade a pinned tool without asking, then say what changed and how to roll it back. Ask Sami first when running sessions must restart for it (bun, node, omp).
 - Two places build an agent session's environment: `scripts/agent-session`, which every host launcher execs, and `session_env()` in `scripts/agentbox`, for a box. A change every session needs goes in both: a launcher without it makes its sessions act as Sami on GitHub or Google Cloud.
-- This repository is public. The shims refuse a commit, a push or a gh text that holds a private term. This repository keeps its terms only in the encrypted `leak-terms.sops.yaml`: change it only with `sops edit leak-terms.sops.yaml`, and never put a term in a file, an argument or the environment.
+- This repository is public. It keeps the terms that must not reach a public place only in the encrypted `leak-terms.sops.yaml`: change it only with `sops edit leak-terms.sops.yaml`, and never put a term in a file, an argument or the environment.
 
 ## Tests and lint
 
