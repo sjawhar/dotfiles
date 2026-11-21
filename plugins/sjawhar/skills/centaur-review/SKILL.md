@@ -56,8 +56,8 @@ When Sami ends his narration:
    will it improve the code?
 3. Collect the four agent results from §1 step 4. Discard each that reports no finding.
 4. Show Sami his comments, the challenges and the four agents' findings. He decides what stays.
-5. Write each kept comment as a clear observation, then what it asks of the author: a question for a QUESTION
-   comment; for every other severity, the change, or a question when Sami named no change. Open with the
+5. Write each kept comment as a clear observation, then the concrete thing it asks of the author: a question for a
+   QUESTION comment; for every other severity, the change, or a question when Sami named no change. Open with the
    observation, not praise or a hedge. No emojis.
 
    ```markdown

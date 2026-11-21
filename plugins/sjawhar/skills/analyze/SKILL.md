@@ -16,8 +16,8 @@ description: Use when you are about to commit or open a PR on code you wrote, at
      edit files."
    - Add `test-analyzer` only if the changes have test files. It has no edit tools either, so tell it to report.
 3. Grade each finding after all agents finish, since they edit the same files until then:
-   - Critical, must fix before shipping: bugs on the normal path the change serves, security issues, type errors
-     that cause runtime failures.
+   - Critical, must fix before shipping: every bug that is not a subtle one (High, below), security issues, type
+     errors that cause runtime failures.
    - High, should fix: subtle bugs (bugs that show only on an error path, under a race, or on rare input), missing
      edge cases, unsafe type casts.
    - Medium, consider fixing: type improvements, simplifications that make the code clearer.

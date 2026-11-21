@@ -22,7 +22,7 @@
 ## Stopping work until an event
 
 1. Before you stop, write down the Envoy topic or timed re-check that will resume you, and the artefact the hold waits on.
-2. Subscribe when the pull request or issue is opened, not when you stop. The `envoy` skill has the topic for each event and what `envoy_subscribe`'s warnings mean. On a repository without our GitHub App (every upstream one) no topic fires: use `pr-snapshot watch` or another timed re-check.
+2. Subscribe when the pull request or issue is opened, not when you stop. The `envoy` skill has the topic for each event and what `envoy_subscribe`'s warnings mean. For a workflow run with no pull request, subscribe to `notifications.github.<owner>.<repo>.workflow.<file>.>`, so every action of that workflow file wakes you. On a repository without our GitHub App (every upstream one) no topic fires: use `pr-snapshot watch` or another timed re-check.
 3. If someone has committed to ping you on this exact event, yield and run no loop. Otherwise pace the re-check to the thing's own settle time, the time it took to change state last time (a CI run's `updatedAt` minus `startedAt` in `gh run list --json startedAt,updatedAt`, a reviewer's last reply delay); a loop that keeps returning the same value is paced wrong.
 4. Run the re-check with credentials you already hold. Call `secrets_request` only when an action needs a new credential, and request every key your pending actions need in that one request.
 

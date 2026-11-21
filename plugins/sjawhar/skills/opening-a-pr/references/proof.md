@@ -17,7 +17,7 @@ thing. Report what you ran, what you saw, and every defect.
 - Every artifact has a consumer; prove it through that consumer. A skill or prompt: a fresh agent walks it. Config: apply it and observe the service. CI: trigger it. A doc: a person who did not read the diff follows it literally.
 - Use the user's own access path, not a privileged shortcut: a minted cookie is not the SSO login.
 - Use a production-like surface that has the resource the change touches: a dev stack, staging, or a local stack with real migrations.
-- When the real path is hard to drive, build the test tooling. It is in scope.
+- When the real path is hard to drive, build the test tooling, and any skill or driver the scenario needs. It is in scope.
 - Code that runs only after merge stays untested until you run it against a dev stack yourself.
 - A step you must run by hand that the shipped product should run itself means the proof does not cover the product. Record that gap on the work's issue in Dispatch, the issue tracker the `dispatch` command writes to (`dispatch comment`), not as a GitHub issue nobody asked for, and name it in `## Verification` beside the scenario that needed the step.
 - A page or workflow: walk it as each affected role at the final head. Click every element on the changed pages and read what a user reads. Grep the e2e and spec suites for locators the change breaks, and update them.

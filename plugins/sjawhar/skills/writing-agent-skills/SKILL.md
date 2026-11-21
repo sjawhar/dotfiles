@@ -16,7 +16,7 @@ An agent guide (AGENTS.md, CLAUDE.md) follows `updating-docs` for its shape and 
 - References: in `references/`, one level deep. Move each block that only some tasks need into `references/<topic>.md`, and name it in SKILL.md at the step that needs it, with the condition: "Read `references/<topic>.md` when ...". Merge a reference that every task of the skill reads into SKILL.md when the merged file stays within the limits; delete one nothing names.
 - A file the skill tells an agent to copy whole into another place (a brief, a form) may go under `assets/`, where the Agent Skills specification puts templates; `check_skill.py` reads `templates/` the same way. That directory alone makes the file a template, and the limits do not hold a template.
 - Code, prompts and other skills name skills and their paths, and code reads some frontmatter (`mcp:`): `git grep -n <name>` before you rename, move or delete one, and fix each namer in the same change.
-- Check: `uv run --script ~/.dotfiles/plugins/sjawhar/skills/writing-agent-skills/scripts/check_skill.py <skill dir>...`; `--help` lists each check. Fix every FAIL. Over 40 rule lines (each bullet or numbered line of SKILL.md's body) it warns: split the skill, move blocks into references, or delete rules (section 4), because a model obeys fewer of its rules as their number grows.
+- Check: `uv run --script ~/.dotfiles/plugins/sjawhar/skills/writing-agent-skills/scripts/check_skill.py <skill dir>...`; `--help` lists each check. Fix every FAIL and each warning. Over 40 rule lines (each bullet or numbered line of SKILL.md's body) it warns: split the skill, move blocks into references, or delete rules (section 4), because a model obeys fewer of its rules as their number grows.
 
 ## 1. Decide that a rule is needed
 

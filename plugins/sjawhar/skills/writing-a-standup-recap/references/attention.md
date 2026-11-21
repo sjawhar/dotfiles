@@ -1,7 +1,8 @@
 # The attention map
 
 Where Sami's own attention went in the window, counted from what he wrote. It goes to him alone, in its own message
-to him, never in the standup room thread (the chief of staff and the Legion controllers read it) or on the team page.
+to him just after the recap link, never in the standup room thread (the chief of staff and the Legion controllers
+read it) or on the team page.
 
 ## What to count
 

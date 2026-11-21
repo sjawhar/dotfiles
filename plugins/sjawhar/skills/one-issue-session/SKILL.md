@@ -26,8 +26,8 @@ else's, does not make your issue done.
 ## What one issue is
 
 - One outcome, not one pull request. Making a container image current is one issue, even when it takes a version
-  pin change, a release, a CI gate and ledger rows in three repositories. A wave of several batches with one build
-  and one launch is one issue.
+  pin change, a release, a CI gate and ledger rows in three repositories. A wave of several batches with one draw of
+  their tasks, one build and one launch is one issue.
 - Done is evidence for every done condition the issue states: a merged pull request, a measured result, or, when
   the result arrives more than an hour after the work that starts it ends (a task's reading a day after launch), the
   work itself: launched with the control runs (the runs that show the measurement can fail) and the number of

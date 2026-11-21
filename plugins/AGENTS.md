@@ -9,7 +9,7 @@ Skills, agents and commands for Claude Code and omp. `sjawhar/` is Sami's plugin
 
 ## Writing a skill
 
-- A skill here loads in every repository Sami works in, so it names no repository, single-repository path or project workflow. A project's rule goes in that project's `AGENTS.md` or `.claude/skills/`; point at it from here where that helps. A rule drawn from one repository's incident must read correctly with the repository's name removed.
+- A skill here loads in every repository Sami works in, so it names no repository, single-repository path or project workflow. A project's rule goes in that project's `AGENTS.md` or `.claude/skills/`; where the repository has its own `AGENTS.md`, skill, workflow or tool for the job, point the skill here at it. A rule drawn from one repository's incident must read correctly with the repository's name removed.
 - A skill that names a customer goes in the private pool that `skills-sources.json` names, not here.
 - The `writing-agent-skills` skill has the authoring rules. Check a skill with `uv run --script plugins/sjawhar/skills/writing-agent-skills/scripts/check_skill.py plugins/sjawhar/skills/<name>`.
 - A skill's script tests sit beside its scripts: `uvx pytest plugins/sjawhar/skills/<name>/scripts`.
