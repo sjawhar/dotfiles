@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Tests for installers/docker.sh: dockerd's live-restore, and docker-ce pinned at one version.
+"""Tests for installers/docker.sh: dockerd's live-restore, docker-ce pinned at one version, and
+conntrack's TCP TIME_WAIT timeout.
 
 The installer runs with a PATH of fakes and real tools only. Each fake (sudo, curl, apt-get,
-dpkg, dpkg-query, dockerd, systemctl, getent, id, usermod) writes one line per call to a log;
-the fake sudo runs its command as the test user. jq, mktemp, install, tee, mv and cp are real.
-Every path the installer writes is under INSTALL_ROOT, a temporary directory.
+dpkg, dpkg-query, dockerd, systemctl, sysctl, getent, id, usermod) writes one line per call to a
+log; the fake sudo runs its command as the test user. jq, mktemp, install, tee, mv, cp and cmp are
+real. Every path the installer writes or reads is under INSTALL_ROOT, a temporary directory,
+/proc/sys included.
 """
 
 from __future__ import annotations
@@ -23,6 +25,14 @@ from typing import cast, final
 DOTFILES = Path(__file__).resolve().parents[2]
 INSTALLER = DOTFILES / "installers" / "docker.sh"
 LIBRARY = DOTFILES / "installers" / "lib.sh"
+CONNTRACK_CONF = DOTFILES / "devbox" / "sysctl-conntrack.conf"
+# sami-devbox's /etc/sysctl.d/90-conntrack-time-wait.conf, byte for byte, as it was written by hand
+# on 2026-11-21, before installers/docker.sh wrote that file.
+HAND_CONNTRACK_CONF = (
+    "# Docker start/exit hold one host-wide bridge lock while dockerd dumps the conntrack table; 92% of\n"
+    "# its entries were TCP TIME_WAIT flows kept 120 s. 15 s halves that cost (see sjawhar/dotfiles devbox).\n"
+    "net.netfilter.nf_conntrack_tcp_timeout_time_wait = 15\n"
+)
 VERSION = "5:29.9.3-1~ubuntu.24.04~noble"
 OLD_VERSION = "5:29.9.2-1~ubuntu.24.04~noble"
 NEWER_VERSION = "5:29.10.0-1~ubuntu.24.04~noble"
@@ -64,7 +74,7 @@ SYSBOX_DAEMON_JSON = """{
 # so the machine's own docker, dockerd and systemctl are never reached.
 REAL_TOOLS = (
     "bash", "sh", "env", "jq", "mktemp", "install", "tee", "chmod", "mv", "rm", "cp", "ln", "cat",
-    "date", "dirname", "grep", "readlink", "sleep", "timeout",
+    "cmp", "date", "dirname", "grep", "readlink", "sleep", "timeout",
 )
 
 FAKES = {
@@ -159,6 +169,18 @@ case "$*" in
         ;;
     *) echo "fake systemctl: unexpected call: $*" >&2; exit 2 ;;
 esac''',
+    # `sysctl -q -p FILE` writes each `key = value` line of FILE to INSTALL_ROOT/proc/sys, and fails
+    # as sysctl does when that path is missing; SYSCTL_IGNORED: it exits 0 and writes nothing.
+    "sysctl": r'''echo "sysctl $*" >> "$CALL_LOG"
+[[ $# == 3 && "$1" == -q && "$2" == -p ]] || { echo "fake sysctl: unexpected call: $*" >&2; exit 2; }
+[[ "${SYSCTL_IGNORED:-}" != 1 ]] || exit 0
+while read -r key equals value; do
+    if [[ -z "$key" || "$key" == \#* ]]; then
+        continue
+    fi
+    [[ "$equals" == "=" ]] || { echo "fake sysctl: unexpected line in $3: $key $equals $value" >&2; exit 2; }
+    printf '%s\n' "$value" > "$INSTALL_ROOT/proc/sys/${key//.//}"
+done < "$3"''',
     # The running dockerd's live-restore, as the last reload left it.
     "docker": r'''echo "docker $*" >> "$CALL_LOG"
 [[ "$*" == "info -f {{.LiveRestoreEnabled}}" ]] || exit 2
@@ -209,6 +231,10 @@ class Machine:
         self.installer = installers / "docker.sh"
         _ = shutil.copy2(INSTALLER, self.installer)
         _ = shutil.copy2(LIBRARY, installers / "lib.sh")
+        devbox = self.root / "dotfiles" / "devbox"
+        devbox.mkdir()
+        self.conntrack_source = devbox / CONNTRACK_CONF.name
+        _ = shutil.copy2(CONNTRACK_CONF, self.conntrack_source)
 
         self.bin_dir = self.root / "bin"
         self.bin_dir.mkdir()
@@ -236,6 +262,12 @@ class Machine:
         self.preferences = self.apt_dir / "preferences.d/docker-ce.pref"
         self.sources = self.apt_dir / "sources.list.d/docker.list"
         self.keyring = self.apt_dir / "keyrings/docker.asc"
+        self.sysctl_dir = self.install_root / "etc/sysctl.d"
+        self.conntrack_conf = self.sysctl_dir / "90-conntrack-time-wait.conf"
+        # The kernel's value, at its default until a test or the fake sysctl changes it.
+        self.time_wait = self.install_root / "proc/sys/net/netfilter/nf_conntrack_tcp_timeout_time_wait"
+        self.time_wait.parent.mkdir(parents=True)
+        _ = self.time_wait.write_text("120\n", encoding="utf-8")
         self.env = {
             "HOME": str(self.root),
             "USER": "tester",
@@ -288,6 +320,9 @@ class Machine:
 
     def docker_dir_names(self) -> set[str]:
         return {path.name for path in self.docker_dir.iterdir()}
+
+    def sysctl_dir_names(self) -> set[str]:
+        return {path.name for path in self.sysctl_dir.iterdir()}
 
 
 class InstallerCase(unittest.TestCase):
@@ -649,7 +684,8 @@ class Defaults(InstallerCase):
         self.assertEqual(m.calls_of("sudo usermod"), ["sudo usermod -aG docker tester"])
         self.assertFalse(m.docker_dir.exists())
         self.assertFalse(m.apt_dir.exists())
-        for command in ("apt-get ", "dpkg", "dockerd ", "systemctl ", "docker "):
+        self.assertFalse(m.sysctl_dir.exists())
+        for command in ("apt-get ", "dpkg", "dockerd ", "systemctl ", "docker ", "sysctl "):
             self.assertEqual(m.calls_of(command), [], command)
 
     def test_neither_variable_and_docker_present_downloads_nothing(self) -> None:
@@ -660,6 +696,101 @@ class Defaults(InstallerCase):
         self.assert_ok(result)
         self.assertEqual(m.calls_of("curl "), [])
         self.assertEqual(m.calls_of("sudo "), [])
+
+
+class ConntrackTimeWait(InstallerCase):
+    def test_writes_the_file_and_applies_it(self) -> None:
+        """No file yet: devbox/sysctl-conntrack.conf is written in place, then sysctl applies it."""
+        m = self.machine()
+
+        result = m.install(DOCKER_CONNTRACK_TIME_WAIT="1")
+
+        self.assert_ok(result)
+        self.assertEqual(m.conntrack_conf.read_bytes(), CONNTRACK_CONF.read_bytes())
+        self.assert_mode(m.conntrack_conf, 0o644)
+        self.assertEqual(m.sysctl_dir_names(), {m.conntrack_conf.name})
+        self.assertEqual(m.calls_of("sudo sysctl"), [f"sudo sysctl -q -p {m.conntrack_conf}"])
+        self.assertEqual(m.time_wait.read_text(encoding="utf-8"), "15\n")
+
+    def test_second_run_writes_nothing_and_applies_nothing(self) -> None:
+        m = self.machine()
+        self.assert_ok(m.install(DOCKER_CONNTRACK_TIME_WAIT="1"))
+        status = m.conntrack_conf.stat()
+
+        result = m.install(DOCKER_CONNTRACK_TIME_WAIT="1")
+
+        self.assert_ok(result)
+        self.assertIn("in place already", result.stdout)
+        self.assertEqual(m.conntrack_conf.read_bytes(), CONNTRACK_CONF.read_bytes())
+        self.assertEqual(m.conntrack_conf.stat().st_ino, status.st_ino)
+        self.assertEqual(m.conntrack_conf.stat().st_mtime_ns, status.st_mtime_ns)
+        self.assertEqual(m.sysctl_dir_names(), {m.conntrack_conf.name})
+        self.assertEqual(m.calls_of("sudo "), [])
+        self.assertEqual(m.calls_of("sysctl "), [])
+
+    def test_the_hand_written_file_is_replaced(self) -> None:
+        """sami-devbox: the file written by hand, and the kernel at 15 already."""
+        m = self.machine()
+        m.sysctl_dir.mkdir(parents=True)
+        _ = m.conntrack_conf.write_text(HAND_CONNTRACK_CONF, encoding="utf-8")
+        _ = m.time_wait.write_text("15\n", encoding="utf-8")
+
+        result = m.install(DOCKER_CONNTRACK_TIME_WAIT="1")
+
+        self.assert_ok(result)
+        self.assertEqual(m.conntrack_conf.read_bytes(), CONNTRACK_CONF.read_bytes())
+        self.assert_mode(m.conntrack_conf, 0o644)
+        self.assertEqual(m.sysctl_dir_names(), {m.conntrack_conf.name})
+        self.assertEqual(m.calls_of("sudo sysctl"), [f"sudo sysctl -q -p {m.conntrack_conf}"])
+        self.assertEqual(m.time_wait.read_text(encoding="utf-8"), "15\n")
+
+    def test_a_kernel_at_another_value_gets_the_file_in_place(self) -> None:
+        """The file is in place and the kernel holds 120 (a hand sysctl -w): no write, one apply."""
+        m = self.machine()
+        self.assert_ok(m.install(DOCKER_CONNTRACK_TIME_WAIT="1"))
+        mtime = m.conntrack_conf.stat().st_mtime_ns
+        _ = m.time_wait.write_text("120\n", encoding="utf-8")
+
+        result = m.install(DOCKER_CONNTRACK_TIME_WAIT="1")
+
+        self.assert_ok(result)
+        self.assertEqual(m.conntrack_conf.stat().st_mtime_ns, mtime)
+        self.assertEqual(m.calls_of("sudo sysctl"), [f"sudo sysctl -q -p {m.conntrack_conf}"])
+        self.assertEqual(m.time_wait.read_text(encoding="utf-8"), "15\n")
+
+    def test_a_kernel_that_keeps_its_value_fails_the_install(self) -> None:
+        m = self.machine()
+
+        result = m.install(DOCKER_CONNTRACK_TIME_WAIT="1", SYSCTL_IGNORED="1")
+
+        self.assert_failed(result)
+        self.assertIn("is 120, not 15", result.stderr)
+
+    def test_the_rollback_value_is_applied_from_the_file(self) -> None:
+        """The header's rollback: 120 in the file; the next run writes it and the kernel takes it."""
+        m = self.machine()
+        self.assert_ok(m.install(DOCKER_CONNTRACK_TIME_WAIT="1"))
+        rollback = CONNTRACK_CONF.read_text(encoding="utf-8").replace(" = 15\n", " = 120\n")
+        self.assertNotEqual(rollback, CONNTRACK_CONF.read_text(encoding="utf-8"))
+        _ = m.conntrack_source.write_text(rollback, encoding="utf-8")
+
+        result = m.install(DOCKER_CONNTRACK_TIME_WAIT="1")
+
+        self.assert_ok(result)
+        self.assertEqual(m.conntrack_conf.read_text(encoding="utf-8"), rollback)
+        self.assertEqual(m.time_wait.read_text(encoding="utf-8"), "120\n")
+
+    def test_off_unless_asked(self) -> None:
+        """The other two steps leave sysctl alone."""
+        m = self.machine()
+        m.set_installed(VERSION)
+
+        result = m.install(DOCKER_LIVE_RESTORE="1", DOCKER_CE_VERSION=VERSION)
+
+        self.assert_ok(result)
+        self.assertFalse(m.sysctl_dir.exists())
+        self.assertEqual(m.calls_of("sysctl "), [])
+        self.assertEqual(m.calls_of("sudo sysctl"), [])
 
 
 class Order(InstallerCase):

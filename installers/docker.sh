@@ -5,7 +5,7 @@
 # nor the compose plugin.
 #
 # By default Docker comes from the official installer (get.docker.com), at its latest version, and
-# only when the machine has no `docker`. A role script turns on two more steps (devbox/gce-host.sh
+# only when the machine has no `docker`. A role script turns on three more steps (devbox/gce-host.sh
 # does, for sami-devbox, dispatch://INFRA-4893):
 #
 #   DOCKER_LIVE_RESTORE=1        dockerd's "live-restore": true in /etc/docker/daemon.json, merged
@@ -25,10 +25,18 @@
 #                                restarts dockerd. An installed version newer than the pin fails
 #                                the install: apt refuses a downgrade without --allow-downgrades,
 #                                which this never passes. Ubuntu only.
+#   DOCKER_CONNTRACK_TIME_WAIT=1 devbox/sysctl-conntrack.conf as
+#                                /etc/sysctl.d/90-conntrack-time-wait.conf: conntrack forgets a
+#                                closed TCP flow after 15 s, not the kernel's 120 s, which shortens
+#                                the conntrack dump dockerd makes under one host-wide lock at each
+#                                container start and exit (the file says why). The file is written
+#                                only when it differs from the repository's, and `sysctl -p` applies
+#                                it only when it was written or the kernel holds another value; the
+#                                step then fails unless the kernel holds the file's value.
 #
-# live-restore goes first, so a version change restarts a dockerd that has it on already. Paths
-# these two steps write are under INSTALL_ROOT, which is empty unless a test sets it. install.sh
-# sources this file, so their variables are local to functions.
+# live-restore goes first, so a version change restarts a dockerd that has it on already; the
+# conntrack step goes last. Paths these steps write or read are under INSTALL_ROOT, which is empty
+# unless a test sets it. install.sh sources this file, so their variables are local to functions.
 set -euo pipefail
 # shellcheck source=installers/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -191,6 +199,40 @@ Pin-Priority: 1001"
     echo "docker.sh: installed docker-ce and docker-ce-cli $version"
 }
 
+# DOCKER_CONNTRACK_TIME_WAIT (header). The kernel's value is read from /proc/sys, which needs
+# neither root nor sysctl on PATH.
+docker_conntrack_time_wait() {
+    local key=net.netfilter.nf_conntrack_tcp_timeout_time_wait root="${INSTALL_ROOT:-}"
+    local src="$DOTFILES_DIR/devbox/sysctl-conntrack.conf" name value want="" live changed=0
+    local conf="$root/etc/sysctl.d/90-conntrack-time-wait.conf"
+    local proc="$root/proc/sys/${key//.//}"
+    while read -r name _ value; do
+        if [[ "$name" == "$key" ]]; then
+            want="$value"
+        fi
+    done <"$src"
+    [[ -n "$want" ]] || { echo "docker.sh: $src does not set $key" >&2; return 1; }
+    if cmp -s -- "$src" "$conf"; then
+        echo "docker.sh: $conf is in place already"
+    else
+        docker_write "$conf" 0644 "$(<"$src")" || return 1
+        changed=1
+        echo "docker.sh: wrote $conf ($key = $want)"
+    fi
+
+    live="$(cat -- "$proc" 2>/dev/null || true)"
+    if ((!changed)) && [[ "$live" == "$want" ]]; then
+        return 0
+    fi
+    sudo sysctl -q -p "$conf" || return 1
+    live="$(cat -- "$proc" 2>/dev/null || true)"
+    if [[ "$live" != "$want" ]]; then
+        echo "docker.sh: after sysctl -p $conf, the kernel's $key is ${live:-unreadable}, not $want" >&2
+        return 1
+    fi
+    echo "docker.sh: the kernel's $key is $want"
+}
+
 if command -v apt-get &>/dev/null; then
     if [[ "${DOCKER_LIVE_RESTORE:-}" == 1 ]]; then
         docker_live_restore
@@ -199,6 +241,9 @@ if command -v apt-get &>/dev/null; then
         docker_ce_pin "$DOCKER_CE_VERSION"
     else
         ensure_command docker "curl -fsSL https://get.docker.com | sudo sh"
+    fi
+    if [[ "${DOCKER_CONNTRACK_TIME_WAIT:-}" == 1 ]]; then
+        docker_conntrack_time_wait
     fi
 
     # Tooling that drives Docker over SSH — Pulumi's docker provider, the envoy
