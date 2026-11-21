@@ -1,11 +1,12 @@
 name: scripts-tests
 
-# The tests under scripts/tests that pass on a stock runner, run as scripts/AGENTS.md documents:
-# `PYTHONPATH=. uvx pytest scripts/tests` from the root. They read files all over the repository
-# (shims/, installers/, devbox/, agentbox/, agent-secrets/, .claude/, .bashrc and more), so every
-# change runs them, not only a change under scripts/. The push trigger checks main as merged, since
-# a squash merge can land on a main that moved under its pull request. scripts/dotfiles-publish
-# merges without waiting for this job, and no rule makes it required.
+# The tests under scripts/tests, run as scripts/AGENTS.md documents: `PYTHONPATH=. uvx pytest
+# scripts/tests` from the root, on an ubuntu-24.04 runner given the dev box's tools the tests call.
+# They read files all over the repository (shims/, installers/, devbox/, agentbox/,
+# agent-secrets/, .claude/, .bashrc and more), so every change runs them, not only a change under
+# scripts/. The push trigger checks main as merged, since a squash merge can land on a main that
+# moved under its pull request. scripts/dotfiles-publish merges without waiting for this job, and
+# no rule makes it required.
 on:
   push:
     branches: [main]
@@ -25,61 +26,42 @@ jobs:
         with:
           # The version mise.toml pins for the dev box.
           version: "0.12.5"
-      # scripts/tests/conftest.py encrypts a test term list with age and sops: sops at the version
-      # mise.toml pins, age from Ubuntu.
-      - name: age and sops
+      # The tools the tests call:
+      #   - age and sops: scripts/tests/conftest.py encrypts a test term list with them. sops at
+      #     the version mise.toml pins, age from Ubuntu.
+      #   - zsh: test_agent_identity.py runs .bashrc in bash and zsh.
+      #   - mise, installed as installers/mise.sh installs it, at its pinned version, into bin/,
+      #     with MISE_DATA_DIR outside HOME as .bashrc sets it, so a test that moves HOME keeps
+      #     mise's tools. Then mise installs the pins of mise.toml that tests resolve through it:
+      #     jj, knives and yq.
+      - name: age, sops, zsh and mise
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q age
+          sudo apt-get install -y -q age zsh
           curl -fsSLo sops https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.linux.amd64
           echo "e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b  sops" | sha256sum -c -
           sudo install -m 0755 sops /usr/local/bin/sops
-      # Each file ignored below fails on a stock runner, measured in
+          export MISE_DATA_DIR="$HOME/.mise"
+          echo "MISE_DATA_DIR=$MISE_DATA_DIR" >> "$GITHUB_ENV"
+          curl -fsSL https://mise.run | MISE_VERSION=v2026.10.11 MISE_INSTALL_PATH="$GITHUB_WORKSPACE/bin/mise" sh
+          echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
+          "$GITHUB_WORKSPACE/bin/mise" install github:sjawhar/jj github:sjawhar/knives yq
+      # Each file ignored below fails on this runner, measured in
       # https://github.com/sjawhar/dotfiles/actions/runs/44875049666 (each file run alone); they run
       # on a dev box:
-      #   test_agent_identity.py: runs zsh, which the runner does not have.
-      #   test_agent_workspace.py: agent-workspace takes the runner for an agent box ("no workspace
-      #     root here is a host path") and exits 1.
-      #   test_agentbox_access.py, test_agentbox_dirs.py, test_agentbox_docker_snapshot.py,
-      #   test_agentbox_helper_invocation.py, test_agentbox_home_links.py,
-      #   test_agentbox_no_host_writes.py: `agentbox new` exits 1; its last words are that the
-      #     secretsd socket /run/user/<uid>/secretsd.sock is missing, and the runner runs no secretsd.
       #   test_agentbox_move.py: ran past the 180 s the measurement gave it, with many of its tests
       #     failing before then; the cut-off run printed no cause.
       #   test_az_reader.py: the runner's own Azure CLI, not the pinned one, starts no telemetry
       #     uploader in the test's control.
-      #   test_chathub_installer.py, test_commit_identity.py, test_dotfiles_follow_jj.py,
-      #   test_hub_send.py: run mise while pytest collects them, and the runner has no mise.
-      #   test_dotfiles_sync.py, test_dotfiles_tools.py, test_knives_installer.py: run mise (on PATH
-      #     or bin/mise), which the runner does not have.
-      #   test_cache_config_installer.py: added after the measurement; its eval-kernel test runs mise
-      #     (https://github.com/sjawhar/dotfiles/actions/runs/44878745491).
-      #   test_gocache_cap_guard.py: gocache-cap does not see the go command the test starts ("no go
-      #     command was running") and deletes what that command holds.
       - name: pytest scripts/tests
         env:
           PYTHONPATH: .
-          # test_secretsd_installer_config.py finds age-keygen here, or through mise, which the
-          # runner lacks.
+          # test_secretsd_installer_config.py finds age-keygen here, or through mise, which has no
+          # age pin installed here.
           AGE_KEYGEN: /usr/bin/age-keygen
         run: >-
           uvx pytest@9.2.0 -p no:cacheprovider scripts/tests
-          --ignore=scripts/tests/test_agent_identity.py
-          --ignore=scripts/tests/test_agent_workspace.py
-          --ignore=scripts/tests/test_agentbox_access.py
-          --ignore=scripts/tests/test_agentbox_dirs.py
-          --ignore=scripts/tests/test_agentbox_docker_snapshot.py
-          --ignore=scripts/tests/test_agentbox_helper_invocation.py
-          --ignore=scripts/tests/test_agentbox_home_links.py
           --ignore=scripts/tests/test_agentbox_move.py
-          --ignore=scripts/tests/test_agentbox_no_host_writes.py
           --ignore=scripts/tests/test_az_reader.py
-          --ignore=scripts/tests/test_cache_config_installer.py
-          --ignore=scripts/tests/test_chathub_installer.py
-          --ignore=scripts/tests/test_commit_identity.py
-          --ignore=scripts/tests/test_dotfiles_follow_jj.py
-          --ignore=scripts/tests/test_dotfiles_sync.py
-          --ignore=scripts/tests/test_dotfiles_tools.py
-          --ignore=scripts/tests/test_gocache_cap_guard.py
-          --ignore=scripts/tests/test_hub_send.py
-          --ignore=scripts/tests/test_knives_installer.py

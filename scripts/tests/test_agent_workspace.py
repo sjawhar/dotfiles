@@ -361,7 +361,16 @@ class BoxWorkspaceRootTest(WorkspaceCase):
         self.legacy = self.home / ".worktrees"
         self.legacy.mkdir(parents=True)
         self.nvme = self.base / "mnt-nvme"  # no big disk in this box
-        self.bind = self.base / "bound-lane"
+        # The box's host directory. agent-workspace calls a path box-private when it is under the
+        # box's HOME or /tmp, or on the device / is on (box_private), since a host bind is a mount
+        # of its own. So the bound directory is made on a filesystem of its own, /dev/shm, and not
+        # under TMPDIR, which is /tmp on a CI runner and another disk only on a dev box.
+        shm = Path("/dev/shm")
+        if not shm.is_dir() or shm.stat().st_dev == Path("/").stat().st_dev:
+            self.fail("needs /dev/shm on a filesystem other than /, to stand for a host bind")
+        bind_root = Path(tempfile.mkdtemp(prefix="aw-bind-", dir=shm))
+        self.addCleanup(shutil.rmtree, bind_root, ignore_errors=True)
+        self.bind = bind_root / "bound-lane"
         self.bind.mkdir()
         old = {k: os.environ.get(k) for k in ("HOME", "AGENTBOX_BOX", "AGENTBOX_DIRS")}
         old_nvme = AW.NVME
