@@ -9,10 +9,8 @@
 
 ## Running it
 
-- For a slice that changes what runs, run its affected end-to-end scenarios before merge, under the pre-merge scenario rule in `opening-a-pr` (`skill://opening-a-pr/references/proof.md`, "End-to-end scenarios", which also says which scenarios a change affects). Record the source, dependency and image revisions per scenario, then mark it with one of the markers (`RAN`, `BLOCKED`, `WAIVED-BY-SAMI`) that section defines.
+- For a slice that changes what runs, run its affected end-to-end scenarios before merge, under the pre-merge scenario rule in `opening-a-pr` (`skill://opening-a-pr/references/proof.md`, "End-to-end scenarios", which also says which scenarios a change affects). Record the source, dependency and image revisions per scenario, then mark it with one of the markers (`RAN`, `BLOCKED`, `WAIVED-BY-SAMI`) that section defines. Its "Merge-ready" section says what to do when a surface cannot be reached or a blocker remains.
 - Exercise every human entry point the plan's `## Contract change census` lists through the real client and the new check. Each entry not run is `BLOCKED`.
-- Build or repair missing infrastructure, tooling, skills or drivers at the tested head, then rerun the affected scenarios.
-- Do not ask Sami to omit acceptance or to accept a proxy. A named blocker that survives building or repairing the surface goes to him as a pre-merge decision. His explicit waiver of that blocker is the only exception; the change's size, its kind and green CI never are.
 - Iterate on the repo's fastest loop and keep its slowest surface for the final proof. The repo's testing skill defines what counts as production-like.
 
 ## A slice with a browser page

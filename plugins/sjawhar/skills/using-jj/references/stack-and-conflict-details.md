@@ -14,8 +14,9 @@
 ## Resolving conflicts
 
 1. Run `jj log` to see what diverged.
-2. Delete a local change only after its owner says yes.
+2. Keep each local change unless its owner says you may delete it.
 3. When one side is the old version and the other the new version of the same logic, keep only the new. Then scan for duplicated blocks.
+4. After resolving, compare the diff against main with the pre-rebase diff, so nothing was lost or reverted.
 
 The `resolve-conflicts` skill has the rest: it maps both sides, checks for dropped hunks, and runs the checks as CI does.
 

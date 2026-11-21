@@ -25,6 +25,6 @@ fetch_part() {
 
 ## While the workers run
 
-- When a worker looks silent, follow `using-subagents`' `references/waiting.md` ("A lane that looks stalled"): message it once with a direct question, and redispatch the same brief only if it has not answered after the wait that section sets.
+- When a worker looks silent, follow `using-subagents`' `references/waiting.md` ("A lane that looks stalled").
 - A `deep` worker has no eval tool: when its bash breaks, give it a shell tool from your kernel (`using-subagents`).
 - While a PR waits for merge or deploy, continue from its branch or a dependency's branch, unless you are revising it. Post-merge production proof runs beside the next work, not instead of it.
