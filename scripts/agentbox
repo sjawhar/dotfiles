@@ -4239,8 +4239,22 @@ cmd_rebuild() {
 
 # What a path uses, for a listing: never a failure, since `set -o pipefail` would otherwise make
 # one unreadable directory inside a box tree end the whole command (it did, on the ext4 image's
-# root-owned lost+found, before open_box_disk gave that one to the user).
-dir_size() { du -sh --one-file-system "$1" 2>/dev/null | cut -f1 || true; }
+# root-owned lost+found, before open_box_disk gave that one to the user). du walks every file, so
+# it has LS_DU_WAIT seconds; past that the line says the size was not measured.
+LS_DU_WAIT="${AGENTBOX_LS_DU_WAIT:-10}"
+dir_size() {
+    local size
+    size="$(timeout "$LS_DU_WAIT" du -sh --one-file-system "$1" 2>/dev/null | cut -f1 || true)"
+    printf '%s\n' "${size:-size not measured in $LS_DU_WAIT s}"
+}
+# What a box tree on its own filesystem uses, as that filesystem counts it: one statfs, where du
+# walked every file. On sami-devbox on 2026-11-21 two left trees (119 GiB and 3 million inodes in
+# one) took du 41-58 s each, after the table had printed, and `agentbox ls` ran into a 300 s limit.
+fs_used() {
+    local used
+    used="$(df -h --output=used "$1" 2>/dev/null | tail -n 1 | tr -d ' ' || true)"
+    printf '%s\n' "${used:-size unknown (df failed)}"
+}
 
 # Running boxes, then any box tree with no container: one whose launcher was killed before it
 # could close (the trap cannot run on a SIGKILL, and a reboot drops the loop mount while the image
@@ -4258,7 +4272,7 @@ cmd_ls() {
         if grep -qxF "$box" <<<"$running"; then continue; fi
         img="$BOX_DISKS/$box.img"
         if mountpoint -q "$dir" 2>/dev/null; then
-            left+=("$box  $(dir_size "$dir") on its own filesystem; release: sudo umount '$dir' && rm -f '$img' && rmdir '$dir'")
+            left+=("$box  $(fs_used "$dir") on its own filesystem; release: sudo umount '$dir' && rm -f '$img' && rmdir '$dir'")
         elif [[ -s "$img" ]]; then
             left+=("$box  an unmounted filesystem image ($(dir_size "$img") used); read it: sudo mount -o loop '$img' '$dir'")
         else
