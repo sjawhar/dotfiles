@@ -6,8 +6,14 @@ shim's header and comments say what it adds; this guide holds the rules that spa
 
 ## Test
 
-- CI runs none of these. All cases, from the checkout root: `uvx pytest shims/tests`; in parallel,
+- All cases, from the checkout root: `uvx pytest shims/tests`; in parallel,
   `uvx --with pytest-xdist pytest -n 8 shims/tests`.
+- CI (`.github/workflows/shims-tests.yml`) runs them on each pull request and push to main. A test
+  that cannot run on its runner goes on the workflow's skip list, with the reason; the job fails on
+  any other skip, on a listed test that ran, and on a file that runs no test.
+- `test_jj_push_leak_gate.py` gives the gate a fixture check (`FIXTURE_CHECK`). A case that needs
+  the installed public leak check or its tag's hooks is marked `needs_the_installed_check`; one
+  marked `also_with_the_installed_check` runs with each.
 - One case: `uvx pytest shims/tests/test_ssh_keygen_shim.py -k test_signing_runs_without_the_agent`.
 
 ## Where the header is not enough
