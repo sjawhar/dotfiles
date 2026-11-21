@@ -1,12 +1,12 @@
 name: scripts-tests
 
 # The tests under scripts/tests, run as the root AGENTS.md documents: `PYTHONPATH=. uvx pytest
-# scripts/tests` from the root, on an ubuntu-24.04 runner given the dev box's tools the tests call.
-# They read files all over the repository (shims/, installers/, devbox/, agentbox/,
-# agent-secrets/, .claude/, .bashrc and more), so every change runs them, not only a change under
-# scripts/. The push trigger checks main as merged, since a squash merge can land on a main that
-# moved under its pull request. scripts/dotfiles-publish merges without waiting for this job, and
-# no rule makes it required.
+# scripts/tests` from the root, on an ubuntu-24.04 runner given sami-devbox's tools and layout where
+# the tests look for them. They read files all over the repository (shims/, installers/, devbox/,
+# agentbox/, agent-secrets/, .claude/, .bashrc and more), so every change runs them, not only a
+# change under scripts/. The push trigger checks main as merged, since a squash merge can land on a
+# main that moved under its pull request. scripts/dotfiles-publish merges without waiting for this
+# job, and no rule makes it required.
 on:
   push:
     branches: [main]
@@ -18,50 +18,68 @@ permissions:
 jobs:
   scripts-tests:
     runs-on: ubuntu-24.04
-    # A whole run took about 28 minutes when measured (2026-11-21), 13 of them in
-    # test_agentbox_move.py, whose relauncher tests wait out real deadlines; a hung test stops here.
-    timeout-minutes: 45
+    # A whole run took 37 minutes (run 44955611146, 2026-11-21: 3113 tests), 36 of them in pytest
+    # and 13 in test_agentbox_move.py, whose relauncher tests wait out real deadlines. A hung test
+    # stops here.
+    timeout-minutes: 60
     steps:
+      # No credential stays in .git/config: no test fetches from GitHub.
       - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
         with:
-          # The version mise.toml pins for the dev box.
-          version: "0.12.5"
-      # The tools the tests call:
-      #   - age and sops: scripts/tests/conftest.py encrypts a test term list with them. sops at
-      #     the version mise.toml pins, age from Ubuntu.
+          persist-credentials: false
+      # sami-devbox's tools (.github/actions/dev-box-tools says which, and how), and these the tests
+      # call besides:
       #   - zsh: test_agent_identity.py runs .bashrc in bash and zsh.
-      #   - mise, installed as installers/mise.sh installs it, at its pinned version, into bin/,
-      #     with MISE_DATA_DIR outside HOME as .bashrc sets it, so a test that moves HOME keeps
-      #     mise's tools. Then mise installs the pins of mise.toml that tests resolve through it:
-      #     jj, knives and yq, and bun, which `agentbox move` runs to read an omp's launch flags
-      #     and which test_agentbox_move.py finds on PATH.
-      - name: age, sops, zsh and mise
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+      #   - socat and inotify-tools, from Ubuntu as on sami-devbox: test_agentbox_tmux_guard.py, and
+      #     test_tmux_attention.py's cockpit view.
+      #   - The pins the tests resolve through mise or find on PATH: jj, knives, yq, bun (which
+      #     `agentbox move` runs to read an omp's launch flags), tmux, codegraph, and the Azure CLI.
+      #     test_az_reader.py runs the real az; the runner's own az started no telemetry uploader in
+      #     the test's control (run 44875049666).
+      - uses: ./.github/actions/dev-box-tools
+        with:
+          apt: zsh socat inotify-tools
+          tools: >-
+            github:sjawhar/jj github:sjawhar/knives yq bun github:sjawhar/tmux-builds
+            github:colbymchenry/codegraph pipx:azure-cli
+          binaries: jj knives yq bun tmux codegraph az
+      # sami-devbox's layout, where the tests read it:
+      #   - Unprivileged user namespaces, which Ubuntu 24.04's AppArmor restricts and sami-devbox
+      #     allows (kernel.apparmor_restrict_unprivileged_userns reads 0 there): the mount tests of
+      #     the reapers and of nvme-cache-cap run in `unshare -rm`, and test_commit_identity.py's lock
+      #     test in a pid namespace of its own. The probe is the command
+      #     test_session_scratch_reap.py runs.
+      #   - /mnt/nvme, a file system of its own, as sami-devbox's NVMe disk is:
+      #     test_session_tmp_reap.py's device gate, and test_disk_gate.py's second disk
+      #     (DISK_GATE_TEST_OTHER_DISK, below).
+      #   - The snap's gcloud at /snap/bin/gcloud, as sami-devbox has it:
+      #     test_agent_session_gcloud_file_logging.py runs a gcloud outside ~/.gcloud.
+      - name: the dev box's layout
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q age zsh
-          curl -fsSLo sops https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.linux.amd64
-          echo "e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b  sops" | sha256sum -c -
-          sudo install -m 0755 sops /usr/local/bin/sops
-          export MISE_DATA_DIR="$HOME/.mise"
-          echo "MISE_DATA_DIR=$MISE_DATA_DIR" >> "$GITHUB_ENV"
-          curl -fsSL https://mise.run | MISE_VERSION=v2026.10.11 MISE_INSTALL_PATH="$GITHUB_WORKSPACE/bin/mise" sh
-          echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
-          "$GITHUB_WORKSPACE/bin/mise" install github:sjawhar/jj github:sjawhar/knives yq bun
-          dirname "$("$GITHUB_WORKSPACE/bin/mise" which bun)" >> "$GITHUB_PATH"
-      # The file ignored below fails on this runner, measured in
-      # https://github.com/sjawhar/dotfiles/actions/runs/44875049666 (each file run alone); it runs
-      # on a dev box:
-      #   test_az_reader.py: the runner's own Azure CLI, not the pinned one, starts no telemetry
-      #     uploader in the test's control.
-      - name: pytest scripts/tests
+          set -euo pipefail
+          sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
+          # shellcheck disable=SC2016 # the inner shell expands $d
+          unshare -rm sh -c 'd=$(mktemp -d) && mount -t tmpfs none "$d" && umount "$d" && rmdir "$d"'
+          sudo truncate -s 4G /var/lib/nvme-disk.img
+          sudo mkfs.ext4 -q /var/lib/nvme-disk.img
+          sudo mkdir -p /mnt/nvme
+          sudo mount -o loop /var/lib/nvme-disk.img /mnt/nvme
+          sudo chown "$USER:" /mnt/nvme
+          mkdir /mnt/nvme/scratch
+          sudo snap install google-cloud-cli --classic
+          [[ -x /snap/bin/gcloud ]] || { echo "the snap installed no /snap/bin/gcloud" >&2; exit 1; }
+      - uses: ./.github/actions/pytest-guarded
         env:
           PYTHONPATH: .
-          # test_secretsd_installer_config.py finds age-keygen here, or through mise, which has no
-          # age pin installed here.
-          AGE_KEYGEN: /usr/bin/age-keygen
-        run: >-
-          uvx pytest@9.2.0 -p no:cacheprovider scripts/tests
-          --ignore=scripts/tests/test_az_reader.py
+          DISK_GATE_TEST_OTHER_DISK: /mnt/nvme/scratch
+        with:
+          tests: scripts/tests
+          skips: |
+            # A live test of this machine's own identity, which a runner does not have: it mints a
+            # token as dev-sjawhar through the Azure box identity (box_credential_config.json, which
+            # installers/gcloud-box.sh writes only on an Azure VM enrolled in box-identity).
+            # sami-devbox, a Google VM, has none and skips it too.
+            scripts/tests/test_agent_session_google_adc.py::AgentSessionGoogleAdcTest::test_live_this_machines_session_mints_as_the_box_account
+            # A live test of this machine's own state, which a runner does not have: it scans the omp
+            # sessions running on this host, and a runner runs none.
+            scripts/tests/test_devbox_offbox_act_live.py::test_live_answers_inside_its_budget_on_this_host

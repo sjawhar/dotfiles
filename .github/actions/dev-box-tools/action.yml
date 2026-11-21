@@ -1,0 +1,127 @@
+name: the dev box's tools
+description: >-
+  Gives an ubuntu-24.04 runner the tools sami-devbox has, where sami-devbox keeps them, for a test
+  suite of this repository: git from Ubuntu noble; mise as installers/mise.sh installs it, with
+  mise.toml as its global configuration; uv, sops, age and the suite's pins from mise.toml, each on
+  PATH ahead of the runner's own; the Google Cloud SDK installers/gcloud-sdk.sh pins, at
+  ~/.gcloud/google-cloud-sdk; and no runner copy of a pinned command line in the system directories.
+  The job's GitHub token is in the environment of the step that runs mise alone; a caller must check
+  out with persist-credentials: false, or the token stays in .git/config for every later step.
+
+inputs:
+  apt:
+    description: The Ubuntu packages the suite calls, separated by spaces or new lines.
+    required: false
+    default: ""
+  tools:
+    description: >-
+      The mise.toml pins the suite calls, besides uv, sops and age, as mise names them, separated by
+      spaces or new lines.
+    required: true
+  binaries:
+    description: The commands of those pins, whose directories go on PATH, separated by spaces or new lines.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # git from Ubuntu noble (2.43.0 on sami-devbox), in place of the runner's newer one from
+    # git-core's PPA (run 44964156792 downgraded it from 1:2.56.1-0ppa1~ubuntu24.04.1): git's options,
+    # hooks and messages differ between them, and the shims and scripts handle them as 2.43 does.
+    - name: git from Ubuntu noble, and the suite's Ubuntu packages
+      shell: bash
+      env:
+        APT: ${{ inputs.apt }}
+      run: |
+        set -euo pipefail
+        # -d '': every line of the input, not only the first.
+        read -r -d '' -a packages <<< "$APT" || true
+        sudo apt-get update -q
+        # The newest git of Ubuntu's own noble suites (noble-updates, noble-security, noble), as
+        # apt-cache lists them, past any PPA's (git-core's ships noble/main too).
+        noble="$(apt-cache madison git | awk -F ' [|] ' '$3 ~ / noble(-updates|-security)?\/main / && $3 !~ /launchpad/ { print $2; exit }')"
+        [[ -n "$noble" ]] || { echo "apt offers no git from Ubuntu noble" >&2; apt-cache madison git >&2; exit 1; }
+        sudo apt-get install -y -q --allow-downgrades "git=$noble" "git-man=$noble" "${packages[@]}"
+        version="$(git --version)"
+        [[ "$(command -v git)" == /usr/bin/git && "$version" == "git version 2.43."* ]] ||
+          { echo "the runner's git is $(command -v git), $version, not noble's 2.43" >&2; exit 1; }
+    # mise as installers/mise.sh installs it on a dev box: at the version it pins, into bin/, with
+    # mise.toml linked as its global configuration, so a test that resolves a pin from outside the
+    # checkout finds it. --skip-mise: the next step installs only the pins the suite calls. MISE_DATA_DIR
+    # is the absolute path .bashrc sets, so a test that moves HOME keeps mise's installs.
+    - name: mise, as installers/mise.sh installs it
+      shell: bash
+      run: |
+        set -euo pipefail
+        export MISE_DATA_DIR="$HOME/.mise"
+        echo "MISE_DATA_DIR=$MISE_DATA_DIR" >> "$GITHUB_ENV"
+        (cd / && "$GITHUB_WORKSPACE/installers/mise.sh" --skip-mise)
+        pin="$(sed -n 's/^MISE_VERSION=v//p' installers/mise.sh)"
+        installed="$(bin/mise --version)"
+        [[ -n "$pin" && "$installed" == "$pin "* ]] ||
+          { echo "bin/mise is '$installed', not installers/mise.sh's $pin" >&2; exit 1; }
+        [[ "$(readlink "$HOME/.config/mise/config.toml")" == "$GITHUB_WORKSPACE/mise.toml" ]] ||
+          { echo "mise's global configuration is not mise.toml" >&2; exit 1; }
+        echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
+    # The pins, each command's directory on PATH ahead of the runner's own, as .bashrc's
+    # `mise activate` puts it. uv first: mise installs the pipx: pins with it. sops and age always:
+    # shims/tests/leak_terms_fixture.py encrypts the tests' term list with them, and
+    # scripts/tests/conftest.py loads it. The token is for mise's release lookups (the shared
+    # anonymous rate limit is too low). It is in this step's environment alone, and this step runs
+    # mise alone (see the description for the caller's part).
+    - name: mise's pins
+      shell: bash
+      env:
+        MISE_GITHUB_TOKEN: ${{ github.token }}
+        TOOLS: ${{ inputs.tools }}
+        BINARIES: ${{ inputs.binaries }}
+      run: |
+        set -euo pipefail
+        # -d '': every line of each input, not only the first.
+        read -r -d '' -a tools <<< "$TOOLS" || true
+        read -r -d '' -a binaries <<< "$BINARIES" || true
+        mise="$GITHUB_WORKSPACE/bin/mise"
+        cd /
+        "$mise" install uv
+        "$mise" install sops age "${tools[@]}"
+        for binary in uv sops age "${binaries[@]}"; do
+          found="$("$mise" which "$binary")"
+          [[ -x "$found" ]] || { echo "mise names no $binary: '$found'" >&2; exit 1; }
+          printf '%s\n' "${found%/*}" >> "$GITHUB_PATH"
+        done
+    # The Google Cloud SDK at ~/.gcloud/google-cloud-sdk, where sami-devbox installs it: the version
+    # and sha256 installers/gcloud-sdk.sh pins. That installer also sets the installation property
+    # core/disable_file_logging; this does not, so test_gcloud_reader.py's and
+    # test_gcloud_broker.py's test_the_real_gcloud_writes_no_log_file see what gcloud does without
+    # the property, which on sami-devbox would hide a caller that did not turn file logging off.
+    - name: the Cloud SDK installers/gcloud-sdk.sh pins
+      shell: bash
+      run: |
+        set -euo pipefail
+        version="$(sed -n 's/^GCLOUD_SDK_VERSION=//p' installers/gcloud-sdk.sh)"
+        sha256="$(sed -n 's/^GCLOUD_SDK_SHA256=//p' installers/gcloud-sdk.sh)"
+        [[ -n "$version" && -n "$sha256" ]] || { echo "installers/gcloud-sdk.sh pins no SDK" >&2; exit 1; }
+        tarball="$RUNNER_TEMP/google-cloud-cli.tar.gz"
+        curl -fsSL --retry 3 -o "$tarball" \
+          "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-${version}-linux-x86_64.tar.gz"
+        echo "$sha256  $tarball" | sha256sum -c --quiet -
+        mkdir -p "$HOME/.gcloud"
+        tar -xzf "$tarball" -C "$HOME/.gcloud"
+        rm "$tarball"
+        [[ "$(cat "$HOME/.gcloud/google-cloud-sdk/VERSION")" == "$version" ]] ||
+          { echo "$HOME/.gcloud/google-cloud-sdk is not $version" >&2; exit 1; }
+    # No gh, az, gcloud, bq, gsutil or pulumi in the system directories, where sami-devbox has none:
+    # the runner's own copies answered there before the pinned ones (the moved-HOME panes of
+    # shims/tests/test_shim_moved_home.py search /usr/local/bin:/usr/bin:/bin).
+    - name: no runner copy of a pinned command line
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get remove -y -q gh
+        sudo rm -f /usr/bin/az /usr/bin/gcloud /usr/bin/bq /usr/bin/gsutil /usr/local/bin/pulumi
+        for binary in gh az gcloud bq gsutil pulumi; do
+          if found="$(PATH=/usr/local/bin:/usr/bin:/bin command -v "$binary")"; then
+            echo "the runner still has $found" >&2
+            exit 1
+          fi
+        done
