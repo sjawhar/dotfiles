@@ -320,6 +320,22 @@ platforms.linux-x64   = { asset_pattern = "ctx-x86_64-unknown-linux-musl.tar.gz"
 platforms.linux-arm64 = { asset_pattern = "ctx-aarch64-unknown-linux-musl.tar.gz" }
 platforms.macos-arm64 = { asset_pattern = "ctx-aarch64-apple-darwin.tar.gz" }
 
+# CodeGraph CLI (colbymchenry/codegraph), which the omp `codegraph` tool runs from PATH
+# (@bopstack/pi-codegraph in omp/plugins/package.json; without the CLI every call answers "CodeGraph
+# CLI is unavailable on PATH"). Same version as Legion's worker image, which pins it in
+# cybermonklabs/legion packages/daemon/docker/codegraph/package.json. Each release archive holds the
+# npm per-platform package (@colbymchenry/codegraph-<platform>): bin/codegraph is a sh wrapper that
+# execs the Node 24 bundled beside it, so it needs no system node. The npm `@colbymchenry/codegraph`
+# package is only a `#!/usr/bin/env node` launcher for that same bundle. A box finds it through
+# ~/.mise/shims, the shared tool store. Digests are the ones GitHub recorded at upload (`gh release
+# view v<version> -R colbymchenry/codegraph --json assets`); bump them with the version.
+[tools."github:colbymchenry/codegraph"]
+version = "1.5.0"
+platforms.linux-x64   = { asset_pattern = "codegraph-linux-x64.tar.gz", checksum = "sha256:2ba65e87a1210b706bb1e67d5e48b5fc4a1935e43dbb3fb5f31c5597840d2e58" }
+platforms.linux-arm64 = { asset_pattern = "codegraph-linux-arm64.tar.gz", checksum = "sha256:9f17750aedf45d51f68caae39ed21d6e2a7290b2326e5c53f95a165918ebd1d8" }
+platforms.macos-x64   = { asset_pattern = "codegraph-darwin-x64.tar.gz", checksum = "sha256:0a0ccc29bf7da9d10be1458d89d7e15c55927ae24cd95e9fa3de4bdfea059dde" }
+platforms.macos-arm64 = { asset_pattern = "codegraph-darwin-arm64.tar.gz", checksum = "sha256:cf5ee435a6e44d097b2f98f2b7b8b9422bb1094844404efed82519c5da1af2cf" }
+
 # Device management CLI (osquery/MDM). Each fleetdm/fleet release bundles two
 # binaries — fleet (server) + fleetctl — so asset_pattern selects the fleetctl
 # archive; the release tag is prefixed "fleet-v". The npm "fleetctl" package is
