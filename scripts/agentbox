@@ -3694,14 +3694,22 @@ cmd_adopt() {
     [[ ! -e "$AGENTBOX_IDENTITY_FILE" ]] || die "adopt runs on the host, where the box's launcher runs"
     state="$(box_container_state "$box")"
     [[ "$state" == running ]] || die "Docker says $box is $state, not running; nothing was done"
+    local attach=""
     for p in "$PROC"/[0-9]*; do
         [[ -O "$p" ]] || continue
         mapfile -d '' -t args <"$p/cmdline" 2>/dev/null || continue
         [[ "${args[0]:-}" == docker || "${args[0]:-}" == */docker ]] || continue
+        # `docker attach <box>` is the client of a launcher of this version (box_client): of an
+        # adopted box, or of any box after a dockerd restart.
+        if [[ "${args[1]:-}" == attach && "${args[*]: -1}" == "$box" ]]; then attach="${p##*/}"; continue; fi
         if [[ "${args[1]:-}" != run ]] || ! adopt_names "$box" "${args[@]}"; then continue; fi
         [[ -z "$client" ]] || die "two docker clients run $box (pids $client and ${p##*/}); nothing was done"
         client="${p##*/}"
     done
+    if [[ -z "$client" && -n "$attach" ]]; then
+        echo "agentbox: $box already runs under a launcher that attaches to it again (its docker attach is pid $attach); nothing to do"
+        return 0
+    fi
     [[ -n "$client" ]] || die "no launcher's docker run of $box runs on this host, so there is no launcher to replace; attach to it by hand: docker attach $box"
     launcher="$(adopt_ppid "$client")" || die "cannot read the parent of $box's docker client (pid $client); nothing was done"
     mapfile -d '' -t largs <"$PROC/$launcher/cmdline" 2>/dev/null || die "cannot read the command of pid $launcher, the parent of $box's docker client; nothing was done"

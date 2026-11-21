@@ -252,6 +252,24 @@ class Adopt(Fixture):
         self.assertEqual([p.poll() for p in (upper, launcher, client)], [None, None, None], said)
         self.assertEqual(self.calls("tmux"), [], said)
 
+    def test_an_adopted_box_needs_nothing(self) -> None:
+        """An adopted box's client is the new launcher's `docker attach BOX` (box_client); adopt
+        says it needs nothing, exits 0 and signals nothing (on the test VM it said "no launcher's
+        docker run" and exited 1)."""
+        shell, launcher, attach = self.real(), self.real(), self.real()
+        (self.run_base / BOX).mkdir()
+        argv = ["bash", "/tmp/agentbox-self-XyZ", "adopt", "--pane", BOX]
+        self.fake(shell.pid, 1, ["bash", "-i", "-c", "agentbox adopt --pane …"], 100, session=shell.pid)
+        self.fake(launcher.pid, shell.pid, argv, 200, {"TMUX_PANE": "%7", "TMUX": f"{self.sock},4242,0"}, session=shell.pid)
+        self.fake(attach.pid, launcher.pid, ["docker", "attach", BOX], 300, session=shell.pid)
+        result = self.adopt()
+        said = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, said)
+        self.assertIn(f"{BOX} already runs under a launcher that attaches to it again (its docker attach is pid {attach.pid})", said)
+        time.sleep(0.5)
+        self.assertEqual([p.poll() for p in (shell, launcher, attach)], [None, None, None], said)
+        self.assertEqual(self.calls("tmux"), [], said)
+
     def test_a_box_docker_does_not_say_runs_is_refused(self) -> None:
         upper, launcher, client = self.box_launched()
         result = self.adopt(STUB_STATE="exited")
