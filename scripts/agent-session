@@ -17,6 +17,7 @@
 #     none, and the libraries take the VM's account from the metadata server;
 #   - turns gcloud's file logging off (CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true) unless the caller
 #     set it, so a gcloud run past shims/gcloud writes no token into a log file (below);
+#   - turns CodeGraph's usage telemetry off (CODEGRAPH_TELEMETRY=0) unless the caller set it (below);
 #   - gives the session a TMPDIR of its own on the big disk and points the uv, cargo and Go
 #     caches there, on a machine that has one (below); on one that has not, nothing changes;
 #   - exports the model-spend telemetry variables when this machine holds the collector's token (below);
@@ -182,6 +183,15 @@ fi
 # sami-devbox on 2026-11-20. gcloud reads this variable before any configuration file. A value the
 # caller set is kept, as the shim keeps it. session_env in scripts/agentbox does the same in a box.
 export CLOUDSDK_CORE_DISABLE_FILE_LOGGING="${CLOUDSDK_CORE_DISABLE_FILE_LOGGING:-true}"
+
+# The codegraph CLI (pinned in mise.toml; omp's codegraph tool runs it) records each command it
+# runs and sends the counts to telemetry.getcodegraph.com at its next init, index or sync, unless
+# DO_NOT_TRACK or CODEGRAPH_TELEMETRY=0 is set or `codegraph telemetry off` was run as this user.
+# On sami-devbox on 2026-11-21 its queue held 339 agent commands at 04:30Z, 90 minutes after its
+# first run there (the queue file's mtime, and the updated_at of ~/.codegraph/telemetry.json).
+# Legion's worker warm-up sets DO_NOT_TRACK; this is the narrower switch, so other tools keep their
+# own settings. A value the caller set is kept. session_env in scripts/agentbox does the same in a box.
+export CODEGRAPH_TELEMETRY="${CODEGRAPH_TELEMETRY:-0}"
 
 # Machine-local environment, outside this public repository (dispatch://BET-765). A setting that
 # names a customer may not be committed here, so each machine keeps its own file and this reads it

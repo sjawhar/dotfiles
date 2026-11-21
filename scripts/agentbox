@@ -2600,6 +2600,10 @@ session_env() {
     # past shims/gcloud and ~/.gcloud's installation property copies a printed token into a log
     # file (dispatch://INFRA-4824). The launcher's own value wins, as the shim keeps a caller's.
     e+=(-e "CLOUDSDK_CORE_DISABLE_FILE_LOGGING=${CLOUDSDK_CORE_DISABLE_FILE_LOGGING:-true}")
+    # CodeGraph's usage telemetry off, as scripts/agent-session sets it for a host session; a box's
+    # ~/.codegraph is its own, so no `codegraph telemetry off` on the host reaches it. The
+    # launcher's own value wins.
+    e+=(-e "CODEGRAPH_TELEMETRY=${CODEGRAPH_TELEMETRY:-0}")
     # Machine-local session environment (dispatch://BET-765), the same file scripts/agent-session
     # sources for a host session. A box builds its variables from scratch and never runs
     # agent-session, so without this the file is visible in the box (agentbox/mounts has
