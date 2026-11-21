@@ -25,7 +25,7 @@ Remove always:
 - History: dates, incidents, measurements of past events, who decided what, issue keys, links to decisions, pull request numbers as provenance. They go in the commit message or PR body; git keeps the removed text.
 - Restatements of what code, a test or a linter enforces, and duplicates: a fact lives in one doc, and others link to it.
 - Long explanations of why. Keep one clause where a rule would otherwise look arbitrary.
-- Emphasis as force: NEVER or MUST in capitals, "critical", bold. A rule that needs force is a hook or a check.
+- Emphasis as force: NEVER or MUST in capitals, "critical", bold. A bold label that starts a rule in a skill is a label, not force. A rule that needs force is a hook or a check.
 
 Move a fact to a README or `docs/` page only when that page is where an engineer would look and no page holds it yet; otherwise delete it.
 

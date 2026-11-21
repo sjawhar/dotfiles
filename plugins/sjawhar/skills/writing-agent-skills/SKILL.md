@@ -17,8 +17,8 @@ Use steps 1 and 3 for an agent guide's rules too.
 
 | Part | Limit | `check_skill.py` |
 | --- | --- | --- |
-| `description` | Starts "Use when", at most 300 characters, says when to load the skill and never its steps | Fails it |
-| `SKILL.md` and each markdown file outside `assets/` and `templates/` | At most 8,000 bytes, the whole file counted, frontmatter included; no line limit | Fails it |
+| `description` | Starts "Use when", at most 300 characters, says when to load the skill and never its steps | Fails a wrong start or length |
+| `SKILL.md` and each markdown file outside `assets/` and `templates/` | At most 8,000 bytes, the whole file counted; no line limit | Fails it |
 | Rules in `SKILL.md` (a list item, or a sentence of a paragraph) | At most 40 | Warns |
 
 - **Keep the steps out of the description:** an agent that reads them there follows them and skips the body.
