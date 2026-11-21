@@ -299,12 +299,13 @@ class Reattach(Fixture):
 
     def test_an_attach_that_keeps_ending_is_given_up_and_the_box_left(self) -> None:
         """Docker answers that the box runs, but each attach ends at once. The launcher tries
-        again, a pause apart, until the window (2 s here) ends, then leaves the box as it is. It
-        does not loop without end, and it does not remove a running box."""
-        result = self.launch(STUB_RUN_END="eof", STUB_ATTACH_END="eof", AGENTBOX_REATTACH_WAIT="2")
+        again, a pause apart, until the window (10 s here) ends, then leaves the box as it is. It
+        does not loop without end, and it does not remove a running box. 10 s and not 2: at load
+        about 800 on sami-devbox (2026-11-21) one pass took most of 2 s, and only one attach fit."""
+        result = self.launch(STUB_RUN_END="eof", STUB_ATTACH_END="eof", AGENTBOX_REATTACH_WAIT="10")
         self.assert_left(result, 1)
         self.assertGreaterEqual(len(self.calls("docker attach")), 2, result.stdout + result.stderr)
-        self.assertIn("the box still runs, but every attach to it ended within 2s; no more attaches", self.box_log())
+        self.assertIn("the box still runs, but every attach to it ended within 10s; no more attaches", self.box_log())
 
     def test_a_box_whose_command_ends_is_closed_as_before(self) -> None:
         """The box's command exits 3: the container is `exited 3` when `docker run` returns 3.
