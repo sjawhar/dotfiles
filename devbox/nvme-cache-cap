@@ -5,7 +5,7 @@
 # scripts/agent-session and .bashrc point every session's uv, cargo and Go module caches at
 # /mnt/nvme/<user> (dispatch://INFRA-613), where they are shared by every session and reused
 # across them. Shared and reused is the point; unbounded is not, so each one has a cap here and
-# devbox/nvme-cache-cap.service checks them hourly. The Go BUILD cache has its own, older unit
+# devbox/box-cleanup checks them every 15 minutes. The Go BUILD cache has its own, older unit
 # (devbox/gocache-cap). devbox/nvme-cache-cap.md says what each cap costs and how to
 # turn it off.
 #

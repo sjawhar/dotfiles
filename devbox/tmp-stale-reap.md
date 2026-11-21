@@ -7,7 +7,7 @@ nothing in it has been written for 48 hours.
 | | |
 |---|---|
 | Script | `devbox/tmp-stale-reap` (`--dry-run` by default, `--apply` removes) |
-| Units | `devbox/tmp-stale-reap.service`, `.timer` (hourly), armed by `devbox/install.sh` |
+| Units | run daily as a step of `devbox/box-cleanup` (`box-cleanup.timer`, armed by `devbox/install.sh`), with the environment of `devbox/tmp-stale-reap.service`; its own `.timer` is no longer armed |
 | Knobs | `TMP_REAP_ROOT`, `TMP_REAP_AGE_HOURS`, `TMP_REAP_KEEP`, `TMP_REAP_PROBE_SECONDS`, `TMP_REAP_IO_PRESSURE_MAX`, `TMP_REAP_RUN_SECONDS` (the pass's deadline; the service sets 1680), `TMP_REAP_STATE` (where the cursor is kept), `TMP_REAP_PROC` (a scratch `/proc` for tests) |
 | Tests | `scripts/tests/test_tmp_stale_reap.py` |
 

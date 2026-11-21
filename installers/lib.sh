@@ -248,3 +248,35 @@ arm_user_service() {
     }
     echo "$name: armed (running, $(systemctl --user show -p MainPID --value "$name.service"))"
 }
+
+# Disarm the systemd user timer <name> that arm_user_timer armed from <unit-dir> in ~/.dotfiles:
+# disable and stop the timer (a run under way ends by itself), remove the timer's and the
+# service's links from ~/.config/systemd/user, and reload. Only a link that points at this
+# repository's unit is touched: a unit of the same name from anywhere else is not this one. A
+# machine that never armed the timer changes nothing and prints nothing. Same refusal as
+# arm_user_timer inside an agentbox, for the same reason. Returns 1 on any failure.
+disarm_user_timer() {
+    local dir="$1" name="$2" suffix link removed=0
+    local links="$HOME/.config/systemd/user"
+    if [[ -f /.dockerenv ]] || [[ "$(systemd-detect-virt 2>/dev/null)" == docker ]]; then
+        echo "$name: this is an agentbox; the host systemd cannot see its ~/.config/systemd." >&2
+        echo "  Run $0 from a host shell instead." >&2
+        return 1
+    fi
+    link="$links/$name.timer"
+    if [[ -L "$link" && "$(readlink -- "$link")" == "$HOME/.dotfiles/$dir/$name.timer" ]]; then
+        echo "$name: timer was $(systemctl --user is-enabled "$name.timer" 2>&1 || true)/$(systemctl --user is-active "$name.timer" 2>&1 || true); disarming it"
+        systemctl --user disable --now "$name.timer" || return 1
+    fi
+    for suffix in timer service; do
+        link="$links/$name.$suffix"
+        if [[ -L "$link" && "$(readlink -- "$link")" == "$HOME/.dotfiles/$dir/$name.$suffix" ]]; then
+            rm -- "$link" || return 1
+            echo "$name: removed $link"
+            removed=1
+        fi
+    done
+    if ((removed)); then
+        systemctl --user daemon-reload || return 1
+    fi
+}
