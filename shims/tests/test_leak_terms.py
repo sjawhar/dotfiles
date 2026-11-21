@@ -6,6 +6,7 @@ import base64
 import hashlib
 import importlib.machinery
 import importlib.util
+import itertools
 import json
 import os
 import re
@@ -46,6 +47,17 @@ AGENT_MARKERS = (
 # RLIMIT_NPROC at this uid's live tasks plus 1000, which counts every session of the uid: other sessions grew by up to
 # 9,543 tasks in 10 s, and jj's thread pool and git's forks failed with EAGAIN in about two of three runs of a test.
 TASK_LIMIT = 1024 + 4 * (os.cpu_count() or 1)
+# Its memory limit (MemoryMax, no swap) holds that command alone too, with OOMPolicy=kill: when a process of it runs
+# past the limit, systemd on the host and shims/systemd-run in a box (memory.oom.group) kill the whole command, not the
+# kernel's one victim. On 2026-11-21 a control run of an earlier scanner made iconv read /dev/zero, and each iconv grew
+# to about 50 GiB in 30 s in a scope with no limit, pushing the box's memory pressure (PSI full avg60) to 17%
+# (INFRA-4943). A command killed so fails its test (launch) rather than the host.
+MEMORY_LIMIT = "4G"
+# The systemd-run of an agent box (scope_runner), and the line it writes when the kernel OOM-killed in its cgroup.
+BOX_SCOPE_RUNNER = str(ROOT / "shims" / "systemd-run")
+BOX_OOM_REPORT = re.compile(r"^shims/systemd-run: oom_kill=[1-9][0-9]* in ", re.MULTILINE)
+# Each host scope launch makes is named test-leak-terms-<pid>-<n>.
+SCOPE_NUMBERS = itertools.count()
 LAUNCH_TIMEOUT = 120
 AGE_PUBLIC_KEY = re.compile(r"\bage1[02-9ac-hj-np-z]{58}\b")
 
@@ -66,7 +78,7 @@ def scope_runner() -> str:
     under the box's delegated root instead. The shim's own lookup costs about 0.3 s a call on the host, the real one
     0.015 s."""
     if os.environ.get("AGENTBOX_BOX") or Path("/etc/agentbox-identity").exists():
-        return str(ROOT / "shims" / "systemd-run")
+        return BOX_SCOPE_RUNNER
     shims = (ROOT / "shims").resolve()
     entries = [entry for entry in os.environ.get("PATH", os.defpath).split(os.pathsep) if entry]
     found = shutil.which("systemd-run", path=os.pathsep.join(entry for entry in entries if Path(entry).resolve() != shims))
@@ -175,6 +187,7 @@ class LeakTestCase(unittest.TestCase):
     def setUp(self) -> None:
         super().setUp()
         self.task_limit = TASK_LIMIT
+        self.memory_limit = MEMORY_LIMIT
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -202,9 +215,14 @@ class LeakTestCase(unittest.TestCase):
         stdin: int | None = None,
     ) -> subprocess.CompletedProcess:
         """ARGV with exactly the environment ENV (this process's when None), in a session and process group of its own
-        and in a cgroup of its own whose task limit is self.task_limit, stdin the descriptor STDIN, else /dev/null
-        unless INPUT is given. A command that outlives TIMEOUT fails the test after its whole cgroup and process group
-        are killed, descendants holding its pipes included."""
+        and in a cgroup of its own whose task limit is self.task_limit and whose memory limit is self.memory_limit
+        (MEMORY_LIMIT unless a test sets it), with OOMPolicy=kill, stdin the descriptor STDIN, else /dev/null unless
+        INPUT is given. A command that outlives TIMEOUT fails the test after its whole cgroup and process group are
+        killed, descendants holding its pipes included. A command killed by SIGKILL fails the test too, named as past
+        the memory limit only when its cgroup recorded an OOM kill: on the host the scope's Result=oom-kill, in a box
+        the shim's BOX_OOM_REPORT line. In a box shims/systemd-run ends by SIGKILL only after such an OOM kill and
+        passes every other status through, so a SIGKILL with no OOM kill reads as 137 there, the same as an exit of
+        137: launch fails a box run that returns 137 too, naming both."""
         if "=" in os.fspath(argv[0]):
             raise ValueError(f"env would read {argv[0]!r} as a variable, not a command")
         environment = os.environ if env is None else env
@@ -213,9 +231,16 @@ class LeakTestCase(unittest.TestCase):
         # The description replaces the unit's default one, the whole command line: with the environment in it each
         # "Started run-u….scope" journal line was about 15 KB, 99% of the user journal's bytes while this suite ran,
         # and the journal kept only about 18 hours (sami-devbox, 2026-11-17). shims/systemd-run ignores it in a box.
+        # On the host the scope is named and not collected: an OOM kill leaves it failed, with Result=oom-kill for
+        # scope_result to read before it resets it; a scope that ends any other way is gone at once, as with --collect.
+        # In a box shims/systemd-run reports an OOM kill on stderr itself, and a --unit would keep its cgroup from the
+        # sweep of ended runs' cgroups.
+        runner = scope_runner()
+        unit = None if runner == BOX_SCOPE_RUNNER else f"test-leak-terms-{os.getpid()}-{next(SCOPE_NUMBERS)}"
         command = [
-            scope_runner(), "--user", "--scope", "--quiet", "--collect",
-            f"--description=test_leak_terms {Path(os.fspath(argv[0])).name}", "-p", f"TasksMax={self.task_limit}", "--",
+            runner, "--user", "--scope", "--quiet", *(["--collect"] if unit is None else [f"--unit={unit}"]),
+            f"--description=test_leak_terms {Path(os.fspath(argv[0])).name}", "-p", f"TasksMax={self.task_limit}",
+            "-p", f"MemoryMax={self.memory_limit}", "-p", "MemorySwapMax=0", "-p", "OOMPolicy=kill", "--",
             "/usr/bin/env", "-i", *(f"{name}={value}" for name, value in environment.items()), *argv,
         ]
         process = subprocess.Popen(
@@ -238,8 +263,30 @@ class LeakTestCase(unittest.TestCase):
                 (cgroup / "cgroup.kill").write_text("1", encoding="ascii")
             os.killpg(process.pid, signal.SIGKILL)
             _, stderr = process.communicate(timeout=30)
+            self.scope_result(unit)
             self.fail(f"{argv[0]} ran past {timeout} s; its cgroup and process group were killed: {stderr!r}")
+        if process.returncode == -signal.SIGKILL:
+            said = stderr if isinstance(stderr, str) else (stderr or b"").decode("utf-8", errors="replace")
+            if self.scope_result(unit) == "oom-kill" or BOX_OOM_REPORT.search(said):
+                self.fail(f"{argv[0]} ran past MemoryMax={self.memory_limit}, and its cgroup's OOM policy killed the "
+                          f"whole command: {stderr!r}")
+            self.fail(f"{argv[0]} was killed by SIGKILL, and its cgroup recorded no OOM kill: {stderr!r}")
+        if runner == BOX_SCOPE_RUNNER and process.returncode == 137:
+            self.fail(f"{argv[0]} exited 137 (SIGKILL, or the command exited 137), and its cgroup recorded no OOM "
+                      f"kill: {stderr!r}")
         return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+    @staticmethod
+    def scope_result(unit: str | None) -> str | None:
+        """The Result systemd recorded for launch's host scope UNIT (`oom-kill` after an OOM kill), its failed state then
+        reset so the unit does not stay loaded; None in a box, where launch names no unit."""
+        if unit is None:
+            return None
+        shown = subprocess.run(["systemctl", "--user", "show", f"{unit}.scope", "--property=Result", "--value"],
+                               capture_output=True, text=True, timeout=60, check=False)
+        subprocess.run(["systemctl", "--user", "reset-failed", f"{unit}.scope"], capture_output=True, timeout=60,
+                       check=False)
+        return shown.stdout.strip() or None
 
     def assert_hidden(self, *outputs: object) -> None:
         """No test term in OUTPUTS (strings, bytes, or completed processes), by the scanner's matching rule."""
@@ -1355,8 +1402,11 @@ index 0000000,0000000,0000000..1111111
         # The bound itself, made to fire: a child that outlives the timeout while it holds the output pipes, and a
         # command that starts more tasks than its budget allows.
         pid_file = self.root / "sleeper.pid"
+        # 10 s, not 2: the timeout must fire after the shell wrote the pid file. In a suite run with six workers at a
+        # load average near 600, the 2 s bound fired before the file was written (FileNotFoundError, 2026-11-21 11:05Z,
+        # INFRA-4943), and five runs of this test alone at a load near 460 passed.
         with self.assertRaisesRegex(AssertionError, "process group were killed"):
-            self.launch(["/bin/sh", "-c", f"sleep 300 & echo $! > {shlex.quote(str(pid_file))}; wait"], timeout=2)
+            self.launch(["/bin/sh", "-c", f"sleep 300 & echo $! > {shlex.quote(str(pid_file))}; wait"], timeout=10)
         sleeper = Path(f"/proc/{int(pid_file.read_text(encoding='ascii'))}/stat")
 
         def gone() -> bool:
@@ -1394,6 +1444,29 @@ index 0000000,0000000,0000000..1111111
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertLess(int(result.stdout), self.task_limit, "the task limit did not stop the forks")
         self.assertGreater(int(result.stdout), 0, "the command could not fork at all")
+
+    def test_harness_launch_names_an_oom_kill_and_a_plain_sigkill(self) -> None:
+        # The memory bound made to fire: a child of the command that runs past the limit takes the whole command with
+        # it, the shell that would go on to write a file included, and the failure names the limit; a SIGKILL with no
+        # OOM kill behind it is named as only that (on the host -9; in a box 137, the same as an exit of 137), and an
+        # exit of 137 in a box too.
+        self.memory_limit = "64M"
+        after = self.root / "after"
+        eater = "x = bytearray()\nfor _ in range(400):\n    x += bytearray(1024 * 1024)\n"
+        with self.assertRaisesRegex(AssertionError, r"ran past MemoryMax=64M, and its cgroup's OOM policy killed the "
+                                                    r"whole command"):
+            self.launch(["/bin/sh", "-c", f"{shlex.quote(sys.executable)} -c {shlex.quote(eater)}; "
+                                          f"echo after > {shlex.quote(str(after))}"], timeout=60)
+        self.assertFalse(after.exists(), "the shell went on after its child's OOM kill")
+        plain = (r"(was killed by SIGKILL|exited 137 \(SIGKILL, or the command exited 137\)), and its cgroup recorded no "
+                 r"OOM kill")
+        with self.assertRaisesRegex(AssertionError, plain):
+            self.launch(["/bin/sh", "-c", "kill -KILL $$"], timeout=60)
+        if scope_runner() == BOX_SCOPE_RUNNER:
+            with self.assertRaisesRegex(AssertionError, plain):
+                self.launch(["/bin/sh", "-c", "exit 137"], timeout=60)
+        else:
+            self.assertEqual(self.launch(["/bin/sh", "-c", "exit 137"], timeout=60).returncode, 137)
 
     def test_harness_task_limit_counts_only_the_commands_own_tasks(self) -> None:
         # The failure the per-uid cap had: once a command runs, other processes of this uid start more tasks than the
