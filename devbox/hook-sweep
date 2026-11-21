@@ -17,15 +17,19 @@
 #
 # It prints the pass's INSTALLED, FAILED, DEFERRED and OPTED-OUT lines and its summary, then
 # `reclaimed-bytes: 0` (it frees nothing, and box-cleanup counts a step without that line as unmeasured).
-# Exit 0 when the pass ended with its summary line and failed nothing; 1 when it failed a checkout or
-# ended without its summary; 2 on a usage error or a missing sweep. A deferred checkout is not a failure:
-# the sweep's next pass reaches it (its per-pass cap on GitHub visibility lookups).
+# Exit 0 when the pass exited 0 and ended with a summary line that failed nothing; 1 otherwise; 2 on a usage
+# error or a missing sweep. A deferred checkout is not a failure: the sweep's next pass reaches it (its per-pass
+# cap on GitHub visibility lookups). On TERM or INT (box-cleanup's step timeout) the pass's process group is
+# stopped, what it logged so far is printed and kept in killed/ beside box-cleanup's state (the newest five),
+# and it exits 124, so a pass cut short still says what it did (as dotfiles-follow's keep_killed_sweep_log did).
 set -uo pipefail
 
 kind=${1:-}
 dir=${HOOK_SWEEP_DIR:-$HOME/.local/share/public-leak-check-hooks}
 script=$dir/sweep-hooks.sh
-# shellcheck disable=SC2016  # the roots are for the sweep's own shell to expand, not this one
+keep=${HOOK_SWEEP_KEEP:-${XDG_STATE_HOME:-$HOME/.local/state}/box-cleanup/killed}
+# The roots and the sweep's code are text for the sweep's own shell to expand, not this one.
+# shellcheck disable=SC2016
 case $kind in
     fast) roots='"${fast_roots[@]}"' ;;
     slow) roots='"${fast_roots[@]}" "${slow_roots[@]}"' ;;
@@ -37,9 +41,37 @@ if [[ ! -f "$script" ]]; then
 fi
 log=$(mktemp "${TMPDIR:-/tmp}/hook-sweep-$kind-XXXXXX") || { echo "hook-sweep: cannot make a log file" >&2; exit 1; }
 trap 'rm -f "$log"' EXIT
-bash -c 'eval "$(sed "/^i=0\$/,\$d" "$1")" && here=$2 && log=$3 && sweep '"$roots" _ "$script" "$dir" "$log" </dev/null >/dev/null 2>&1
+
+lines() { grep -E ' (INSTALLED|FAILED|DEFERRED|OPTED-OUT) ' "$log"; }
+
+# The pass runs in a session of its own, in the background, so a signal reaches this shell at once (bash runs a
+# trap only after a foreground child ends) and can stop the whole pass: its find, git and gh children too.
+# shellcheck disable=SC2016  # the sweep's code, for its own shell to expand
+setsid bash -c 'eval "$(sed "/^i=0\$/,\$d" "$1")" && here=$2 && log=$3 && sweep '"$roots" _ "$script" "$dir" "$log" </dev/null >/dev/null 2>&1 &
+pid=$!
+# shellcheck disable=SC2329  # run by the trap below
+stopped() {
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    lines
+    echo "reclaimed-bytes: 0"
+    local name old=()
+    name=$(date -u +%Y%m%dT%H%M%SZ)-$kind.log
+    if mkdir -p "$keep" 2>/dev/null && cp -- "$log" "$keep/.$name.new" 2>/dev/null && mv -f -- "$keep/.$name.new" "$keep/$name"; then
+        echo "hook-sweep: the $kind pass was stopped before its end; its log so far is $keep/$name" >&2
+        old=("$keep"/*Z-*.log)  # in name order, which is time order
+        ((${#old[@]} <= 5)) || rm -f -- "${old[@]:0:${#old[@]}-5}"
+    else
+        echo "hook-sweep: the $kind pass was stopped before its end, and its log could not be kept in $keep" >&2
+    fi
+    exit 124
+}
+trap stopped TERM INT
+wait "$pid"
 rc=$?
-grep -E ' (INSTALLED|FAILED|DEFERRED|OPTED-OUT) ' "$log"
+trap - TERM INT
+
+lines
 summary=$(grep -E ' sweep \[[^]]*\]: [0-9]+ checkouts.*, [0-9]+ installed, [0-9]+ failed$' "$log" | tail -n 1)
 echo "reclaimed-bytes: 0"
 if [[ -z "$summary" ]]; then
@@ -47,5 +79,9 @@ if [[ -z "$summary" ]]; then
     exit 1
 fi
 echo "$summary"
+if ((rc != 0)); then
+    echo "hook-sweep: the $kind pass exited $rc" >&2
+    exit 1
+fi
 [[ "$summary" == *", 0 failed" ]] || exit 1
 exit 0
