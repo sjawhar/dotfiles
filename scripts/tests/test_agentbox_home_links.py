@@ -18,6 +18,7 @@ stub runs the in-box script on this host, against the fixture home, with stubs f
 from __future__ import annotations
 
 import os
+import socket
 import stat
 import subprocess
 import tempfile
@@ -90,6 +91,12 @@ class HomeLinks(unittest.TestCase):
         self.run_args = self.root / "run-args"
         self.exec_log = self.root / "exec-log"
         self.boxes = self.root / "boxes"
+        # A stand-in secretsd socket, named through SECRETSD_SOCK at each launch: the script binds
+        # secretsd's socket into a box and stops when it is missing, so without this a test passed
+        # only on a host that runs secretsd.
+        self.secretsd = self.root / "secretsd.sock"
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.bind(str(self.secretsd))
         self.env = {
             "AGENTBOX_IDENTITY_FILE": str(self.root / "not-a-box"),
             "AGENTBOX_BOX": "",
@@ -110,7 +117,7 @@ class HomeLinks(unittest.TestCase):
 
     def launch(self, *options: str) -> tuple[list[str], Path]:
         """The -v arguments of the docker run this launch would make, and the box's home."""
-        script = f'source "{AGENTBOX}"\n{NO_HOST}cmd_new {" ".join(options)} repo1 -- omp\n'
+        script = f'source "{AGENTBOX}"\nSECRETSD_SOCK="{self.secretsd}"\n{NO_HOST}cmd_new {" ".join(options)} repo1 -- omp\n'
         result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                                 env=self.env, check=False, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr[-3000:])

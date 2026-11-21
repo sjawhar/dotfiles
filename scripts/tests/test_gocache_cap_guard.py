@@ -77,6 +77,11 @@ UID = os.getuid()
 BOX_UID = 101000
 # This script's own shell is always among the processes ps lists.
 SELF = f"5 100 {UID} S bash\n"
+# The stubbed host's uptime: above every age a test gives a running go command (15000 s at most)
+# and below the wrapped age procps prints (about 4.1e9 s). gocache-cap reads an age above the
+# uptime as wrapped, so the host's own uptime, copied, failed these tests on a machine up for less
+# than about 4 hours, a fresh CI runner among them.
+UPTIME = 30 * 24 * HOUR
 
 
 def go(age: int, pid: int = 4242, uid: int = UID, stat: str = "Sl") -> str:
@@ -100,7 +105,7 @@ class Harness(unittest.TestCase):
         # The stubbed processes' /proc, so a pid the stub lists never reads a real process's GOCACHE.
         self.proc = self.root / "proc"
         self.proc.mkdir()
-        (self.proc / "uptime").write_text(Path("/proc/uptime").read_text(encoding="utf-8"), encoding="utf-8")
+        (self.proc / "uptime").write_text(f"{UPTIME}.00 {UPTIME}.00\n", encoding="utf-8")
         self.env = {"HOME": str(self.root), "PATH": f"{stubs}:{os.environ['PATH']}", "TMPDIR": str(self.root),
                     "STUB_GO_CALLS": str(self.go_calls), "GOCACHE_CAP_ROOTS": str(self.cache),
                     "PROC_ROOT": str(self.proc)}
