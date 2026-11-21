@@ -84,7 +84,13 @@ Everything else is removed, **except**:
   root-owned `probe.CoPz/…/verifier`, its session's pid was gone, and its mtime read 06:28:37Z:
   something this user cannot see was still writing there. One walk of each directory about to go
   finds such an entry before anything in it is removed. Removing what is left takes root, once
-  its owner is done with it.
+  its owner is done with it;
+- a directory with a **filesystem mounted** at or below it, kept whole and named (`keep … (a
+  filesystem is mounted inside it, at <path>; …)`) and counted as holding a mount, in both roots.
+  `rm -rf` deletes through a mount: the files of a tmpfs or another disk, or, through a bind
+  mount, another directory's. `/proc/self/mountinfo` names every mount point, bind mounts of the
+  same filesystem too (`devbox/mounts-below.sh`), and the removal is `rm -rf --one-file-system`
+  besides, so a mount the check misses is skipped and that removal fails and is said.
 
 A run that finds `/proc/pressure/io` `full avg10` above 20 removes nothing and says so; the next
 pass is 15 minutes away.
@@ -183,7 +189,8 @@ dir=$(work-dir my-work)   # /mnt/nvme/$USER/tmp/my-work, OWNER = this session's 
 | All three hold — no holder, owner gone, idle 7 days | the one case a removal is allowed in |
 
 Symlinks are never followed, a mount under the root is never crossed or acted on (the entry that
-is a mount point reads as unowned), and the root itself is never a candidate.
+is a mount point reads as unowned, and an entry with a mount deeper inside is kept, as in the
+session root), and the root itself is never a candidate.
 
 ### It is report-only
 

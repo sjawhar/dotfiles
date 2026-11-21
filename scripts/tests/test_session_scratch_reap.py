@@ -15,6 +15,13 @@ The rules tested here:
   the run says what it removed, and only that     test_reclaimed_bytes_is_what_this_run_removed
   a run stops at its own deadline, and the next   test_a_run_stops_at_its_deadline_and_the_next_finishes
   run finishes the job
+  a filesystem mounted inside a directory keeps   test_a_mount_inside_keeps_the_directory_and_its_files
+  it, and its files survive; a bind mount of the  test_a_bind_mount_of_the_same_filesystem_keeps_it
+  same filesystem too, which rm's
+  --one-file-system alone does not stop
+
+The mount tests run the reaper in a user and mount namespace of its own (`unshare -rm`), where an
+unprivileged user may mount a tmpfs or bind a directory, and read the mounted files from inside it.
 """
 
 import os
@@ -48,6 +55,29 @@ def sudo_works():
     return shutil.which("sudo") is not None and subprocess.run(
         ["sudo", "-n", "true"], capture_output=True, check=False
     ).returncode == 0
+
+
+def unshare_works():
+    """Can this user mount a tmpfs in a user and mount namespace of its own?"""
+    if shutil.which("unshare") is None:
+        return False
+    return subprocess.run(
+        ["unshare", "-rm", "sh", "-c", 'd=$(mktemp -d) && mount -t tmpfs none "$d" && umount "$d" && rmdir "$d"'],
+        capture_output=True, check=False,
+    ).returncode == 0
+
+
+# Run inside `unshare -rm`: make the mount ("$MOUNT_SETUP"), run the reaper, then say whether the
+# mounted file is still there, as the namespace and its mounts end with this shell.
+IN_NAMESPACE = """
+set -e
+eval "$MOUNT_SETUP"
+set +e
+"$REAPER"
+rc=$?
+if [ -f "$MOUNTED_FILE" ]; then echo "MOUNTED FILE SURVIVED"; else echo "MOUNTED FILE GONE"; fi
+exit $rc
+"""
 
 
 def tree_bytes(path):
@@ -186,6 +216,55 @@ class SessionRootTest(unittest.TestCase):
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
         self.assertIn(f"removed {dead} (", again.stdout)
         self.assertFalse(dead.exists())
+
+    def run_in_namespace(self, setup, mounted_file):
+        return subprocess.run(
+            ["unshare", "-rm", "sh", "-c", IN_NAMESPACE],
+            capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL, start_new_session=True,
+            env={**os.environ, "SESSION_SCRATCH_ROOT": str(self.root), "SESSION_SCRATCH_GRACE_SECONDS": "600",
+                 "SESSION_SCRATCH_IO_PRESSURE_MAX": "100", "REAPER": str(SCRIPT), "MOUNT_SETUP": setup,
+                 "MOUNTED_FILE": str(mounted_file)},
+        )
+
+    @unittest.skipUnless(unshare_works(), "needs `unshare -rm` to mount a tmpfs without root")
+    def test_a_mount_inside_keeps_the_directory_and_its_files(self):
+        dead = self.session(f"{DEAD_PID}-mount001", {"work/notes.txt": b"x" * 100, "mnt/.keep": b""})
+        self.age(dead)
+        clean = self.session(f"{DEAD_PID + 1}-cleanAAA", {"data": b"y" * 10})
+        self.age(clean)
+        mounted = dead / "mnt" / "data"
+
+        done = self.run_in_namespace(f'mount -t tmpfs none "{dead}/mnt"; echo precious > "{mounted}"', mounted)
+
+        out = done.stdout + done.stderr
+        self.assertEqual(done.returncode, 0, out)
+        self.assertIn("MOUNTED FILE SURVIVED", done.stdout)
+        self.assertIn(f"keep {dead} (a filesystem is mounted inside it, at {dead}/mnt;", done.stdout)
+        self.assertTrue((dead / "work" / "notes.txt").exists(), "nothing of a kept directory is removed")
+        self.assertFalse(clean.exists(), "the run still removes the dead directories it can")
+        self.assertNotIn("FAILED", out)
+        summary = self.summary(done.stdout)
+        self.assertIn("1 holding a mount", summary)
+        self.assertIn("0 failed", summary)
+
+    @unittest.skipUnless(unshare_works(), "needs `unshare -rm` to bind a directory without root")
+    def test_a_bind_mount_of_the_same_filesystem_keeps_it(self):
+        # A bind mount of a directory on the same disk has the same device, so rm's
+        # --one-file-system goes through it; only the mount table shows it.
+        precious = self.work / "precious"
+        precious.mkdir()
+        (precious / "data").write_text("precious\n")
+        dead = self.session(f"{DEAD_PID}-bind0001", {"bound/.keep": b""})
+        self.age(dead)
+
+        done = self.run_in_namespace(f'mount --bind "{precious}" "{dead}/bound"', dead / "bound" / "data")
+
+        out = done.stdout + done.stderr
+        self.assertEqual(done.returncode, 0, out)
+        self.assertIn("MOUNTED FILE SURVIVED", done.stdout)
+        self.assertIn(f"keep {dead} (a filesystem is mounted inside it, at {dead}/bound;", done.stdout)
+        self.assertTrue((precious / "data").exists(), "the bound directory's own file survives outside too")
+        self.assertIn("1 holding a mount", self.summary(done.stdout))
 
 
 if __name__ == "__main__":

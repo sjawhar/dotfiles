@@ -40,6 +40,11 @@
 # about to go answers that, before anything in it is removed, and gives the bytes its removal
 # reclaims. Kept is not failed; the summary counts it.
 #
+# A filesystem mounted at or below a directory keeps it too, in both roots: rm -rf would delete
+# that filesystem's files, or through a bind mount another directory's (devbox/mounts-below.sh).
+# The removal itself is rm -rf --one-file-system, so even a mount the check misses is skipped,
+# and that removal fails and is said.
+#
 # SESSION_SCRATCH_RUN_SECONDS gives a run a deadline, counted from its start, which box-cleanup
 # sets inside its 30-minute step limit. At the deadline the run stops before the next directory,
 # or ends the walk or the rm -rf in progress, says where, and exits 0 unless a removal failed: the
@@ -85,6 +90,9 @@
 # TMP_REAP_ENVOY_SECONDS, TMP_REAP_REPORT_MIN_BYTES, ENVOY_URL and TMP_REAP_LIVE override the
 # defaults, so a test can run it against a scratch root and a fake Envoy.
 set -euo pipefail
+# mount_below comes from devbox/mounts-below.sh.
+# shellcheck source=devbox/mounts-below.sh
+source "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/mounts-below.sh"
 
 mode=session
 dry=""
@@ -154,18 +162,19 @@ within_deadline() {
     timeout "$left" "$@"
 }
 
-# remove_tree DIR: rm -rf, and when that fails because a test left read-only directories in the
-# tree (rm cannot unlink inside a directory without write permission), give the user write
-# permission on what it owns and try once more. Measured 2026-10-31: three dead sessions' pytest
-# trees failed with "Permission denied" until then. Exit 124: the deadline came first.
+# remove_tree DIR: rm -rf, never into another filesystem, and when that fails because a test left
+# read-only directories in the tree (rm cannot unlink inside a directory without write
+# permission), give the user write permission on what it owns and try once more. Measured
+# 2026-10-31: three dead sessions' pytest trees failed with "Permission denied" until then. The
+# chmod walk stays on the tree's filesystem too. Exit 124: the deadline came first.
 remove_tree() {
     local status=0
-    within_deadline rm -rf -- "$1" 2>/dev/null || status=$?
+    within_deadline rm -rf --one-file-system -- "$1" 2>/dev/null || status=$?
     ((status == 0 || status == 124)) && return "$status"
     status=0
-    within_deadline chmod -R u+rwX -- "$1" 2>/dev/null || status=$?
+    within_deadline find "$1" -xdev -user "$uid" -exec chmod u+rwX -- {} + 2>/dev/null || status=$?
     ((status == 124)) && return 124
-    within_deadline rm -rf -- "$1"
+    within_deadline rm -rf --one-file-system -- "$1"
 }
 
 # io_pressure_over MAX: deleting under IO pressure hangs every shell on the box
@@ -324,9 +333,10 @@ reap_tmp_root() {
         newest["$name"]="$m"
     done <<<"$walk"
 
-    local kept_live=0 kept_held=0 kept_recent=0 unowned=0 going=0 failed=0
+    local kept_live=0 kept_held=0 kept_recent=0 kept_mount=0 unowned=0 going=0 failed=0
     local live_bytes=0 held_bytes=0 recent_bytes=0 unowned_bytes=0 going_bytes=0
     local -a unowned_list=()
+    local mount_point=""
     local type dev entry owner size
     local -A owner_of=()
     CANDIDATE=()
@@ -363,6 +373,11 @@ reap_tmp_root() {
             echo "session-scratch-reap: keep $entry (owner $owner is gone, but the walk of it could not be finished: ${unsure["$name"]})"
             kept_recent=$((kept_recent + 1))
             recent_bytes=$((recent_bytes + size))
+            continue
+        fi
+        if mount_point="$(mount_below "$entry")" || (($? == 2)); then
+            echo "session-scratch-reap: keep $entry (a filesystem is mounted inside it, at ${mount_point:-a point the mount table could not show}; removing it would delete that filesystem's files)"
+            kept_mount=$((kept_mount + 1))
             continue
         fi
         owner_of["$entry"]="$owner"
@@ -403,7 +418,7 @@ reap_tmp_root() {
         fi
     done
 
-    echo "session-scratch-reap: $root: ${stance}: ${going} $([[ -n "$removing" ]] && echo removed || echo "would be removed") ($(gb "$going_bytes")), ${kept_live} with a live owner ($(gb "$live_bytes")), ${kept_held} held by a process ($(gb "$held_bytes")), ${kept_recent} written inside the ${idle_days}d window ($(gb "$recent_bytes")), ${unowned} unowned ($(gb "$unowned_bytes")); ${failed} failed; $(df -h --output=avail "$root" | tail -1 | tr -d ' ') free"
+    echo "session-scratch-reap: $root: ${stance}: ${going} $([[ -n "$removing" ]] && echo removed || echo "would be removed") ($(gb "$going_bytes")), ${kept_live} with a live owner ($(gb "$live_bytes")), ${kept_held} held by a process ($(gb "$held_bytes")), ${kept_recent} written inside the ${idle_days}d window ($(gb "$recent_bytes")), ${kept_mount} holding a mount, ${unowned} unowned ($(gb "$unowned_bytes")); ${failed} failed; $(df -h --output=avail "$root" | tail -1 | tr -d ' ') free"
 
     # What a caller may count as reclaimed. ZERO unless this pass actually removed: in
     # report-only mode going_bytes is what WOULD go, and a caller that counts it reports a
@@ -464,16 +479,16 @@ if [[ -z "$dry" ]] && io_pressure_over "$pressure_max"; then
     exit 0
 fi
 
-kept_live=0 kept_young=0 kept_handmade=0 kept_foreign=0 removed=0 removed_bytes=0 failed=0
+kept_live=0 kept_young=0 kept_handmade=0 kept_foreign=0 kept_mount=0 removed=0 removed_bytes=0 failed=0
 
-# probe DIR: one walk of DIR, over all that its removal will reach (no -xdev: rm -rf crosses a
-# mount, so this walk does too). Prints `foreign<TAB><path>, uid <n>` at the first entry another
+# probe DIR: one walk of DIR, over all that its removal will reach: -xdev, since the removal does
+# not cross a mount either. Prints `foreign<TAB><path>, uid <n>` at the first entry another
 # user owns, and stops there; otherwise the bytes of every entry. Exit 124: the deadline ended
 # it. Another non-zero exit is a directory of this user's it could not read: the bytes are then a
 # floor, and remove_tree makes that directory readable, so a foreign entry hidden in it fails
 # this run's rm -rf and keeps the directory from the next run on.
 probe() {
-    within_deadline find "$1" -ignore_readdir_race \
+    within_deadline find "$1" -xdev -ignore_readdir_race \
         \( ! -uid "$uid" -printf 'foreign\t%p, uid %U\n' -quit \) -o -printf '%s\n' 2>/dev/null |
         awk '/^foreign\t/ { print; found = 1; exit } { n += $1 } END { if (!found) printf "%d\n", n }'
 }
@@ -549,6 +564,11 @@ if ((total)); then
             continue
         fi
         age=$((now - $(stat -c %Y "$dir" 2>/dev/null || echo "$now")))
+        if mount_point="$(mount_below "$dir")" || (($? == 2)); then
+            echo "session-scratch-reap: keep $dir (a filesystem is mounted inside it, at ${mount_point:-a point the mount table could not show}; removing it would delete that filesystem's files)"
+            kept_mount=$((kept_mount + 1))
+            continue
+        fi
         status=0
         walk="$(probe "$dir")" || status=$?
         if ((status == 124)); then
@@ -593,7 +613,7 @@ if [[ -n "$stopped" ]]; then
     echo "session-scratch-reap: $root: stopped at its deadline $stopped, ${run_seconds}s after the run began; $((total - decided)) of ${total} directories left for the next run"
 fi
 
-echo "session-scratch-reap: $root: ${removed} removed, ${kept_live} live, ${kept_young} inside the grace, ${kept_handmade} made by hand, ${kept_foreign} holding another user's files, ${failed} failed; $(df -h --output=avail "$root" | tail -1 | tr -d ' ') free"
+echo "session-scratch-reap: $root: ${removed} removed, ${kept_live} live, ${kept_young} inside the grace, ${kept_handmade} made by hand, ${kept_foreign} holding another user's files, ${kept_mount} holding a mount, ${failed} failed; $(df -h --output=avail "$root" | tail -1 | tr -d ' ') free"
 # What a caller may count as reclaimed: the bytes of the directories this run removed, as each
 # one's walk measured it just before its removal. Zero for --dry-run, which removes nothing.
 echo "session-scratch-reap: reclaimed-bytes: $removed_bytes"

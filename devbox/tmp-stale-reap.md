@@ -104,6 +104,11 @@ when **all** of these hold, and survives whenever any one of them is merely unsu
 7. **Nothing in it, at any depth, has an `mtime` or a `ctime` inside the window.** The walk stops
    at the first file that vetoes the entry, so a live tree costs almost nothing. A walk that runs
    past `TMP_REAP_PROBE_SECONDS` (120 s) or fails keeps the entry: a timeout is not proof.
+8. **No filesystem is mounted at or below it.** `rm -rf` deletes through a mount: the files of a
+   tmpfs or another disk, or, through a bind mount, another directory's. `/proc/self/mountinfo`
+   names every mount point, bind mounts of the same filesystem too (`devbox/mounts-below.sh`);
+   such an entry is kept and named. The removal is `rm -rf --one-file-system` besides, so a mount
+   the check misses is skipped and that removal fails.
 
 The whole tree is walked, not the top-level entry's own timestamps, because the top-level stat
 lies in the dangerous direction. Measured 16:14:48Z → 16:16:43Z:

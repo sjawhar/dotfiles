@@ -280,6 +280,36 @@ class TmpRootTest(unittest.TestCase):
         self.assertNotIn("/mnt/nvme/", out)
         self.assertTrue(owner.exists())
 
+    def test_a_mount_inside_an_entry_keeps_it_and_its_files(self):
+        """A filesystem mounted deep inside an entry: the walk stops at it (-xdev), and rm -rf
+        would have deleted through it. The entry is kept and named, and the mounted file stays.
+        Run in a user and mount namespace of its own, where this user may mount a tmpfs."""
+        if shutil.which("unshare") is None or subprocess.run(
+                ["unshare", "-rm", "true"], capture_output=True, check=False).returncode != 0:
+            self.skipTest("needs `unshare -rm` to mount a tmpfs without root")
+        going = self.root / "gone-lane"
+        (going / "work" / "mnt").mkdir(parents=True)
+        (going / "OWNER").write_text(DEAD + "\n")
+        self.age(going, 30)
+        mounted = going / "work" / "mnt" / "data"
+        # The mounted root and its file are as old as the entry, so no age rule keeps it instead.
+        script = ('mount -t tmpfs none "$1/work/mnt" && echo precious > "$2" '
+                  '&& touch -d "30 days ago" "$2" "$1/work/mnt" || exit 9\n'
+                  '"$3" --tmp; rc=$?\n'
+                  'if [ -f "$2" ]; then echo "MOUNTED FILE SURVIVED"; fi\nexit $rc\n')
+        done = subprocess.run(
+            ["unshare", "-rm", "sh", "-c", script, "sh", str(going), str(mounted), str(SCRIPT)],
+            capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL,
+            env={**os.environ, "TMP_REAP_ROOT": str(self.root), "ENVOY_URL": self.envoy.url,
+                 "TMP_REAP_IDLE_DAYS": "7", "TMP_REAP_REPORT_MIN_BYTES": "1", "TMP_REAP_LIVE": "1"},
+        )
+        out = done.stdout + done.stderr
+        self.assertEqual(done.returncode, 0, out)
+        self.assertIn("MOUNTED FILE SURVIVED", done.stdout)
+        self.assertIn(f"keep {going} (a filesystem is mounted inside it, at {going}/work/mnt;", done.stdout)
+        self.assertNotIn("FAILED", out)
+        self.assertIn("1 holding a mount", self.summary(done.stdout))
+
     # --- report-only ---------------------------------------------------------------------------
 
     def test_report_only_removes_nothing(self):
