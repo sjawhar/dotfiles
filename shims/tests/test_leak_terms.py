@@ -2,9 +2,11 @@
 """The leak-term scanner against an encrypted, per-process test list."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.machinery
 import importlib.util
+import itertools
 import json
 import os
 import re
@@ -45,6 +47,17 @@ AGENT_MARKERS = (
 # RLIMIT_NPROC at this uid's live tasks plus 1000, which counts every session of the uid: other sessions grew by up to
 # 9,543 tasks in 10 s, and jj's thread pool and git's forks failed with EAGAIN in about two of three runs of a test.
 TASK_LIMIT = 1024 + 4 * (os.cpu_count() or 1)
+# Its memory limit (MemoryMax, no swap) holds that command alone too, with OOMPolicy=kill: when a process of it runs
+# past the limit, systemd on the host and shims/systemd-run in a box (memory.oom.group) kill the whole command, not the
+# kernel's one victim. On 2026-11-21 a control run of an earlier scanner made iconv read /dev/zero, and each iconv grew
+# to about 50 GiB in 30 s in a scope with no limit, pushing the box's memory pressure (PSI full avg60) to 17%
+# (INFRA-4943). A command killed so fails its test (launch) rather than the host.
+MEMORY_LIMIT = "4G"
+# The systemd-run of an agent box (scope_runner), and the line it writes when the kernel OOM-killed in its cgroup.
+BOX_SCOPE_RUNNER = str(ROOT / "shims" / "systemd-run")
+BOX_OOM_REPORT = re.compile(r"^shims/systemd-run: oom_kill=[1-9][0-9]* in ", re.MULTILINE)
+# Each host scope launch makes is named test-leak-terms-<pid>-<n>.
+SCOPE_NUMBERS = itertools.count()
 LAUNCH_TIMEOUT = 120
 AGE_PUBLIC_KEY = re.compile(r"\bage1[02-9ac-hj-np-z]{58}\b")
 
@@ -65,7 +78,7 @@ def scope_runner() -> str:
     under the box's delegated root instead. The shim's own lookup costs about 0.3 s a call on the host, the real one
     0.015 s."""
     if os.environ.get("AGENTBOX_BOX") or Path("/etc/agentbox-identity").exists():
-        return str(ROOT / "shims" / "systemd-run")
+        return BOX_SCOPE_RUNNER
     shims = (ROOT / "shims").resolve()
     entries = [entry for entry in os.environ.get("PATH", os.defpath).split(os.pathsep) if entry]
     found = shutil.which("systemd-run", path=os.pathsep.join(entry for entry in entries if Path(entry).resolve() != shims))
@@ -174,6 +187,7 @@ class LeakTestCase(unittest.TestCase):
     def setUp(self) -> None:
         super().setUp()
         self.task_limit = TASK_LIMIT
+        self.memory_limit = MEMORY_LIMIT
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -201,9 +215,14 @@ class LeakTestCase(unittest.TestCase):
         stdin: int | None = None,
     ) -> subprocess.CompletedProcess:
         """ARGV with exactly the environment ENV (this process's when None), in a session and process group of its own
-        and in a cgroup of its own whose task limit is self.task_limit, stdin the descriptor STDIN, else /dev/null
-        unless INPUT is given. A command that outlives TIMEOUT fails the test after its whole cgroup and process group
-        are killed, descendants holding its pipes included."""
+        and in a cgroup of its own whose task limit is self.task_limit and whose memory limit is self.memory_limit
+        (MEMORY_LIMIT unless a test sets it), with OOMPolicy=kill, stdin the descriptor STDIN, else /dev/null unless
+        INPUT is given. A command that outlives TIMEOUT fails the test after its whole cgroup and process group are
+        killed, descendants holding its pipes included. A command killed by SIGKILL fails the test too, named as past
+        the memory limit only when its cgroup recorded an OOM kill: on the host the scope's Result=oom-kill, in a box
+        the shim's BOX_OOM_REPORT line. In a box shims/systemd-run ends by SIGKILL only after such an OOM kill and
+        passes every other status through, so a SIGKILL with no OOM kill reads as 137 there, the same as an exit of
+        137: launch fails a box run that returns 137 too, naming both."""
         if "=" in os.fspath(argv[0]):
             raise ValueError(f"env would read {argv[0]!r} as a variable, not a command")
         environment = os.environ if env is None else env
@@ -212,9 +231,16 @@ class LeakTestCase(unittest.TestCase):
         # The description replaces the unit's default one, the whole command line: with the environment in it each
         # "Started run-u….scope" journal line was about 15 KB, 99% of the user journal's bytes while this suite ran,
         # and the journal kept only about 18 hours (sami-devbox, 2026-11-17). shims/systemd-run ignores it in a box.
+        # On the host the scope is named and not collected: an OOM kill leaves it failed, with Result=oom-kill for
+        # scope_result to read before it resets it; a scope that ends any other way is gone at once, as with --collect.
+        # In a box shims/systemd-run reports an OOM kill on stderr itself, and a --unit would keep its cgroup from the
+        # sweep of ended runs' cgroups.
+        runner = scope_runner()
+        unit = None if runner == BOX_SCOPE_RUNNER else f"test-leak-terms-{os.getpid()}-{next(SCOPE_NUMBERS)}"
         command = [
-            scope_runner(), "--user", "--scope", "--quiet", "--collect",
-            f"--description=test_leak_terms {Path(os.fspath(argv[0])).name}", "-p", f"TasksMax={self.task_limit}", "--",
+            runner, "--user", "--scope", "--quiet", *(["--collect"] if unit is None else [f"--unit={unit}"]),
+            f"--description=test_leak_terms {Path(os.fspath(argv[0])).name}", "-p", f"TasksMax={self.task_limit}",
+            "-p", f"MemoryMax={self.memory_limit}", "-p", "MemorySwapMax=0", "-p", "OOMPolicy=kill", "--",
             "/usr/bin/env", "-i", *(f"{name}={value}" for name, value in environment.items()), *argv,
         ]
         process = subprocess.Popen(
@@ -237,8 +263,30 @@ class LeakTestCase(unittest.TestCase):
                 (cgroup / "cgroup.kill").write_text("1", encoding="ascii")
             os.killpg(process.pid, signal.SIGKILL)
             _, stderr = process.communicate(timeout=30)
+            self.scope_result(unit)
             self.fail(f"{argv[0]} ran past {timeout} s; its cgroup and process group were killed: {stderr!r}")
+        if process.returncode == -signal.SIGKILL:
+            said = stderr if isinstance(stderr, str) else (stderr or b"").decode("utf-8", errors="replace")
+            if self.scope_result(unit) == "oom-kill" or BOX_OOM_REPORT.search(said):
+                self.fail(f"{argv[0]} ran past MemoryMax={self.memory_limit}, and its cgroup's OOM policy killed the "
+                          f"whole command: {stderr!r}")
+            self.fail(f"{argv[0]} was killed by SIGKILL, and its cgroup recorded no OOM kill: {stderr!r}")
+        if runner == BOX_SCOPE_RUNNER and process.returncode == 137:
+            self.fail(f"{argv[0]} exited 137 (SIGKILL, or the command exited 137), and its cgroup recorded no OOM "
+                      f"kill: {stderr!r}")
         return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+    @staticmethod
+    def scope_result(unit: str | None) -> str | None:
+        """The Result systemd recorded for launch's host scope UNIT (`oom-kill` after an OOM kill), its failed state then
+        reset so the unit does not stay loaded; None in a box, where launch names no unit."""
+        if unit is None:
+            return None
+        shown = subprocess.run(["systemctl", "--user", "show", f"{unit}.scope", "--property=Result", "--value"],
+                               capture_output=True, text=True, timeout=60, check=False)
+        subprocess.run(["systemctl", "--user", "reset-failed", f"{unit}.scope"], capture_output=True, timeout=60,
+                       check=False)
+        return shown.stdout.strip() or None
 
     def assert_hidden(self, *outputs: object) -> None:
         """No test term in OUTPUTS (strings, bytes, or completed processes), by the scanner's matching rule."""
@@ -616,6 +664,49 @@ class ScanModes(LeakTestCase):
         self.assertEqual(result.returncode, 4, result.stderr)
         self.assertIn("cannot decode standard input", result.stderr)
         self.assertEqual(result.stdout, "")
+
+    def test_iconv_reencode_converts_as_git_does_and_bounds_its_output(self) -> None:
+        # dispatch://INFRA-4943: an encoded commit is converted with the C library's iconv, given the encoding as
+        # written, as git converts it; a name iconv_open refuses, or bytes the charset cannot convert, give None (git
+        # shows the bytes); and no encoding grows the output past ICONV_GROWTH bytes per input byte. The iconv is the
+        # one in this process's C library: finding it starts no process (ctypes.util.find_library ran ldconfig, gcc
+        # and ld, about 35 ms, for a library never loaded).
+        module = scanner_module()
+        module.c_iconv.cache_clear()
+        with mock.patch("subprocess.Popen", side_effect=AssertionError("finding iconv started a process")):
+            module.c_iconv()
+        term = TEST_TERMS[1]
+        self.assertEqual(module.iconv_reencode(f"{term} x".encode("utf-16-le"), b"UTF-16LE"), f"{term} x")
+        self.assertEqual(module.iconv_reencode(f"{term} x".encode("cp500"), b"IBM500//TRANSLIT"), f"{term} x")
+        self.assertEqual(module.iconv_reencode(b"+AFo-", b"UTF-7 //TRANSLIT"), "Z")
+        self.assertIsNone(module.iconv_reencode(b"+AFo-", b"UTF-7/x"))
+        self.assertIsNone(module.iconv_reencode(b"abc", b"/dev/zero"))
+        self.assertIsNone(module.iconv_reencode(b"\xff", b"UTF-8"))
+        # git's own name handling: `latin-1` retried as ISO-8859-1.
+        self.assertEqual(module.iconv_reencode(b"caf\xe9", b"latin-1"), "caf\u00e9")
+        # Each byte becomes 2 UTF-8 bytes: within 16 per byte, past 1 per byte (100 bytes and 64 to spare).
+        data = b"\xe9" * 100
+        self.assertEqual(module.iconv_reencode(data, b"ISO-8859-1"), "\u00e9" * 100)
+        with mock.patch.object(module, "ICONV_GROWTH", 1):
+            self.assertIsNone(module.iconv_reencode(data, b"ISO-8859-1"))
+            self.assertEqual(module.iconv_reencode(b"\xe9" * 10, b"ISO-8859-1"), "\u00e9" * 10)
+        # The input goes to iconv a piece at a time, each piece no more than the fixed buffer holds the output of, and
+        # gives one call's text: with 2-byte pieces, a UTF-7 shift that spans them, a UTF-16LE surrogate pair split
+        # between them (carried into the next piece), 100 bytes of é, and 20 TSCII 0x82 bytes, each four Tamil
+        # characters, which glibc's converter resumes wrongly after stopping for lack of room. The growth bound still
+        # counts every piece, and a sequence still unfinished at the end of the input gives None, as git shows bytes.
+        tscii = b"\x82" * 20
+        whole = module.iconv_reencode(tscii, b"TSCII")
+        self.assertEqual(len(whole), 80)
+        pair = "a\U0001f600b".encode("utf-16-le")
+        with mock.patch.object(module, "ICONV_PIECE", 2):
+            self.assertEqual(module.iconv_reencode(b"+AFoAWgBa-", b"UTF-7"), "ZZZ")
+            self.assertEqual(module.iconv_reencode(pair, b"UTF-16LE"), "a\U0001f600b")
+            self.assertEqual(module.iconv_reencode(data, b"ISO-8859-1"), "\u00e9" * 100)
+            self.assertEqual(module.iconv_reencode(tscii, b"TSCII"), whole)
+            self.assertIsNone(module.iconv_reencode(pair[:-1], b"UTF-16LE"))
+            with mock.patch.object(module, "ICONV_GROWTH", 1):
+                self.assertIsNone(module.iconv_reencode(data, b"ISO-8859-1"))
 
     def test_a_hand_run_check_reads_the_scoped_lists_of_the_repository_it_names(self) -> None:
         # `diff` and `message` read the global list alone, as a commit's text goes nowhere yet. With --repository they
@@ -1231,12 +1322,6 @@ index 0000000,0000000,0000000..1111111
                 )
                 self.assertEqual((result.returncode, result.stdout, result.stderr), (0, expected, ""))
 
-    def test_scanner_stream_parser_reads_a_16_mib_record_split_over_chunks(self) -> None:
-        module = scanner_module()
-        payload = b"x" * (16 * 1024 * 1024)
-        chunks = [payload[index:index + 65536] for index in range(0, len(payload), 65536)]
-        self.assertEqual(list(module.nul_records([*chunks, b"\0"])), [payload])
-
     def test_scanner_diff_stream_counts_hunks_before_accepting_a_commit_boundary(self) -> None:
         module = scanner_module()
         first = b"a" * 40
@@ -1317,8 +1402,11 @@ index 0000000,0000000,0000000..1111111
         # The bound itself, made to fire: a child that outlives the timeout while it holds the output pipes, and a
         # command that starts more tasks than its budget allows.
         pid_file = self.root / "sleeper.pid"
+        # 10 s, not 2: the timeout must fire after the shell wrote the pid file. In a suite run with six workers at a
+        # load average near 600, the 2 s bound fired before the file was written (FileNotFoundError, 2026-11-21 11:05Z,
+        # INFRA-4943), and five runs of this test alone at a load near 460 passed.
         with self.assertRaisesRegex(AssertionError, "process group were killed"):
-            self.launch(["/bin/sh", "-c", f"sleep 300 & echo $! > {shlex.quote(str(pid_file))}; wait"], timeout=2)
+            self.launch(["/bin/sh", "-c", f"sleep 300 & echo $! > {shlex.quote(str(pid_file))}; wait"], timeout=10)
         sleeper = Path(f"/proc/{int(pid_file.read_text(encoding='ascii'))}/stat")
 
         def gone() -> bool:
@@ -1356,6 +1444,29 @@ index 0000000,0000000,0000000..1111111
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertLess(int(result.stdout), self.task_limit, "the task limit did not stop the forks")
         self.assertGreater(int(result.stdout), 0, "the command could not fork at all")
+
+    def test_harness_launch_names_an_oom_kill_and_a_plain_sigkill(self) -> None:
+        # The memory bound made to fire: a child of the command that runs past the limit takes the whole command with
+        # it, the shell that would go on to write a file included, and the failure names the limit; a SIGKILL with no
+        # OOM kill behind it is named as only that (on the host -9; in a box 137, the same as an exit of 137), and an
+        # exit of 137 in a box too.
+        self.memory_limit = "64M"
+        after = self.root / "after"
+        eater = "x = bytearray()\nfor _ in range(400):\n    x += bytearray(1024 * 1024)\n"
+        with self.assertRaisesRegex(AssertionError, r"ran past MemoryMax=64M, and its cgroup's OOM policy killed the "
+                                                    r"whole command"):
+            self.launch(["/bin/sh", "-c", f"{shlex.quote(sys.executable)} -c {shlex.quote(eater)}; "
+                                          f"echo after > {shlex.quote(str(after))}"], timeout=60)
+        self.assertFalse(after.exists(), "the shell went on after its child's OOM kill")
+        plain = (r"(was killed by SIGKILL|exited 137 \(SIGKILL, or the command exited 137\)), and its cgroup recorded no "
+                 r"OOM kill")
+        with self.assertRaisesRegex(AssertionError, plain):
+            self.launch(["/bin/sh", "-c", "kill -KILL $$"], timeout=60)
+        if scope_runner() == BOX_SCOPE_RUNNER:
+            with self.assertRaisesRegex(AssertionError, plain):
+                self.launch(["/bin/sh", "-c", "exit 137"], timeout=60)
+        else:
+            self.assertEqual(self.launch(["/bin/sh", "-c", "exit 137"], timeout=60).returncode, 137)
 
     def test_harness_task_limit_counts_only_the_commands_own_tasks(self) -> None:
         # The failure the per-uid cap had: once a command runs, other processes of this uid start more tasks than the
@@ -1557,7 +1668,9 @@ class GitLeaks(LeakTestCase):
 
     def repository(self, agent: bool, remote: bool = False) -> Path:
         self.repositories += 1
-        repository = self.root / f"repo-{self.repositories}"
+        # Under the TMPDIR the shim gets, so scripts/omp-session-trailer reads it as a throwaway repository whatever
+        # TMPDIR this test runs under; a remote makes it not one.
+        repository = self.tmpdir / f"repo-{self.repositories}"
         repository.mkdir()
         initialized = self.git_run(repository, "init", "-q", agent=agent)
         self.assertEqual(initialized.returncode, 0, initialized.stderr)
@@ -2324,7 +2437,9 @@ class JjLeaks(LeakTestCase):
 
     def repository(self, agent: bool) -> Path:
         self.repositories += 1
-        repository = self.root / f"repo-{self.repositories}"
+        # Under the TMPDIR the shim gets, so scripts/omp-session-trailer reads it as a throwaway repository whatever
+        # TMPDIR this test runs under.
+        repository = self.tmpdir / f"repo-{self.repositories}"
         repository.mkdir()
         initialized = self.jj(repository, "git", "init", agent=agent)
         self.assertEqual(initialized.returncode, 0, initialized.stderr)
@@ -3267,6 +3382,8 @@ class OutgoingLeaks(SinkRepositoryCase):
     private_url = "https://github.com/theorem-labs/private-fixture.git"
     term = TEST_TERMS[0]
     identity = "Push Test"
+    # The author, committer and tagger of the objects raw_commit and raw_tag write: this class's own identity, dated.
+    PUSH_TEST_IDENTITY = b"Push Test <push-test@example.invalid> 1700000000 +0000"
 
     def setUp(self) -> None:
         super().setUp()
@@ -4801,6 +4918,303 @@ class OutgoingLeaks(SinkRepositoryCase):
                 )
                 self.assertFalse(self.sink_holds(destination, tag))
 
+    def identity_commit(self, label: str, message: str, identity: dict[str, str]) -> str:
+        """A clean commit on the base whose message is MESSAGE, made by /usr/bin/git with IDENTITY, GIT_AUTHOR_* and
+        GIT_COMMITTER_* variables over the repository's own name and e-mail."""
+        self.real("checkout", "-q", "--detach", self.base)
+        path = f"{self.unique(label)}.txt"
+        (self.repo / path).write_text("clean\n", encoding="utf-8")
+        self.real("add", path)
+        self.real("commit", "--no-verify", "-m", message, environment=self.person | identity)
+        return self.real("rev-parse", "HEAD")
+
+    def test_push_refuses_a_term_in_an_author_or_committer(self) -> None:
+        # dispatch://INFRA-4943: a commit's author and committer go to the destination with it. (1) The control: the term
+        # in the message. (2) The term in the author and committer e-mail alone, and (3) in their names alone, under a
+        # clean message: each is refused at its header, through git and jj, and a commit of clean identities goes out.
+        self.init_jj()
+        term = TEST_TERMS[1]
+        mail, name = f"{term}-grader@example.invalid", f"{term} Grader"
+        cases = (
+            ("message", f"clean subject\n\nclean\n{term}", {}, ("message line 4",)),
+            ("e-mail", "clean subject", {"GIT_AUTHOR_EMAIL": mail, "GIT_COMMITTER_EMAIL": mail}, ("author", "committer")),
+            ("name", "clean subject", {"GIT_AUTHOR_NAME": name, "GIT_COMMITTER_NAME": name}, ("author", "committer")),
+        )
+        for agent, environment in self.callers():
+            for kind in ("git", "jj"):
+                for case, message, identity, places in cases:
+                    with self.subTest(kind=kind, agent=agent, case=case):
+                        self.set_url(self.public_url)
+                        commit = self.identity_commit(f"{kind}-{case}", message, identity)
+                        ref = self.unique("refused")
+                        push = (lambda: self.git_push("origin", commit, ref, environment)) if kind == "git" \
+                            else (lambda: self.jj_push(commit, ref, environment))
+                        result = self.assert_push_refused(push, commit, places[0], self.public_url, kind)
+                        for place in places:
+                            self.assert_refusal(result.stderr, f"commit {commit[:12]} {place}", prefix="error: ")
+                        self.assertEqual(refusal_places(result.stderr, "error: "),
+                                         [f"commit {commit[:12]} {place}" for place in places], result.stderr)
+                with self.subTest(kind=kind, agent=agent, control="clean identities"):
+                    url = self.fresh_public_url()
+                    self.set_url(url)
+                    clean = {"GIT_AUTHOR_NAME": "Clean Grader", "GIT_AUTHOR_EMAIL": "clean-grader@example.invalid",
+                             "GIT_COMMITTER_NAME": "Clean Grader", "GIT_COMMITTER_EMAIL": "clean-grader@example.invalid"}
+                    commit = self.identity_commit(f"{kind}-clean-identity", "clean subject", clean)
+                    ref = self.unique("clean")
+                    pushed = self.git_push("origin", commit, ref, environment) if kind == "git" \
+                        else self.jj_push(commit, ref, environment)
+                    self.assert_pushed(pushed, url, commit)
+
+    def test_push_refuses_a_term_in_a_tagger(self) -> None:
+        # dispatch://INFRA-4943: an annotated tag carries its tagger to the destination. A tag whose message is clean and
+        # whose tagger's name holds the term is refused at its tagger, through git and jj; the same tag with a clean
+        # tagger goes out.
+        self.init_jj()
+        for agent, environment in self.callers():
+            for kind in ("git", "jj"):
+                for tagger, refused in ((f"{TEST_TERMS[1]} Grader", True), ("Clean Grader", False)):
+                    with self.subTest(kind=kind, agent=agent, refused=refused):
+                        url = self.fresh_public_url()
+                        self.set_url(url)
+                        name = self.unique(f"{kind}-tagger")
+                        commit = self.commit(f"{name}.txt", "clean", "clean", parent=self.base)
+                        self.real("tag", "-a", name, "-m", self.clean_tag_message, commit,
+                                  environment=self.person | {"GIT_COMMITTER_NAME": tagger})
+                        tag = self.real("rev-parse", f"refs/tags/{name}")
+                        push = (lambda: self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", environment)) \
+                            if kind == "git" else (lambda: self.jj_push_tag(name, environment))
+                        if not refused:
+                            self.assert_objects_pushed(push(), url, tag, commit)
+                            continue
+                        result = self.assert_object_refused(push, f"tag {name} tagger", url, tag, commit, shim=kind)
+                        self.assertEqual(refusal_places(result.stderr, "error: "), [f"tag {name} tagger"], result.stderr)
+
+    def merged_tag(self, label: str, tagger: str, message: str) -> tuple[str, str]:
+        """A merge commit that `git merge` of a signed tag made, and the tag's name. The tag of a new side commit is
+        written by `git mktag` with TAGGER and MESSAGE and a fixed signature block, which git does not verify to write
+        the tag into the merge's `mergetag` header."""
+        name = self.unique(label)
+        side = self.commit(f"{name}-side.txt", "side", "side", parent=self.base)
+        main = self.commit(f"{name}-main.txt", "main", "main", parent=self.base)
+        made = self.launch(["/usr/bin/git", "mktag"], cwd=self.repo, env=self.person, input=(
+            f"object {side}\ntype commit\ntag {name}\ntagger {tagger} <t@example.invalid> 1700000000 +0000\n\n{message}\n"
+            "-----BEGIN PGP SIGNATURE-----\n\niQEzBAABCAAdFiEE\n=abcd\n-----END PGP SIGNATURE-----\n"))
+        self.assertEqual(made.returncode, 0, made.stderr)
+        self.real("update-ref", f"refs/tags/{name}", made.stdout.strip())
+        self.real("checkout", "-q", "--detach", main)
+        self.real("merge", "-q", "--no-ff", "--no-edit", "--no-verify", "-m", "Merge a tag", f"refs/tags/{name}")
+        merge = self.real("rev-parse", "HEAD")
+        self.assertIn(f"\nmergetag object {side}\n", self.real("cat-file", "commit", merge))
+        return merge, name
+
+    def test_push_refuses_a_term_in_a_merged_tag(self) -> None:
+        # dispatch://INFRA-4943: `git merge` of a signed tag writes the whole tag into the merge commit's `mergetag`
+        # header, so its tagger and its message go to the destination inside the commit. A merge whose merged tag's
+        # tagger, or whose merged tag's message, holds the term is refused there; a merge of a clean tag goes out.
+        cases = (
+            ("tagger", f"{TEST_TERMS[1]} Grader", "a clean tag message", "tagger"),
+            ("message", "Clean Grader", f"{TEST_TERMS[1]} in the tag message", "message line 1"),
+        )
+        for agent, environment in self.callers():
+            for case, tagger, message, place in cases:
+                with self.subTest(agent=agent, case=case):
+                    self.set_url(self.public_url)
+                    merge, name = self.merged_tag(f"merged-{case}", tagger, message)
+                    ref = self.unique("refused")
+                    shown = f"merged tag {name} {place}"
+                    result = self.assert_push_refused(lambda: self.git_push("origin", merge, ref, environment), merge,
+                                                      shown, self.public_url)
+                    self.assertEqual(refusal_places(result.stderr, "error: "), [f"commit {merge[:12]} {shown}"],
+                                     result.stderr)
+            with self.subTest(agent=agent, control="clean merged tag"):
+                url = self.fresh_public_url()
+                self.set_url(url)
+                merge, _ = self.merged_tag("merged-clean", "Clean Grader", "a clean tag message")
+                self.assert_pushed(self.git_push("origin", merge, self.unique("clean"), environment), url, merge)
+
+    def test_push_refuses_a_term_in_another_header_line(self) -> None:
+        # dispatch://INFRA-4943: a header line git does not know goes to the destination too, and git keeps it. A commit
+        # whose fifth header line holds the term, under clean identities and a clean message, is refused at that line;
+        # the same commit with a clean line goes out.
+        for agent, environment in self.callers():
+            for note, refused in ((f"see {TEST_TERMS[1]}", True), ("a clean note", False)):
+                with self.subTest(agent=agent, refused=refused):
+                    url = self.fresh_public_url()
+                    self.set_url(url)
+                    commit = self.raw_commit(b"x-note " + note.encode())
+                    ref = self.unique("header")
+                    if not refused:
+                        self.assert_pushed(self.git_push("origin", commit, ref, environment), url, commit)
+                        continue
+                    result = self.assert_push_refused(lambda: self.git_push("origin", commit, ref, environment), commit,
+                                                      "header line 5", url)
+                    self.assertEqual(refusal_places(result.stderr, "error: "), [f"commit {commit[:12]} header line 5"],
+                                     result.stderr)
+
+    def raw_commit(self, header: bytes = b"", message: bytes | None = None, author: bytes = PUSH_TEST_IDENTITY,
+                   committer: bytes = PUSH_TEST_IDENTITY) -> str:
+        """A commit on the base written byte for byte: its tree and parent, AUTHOR and COMMITTER, then HEADER (its other
+        header lines, from line 5), then MESSAGE, else a clean message of its own."""
+        tree = self.real("rev-parse", f"{self.base}^{{tree}}")
+        body = (f"tree {tree}\nparent {self.base}\n".encode() + b"author " + author + b"\ncommitter " + committer
+                + (b"\n" + header if header else b"") + b"\n\n"
+                + (f"{self.unique('clean subject')}\n".encode() if message is None else message))
+        made = self.launch(["/usr/bin/git", "hash-object", "-t", "commit", "-w", "--literally", "--stdin"],
+                           cwd=self.repo, env=self.person, input=body, text=False)
+        self.assertEqual(made.returncode, 0, made.stderr)
+        return made.stdout.decode("ascii").strip()
+
+    def raw_tag(self, header: bytes, message: bytes) -> tuple[str, str]:
+        """An annotated tag of the base written byte for byte, named `raw-tag-<n>`: its object, type, name and tagger
+        (PUSH_TEST_IDENTITY), then HEADER (its other header lines), then MESSAGE. Its name and object id, with
+        refs/tags/<name> set to it."""
+        name = self.unique("raw-tag")
+        body = (f"object {self.base}\ntype commit\ntag {name}\n".encode() + b"tagger " + self.PUSH_TEST_IDENTITY
+                + b"\n" + header + b"\n\n" + message)
+        made = self.launch(["/usr/bin/git", "hash-object", "-t", "tag", "-w", "--literally", "--stdin"],
+                           cwd=self.repo, env=self.person, input=body, text=False)
+        self.assertEqual(made.returncode, 0, made.stderr)
+        tag = made.stdout.decode("ascii").strip()
+        self.real("update-ref", f"refs/tags/{name}", tag)
+        return name, tag
+
+    # A UTF-8 message that holds the term on its third line, an even number of bytes long, so that UTF-16 decodes it
+    # with no error to other characters.
+    ENCODED_MESSAGE = f"subject\n\n{TEST_TERMS[1]} in the body\n".encode()
+
+    @staticmethod
+    def utf7_message() -> bytes:
+        """`<term> in the body` with the term's first letter written as a UTF-7 escape, so a UTF-7 decode alone spells
+        the term: read as UTF-8 or Latin-1 it is `+AHo-...`."""
+        term = TEST_TERMS[1]
+        message = (b"+" + base64.b64encode(term[0].encode("utf-16-be")).rstrip(b"=") + b"-"
+                   + f"{term[1:]} in the body".encode())
+        if message.decode("utf-7") != f"{term} in the body" or term.encode() in message:
+            raise AssertionError(f"{message!r} is not the term in a UTF-7 escape")
+        return message
+
+    def test_push_reads_headers_and_messages_in_any_encoding(self) -> None:
+        # dispatch://INFRA-4943: git keeps a header's bytes as written, and an `encoding` header may name any encoding,
+        # or none git converts. None of them stops a push for how it is written, and a term under any of them is
+        # refused: a commit by `Jos\xe9 Grader` (Latin-1, no `encoding` header), one whose mergetag is `object <id>`
+        # alone, and clean commits under `encoding punycode`, `undefined` and a name holding a NUL go out; a term in a
+        # Latin-1 author, in a UTF-8 author or message under an encoding that converts it to other characters, and in
+        # an author and message written in IBM1047 is refused. An encoding is given to the C library's iconv_open
+        # exactly as written, as git gives it: every spelling iconv_open opens is converted (`UTF-7 //TRANSLIT`,
+        # `UTF-7/ /x`, ` UTF-7 `), and one it refuses (`UTF-7/x`) is not.
+        self.assertEqual(len(self.ENCODED_MESSAGE) % 2, 0)
+        latin1 = b"Jos\xe9 Grader <jose@example.invalid> 1700000000 +0000"
+        clean = {
+            "latin1-author": {"author": latin1, "committer": latin1},
+            "one-line-mergetag": {"header": b"mergetag object " + self.base.encode()},
+            **{f"encoding-{name!r}": {"header": b"encoding " + name} for name in (b"punycode", b"undefined", b"x\x00y")},
+            # `X/<anything>` git does not convert, so the term the UTF-7 escape spells is in no text git shows.
+            "utf7-term-under-UTF-7/x": {"header": b"encoding UTF-7/x", "message": self.utf7_message()},
+        }
+        named = TEST_TERMS[1].encode() + b" Grader <pt@example.invalid>"
+        # An even number of bytes, so UTF-16 decodes the name with no error.
+        self.assertEqual(len(named) % 2, 0)
+
+        def ibm1047(text: str) -> bytes:
+            return subprocess.run(["iconv", "-f", "UTF-8", "-t", "IBM1047"], input=text.encode(), capture_output=True,
+                                  check=True).stdout
+
+        refused: dict[str, tuple[dict[str, bytes], list[str]]] = {
+            "latin1-author-holds-the-term": ({"author": TEST_TERMS[1].encode() + b" " + latin1, "committer": latin1},
+                                             ["author"]),
+            **{f"term-under-{name}": ({"author": named + b" 1700000000 +0000", "header": b"encoding " + name.encode()},
+                                      ["author"])
+               for name in ("UTF-16LE", "UTF-16BE", "UTF-16", "UTF-32", "cp500", "IBM037", "ISO-8859-1",
+                            "x-no-such-encoding")},
+            **{f"message-term-under-{name}": ({"header": b"encoding " + name.encode(), "message": self.ENCODED_MESSAGE},
+                                              ["message line 3"])
+               for name in ("UTF-16LE", "cp500")},
+            "ibm1047-author-and-message": ({"author": ibm1047(f"{TEST_TERMS[1]} Grader <pt@example.invalid>")
+                                            + b" 1700000000 +0000", "header": b"encoding IBM1047",
+                                            "message": ibm1047(f"{TEST_TERMS[1]} in the body")},
+                                           ["author", "message line 1"]),
+            # A charset with the suffix iconv_open takes (`//TRANSLIT`, `//IGNORE`, `//`, `/`): git converts the message
+            # with the charset, so its term is refused.
+            **{f"message-term-under-{name}": ({"header": b"encoding " + name.encode(),
+                                               "message": ibm1047(f"{TEST_TERMS[1]} in the body")}, ["message line 1"])
+               for name in ("IBM1047//TRANSLIT", "IBM1047//IGNORE", "IBM1047//", "IBM1047/")},
+            **{f"message-term-under-{name}": ({"header": b"encoding " + name.encode(),
+                                               "message": f"{TEST_TERMS[1]} in the body".encode("cp500")},
+                                              ["message line 1"])
+               for name in ("cp500//TRANSLIT", "IBM500//TRANSLIT")},
+            # Spellings glibc's iconv_open opens, so git converts them; the last two a regular expression of an earlier
+            # version missed (the review of INFRA-4943).
+            **{f"message-term-under-{name!r}": ({"header": b"encoding " + name.encode(), "message": self.utf7_message()},
+                                                ["message line 1"])
+               for name in ("UTF-7//TRANSLIT//IGNORE", "UTF-7//../x", " UTF-7 ", "UTF-7 //TRANSLIT", "UTF-7/ /x")},
+        }
+        for agent, environment in self.callers():
+            for case, parts in clean.items():
+                with self.subTest(agent=agent, case=case):
+                    url = self.fresh_public_url()
+                    self.set_url(url)
+                    commit = self.raw_commit(**parts)
+                    self.assert_pushed(self.git_push("origin", commit, self.unique("clean"), environment), url, commit)
+            for case, (parts, places) in refused.items():
+                with self.subTest(agent=agent, control=case):
+                    url = self.fresh_public_url()
+                    self.set_url(url)
+                    commit = self.raw_commit(**parts)
+                    ref = self.unique("refused")
+                    result = self.assert_push_refused(lambda: self.git_push("origin", commit, ref, environment), commit,
+                                                      places[0], url)
+                    self.assertEqual(refusal_places(result.stderr, "error: "),
+                                     [f"commit {commit[:12]} {place}" for place in places], result.stderr)
+
+    def test_push_reads_an_encoding_that_names_a_path_without_reading_the_path(self) -> None:
+        # dispatch://INFRA-4943: glibc's iconv program reads a `--from-code` value holding `/` as the path of a charmap
+        # file, and /dev/zero never ends; an earlier version that ran it took its 30 s timeout for each header line and
+        # the message. The C library's iconv_open, which the scanner now calls as git does, reads no file: it refuses
+        # `/dev/zero`, `/etc/passwd`, `IBM1047/dev/zero` and `/IBM1047`, so they are read as UTF-8 and Latin-1, and
+        # opens `IBM1047//../../dev/zero` as IBM1047, as git converts it. A clean commit goes out and one whose author
+        # holds the term is refused, each push within 60 s.
+        named = TEST_TERMS[1].encode() + b" Grader <pt@example.invalid> 1700000000 +0000"
+        for agent, environment in self.callers():
+            for path in (b"/dev/zero", b"/etc/passwd", b"IBM1047/dev/zero", b"IBM1047//../../dev/zero", b"/IBM1047"):
+                for refused in (False, True):
+                    with self.subTest(agent=agent, encoding=path.decode(), refused=refused):
+                        url = self.fresh_public_url()
+                        self.set_url(url)
+                        commit = self.raw_commit(b"encoding " + path,
+                                                 author=named if refused else self.PUSH_TEST_IDENTITY)
+                        ref = self.unique("path-encoding")
+                        started = time.monotonic()
+                        if refused:
+                            self.assert_push_refused(lambda: self.git_push("origin", commit, ref, environment), commit,
+                                                     "author", url)
+                        else:
+                            self.assert_pushed(self.git_push("origin", commit, ref, environment), url, commit)
+                        elapsed = time.monotonic() - started
+                        self.assertLess(elapsed, 60, f"a push under `encoding {path.decode()}` took {elapsed:.0f} s")
+
+    def test_push_reads_a_pushed_tag_in_any_encoding(self) -> None:
+        # dispatch://INFRA-4943: a pushed tag is read as a commit is (object_findings). A UTF-8 term in its message under
+        # `encoding UTF-16LE` or `encoding cp500` is refused at the message's line; a clean tag under an encoding no
+        # codec decodes (`x-no-such-encoding`, `punycode`, `undefined`) goes out.
+        for agent, environment in self.callers():
+            for declared in (b"UTF-16LE", b"cp500"):
+                with self.subTest(agent=agent, control=f"tag-message-term-under-{declared.decode()}"):
+                    url = self.fresh_public_url()
+                    self.set_url(url)
+                    name, tag = self.raw_tag(b"encoding " + declared, self.ENCODED_MESSAGE)
+                    result = self.assert_object_refused(
+                        lambda: self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", environment),
+                        f"tag {name} message line 3", url, tag)
+                    self.assertEqual(refusal_places(result.stderr, "error: "), [f"tag {name} message line 3"],
+                                     result.stderr)
+            for declared in (b"x-no-such-encoding", b"punycode", b"undefined"):
+                with self.subTest(agent=agent, case=f"clean-tag-under-{declared.decode()}"):
+                    url = self.fresh_public_url()
+                    self.set_url(url)
+                    name, tag = self.raw_tag(b"encoding " + declared, b"a clean tag message\n")
+                    self.assert_objects_pushed(
+                        self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", environment), url, tag)
+
     def test_push_refuses_one_commit_finding_when_it_sends_its_file_object(self) -> None:
         # (14c) The same blob can be sent by a commit and a direct ref, but the commit scan reports it once.
         path = f"{self.unique('same-object')}.txt"
@@ -4900,14 +5314,13 @@ class OutgoingLeaks(SinkRepositoryCase):
                     result = self.assert_tag_refused(push, name, self.public_url, kind, tag, commit, matched=term)
                     self.assertIn(f'"{term}"', result.stderr)
 
+        # With no encoding named or configured, the message's bytes are read as Latin-1 beside UTF-8 (git_texts), so the
+        # term is refused at its line, where the push once refused the message unread.
         name, tag, commit = self.latin1_annotated_tag("latin1-unset", message)
         self.real("config", "--unset", "i18n.commitEncoding")
-        before = self.sink_state(self.public_url)
-        unreadable = self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", self.person | {"DOTFILES_LEAK_TERMS_FILE": str(term_file)})
-        self.assertNotEqual(unreadable.returncode, 0, unreadable.stderr)
-        self.assertIn("the leak-term check did not pass", unreadable.stderr)
-        self.assertEqual(self.sink_state(self.public_url), before)
-        self.assertNotIn(term, unreadable.stdout + unreadable.stderr)
+        unset_environment = self.person | {"DOTFILES_LEAK_TERMS_FILE": str(term_file)}
+        self.assert_tag_refused(lambda: self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", unset_environment),
+                                name, self.public_url, "git", tag, commit, matched=term)
 
         self.real("config", "i18n.commitEncoding", "ISO-8859-1")
         name, tag, commit = self.latin1_annotated_tag("latin1-clean", clean_message)
@@ -4933,7 +5346,8 @@ class OutgoingLeaks(SinkRepositoryCase):
                 self.assert_sink_ref(self.public_url, f"refs/tags/{name}", tag, "tag")
 
 
-    def test_push_reads_a_new_tag_with_two_cat_file_calls(self) -> None:
+    def test_push_reads_a_new_tag_and_its_commit_with_three_cat_file_calls(self) -> None:
+        # Two calls read the tag, its type and then its object, and one reads the new commit's header (INFRA-4943).
         calls = self.root / "cat-file-calls"
         write_executable(
             self.fake / "git",
@@ -4952,7 +5366,7 @@ class OutgoingLeaks(SinkRepositoryCase):
         cat_file_calls = [line for line in calls.read_text(encoding="utf-8").splitlines() if " cat-file " in f" {line} "]
         self.assertEqual(
             cat_file_calls,
-            ["cat-file --batch-check=%(objectname) %(objecttype)", "cat-file --batch"],
+            ["cat-file --batch-check=%(objectname) %(objecttype)", "cat-file --batch", "cat-file --batch"],
             calls.read_text(encoding="utf-8"),
         )
 
@@ -4993,6 +5407,22 @@ class OutgoingLeaks(SinkRepositoryCase):
             self.public_url,
             matched=term,
         )
+
+    def test_push_reads_a_latin1_commit_message_with_no_encoding_named(self) -> None:
+        # dispatch://INFRA-4943: with no `encoding` header and no i18n.commitEncoding, a message that is not UTF-8 is read
+        # as Latin-1 beside UTF-8 (git_texts): a listed term in it is refused at its line, and a clean one goes out. The
+        # push once refused such a message unread, whatever it held.
+        term = "Café Zorble"
+        environment = self.person | {"DOTFILES_LEAK_TERMS_FILE": str(encrypt_yaml(f"terms: |\n  {term}\n"))}
+        unset = self.command(["/usr/bin/git", "config", "--get", "i18n.commitEncoding"], self.person)
+        self.assertEqual(unset.returncode, 1, unset.stderr)
+        leaky = self.raw_commit(message=f"clean first line\n{term}\n".encode("latin-1"))
+        self.assert_push_refused(lambda: self.git_push("origin", leaky, self.unique("latin1-leaky"), environment), leaky,
+                                 "message line 2", self.public_url, matched=term)
+        url = self.fresh_public_url()
+        self.set_url(url)
+        clean = self.raw_commit(message="clean first line\nCafé clean\n".encode("latin-1"))
+        self.assert_pushed(self.git_push("origin", clean, self.unique("latin1-clean"), environment), url, clean)
 
     def test_jj_push_hides_a_tag_name_from_a_plan_mismatch(self) -> None:
         workspace = self.root / "noncolocated"

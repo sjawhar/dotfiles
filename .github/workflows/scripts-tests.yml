@@ -18,8 +18,9 @@ permissions:
 jobs:
   scripts-tests:
     runs-on: ubuntu-24.04
-    # A whole run took about 15 minutes when measured (2026-11-21); a hung test stops here.
-    timeout-minutes: 30
+    # A whole run took about 28 minutes when measured (2026-11-21), 13 of them in
+    # test_agentbox_move.py, whose relauncher tests wait out real deadlines; a hung test stops here.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
@@ -33,7 +34,8 @@ jobs:
       #   - mise, installed as installers/mise.sh installs it, at its pinned version, into bin/,
       #     with MISE_DATA_DIR outside HOME as .bashrc sets it, so a test that moves HOME keeps
       #     mise's tools. Then mise installs the pins of mise.toml that tests resolve through it:
-      #     jj, knives and yq.
+      #     jj, knives and yq, and bun, which `agentbox move` runs to read an omp's launch flags
+      #     and which test_agentbox_move.py finds on PATH.
       - name: age, sops, zsh and mise
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -47,12 +49,11 @@ jobs:
           echo "MISE_DATA_DIR=$MISE_DATA_DIR" >> "$GITHUB_ENV"
           curl -fsSL https://mise.run | MISE_VERSION=v2026.10.11 MISE_INSTALL_PATH="$GITHUB_WORKSPACE/bin/mise" sh
           echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
-          "$GITHUB_WORKSPACE/bin/mise" install github:sjawhar/jj github:sjawhar/knives yq
-      # Each file ignored below fails on this runner, measured in
-      # https://github.com/sjawhar/dotfiles/actions/runs/44875049666 (each file run alone); they run
+          "$GITHUB_WORKSPACE/bin/mise" install github:sjawhar/jj github:sjawhar/knives yq bun
+          dirname "$("$GITHUB_WORKSPACE/bin/mise" which bun)" >> "$GITHUB_PATH"
+      # The file ignored below fails on this runner, measured in
+      # https://github.com/sjawhar/dotfiles/actions/runs/44875049666 (each file run alone); it runs
       # on a dev box:
-      #   test_agentbox_move.py: ran past the 180 s the measurement gave it, with many of its tests
-      #     failing before then; the cut-off run printed no cause.
       #   test_az_reader.py: the runner's own Azure CLI, not the pinned one, starts no telemetry
       #     uploader in the test's control.
       - name: pytest scripts/tests
@@ -63,5 +64,4 @@ jobs:
           AGE_KEYGEN: /usr/bin/age-keygen
         run: >-
           uvx pytest@9.2.0 -p no:cacheprovider scripts/tests
-          --ignore=scripts/tests/test_agentbox_move.py
           --ignore=scripts/tests/test_az_reader.py

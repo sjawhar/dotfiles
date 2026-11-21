@@ -10,7 +10,14 @@
 # Sysbox delegates the box's cgroup tree, so the cap is made here instead: a child cgroup of the
 # box's own root with the limits written into it, the command's process moved in, and the cgroup
 # removed when it ends. The kernel enforces it exactly as it does a scope's -- a run past
-# MemoryMax is OOM-killed in its own cgroup and nothing else in the box is touched.
+# MemoryMax is OOM-killed in its own cgroup and nothing else in the box is touched. OOMPolicy=kill
+# (and stop) sets memory.oom.group, so an OOM kill takes every process of the command at once, as
+# systemd's policy does for a scope; continue, systemd's default for a scope, leaves the kernel's
+# one victim. A command that ended with 137 while its cgroup recorded an OOM kill ends this shim
+# by SIGKILL, as the command a host scope execs ends systemd-run itself (a Python caller sees -9
+# there and here); it is the one death the shim can prove. Every other status passes through as
+# it is: a command another signal N ended reads as 128 + N here (143 for SIGTERM, 137 for a
+# SIGKILL with no OOM kill), where a host caller sees the signal.
 #
 # Everything else passes through to the real systemd-run: on the host (no box), a call that is
 # not `--user --scope`, and `--help`/`--version`. A limit this cannot apply is refused, loudly
@@ -165,8 +172,17 @@ for property in "${properties[@]}"; do
         CPUWeight) limit_files+=("cpu.weight"); limit_values+=("$(count_of "$value" CPUWeight)") ;;
         TasksMax) limit_files+=("pids.max"); limit_values+=("$(count_of "$value" TasksMax)") ;;
         IOWeight) limit_files+=("io.weight"); limit_values+=("$(count_of "$value" IOWeight)") ;;
+        # systemd's OOM policy for the unit. kill and stop take the whole command when the kernel OOM-kills a
+        # process of it: memory.oom.group=1 has the kernel kill every process of the cgroup together (with SIGKILL,
+        # where stop would ask with SIGTERM first). continue leaves the kernel's one victim.
+        OOMPolicy)
+            case "$value" in
+                kill|stop) limit_files+=("memory.oom.group"); limit_values+=("1") ;;
+                continue) : ;;
+                *) die "OOMPolicy=$value is not continue, stop or kill. Nothing ran" ;;
+            esac ;;
         # Not a resource limit: a scope property this box has no unit to carry. Named, not obeyed.
-        OOMPolicy|KillMode|Delegate|Description|Slice|TimeoutStopSec|SendSIGKILL|SendSIGHUP)
+        KillMode|Delegate|Description|Slice|TimeoutStopSec|SendSIGKILL|SendSIGHUP)
             $quiet || echo "shims/systemd-run: $name is a unit property and this box has no units; the command runs without it" >&2 ;;
         Memory*|CPU*|IO*|Tasks*|Limit*|BlockIO*)
             die "-p $name is a resource limit this box's systemd-run cannot apply, and running without it would give you no cap at all. Nothing ran" ;;
@@ -300,10 +316,26 @@ trap 'forward INT' INT
 trap 'forward HUP' HUP
 
 echo go > "$gate_dir/gate"
-# The reaping shell announces a child the kernel killed ("Killed  ( read -r _ < …"), which says
-# the shim's own plumbing to a caller whose run was OOM-killed. The status carries it instead:
-# 137, exactly as a scope on the host reports it. The command's own stderr is its own fd, taken
-# at the fork, so this hides nothing of the command's.
+# The reaping shell announces a child a signal killed ("Killed  ( read -r _ < …"), which says the
+# shim's own plumbing to the caller. The command's own stderr is its own fd, taken at the fork, so
+# this hides nothing of the command's.
 { wait "$child"; } 2>/dev/null
 status=$?
+# An OOM kill in the cgroup, read before the cleanup removes it. On the host systemd records it as the scope's
+# Result=oom-kill; a box has no unit to carry that, so it is said here, under --quiet too: it is the failure.
+oom_kills="$(awk '$1 == "oom_kill" {print $2; exit}' "$scope/memory.events" 2>/dev/null)"
+if [ -n "$oom_kills" ] && [ "$oom_kills" != 0 ]; then
+    echo "shims/systemd-run: oom_kill=$oom_kills in $scope/memory.events: the command ran past its memory limit" >&2
+    # wait gives 137 both for a command SIGKILL ended and for one that exited 137. With an OOM kill recorded, 137 is
+    # the kernel's SIGKILL, so this shim ends by SIGKILL too, its cgroup removed first, as the command a host scope
+    # execs ends systemd-run itself.
+    if [ "$status" = 137 ]; then
+        cleanup
+        trap - EXIT TERM INT HUP
+        kill -s KILL "$$"
+    fi
+fi
+# Every other status passes through as it is, 128 + N included: bash's wait cannot tell a command signal N ended from
+# one that exited 128 + N, and its report of a death, which could, is never made for INT, PIPE or TERM (bash 5.2,
+# measured for INFRA-4943). So no other signal is replayed: an exit of 143 stays 143, and so does a SIGTERM death.
 exit "$status"

@@ -16,7 +16,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from scripts.tests.test_dotfiles_follow import FOLLOW, Harness
+from scripts.tests.test_dotfiles_follow import FOLLOW, TOOLS_PASSED, Harness, tools_passed_in
 from scripts.tests.marketplace_version_cases import CASES, EMPTY_CASES, MISSING, RAW_CASES
 
 
@@ -194,6 +194,43 @@ class MarketplacePlugins(Harness):
         self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
         self.assertEqual(len(self.calls()), 6)
         self.assert_clean_lock()
+
+    def test_only_home_dotfiles_upgrades_marketplace_plugins(self) -> None:
+        # Main's code ran shims/omp plugin marketplace update and plugin upgrade for any --repo, and
+        # ~/.omp/plugins links to ~/.dotfiles/omp/plugins (installers/omp.sh), so an upgrade from
+        # another checkout could write this machine's plugins. Both rows hold the lock entries of
+        # the target commit (2.0.0) above the same installed records (1.0.0). A run of another clone
+        # makes no omp call and logs why; its control, a run of ~/.dotfiles, upgrades as before.
+        other = self.other_checkout()
+        other_installed = other / "omp/plugins/installed_plugins.json"
+        other_installed.write_text(self.installed_path.read_text())
+        upgrades = [
+            ["plugin", "marketplace", "update", "verification-skills"],
+            ["plugin", "upgrade", "dev-infra@verification-skills"],
+            ["plugin", "marketplace", "update", "verification-skills"],
+            ["plugin", "upgrade", "verification-skills@verification-skills"],
+            ["plugin", "marketplace", "update", "core-ops"],
+            ["plugin", "upgrade", "core-ops@core-ops"],
+        ]
+        with self.subTest(checkout="another clone"):
+            self.assertEqual((other / FOLLOW.MARKETPLACE_LOCK).read_text(), self.want_lock)
+            before = other_installed.read_text()
+            lines = self.logged_run(1_000_000.0, repo=other, provision=other / "devbox/sami-devbox-provision")
+            self.assertEqual(self.calls(), [])
+            self.assertIn(f"plugins: {other} is not ~/.dotfiles; marketplace plugins not upgraded", lines)
+            self.assertIn(tools_passed_in(other), lines)
+            self.assertEqual(other_installed.read_text(), before)
+            self.assertEqual(self.sh("git", "status", "--porcelain", cwd=other), "")
+        with self.subTest(checkout="~/.dotfiles"):
+            before = len(self.calls())
+            lines = self.logged_run(1_000_600.0)
+            self.assertEqual(self.head(), self.target)
+            self.assertEqual(self.calls()[before:], upgrades)
+            self.assertFalse([line for line in lines if "marketplace plugins not upgraded" in line], lines)
+            self.assertIn(TOOLS_PASSED, lines)
+            for name in ("dev-infra", "verification-skills", "core-ops"):
+                self.assertEqual(self.version(name), "2.0.0")
+            self.assert_clean_lock()
 
     def test_marketplace_commands_get_the_mise_data_directory(self) -> None:
         self.assertNotIn("MISE_DATA_DIR", os.environ)
@@ -625,7 +662,7 @@ class MarketplacePlugins(Harness):
         (self.repo / "omp/plugins/omp-plugins.lock.json").write_text(self.lock_v1)
         # This run is FOLLOW.main() in a child, on the real clock and the real --slow-sweep-interval:
         # a slow-root pass ended just now, so it is not overdue and the run does not leave its tools
-        # step to the next run (dotfiles-follow.md step 7).
+        # step to the next run (dotfiles-follow.md step 8).
         data = self.state_data()
         data["slow_sweep_at"] = time.time()
         self.state.write_text(json.dumps(data))
@@ -780,12 +817,17 @@ class MarketplacePlugins(Harness):
 
     def test_marketplace_budget_stops_launching_commands_and_restores_lock(self) -> None:
         self.take_upstream()
-        os.environ["FAKE_OMP_DELAY"] = "0.5"
-        start = time.monotonic()
-        with unittest.mock.patch.object(FOLLOW, "MARKETPLACE_TIMEOUT", 0.2, create=True):
-            why = FOLLOW.install_tools(self.repo, self.options())
+        # The 2 s budget gives a loaded machine time to start the fake omp and log its call.
+        # The delay is far past the budget, so the step ends early only when the budget stops it.
+        delay = 10
+        os.environ["FAKE_OMP_DELAY"] = str(delay)
+        timeout = self.options().mise_timeout
+        with unittest.mock.patch.object(FOLLOW, "MARKETPLACE_TIMEOUT", 2.0):
+            start = time.monotonic()
+            why = FOLLOW.install_marketplace_plugins(self.repo, timeout)
+            elapsed = time.monotonic() - start
         self.assertIn("budget", why)
-        self.assertLess(time.monotonic() - start, 2)
+        self.assertLess(elapsed, delay)
         self.assertEqual(self.calls(), [["plugin", "marketplace", "update", "verification-skills"]])
         self.assert_clean_lock()
 

@@ -13,8 +13,9 @@
 #      journald's cap on the boot disk (devbox/journald-cap.conf); the open-file limit of
 #      tailscaled's and sshd's sessions (devbox/nofile.conf);
 #   3. Docker (installers/docker.sh, for the user): docker-ce and docker-ce-cli pinned at one
-#      version, and dockerd's live-restore on; then Sysbox (installers/sysbox.sh), which registers
-#      itself with Docker;
+#      version, dockerd's live-restore on, and conntrack's TCP TIME_WAIT at 15 s
+#      (devbox/sysctl-conntrack.conf); then Sysbox (installers/sysbox.sh), which registers itself
+#      with Docker;
 #   4. Tailscale, joined as Sami's own node by his interactive login (installers/tailscale.sh
 #      prints the login URL and waits until he signs in);
 #   5. systemd lingering for the user, so user services outlive the last login;
@@ -197,8 +198,9 @@ docker_ce_version=5:29.9.3-1~ubuntu.24.04~noble
 # The version `docker version` reports for it (29.9.3): no epoch, no package revision.
 docker_server_version="${docker_ce_version#*:}"
 docker_server_version="${docker_server_version%%-*}"
+# conntrack's TCP TIME_WAIT at 15 s, not 120 s (devbox/sysctl-conntrack.conf says why).
 # installers/docker.sh is a user installer: USER names whom it adds to the docker group.
-USER="$devbox_user" DOCKER_LIVE_RESTORE=1 DOCKER_CE_VERSION="$docker_ce_version" \
+USER="$devbox_user" DOCKER_LIVE_RESTORE=1 DOCKER_CE_VERSION="$docker_ce_version" DOCKER_CONNTRACK_TIME_WAIT=1 \
     bash "${DOTFILES_DIR}/installers/docker.sh"
 # shellcheck source=installers/sysbox.sh
 source "${DOTFILES_DIR}/installers/sysbox.sh"

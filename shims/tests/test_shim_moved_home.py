@@ -359,6 +359,7 @@ class SharedFunctionCopies(unittest.TestCase):
         "mise_paths": ("jj", "tmux", "gh", "knives", "az", "claude", "ctx", "pyright", "basedpyright", "secrets", "pulumi", "omp"),
         "is_mise_shim": ("jj", "tmux", "gh", "az", "claude", "secrets", "pulumi"),
         "mise_pinned": ("jj", "tmux", "gh"),
+        "find_leak_check": ("git", "jj"),
     }
 
     def test_every_copy_is_identical_and_held_where_listed(self) -> None:

@@ -407,6 +407,14 @@ esac
         self.assertIn("exited 124 (past its limit of 2 s, lock wait included)", result.stderr)
         self.assertIn("mise install output", result.stderr)
 
+    def test_install_that_exits_124_at_once_is_not_past_its_limit(self) -> None:
+        # mise can exit 124 itself; the note is only for a run that lasted the limit.
+        result = self.launch("--mode", "own-124", env=self.env(DOTFILES_TOOLS_TIMEOUT="2", FAKE_MISE_EXIT="124"))
+
+        self.assert_agent_started(result, "--mode", "own-124")
+        self.assertIn("exited 124", result.stderr)
+        self.assertNotIn("past its limit", result.stderr)
+
     def test_timed_out_install_kills_survivor_and_releases_lock(self) -> None:
         pid_file = self.root / "mise.pid"
         lock = self.data / ".dotfiles-install.lock"

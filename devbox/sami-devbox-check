@@ -529,11 +529,12 @@ PY
     # by sami-devbox-provision's secrets step): a real turn from inside the box.
     got="$(timeout 200 omp -p "say ok" --model anthropic/claude-opus-4-8 2>&1 | tail -1)"
     [[ "${got,,}" == *ok* ]] && ok "anthropic/claude-opus-4-8 through model-gateway answers: $got" || fail "anthropic/claude-opus-4-8: $got"
-    # openai/ goes through the gateway's openai group too (devbox/sami-devbox-model-routes): the
-    # slow role and astra's model each answer a real turn. A fail prints "Use /login" or an HTTP 4xx.
-    for model in @slow model-gateway/openai/gpt-6-astra:xhigh; do
+    # The slow role (omp/config.yml's Codex route) and the cross-family agents' model, the gateway's
+    # Sol that devbox/sami-devbox-model-routes gives astra, astra-api and gpt-api, each answer a real
+    # turn. A fail prints "Use /login" or an HTTP 4xx.
+    for model in @slow model-gateway-openai/openai/gpt-6.1-sol:xhigh; do
         got="$(timeout 200 omp -p "say ok" --model "$model" 2>&1 | tail -1)"
-        [[ "${got,,}" == *ok* ]] && ok "$model through model-gateway's openai group answers: $got" || fail "$model: $got"
+        [[ "${got,,}" == *ok* ]] && ok "$model answers a real turn: $got" || fail "$model: $got"
     done
 }
 
@@ -1196,14 +1197,15 @@ host() {
     [[ "$missing" == true ]] && ok "omp models.yml: both gateway providers mint their token per call ($want)" || fail "omp models.yml: a gateway provider does not use $want: $missing"
     missing="$(yq -r '[.providers[] | (.apiKey // "")] | map(select(test("/ossv-box/|/verified-grader/"))) | length' "$HOME/.omp/agent/models.yml" 2>&1)"
     [[ "$missing" == 0 ]] && ok "omp models.yml: no provider reads a cached gateway credential file" || fail "omp models.yml: $missing provider(s) still read a cached gateway credential file"
-    # The openai/ agents and roles go to the gateway's openai group (devbox/sami-devbox-model-routes):
-    # the slow and deep roles and the astra and sami-proxy agents name model-gateway/openai/ models,
-    # and omp's merged models.yml declares at least 2 of them (Sol and Sol Flex).
-    missing="$(yq -r '.modelRoles.slow, .modelRoles.deep, .task.agentModelOverrides.astra, .task.agentModelOverrides["sami-proxy"]' "$DOTFILES_DIR/omp/config.local.yml" 2>&1)"
-    if [[ "$(grep -c '^model-gateway/openai/' <<<"$missing")" == 4 && "$(wc -l <<<"$missing")" == 4 ]]; then
-        ok "omp config.local.yml: slow, deep, astra and sami-proxy use model-gateway/openai/ ($(tr '\n' ' ' <<<"$missing"))"
+    # The cross-family agents go to the gateway's Sol (devbox/sami-devbox-model-routes): astra,
+    # astra-api and gpt-api name model-gateway-openai/openai/gpt-6.1-sol, and the slow and deep roles
+    # and the sami-proxy agent are left to omp/config.yml.
+    local routes_got routes_want="model-gateway-openai/openai/gpt-6.1-sol:xhigh model-gateway-openai/openai/gpt-6.1-sol:xhigh model-gateway-openai/openai/gpt-6.1-sol:xhigh unset unset unset"
+    routes_got="$(yq -r '[.task.agentModelOverrides.astra, .task.agentModelOverrides["astra-api"], .task.agentModelOverrides["gpt-api"], .modelRoles.slow, .modelRoles.deep, .task.agentModelOverrides["sami-proxy"]] | map(. // "unset") | join(" ")' "$DOTFILES_DIR/omp/config.local.yml" 2>&1)"
+    if [[ "$routes_got" == "$routes_want" ]]; then
+        ok "omp config.local.yml: astra, astra-api and gpt-api use model-gateway-openai's Sol; slow, deep and sami-proxy take config.yml"
     else
-        fail "omp config.local.yml: slow, deep, astra, sami-proxy want model-gateway/openai/<id> each, got: $(tr '\n' ';' <<<"$missing")"
+        fail "omp config.local.yml: astra, astra-api, gpt-api, slow, deep, sami-proxy want: $routes_want; got: $routes_got"
     fi
     missing="$(yq '[.providers["model-gateway"].models[].id | select(test("^openai/"))] | length' "$HOME/.omp/agent/models.yml" 2>&1)"
     [[ "$missing" =~ ^[0-9]+$ && "$missing" -ge 2 ]] && ok "omp models.yml: model-gateway declares $missing openai/ models" || fail "omp models.yml: model-gateway's openai/ models: want 2 or more, got: $missing"

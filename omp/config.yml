@@ -29,11 +29,13 @@ modelRoles:
   # openai/gpt-5.6-terra, about $560-1,065/day in telemetry (which sees about
   # half the key's bill; agent_spend.spend_daily, 11-01 to 11-03), moved with
   # Astra (dispatch://INFRA-165, Sami's Sol preference dispatch://BET-545).
-  # A role may list models; the first one the machine declares is used:
-  # sami-rocqperf's id first, then sami-devbox's (measured 2026-11-03 on
-  # devbox: code-reviewer on this list was served by
-  # model-gateway/openai/gpt-6.1-sol). Their chains below end on Codex Sol and
-  # name no Anthropic model, so a gate with nothing reachable refuses.
+  # A role may list models; the first one the machine declares is used. Both
+  # machines declare `model-gateway-openai/openai/...`, the first entry of each
+  # list below. The `model-gateway/openai/...` entries are there only for a
+  # session that knows no `model-gateway-openai` id; the agent files that list
+  # both names (omp/agents/oracle.md, sol.md, astra-api.md, gpt-api.md) do the
+  # same. Their chains below end on Codex Sol and name no Anthropic model, so a
+  # gate with nothing reachable refuses.
   #
   # 2026-11-04: both roles lead on the gateway's Flex tier
   # (`openai/gpt-6.1-sol-flex`, the cheaper queued tier of the same model),
@@ -181,25 +183,26 @@ retry:
     # keys now go to GPT-6.1 Sol through Theorem's model gateway (Sami's
     # preference, dispatch://BET-545), then Codex Sol, and never to a per-token
     # `openai/` model. Codex Astra stays the `astra` agent's own model: a
-    # subscription, not per-token, used whenever its window is open. The
-    # gateway Sol id differs per machine: sami-rocqperf declares it as
-    # `model-gateway-openai/openai/gpt-6.1-sol`, sami-devbox as
-    # `model-gateway/openai/gpt-6.1-sol` (devbox/sami-devbox-model-routes); each
-    # chain names both, and a machine skips the id it does not declare.
+    # subscription, not per-token, used whenever its window is open. Both
+    # machines declare the gateway's Sol as `model-gateway-openai/openai/gpt-6.1-sol`;
+    # sami-devbox also declares the same route as `model-gateway/openai/gpt-6.1-sol`
+    # (devbox/sami-devbox-model-routes: one URL, one `scripts/gateway-token`
+    # key), an id older sessions there still know; its agent overrides name
+    # `model-gateway-openai/openai/gpt-6.1-sol`. So a chain names the gateway once,
+    # and no chain walks from one of those ids to the other: on sami-devbox that
+    # hop sends the same request to the same route again (two cyber_policy
+    # refusals of one Sol review on 2026-11-21 were sent again exactly that way).
     openai-codex/gpt-6-astra:high:
       - anthropic/claude-opus-5-5:xhigh
     openai-codex/gpt-6-astra:
       - model-gateway-openai/openai/gpt-6.1-sol
-      - model-gateway/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
     openai/*: []
     openai/gpt-6-astra:
       - model-gateway-openai/openai/gpt-6.1-sol
-      - model-gateway/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
     openai/gpt-5.6-terra:
       - model-gateway-openai/openai/gpt-6.1-sol
-      - model-gateway/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
     # The `sol` agent (agents/sol.md), the default cross-family subagent since
     # Sami's preference of 2026-11-02 (dispatch://BET-545). Its model is
@@ -219,7 +222,7 @@ retry:
     # Codex Sol and refused (`usage_limit_reached`) instead of answering.
     # The Flex tier the @review and @oracle chains lead on. Named explicitly so
     # `model-gateway-openai/*: []` below does not leave a Flex call without a
-    # fallback: the other machine's Flex id first, then the standard tier.
+    # fallback: the standard tier under the same provider name, then Codex Sol.
     # HDO maxed out with an auto-regulating back-off (Sami, 2026-11-05 08:50Z; chain shape from GATE 14:44Z).
     # The chain head is the BARE id on purpose: `claude-opus-5-5` hits the gateway's dedicated Opus 5.5 group
     # with its own HDO/HDO V2 session pin, where `anthropic/claude-opus-5-5` hits the anthropic/* wildcard --
@@ -232,21 +235,17 @@ retry:
       - model-gateway/anthropic/claude-fable-5-1
       - model-gateway/anthropic/claude-fable-5
     model-gateway-openai/openai/gpt-6.1-sol-flex:
-      - model-gateway/openai/gpt-6.1-sol-flex
       - model-gateway-openai/openai/gpt-6.1-sol
-      - model-gateway/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
     model-gateway/openai/gpt-6.1-sol-flex:
-      - model-gateway-openai/openai/gpt-6.1-sol-flex
-      - model-gateway-openai/openai/gpt-6.1-sol
       - model-gateway/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
     model-gateway-openai/openai/gpt-6.1-sol:
-      - model-gateway/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
+    # This provider serves only OpenAI ids, so anything else on it refuses
+    # instead of answering from Claude.
     model-gateway-openai/*: []
     model-gateway/openai/gpt-6.1-sol:
-      - model-gateway-openai/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
     # 2026-11-06 23:4xZ: the old OSS-named provider aliases and their mirror chains are
     # GONE, with those aliases in each machine's models.local.yml, in one cutover (Sami,
@@ -258,12 +257,8 @@ retry:
     # were written by Anthropic under a Sol verdict. The lesson is kept as the rule below, not
     # as a second set of names: NO chain key may resolve to `default`, and the cutover check is
     # that every id named by an agent or a chain resolves to a declared provider.
-    # Mirrors model-gateway-openai/*: [] -- this provider serves only OpenAI ids, so anything
-    # else on it refuses instead of answering from Claude.
-    model-gateway-openai/*: []
     openai-codex/gpt-6.1-sol:
       - model-gateway-openai/openai/gpt-6.1-sol
-      - model-gateway/openai/gpt-6.1-sol
     # openai-codex/gpt-5.5 was retired from the catalog; the resolver already
     # matched it to gpt-5.6-terra, which has its own chain below.
     openai-codex/gpt-5.6-sol:

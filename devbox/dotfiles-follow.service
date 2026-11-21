@@ -9,17 +9,19 @@ IOSchedulingClass=idle
 # A user unit's PATH holds neither the dotfiles nor mise's shims: `mise install` and the pin lines
 # of devbox/sami-devbox-check need mise (bin/), knives (shims/) and the tools mise installs.
 # MISE_TRUSTED_CONFIG_PATHS as .bashrc sets it, so mise loads the checkout's mise.toml.
+# No MISE_CACHE_DIR: dotfiles-follow gives its tools commands the one the checkout's .bashrc sets.
 Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
 Environment=MISE_DATA_DIR=%h/.mise
 Environment=MISE_TRUSTED_CONFIG_PATHS=%h/.dotfiles
 # dotfiles-follow takes this limit as its --run-limit (default 1170, keep the two equal) and keeps a
 # monotonic deadline from its start: 1170 s less 12 s for the state write
-# (scripts/dotfiles-follow.md step 7). Its hook sweep pass never runs past that deadline: a
+# (scripts/dotfiles-follow.md step 8). Its hook sweep pass never runs past that deadline: a
 # slow-root pass (1000 s) starts only when the time left holds all of it, a fast-root pass is cut to
 # the time left (at most 420 s), and none starts with under 30 s left. The steps before the sweep
-# have only their own limits (fetch 120 s, merge 120 s, and when the tools step runs, mise install
-# 600 s, Bun 600 s, marketplace 300 s, the pin check 180 s), which together can pass 1170 s: a run
-# whose tools steps all run to their limits is killed here, before its sweep. Under two of the
-# timer's 10-minute periods, so unit-health-watch never reads a run as one that never ends.
+# have only their own limits (fetch 120 s, merge 120 s, the knives registry render 180 s, and when
+# the tools step runs, the rule links 180 s, the .bashrc read 180 s, mise install 600 s, Bun 600 s,
+# marketplace 300 s, the pin check 180 s), which together can pass 1170 s: a run whose tools steps
+# all run to their limits is killed here, before its sweep. Under two of the timer's 10-minute
+# periods, so unit-health-watch never reads a run as one that never ends.
 TimeoutStartSec=1170
 ExecStart=%h/.dotfiles/scripts/dotfiles-follow

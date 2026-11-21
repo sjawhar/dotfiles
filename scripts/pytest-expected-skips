@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Whether a pytest run ran every test it should: the guard of a CI job whose skip list names what may not run.
+
+Usage: EXPECTED_SKIPS=<list> pytest-expected-skips JUNIT_XML TEST_DIR
+
+JUNIT_XML is the run's report (`pytest --junitxml=... -o junit_family=xunit1`); TEST_DIR is the directory the run
+collected, whose test_*.py files, at any depth, are the files it expects to run. EXPECTED_SKIPS lists the tests that
+may skip, one node id a line (`<file>::<class>::<test>`; a class or a file names every test in it, and a test names
+each of its parameters), each under a `# ` line giving the reason; the reason line before an entry is its reason.
+
+It prints each file's count of tests that ran, then a count line, then each failure, and exits 1 on any of:
+- a test that skipped and that the list does not name;
+- a listed test that ran;
+- a list entry that names no test that skipped (a test renamed or gone, or one that now runs);
+- a test file under TEST_DIR that ran no test: it collected none, or skipped every one;
+- no report, or no test file: what ran cannot be told, which is no pass.
+
+An expected failure (xfail) ran: junit records it as a skip of type pytest.xfail, and it counts as a test that ran.
+A failing test is the run's own exit code's to report, not this script's.
+
+Why it exists: a job that runs a test directory passes when a file collects nothing, and a skip says nothing unless
+someone reads it. shims-tests (dispatch://INFRA-5046) runs shims/tests, where a missing public leak check made 138
+cases skip on every runner without a word.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+
+def expected_skips(text: str) -> dict[str, str]:
+    """The list's entries, each mapped to the reason line above it. An entry before any reason is refused."""
+    listed: dict[str, str] = {}
+    reason = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("#"):
+            reason = line
+        elif line and reason is None:
+            raise ValueError(f"the skip list names {line} under no reason")
+        elif line:
+            listed[line] = reason
+    return listed
+
+
+def check(report: Path, test_dir: Path, listed: dict[str, str]) -> tuple[list[str], list[str]]:
+    """The lines to print and the failures, for the run whose junit report is REPORT."""
+    files = sorted(p.as_posix() for p in test_dir.rglob("test_*.py"))
+    if not files or not report.is_file():
+        return [], [f"FAIL: cannot tell what ran: {len(files)} test files under {test_dir}, "
+                    f"and the report {report} is {'there' if report.is_file() else 'missing'}"]
+
+    def entry(node: str) -> str | None:
+        return next((e for e in listed if node == e or node.startswith((e + "::", e + "["))), None)
+
+    ran, skipped, errors = dict.fromkeys(files, 0), {}, []
+    cases = list(ET.parse(report).iter("testcase"))
+    for case in cases:
+        file = case.get("file") or ""
+        module = file.removesuffix(".py").replace("/", ".")
+        cls = (case.get("classname") or "").removeprefix(module).lstrip(".")
+        node = "::".join(part for part in (file, cls, case.get("name") or "") if part)
+        skip = case.find("skipped")
+        if skip is not None and skip.get("type") != "pytest.xfail":
+            skipped[node] = skip.get("message") or ""
+            if entry(node) is None:
+                errors.append(f"FAIL: {node} skipped, and the skip list does not name it: {skipped[node]}")
+            continue
+        if file in ran:
+            ran[file] += 1
+        if entry(node) is not None:
+            errors.append(f"FAIL: {node} ran, and the skip list names it ({entry(node)})")
+    lines = [f"{ran[file]:5d} ran  {file}" for file in files]
+    errors += [f"FAIL: {file} ran no test: it collected none, or skipped every one" for file in files if not ran[file]]
+    errors += [f"FAIL: the skip list names {e}, which did not skip" for e in listed
+               if not any(entry(node) == e for node in skipped)]
+    lines.append(f"{len(cases)} collected, {sum(ran.values())} ran, {len(skipped)} skipped, in {len(files)} files")
+    return lines, errors
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 2:
+        print(__doc__.split("\n\n", 2)[1], file=sys.stderr)
+        return 2
+    try:
+        listed = expected_skips(os.environ.get("EXPECTED_SKIPS", ""))
+    except ValueError as error:
+        print(f"FAIL: {error}")
+        return 1
+    lines, errors = check(Path(argv[0]), Path(argv[1]), listed)
+    print("\n".join(lines + errors))
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

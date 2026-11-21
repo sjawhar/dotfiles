@@ -89,7 +89,10 @@ class JjLockShimTest(unittest.TestCase):
         self.env = {**os.environ, "PATH": f"{SHIMS}{os.pathsep}{real_jj_dir()}{os.pathsep}{os.environ['PATH']}"}
         self.repo = self.tmp / "main"
         self.repo.mkdir()
-        for cmd in (["git", "init", "-q"], ["git", "commit", "-q", "--allow-empty", "-m", "init"], ["jj", "git", "init", "--colocate"]):
+        # The first commit names its own author: a machine whose git configuration has no user.* (a CI runner) refuses
+        # a commit without one.
+        identity = ["-c", "user.name=T", "-c", "user.email=t@example.com"]
+        for cmd in (["git", "init", "-q"], ["git", *identity, "commit", "-q", "--allow-empty", "-m", "init"], ["jj", "git", "init", "--colocate"]):
             subprocess.run(cmd, cwd=self.repo, env=self.env, check=True, capture_output=True)
 
     def tearDown(self):
