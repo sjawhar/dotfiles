@@ -3737,7 +3737,9 @@ cmd_adopt() {
     if [[ -n "$rec_pid" ]] && [[ "$rec_pid" != "$launcher" || "$rec_start" != "$lstart" ]]; then
         die "$box's record names launcher pid $rec_pid (start $rec_start), not pid $launcher (start $lstart), the parent of its docker client; nothing was done"
     fi
-    inner="env"
+    # The new launcher runs this checkout's agentbox, with this checkout as its DOTFILES_DIR (the
+    # script reads files beside itself through it), and the old launcher's AGENTBOX_* settings.
+    inner="env DOTFILES_DIR=$(printf '%q' "$DOTFILES_DIR")"
     if (( ${#carry[@]} )); then inner+="$(printf ' %q' "${carry[@]}")"; fi
     inner+=" $(printf '%q' "$DOTFILES_DIR/scripts/agentbox") adopt --pane $box"
     inner="$inner; echo; echo 'agentbox: the box has exited; this pane is a shell again'; exec bash -i"

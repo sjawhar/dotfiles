@@ -154,7 +154,9 @@ class Adopt(Fixture):
         self.assertEqual(args[:9], ["-S", str(self.sock), "respawn-pane", "-k", "-t", "%7", "-c", str(self.root), "bash"], said)
         self.assertEqual(args[9:10], ["-i"], said)
         inner = args[11]
-        self.assertIn(f"env AGENTBOX_BOXES=/boxes/of/that/launcher {DOTFILES}/scripts/agentbox adopt --pane {BOX};", inner)
+        # DOTFILES_DIR too: without it the new launcher reads ~/.dotfiles' files beside a checkout
+        # elsewhere, which ended it on the test VM (2026-11-21, no broker-url.sh there).
+        self.assertIn(f"env DOTFILES_DIR={DOTFILES} AGENTBOX_BOXES=/boxes/of/that/launcher {DOTFILES}/scripts/agentbox adopt --pane {BOX};", inner)
         self.assertNotIn("AGENTBOX_SELF_COPY", inner)
         self.assertIn("exec bash -i", inner)
 
