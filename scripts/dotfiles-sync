@@ -107,10 +107,13 @@ tools_limit() {
   printf '%s\n' 600
 }
 
+# tools_error COMMAND DIR STATUS LIMIT RAN OUTPUT: RAN is how many whole seconds the command ran.
 tools_error() {
-  local command="$1" dir="$2" status="$3" limit="$4" output="$5" tick='`'
+  local command="$1" dir="$2" status="$3" limit="$4" ran="$5" output="$6" tick='`'
   printf 'dotfiles-sync: tools step: %s%s%s in %s exited %s' "$tick" "$command" "$tick" "$dir" "$status" >&2
-  if [[ "$status" = 124 || "$status" = 137 ]]; then
+  # A command can exit 124 itself, and 137 can be any SIGKILL (the OOM killer's too), so the note
+  # needs a run that lasted the limit.
+  if [[ "$status" = 124 || "$status" = 137 ]] && (( ran >= limit )); then
     printf ' (past its limit of %s s, lock wait included)' "$limit" >&2
   fi
   if [[ -n "$output" ]]; then
@@ -122,7 +125,7 @@ tools_error() {
 }
 
 tools_run() {
-  local command="$1" cwd="$2" limit="$3" output="" output_made=0 output_fd pid status waits tick='`'
+  local command="$1" cwd="$2" limit="$3" output="" output_made=0 output_fd pid status started ran waits tick='`'
   shift 3
   if output="$(mktemp 2>/dev/null)"; then
     output_made=1
@@ -136,6 +139,7 @@ tools_run() {
   else
     exec {output_fd}>&2
   fi
+  started="${EPOCHSECONDS:-$(date +%s)}"
   (
     # shellcheck disable=SC1007
     CDPATH= cd -- "$cwd" && exec timeout -k "$tools_grace" "$limit" "$@"
@@ -147,6 +151,7 @@ tools_run() {
   else
     status=$?
   fi
+  ran=$(( ${EPOCHSECONDS:-$(date +%s)} - started ))
   if [[ "$status" = 124 || "$status" = 137 ]]; then
     waits=$((tools_grace * 10))
     while (( waits > 0 )) && kill -0 -- "-$pid" 2>/dev/null; do
@@ -165,7 +170,7 @@ tools_run() {
   if (( status == 0 )); then
     printf 'tools: %s%s%s passed in %s\n' "$tick" "$command" "$tick" "$cwd"
   else
-    tools_error "$command" "$cwd" "$status" "$limit" "$output"
+    tools_error "$command" "$cwd" "$status" "$limit" "$ran" "$output"
   fi
   if (( output_made )); then
     rm -f "$output" || true
@@ -200,7 +205,7 @@ tools_step() (
   if [[ -x "$dir/bin/mise" ]]; then
     mise="$dir/bin/mise"
   elif ! mise="$(command -v mise 2>/dev/null)"; then
-    tools_error "mise install" "$dir" 127 "$limit" <(printf 'mise: command not found\n')
+    tools_error "mise install" "$dir" 127 "$limit" 0 <(printf 'mise: command not found\n')
     return 127
   fi
   [[ "$mise" = /* ]] || mise="$PWD/$mise"
@@ -210,7 +215,7 @@ tools_step() (
 
   [[ -f "$dir/omp/plugins/package.json" ]] || return 0
   if ! bun="$(command -v bun 2>/dev/null)"; then
-    tools_error "bun install --frozen-lockfile" "$dir/omp/plugins" 127 "$limit" <(printf 'bun: command not found\n')
+    tools_error "bun install --frozen-lockfile" "$dir/omp/plugins" 127 "$limit" 0 <(printf 'bun: command not found\n')
     return 127
   fi
   [[ "$bun" = /* ]] || bun="$PWD/$bun"

@@ -332,6 +332,7 @@ else
             exec {out_fd}>&2
         fi
         rc=0
+        started="${EPOCHSECONDS:-$(date +%s)}"
         (
             # In this subshell alone, so a knives call under the install does not wait on the lock
             # it holds, and the agent exec'd below never has the marker.
@@ -341,6 +342,7 @@ else
         ) >&"$out_fd" 2>&1 &
         pid=$!
         wait "$pid" || rc=$?
+        ran=$(( ${EPOCHSECONDS:-$(date +%s)} - started ))
         if [[ "$rc" = 124 || "$rc" = 137 ]]; then
             waits=$((grace * 10))
             while (( waits > 0 )) && kill -0 -- "-$pid" 2>/dev/null; do
@@ -373,7 +375,9 @@ else
         if (( rc != 0 )); then
             tick='`'
             printf 'agent-session: %smise install%s in %s exited %s' "$tick" "$tick" "$DOTFILES_DIR" "$rc" >&2
-            if [[ "$rc" = 124 || "$rc" = 137 ]]; then
+            # mise can exit 124 itself, and 137 can be any SIGKILL (the OOM killer's too), so the
+            # note needs a run that lasted the limit.
+            if [[ "$rc" = 124 || "$rc" = 137 ]] && (( ran >= limit )); then
                 printf ' (past its limit of %s s, lock wait included)' "$limit" >&2
             fi
             if (( out_made )); then
