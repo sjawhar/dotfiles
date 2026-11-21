@@ -1,5 +1,5 @@
 [Unit]
-Description=Keep the box's Go build cache (<scratch>/gocache) near 25 GB without removing an entry a running build may read
+Description=Keep the box's Go build caches together near 25 GB without removing an entry a running build may read
 # Go trims only entries unused for 5 days and has no size-based trim, so nothing else bounds the
 # cache. On 2026-11-02 it grew about 20 GB in 80 minutes (agents' `go test` on agent-infra
 # compiling the Pulumi provider SDKs) and two caches together held about 95 GB while /mnt/nvme sat
@@ -14,9 +14,12 @@ Description=Keep the box's Go build cache (<scratch>/gocache) near 25 GB without
 # them, and broke them (dispatch://INFRA-3905). Past 50 GB with nothing more that is safe to delete,
 # the cache stays over the cap and the disk floors are what alert. 50 GB is under the floor's margin
 # on a disk that has run 60-140 GiB free; the 80 GB cap this replaced was the whole margin.
-# On sami-devbox GOCACHE is /mnt/scratch/<user>/gocache (devbox/gce-disks); either one runs it.
-ConditionPathIsDirectory=|/mnt/nvme/%u/gocache
-ConditionPathIsDirectory=|/mnt/scratch/%u/gocache
+# It caps every Go build cache under /mnt/scratch/<user>, /mnt/nvme/<user> and ~/.cache, Go's
+# default included, and their sum, not each one (devbox/gocache-cap says how it finds them and
+# why); any one of the three runs it.
+ConditionPathIsDirectory=|/mnt/scratch/%u
+ConditionPathIsDirectory=|/mnt/nvme/%u
+ConditionPathIsDirectory=|%h/.cache
 
 [Service]
 Type=oneshot
