@@ -1595,7 +1595,9 @@ class GitLeaks(LeakTestCase):
 
     def repository(self, agent: bool, remote: bool = False) -> Path:
         self.repositories += 1
-        repository = self.root / f"repo-{self.repositories}"
+        # Under the TMPDIR the shim gets, so scripts/omp-session-trailer reads it as a throwaway repository whatever
+        # TMPDIR this test runs under; a remote makes it not one.
+        repository = self.tmpdir / f"repo-{self.repositories}"
         repository.mkdir()
         initialized = self.git_run(repository, "init", "-q", agent=agent)
         self.assertEqual(initialized.returncode, 0, initialized.stderr)
@@ -2362,7 +2364,9 @@ class JjLeaks(LeakTestCase):
 
     def repository(self, agent: bool) -> Path:
         self.repositories += 1
-        repository = self.root / f"repo-{self.repositories}"
+        # Under the TMPDIR the shim gets, so scripts/omp-session-trailer reads it as a throwaway repository whatever
+        # TMPDIR this test runs under.
+        repository = self.tmpdir / f"repo-{self.repositories}"
         repository.mkdir()
         initialized = self.jj(repository, "git", "init", agent=agent)
         self.assertEqual(initialized.returncode, 0, initialized.stderr)
