@@ -13,7 +13,10 @@
 # destination's outgoing commits for listed leak terms before that existing
 # gate; a person's DOTFILES_JJ_NO_LEAK_CHECK=1 skips only the public check.
 # Where scripts/omp-session-trailer says no, it drops the session's
-# Omp-Session trailer. Everything else goes straight to the real jj.
+# Omp-Session trailer. It gives jj the commit identity git resolves for the
+# repository (git_identity), and gives an undescribed working-copy commit made
+# under an earlier identity the current one (reauthor_working_copy).
+# Everything else goes straight to the real jj.
 set -euo pipefail
 
 # This shim's own directory, through a link to it: a caller may run the shim by a link in a
@@ -540,41 +543,25 @@ fi
 _pre=()
 
 trailer_on() {
-    local d="" repo target="" entry
+    local target entry
     local -a overlays=() entries=()
-    # jj accepts globals after the command, so this shared reader scans the
-    # expanded argv through --.
-    d="$(repository_option)"
-    d="${d:-$PWD}"
-    [[ "$d" == /* ]] || d="$PWD/$d"
-    d="${d%/}"
-    while [[ ! -d "$d/.jj" ]]; do
-        [[ -n "$d" ]] || return 0 # no jj repository: jj says so itself
-        d="${d%/*}"
-    done
-    repo="$d/.jj/repo"
-    if [[ -f "$repo" ]]; then # a secondary workspace names its repository
-        IFS= read -r target < "$repo" || true
-        [[ -n "$target" ]] || return 1
-        [[ "$target" == /* ]] || target="$d/.jj/$target"
-        repo="$target"
-        target=""
-    fi
-    IFS= read -r target < "$repo/store/git_target" 2> /dev/null || true
-    [[ -n "$target" ]] || return 0 # not git-backed, so no remote
-    [[ "$target" == /* ]] || target="$repo/store/$target"
+    target="$(git_target)" || return 1
+    [[ -n "$target" ]] || return 0 # no jj repository, or one not git-backed: no remote
     # The overlays that give jj its trailers, so a session a test made itself keeps its own
     # trailer in the test's throwaway repository (scripts/omp-session-trailer).
     IFS=':' read -ra entries <<< "${JJ_CONFIG:-}"
     for entry in ${entries[@]+"${entries[@]}"}; do
         if [[ "${entry##*/}" == omp-attribution-*.toml ]]; then overlays+=(--overlay "$entry"); fi
     done
-    "$_shim_dir/../scripts/omp-session-trailer" ${overlays[@]+"${overlays[@]}"} git --git-dir="$target" > /dev/null 2>&1
+    # The re-author's lock, when the shim holds it, is not the trailer check's: nothing the shim starts keeps it.
+    ([[ -z "${_jj_reauthor_fd:-}" ]] || exec {_jj_reauthor_fd}>&-
+        exec "$_shim_dir/../scripts/omp-session-trailer" ${overlays[@]+"${overlays[@]}"} git --git-dir="$target" > /dev/null 2>&1)
 }
-git_target() {
+# The repository directory (.jj/repo, or the one a secondary workspace names) of the workspace the command works in:
+# nothing when there is none, a failure when a workspace names none. jj accepts globals after the command, and this
+# reader skips each global option's value, so that value cannot be mistaken for a repository path.
+jj_repo_dir() {
     local d="" repo target=""
-    # jj accepts globals after `git push`, too. This reader skips each global
-    # option's value, so that value cannot be mistaken for a repository key.
     d="$(repository_option)"
     d="${d:-$PWD}"
     [[ "$d" == /* ]] || d="$PWD/$d"
@@ -589,13 +576,100 @@ git_target() {
         [[ -n "$target" ]] || return 1
         [[ "$target" == /* ]] || target="$d/.jj/$target"
         repo="$target"
-        target=""
     fi
-    IFS= read -r target < "$repo/store/git_target" 2> /dev/null || true
+    printf '%s\n' "$repo"
+}
+# The backing git repository of that jj repository: nothing when there is no jj repository or it is not git-backed.
+git_target() {
+    local repo target=""
+    repo="$(jj_repo_dir)" || return 1
+    [[ -n "$repo" ]] || return 0
+    { IFS= read -r target < "$repo/store/git_target"; } 2> /dev/null || true
     [[ -n "$target" ]] || return 0 # not git-backed, so no remote
     [[ "$target" == /* ]] || target="$repo/store/$target"
     printf '%s\n' "$target"
 }
+
+# jj commits as the identity git resolves for the same repository, so .gitconfig's remote-URL rules (a
+# cybermonklabs or theorem-labs remote) and a checkout's own `git config user.email` decide jj's identity as
+# they decide git's, wherever the checkout lives: jj has no remote condition of its own. git's user.email
+# reaches jj as DOTFILES_GIT_EMAIL, which .jjconfig.toml turns into user.name and user.email with one
+# `--when.environments` scope per identity scripts/git-identity knows. Those scopes are user config, so a
+# repository's or workspace's own jj user.email (`git-identity`, `jj config set --repo`) still wins, and
+# JJ_EMAIL (the Legion daemon's) wins over both; with JJ_EMAIL set nothing is read. The repository is the
+# backing git repository of the jj repository the command works in. `jj git init` reads the git repository
+# it makes jj's (DESTINATION's, or --git-repo's), and `jj git clone` asks git about its source as a remote
+# URL: jj keeps the author of the working-copy commit those two make, so it must be right from the start.
+# A jj run through this shim never takes an inherited DOTFILES_GIT_EMAIL: it is dropped first. Each case only picks
+# the repository git reads; the one read clears GIT_DIR, GIT_WORK_TREE and GIT_COMMON_DIR, so no caller's git
+# environment picks another repository (--git-dir does not override GIT_COMMON_DIR).
+git_identity() {
+    local index a email="" git_repo="" sub=""
+    local -a positional=() repository=()
+    unset DOTFILES_GIT_EMAIL
+    [[ -z "${JJ_EMAIL:-}" ]] || return 0
+    ((_jj_git_pi < 0)) || sub="${_pargs[_jj_git_pi]:-}"
+    if [[ "$sub" == init || "$sub" == clone ]]; then
+        index=$((_jj_git_pi + 1))
+        while ((index < ${#_pargs[@]})); do
+            a="${_pargs[index]}"
+            if [[ "$a" == -- ]]; then
+                positional+=("${_pargs[@]:index+1}")
+                break
+            fi
+            if jj_global_at "$index"; then
+                ((index += _jj_global_size))
+                continue
+            fi
+            case "$a" in
+                --git-repo) git_repo="${_pargs[index + 1]:-}" index=$((index + 2)) ;;
+                --git-repo=*) git_repo="${a#*=}" index=$((index + 1)) ;;
+                --remote | --depth | -b | --branch | -t | --tag | --object-hash) index=$((index + 2)) ;;
+                -*) index=$((index + 1)) ;;
+                *) positional+=("$a") index=$((index + 1)) ;;
+            esac
+        done
+    fi
+    case "$sub" in
+        clone)
+            # From /, so no repository around the caller adds its own config.
+            [[ -z "${positional[0]:-}" ]] || repository=(-C / -c "remote.origin.url=${positional[0]}")
+            ;;
+        init)
+            a="${git_repo:-${positional[0]:-.}}"
+            if [[ -e "$a/.git" ]]; then
+                repository=(--git-dir="$a/.git")
+            elif [[ -n "$git_repo" && -f "$a/HEAD" ]]; then
+                repository=(--git-dir="$a")
+            fi
+            ;;
+        *)
+            a="$(git_target)" || a=""
+            [[ -z "$a" ]] || repository=(--git-dir="$a")
+            ;;
+    esac
+    ((${#repository[@]})) || return 0
+    identity_git
+    email="$(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR
+        "$_identity_git" "${repository[@]}" config --get user.email 2> /dev/null)" || email=""
+    [[ -z "$email" ]] || export DOTFILES_GIT_EMAIL="$email"
+}
+# The git that git_identity reads config with: the first git on PATH that is not shims/git, judged by content as
+# shims/git judges itself. shims/git hands a config read to that git unchanged, so running it directly spares every
+# jj command shims/git's own bash start.
+identity_git() {
+    local IFS=':' dir header
+    _identity_git=git
+    for dir in $PATH; do
+        [[ -n "$dir" && -f "$dir/git" && -x "$dir/git" ]] || continue
+        header=""
+        IFS= read -r -n 512 -d '' header < "$dir/git" || true
+        [[ "$header" == *git-worktree-shim* ]] && continue
+        _identity_git="$dir/git"
+        return 0
+    done
+}
+git_identity
 
 # The leak-term scanner, for the push check below and the commit, describe and new checks after it.
 _jj_scanner="$_shim_dir/../scripts/leak-terms-check"
@@ -764,6 +838,7 @@ _jj_positions=()
 _jj_revisions=()
 _jj_messages=()
 _jj_editor_ids=()
+_jj_no_edit=0
 
 jj_scan_refuse() {
     printf 'jj shim: %s; nothing changed\n' "$1" >&2
@@ -842,7 +917,7 @@ jj_parse_protected() {
         if ((after_options)); then
             case "$_jj_command" in
                 commit | ci) _jj_positions+=("$token") ;;
-                describe | desc) _jj_revisions+=("$token") ;;
+                describe | desc | new) _jj_revisions+=("$token") ;;
             esac
             ((index += 1))
             continue
@@ -910,14 +985,17 @@ jj_parse_protected() {
                 ;;
             new)
                 case "$token" in
-                    --no-edit) ;;
+                    --no-edit) _jj_no_edit=1 ;;
                     -A | -B | -o | -r | --insert-after | --after | --insert-before | --before)
                         ((index + 1 < ${#_pargs[@]})) || jj_scan_refuse "cannot read option $token, so the leak-term check cannot run"
+                        _jj_revisions+=("${_pargs[index + 1]}")
                         ((index += 2))
                         continue
                         ;;
-                    -A?* | -B?* | -o?* | -r?* | --insert-after=* | --after=* | --insert-before=* | --before=*) ;;
+                    -A?* | -B?* | -o?* | -r?*) _jj_revisions+=("${token:2}") ;;
+                    --insert-after=* | --after=* | --insert-before=* | --before=*) _jj_revisions+=("${token#*=}") ;;
                     -*) jj_scan_refuse "cannot read option $token, so the leak-term check cannot run" ;;
+                    *) _jj_revisions+=("$token") ;;
                 esac
                 ;;
         esac
@@ -925,6 +1003,77 @@ jj_parse_protected() {
     done
 }
 jj_parse_protected
+# A working-copy commit made before the repository's remote decided its identity keeps the address jj had then: `jj git
+# init` and then `jj git remote add`, or a `git remote set-url` in a colocated repository, which never passes this shim.
+# signing.behavior = "own" then leaves it unsigned, and a pull request carries the wrong author. So once commit,
+# describe and new pass the leak-term checks below, @ is re-authored with `jj metaedit --update-author`, as
+# scripts/git-identity does when it sets an identity, but only when every one of these holds:
+# - the command works on @ alone: commit, or a describe or new that names no revision but a literal @, and a new
+#   without --no-edit;
+# - jj's user.email now is git's address, DOTFILES_GIT_EMAIL: a run whose JJ_CONFIG leaves out the identity scopes, and
+#   a repository's or workspace's own jj address, re-author nothing;
+# - @ is mutable and has no description and no bookmark, and its author is one of the addresses scripts/git-identity
+#   knows (one jj set itself) and not git's: an author someone set on purpose stays.
+# The rewrite is an operation of its own, and two of them on one @ at once leave its change divergent, so it runs
+# holding a lock in the repository directory, after a second look under the lock. The lock stays held until the real
+# jj exits, so commands that queued behind it run one at a time, except while an editor is open (below). It is a bash
+# file descriptor, which every child inherits, so each process the shim starts while it holds the lock closes it first
+# (the second look, the metaedit, the trailer check and the real jj), and nothing they start keeps it. Three keep it:
+# flock(1), which takes it, the helper that keeps it while jj runs, and the subshell that feeds `describe --stdin` its
+# description, which ends before the shim does. Without flock(1) @ is left as it is, and the shim says so. Succeeds
+# only when it re-authored @.
+working_copy_stale() {
+    local found author current
+    local -a read_only=()
+    [[ " ${_jj_global[*]} " == *" --ignore-working-copy "* ]] || read_only=(--ignore-working-copy)
+    # The caller's stdin, which `describe --stdin` has read already, is not this call's.
+    found="$(DOTFILES_JJ_SHIM="$BASHPID $_handed"; [[ -z "${_jj_reauthor_fd:-}" ]] || exec {_jj_reauthor_fd}>&-
+        exec "$_real" "${_jj_global[@]}" "${read_only[@]}" --no-pager --color=never \
+        log --no-graph -r @ -T 'if(!immutable && !description && !bookmarks, author.email() ++ "\t" ++ config("user.email").as_string())' \
+        < /dev/null 2> /dev/null)" || return 1
+    # Nothing (a commit to leave), or "<author>\t<jj's address>", which may be empty.
+    IFS=$'\t' read -r author current <<< "$found" || return 1
+    [[ "$current" == "$DOTFILES_GIT_EMAIL" && "$author" != "$current" ]] || return 1
+    case "$author" in
+        sami@trajectorylabs.net | sami@thecybermonk.com | sami@theorem.dev | sjawhar@users.noreply.github.com) return 0 ;;
+    esac
+    return 1
+}
+reauthor_working_copy() {
+    local revision repo lock
+    local -a quiet=()
+    [[ -n "${DOTFILES_GIT_EMAIL:-}" && -n "$_jj_command" ]] && ((_jj_help == 0 && _jj_no_edit == 0)) || return 1
+    for revision in ${_jj_revisions[@]+"${_jj_revisions[@]}"}; do
+        [[ "$revision" == @ ]] || return 1
+    done
+    # A command on an earlier operation changes nothing here.
+    [[ " ${_jj_global[*]} " != *" --at-op"* ]] || return 1
+    working_copy_stale || return 1
+    repo="$(jj_repo_dir)" && [[ -n "$repo" ]] || return 1
+    lock="$repo/shims-jj-reauthor.lock"
+    if ! command -v flock > /dev/null 2>&1 || ! exec {_jj_reauthor_fd}>> "$lock"; then
+        unset _jj_reauthor_fd
+        printf 'jj shim: the working-copy commit keeps an earlier address, and %s cannot be locked to change it; run `jj metaedit --update-author`\n' "$lock" >&2
+        return 1
+    fi
+    if ! flock -w 60 "$_jj_reauthor_fd"; then
+        exec {_jj_reauthor_fd}>&-
+        unset _jj_reauthor_fd
+        printf 'jj shim: waited 60 s for %s; the working-copy commit keeps an earlier address; run `jj metaedit --update-author`\n' "$lock" >&2
+        return 1
+    fi
+    # From here the lock stays held until the real jj exits (or an editor is about to open), so commands that queued
+    # behind it run one at a time, not all at once when it is released, also when the second look finds @ done.
+    working_copy_stale || return 1
+    [[ " ${_jj_global[*]} " == *" --quiet "* ]] || quiet=(--quiet)
+    if ! (DOTFILES_JJ_SHIM="$BASHPID $_handed"; exec {_jj_reauthor_fd}>&-
+        exec "$_real" "${_jj_global[@]}" "${quiet[@]}" --no-pager metaedit --update-author < /dev/null); then
+        exec {_jj_reauthor_fd}>&-
+        unset _jj_reauthor_fd
+        printf 'jj shim: could not give the working-copy commit jj'"'"'s current address; run `jj metaedit --update-author`\n' >&2
+        return 1
+    fi
+}
 if [[ -n "$_jj_command" ]] && ((_jj_help == 0)); then
     case "$_jj_command" in
         commit | ci)
@@ -986,6 +1135,9 @@ sys.stdout.buffer.write(data + b"x")
             if ((${#_jj_messages[@]})); then jj_scan_messages; fi
             ;;
     esac
+    # The editor wrapper checks commit ids only for several commits at once, and a describe re-authors @ only when
+    # it names @ alone, so the ids the wrapper was given stay right.
+    reauthor_working_copy || true
 fi
 
 # Alias expansion is complete; keep the existing trailer dispatch on the exact
@@ -1001,25 +1153,58 @@ if [[ ":${JJ_CONFIG:-}:" == *"/omp-attribution-"* ]]; then
     esac
 fi
 
+# An editor, or the diff editor of `commit -i`, can stay open for minutes, and the lock serves the whole repository, so
+# a command that runs one does not hold it while jj runs.
+if ((${#_jj_final_config[@]} || _jj_interactive)) && [[ -n "${_jj_reauthor_fd:-}" ]]; then
+    exec {_jj_reauthor_fd}>&-
+    unset _jj_reauthor_fd
+fi
 _jj_exec=("$@")
 if ((${#_jj_final_config[@]})); then
-    _jj_exec=()
-    _jj_config_inserted=0
-    for _jj_argument in "$@"; do
-        if [[ "$_jj_argument" == -- && $_jj_config_inserted == 0 ]]; then
-            _jj_exec+=("${_jj_final_config[@]}")
-            _jj_config_inserted=1
+    # jj applies --config and --config-file in command-line order, the last one winning, but it counts the place of one
+    # given after the subcommand from the subcommand and the place of one given before it from the start of the line,
+    # and it drops the --config values given before the subcommand when any follow it (clap replaces a global's values
+    # given before the subcommand with those given after it). Before the subcommand, the wrapper's setting is dropped
+    # by a --config after it; after the subcommand, a --config-file given before it can still count as later and run
+    # its own editor unchecked. So every --config and --config-file given before the subcommand, _pre's first, moves to
+    # just after it, in its order, and the wrapper's setting goes after the last --config or --config-file that follows
+    # the subcommand (with none, after the moved ones): all of them are then counted alike, the wrapper's comes last,
+    # and none is dropped. It precedes any --.
+    _jj_kept=()
+    _jj_moved=(${_pre[@]+"${_pre[@]}"})
+    _pre=()
+    _jj_index=0
+    while ((_jj_index < _pi)); do
+        if jj_global_at "$_jj_index"; then
+            case "$_jj_global_name" in
+                --config | --config-file) _jj_moved+=("${_pargs[@]:_jj_index:_jj_global_size}") ;;
+                *) _jj_kept+=("${_pargs[@]:_jj_index:_jj_global_size}") ;;
+            esac
+            ((_jj_index += _jj_global_size))
+        else
+            _jj_kept+=("${_pargs[_jj_index]}")
+            ((_jj_index += 1))
         fi
-        _jj_exec+=("$_jj_argument")
     done
-    ((_jj_config_inserted)) || _jj_exec+=("${_jj_final_config[@]}")
+    _jj_at=$((_pi + 1))
+    _jj_index=$_jj_at
+    while ((_jj_index < ${#_pargs[@]})) && [[ "${_pargs[_jj_index]}" != -- ]]; do
+        if jj_global_at "$_jj_index"; then
+            ((_jj_index += _jj_global_size))
+            case "$_jj_global_name" in --config | --config-file) _jj_at=$_jj_index ;; esac
+        else
+            ((_jj_index += 1))
+        fi
+    done
+    _jj_exec=(${_jj_kept[@]+"${_jj_kept[@]}"} "${_pargs[_pi]}" ${_jj_moved[@]+"${_jj_moved[@]}"}
+        "${_pargs[@]:_pi+1:_jj_at-_pi-1}" "${_jj_final_config[@]}" "${_pargs[@]:_jj_at}")
 fi
 
 if ((_jj_stdin)); then
     # The bytes checked, through a pipe from a subshell that sets the marker and execs jj; the shim exits with jj's
     # status.
     if printf '%s' "$_jj_stdin_text" |
-        (DOTFILES_JJ_SHIM="$BASHPID $_handed"; exec "$_real" "${_pre[@]}" "${_jj_exec[@]}"); then
+        (DOTFILES_JJ_SHIM="$BASHPID $_handed"; [[ -z "${_jj_reauthor_fd:-}" ]] || exec {_jj_reauthor_fd}>&-; exec "$_real" "${_pre[@]}" "${_jj_exec[@]}"); then
         _jj_statuses=("${PIPESTATUS[@]}")
     else
         _jj_statuses=("${PIPESTATUS[@]}")
@@ -1059,6 +1244,22 @@ if [[ "${_pargs[_pi]:-}" == workspace ]]; then
     _pi=$_jj_workspace_pi
 fi
 unset _pargs _pi _parg
+if [[ -n "${_jj_reauthor_fd:-}" ]]; then
+    # The re-author's lock stays held until jj exits, by a helper that watches this pid, which jj takes over: jj keeps
+    # the shim's pid, stdin and signals. Neither jj nor anything jj starts gets a copy of the lock, so no process jj
+    # leaves running (a watchman server, say) holds it on. The helper stops when jj is a zombie, not only when it is
+    # gone: a caller that reaps jj late (one waiting on several jj runs in turn) must not hold the lock up.
+    # (Only commit, describe and new take the lock, never workspace add.)
+    # Only where /proc speaks for this pid namespace: under a host /proc, /proc/$$ is another process.
+    if [[ /proc/$$ -ef /proc/self ]]; then
+        (
+            while IFS= read -r _jj_stat < "/proc/$$/stat" && [[ "${_jj_stat##*) }" != Z* ]]; do
+                sleep 0.1
+            done
+        ) < /dev/null > /dev/null 2>&1 &
+    fi
+    exec {_jj_reauthor_fd}>&-
+fi
 ((_add)) || exec "$_real" "${_pre[@]}" "${_jj_exec[@]}"
 
 _err="$(mktemp)"

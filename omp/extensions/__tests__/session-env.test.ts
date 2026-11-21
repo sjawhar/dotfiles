@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, watch, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { agentGhConfigDir, agentGoogleCredentials, userConfigChain } from "../session-env";
+import { agentGhConfigDir, agentGoogleCredentials, sharedConfigLast, userConfigChain } from "../session-env";
 
 const dirs: string[] = [];
 /** An environment whose PATH finds a `jj` running `body` first. */
@@ -27,6 +27,17 @@ describe("userConfigChain", () => {
 		expect(await userConfigChain(200, withJj("exec sleep 30"))).toBeUndefined();
 		expect(Date.now() - started).toBeLessThan(4_000);
 	}, 5_000);
+});
+
+describe("sharedConfigLast", () => {
+	const env = { HOME: "/h" };
+	test("puts the shared ~/.jjconfig.toml after the per-machine file, as .bashrc does", () => {
+		expect(sharedConfigLast("/h/.jjconfig.toml:/h/.config/jj/config.toml", env)).toBe("/h/.config/jj/config.toml:/h/.jjconfig.toml");
+	});
+
+	test("keeps a chain without it as it is", () => {
+		expect(sharedConfigLast("/u/a.toml:/u/b.toml", env)).toBe("/u/a.toml:/u/b.toml");
+	});
 });
 
 describe("agentGhConfigDir", () => {
@@ -189,13 +200,13 @@ describe("the identity a session exports", () => {
 		bucket = path.join(home, ".omp", "agent", "sessions", "--work--");
 		mkdirSync(path.join(bucket, OWNER, "Probe"), { recursive: true });
 		writeFileSync(path.join(bucket, `${OWNER}.jsonl`), "");
-		// Like jj: `config path --user` prints JJ_CONFIG's entries when it is set. With
-		// FAKE_JJ_FAIL set it fails, as jj does on a malformed user config.
+		// Like jj: `config path --user` prints JJ_CONFIG's entries when it is set, else FAKE_JJ_PATHS's
+		// when that is set. With FAKE_JJ_FAIL set it fails, as jj does on a malformed user config.
 		fakeJj = path.join(home, "bin");
 		mkdirSync(fakeJj);
 		writeFileSync(
 			path.join(fakeJj, "jj"),
-			`#!/bin/sh\n[ -n "$FAKE_JJ_FAIL" ] && exit 1\nif [ -n "$JJ_CONFIG" ]; then printf '%s\\n' "$JJ_CONFIG" | tr ':' '\\n'; else echo /u/default.toml; fi\n`,
+			`#!/bin/sh\n[ -n "$FAKE_JJ_FAIL" ] && exit 1\nif [ -n "$JJ_CONFIG" ]; then printf '%s\\n' "$JJ_CONFIG" | tr ':' '\\n'; elif [ -n "$FAKE_JJ_PATHS" ]; then printf '%s\\n' "$FAKE_JJ_PATHS" | tr ':' '\\n'; else echo /u/default.toml; fi\n`,
 		);
 		chmodSync(path.join(fakeJj, "jj"), 0o755);
 	});
@@ -309,9 +320,21 @@ describe("the identity a session exports", () => {
 		expect(exported).toMatchObject({ id: "", trailers: "", jjConfig: "/u/default.toml" });
 	});
 
+	// jj prints the shared ~/.jjconfig.toml first and the per-machine file after it. Chained so, the
+	// per-machine user.email won over every identity scope of the shared file, and a cybermonklabs
+	// repository committed as trajectorylabs; .bashrc chains them the other way round.
+	test("a session that inherits no chain gets jj's user config files in .bashrc's order", async () => {
+		const shared = path.join(home, ".jjconfig.toml");
+		const machine = path.join(home, ".config", "jj", "config.toml");
+		const exported = await start({ kind: "main", file: path.join(home, "notes", "handmade.jsonl") }, undefined, {
+			FAKE_JJ_PATHS: `${shared}:${machine}`,
+		});
+		expect(exported).toMatchObject({ id: "", jjConfig: `${machine}:${shared}` });
+	});
+
 	// jj fails `config path --user` on a malformed user config. Unsetting JJ_CONFIG then is no
 	// fix: the bash tool's commands still saw the launcher's overlay-only chain (round-2 review).
-	test("with jj unable to name the user config, an unattributed session gets jj's default chain, not the launcher's", async () => {
+	test("with jj unable to name the user config, an unattributed session gets jj's default files in .bashrc's order, not the launcher's chain", async () => {
 		const exported = await start(
 			{ kind: "main", file: path.join(home, "notes", "handmade.jsonl") },
 			{ id: LAUNCHER, jjConfig: overlayOf(LAUNCHER) },
@@ -319,7 +342,7 @@ describe("the identity a session exports", () => {
 		);
 		expect(exported).toMatchObject({
 			id: "",
-			jjConfig: `${path.join(home, ".jjconfig.toml")}:${path.join(home, ".config", "jj", "config.toml")}`,
+			jjConfig: `${path.join(home, ".config", "jj", "config.toml")}:${path.join(home, ".jjconfig.toml")}`,
 		});
 	});
 
@@ -329,7 +352,7 @@ describe("the identity a session exports", () => {
 			{ id: LAUNCHER, jjConfig: overlayOf(LAUNCHER) },
 			{ FAKE_JJ_FAIL: "1" },
 		);
-		expect(exported.jjConfig).toBe(`${path.join(home, ".jjconfig.toml")}:${path.join(home, ".config", "jj", "config.toml")}:${overlayOf(ROOT)}`);
+		expect(exported.jjConfig).toBe(`${path.join(home, ".config", "jj", "config.toml")}:${path.join(home, ".jjconfig.toml")}:${overlayOf(ROOT)}`);
 	});
 });
 

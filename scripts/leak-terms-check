@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import ctypes
+import errno
 import fnmatch
 import glob
 import hashlib
@@ -1274,8 +1276,9 @@ def git_environment() -> dict[str, str]:
     return {**environment, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_ATTR_NOSYSTEM": "1"}
 
 @lru_cache(maxsize=1)
-def pushing_repository_commit_encoding() -> str | None:
-    """The configured fallback for an outgoing message that Git left in its original bytes."""
+def pushing_repository_commit_encoding() -> bytes | None:
+    """The configured fallback for an outgoing message that Git left in its original bytes; None when none is
+    configured or git's configuration cannot be read, since a message is then read in Latin-1 too (git_texts)."""
     try:
         completed = subprocess.run(
             ["git", "config", "--get", "i18n.commitEncoding"],
@@ -1285,37 +1288,136 @@ def pushing_repository_commit_encoding() -> str | None:
             env=git_environment(),
             check=False,
         )
-    except OSError as error:
-        raise TextError("could not read Git's commit message encoding") from error
-    if completed.returncode == 1:
+    except OSError:
         return None
     if completed.returncode != 0:
-        raise TextError("could not read Git's commit message encoding")
+        return None
+    return completed.stdout.removesuffix(b"\n")
+
+
+# What iconv_open and iconv return on failure: (iconv_t) -1 and (size_t) -1.
+ICONV_FAILED = ctypes.c_void_p(-1).value
+ICONV_ERROR = ctypes.c_size_t(-1).value
+# The most UTF-8 bytes iconv_reencode lets one input byte become, so no encoding value can grow memory without bound.
+# Of glibc 2.39's 1,180 charset names, the most any single byte becomes is 12 (TSCII 0x82, four Tamil characters);
+# a conversion that needs more is dropped, and the bytes are read as they are (git_texts).
+ICONV_GROWTH = 16
+# The input bytes iconv_reencode gives iconv per call, and the most bytes of an unfinished sequence (EINVAL) carried
+# into the next call. Its one output buffer holds ICONV_GROWTH bytes for each, so a call never stops for lack of
+# room: no buffer is sized from the whole input.
+ICONV_PIECE = 1 << 16
+ICONV_CARRY = 16
+
+
+@lru_cache(maxsize=1)
+def c_iconv() -> ctypes.CDLL:
+    """The C library's iconv_open, iconv and iconv_close, typed: glibc's, the converter git calls (utf8.c
+    reencode_string_len), found in this process as git finds it. Every machine this check runs on uses glibc, whose
+    libc holds iconv (agentbox/Dockerfile is FROM ubuntu:24.04, sami-devbox runs glibc 2.39, and laptop/install.sh
+    sets up Ubuntu or Pop!_OS), so no other library is looked for. A TextError when it is missing: the check cannot
+    read what git shows."""
+    library = ctypes.CDLL(None, use_errno=True)
     try:
-        return completed.stdout.removesuffix(b"\n").decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise TextError("Git configured an unknown commit message encoding") from error
+        library.iconv_open.restype = ctypes.c_void_p
+    except AttributeError as error:
+        raise TextError("the C library has no iconv to read an encoded commit or tag") from error
+    library.iconv_open.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+    pointer = ctypes.POINTER(ctypes.c_char_p)
+    size = ctypes.POINTER(ctypes.c_size_t)
+    library.iconv.restype = ctypes.c_size_t
+    library.iconv.argtypes = [ctypes.c_void_p, pointer, size, pointer, size]
+    library.iconv_close.argtypes = [ctypes.c_void_p]
+    return library
 
 
-def decode_git_message(message: bytes, declared_encoding: bytes | None = None) -> str:
-    """Decode a Git message from its header, UTF-8 bytes, or the pushing repository's configured encoding."""
+def git_same_utf_encoding(one: bytes, other: bytes) -> bool:
+    """git's same_utf_encoding (utf8.c): both names start with `utf`, in any case, and are the same past it and one
+    optional `-`."""
+    one, other = one.lower(), other.lower()
+    return (one.startswith(b"utf") and other.startswith(b"utf")
+            and one[3:].removeprefix(b"-") == other[3:].removeprefix(b"-"))
+
+
+def iconv_reencode(data: bytes, encoding: bytes) -> str | None:
+    """DATA converted to UTF-8 from ENCODING: the text one iconv conversion over all of it gives, with git's name
+    handling (utf8.c reencode_string_len, git 2.43): iconv_open is given the encoding exactly as written, up to a NUL
+    as C reads it, `UTF-16LE-BOM` is read as `UTF-16`, and when iconv_open refuses, a UTF-8 spelling is retried as
+    `UTF-8` and `latin-1` as `ISO-8859-1`. None where git shows the bytes as they are: iconv_open refuses the name, or
+    the bytes hold a sequence the charset cannot convert, or the text would pass ICONV_GROWTH UTF-8 bytes per input
+    byte. git's own text differs for TSCII, as glibc resumes a TSCII byte wrongly after git's conversion stops for lack
+    of room (the comment in the body below); this returns one call's text.
+
+    This replaces a regular expression that guessed glibc's name parser and missed forms git converts (`UTF-7
+    //TRANSLIT`, `UTF-7/ /x`, the review of INFRA-4943), and the iconv program, which reads a name that holds `/` as
+    the path of a charmap file: `encoding /dev/zero` read until a 30 s timeout. iconv_open reads no file: it refuses
+    `/dev/zero` at once. On sami-devbox (glibc 2.39, git 2.43) iconv_open opened exactly the forms git converted, of 20
+    spellings of UTF-7 (18; `UTF-7/x` and `/UTF-7` neither converts) and 2 paths (neither); Python's codecs, which this
+    no longer uses, read names git does not convert, such as `utf_16_le` and `latin_1`."""
+    name = encoding.split(b"\0", 1)[0]
+    if git_same_utf_encoding(b"UTF-16LE-BOM", name):
+        name = b"UTF-16"
+    library = c_iconv()
+    handle = library.iconv_open(b"UTF-8", name)
+    if handle in (None, ICONV_FAILED):
+        fallback = b"UTF-8" if git_same_utf_encoding(b"utf-8", name) else \
+            b"ISO-8859-1" if name.lower() == b"latin-1" else name
+        handle = library.iconv_open(b"UTF-8", fallback)
+    if handle in (None, ICONV_FAILED):
+        return None
+    try:
+        # glibc's TSCII converter resumes a byte that becomes several characters wrongly after it stops with E2BIG
+        # (8 MiB of byte 0x82 through 1 MiB output pieces gave 792 of 33,554,432 characters unlike one call's text, the
+        # reviews of INFRA-4943), so a call is given only as much input as the buffer holds the output of. A piece that
+        # ends inside a multibyte sequence stops before it with EINVAL, and the next piece starts with it; iconv keeps
+        # any shift state between calls. Fed so, 9,000 random inputs in TSCII, UTF-7, ISO-2022-JP, UTF-16LE, UTF-8 and
+        # IBM1047 through 1-to-64-byte pieces, and the 8 MiB sample, gave one call's text. git itself goes on after
+        # E2BIG, and so shows TSCII text like that damage (`git log --format=%B` of ten 0x82 bytes is not one call's
+        # text); no ASCII character changed in any measured case. Each piece is decoded as it comes: memory is the
+        # decoded pieces and their join, each the size of the text.
+        limit = ICONV_GROWTH * len(data) + 64
+        out = ctypes.create_string_buffer(ICONV_GROWTH * (min(ICONV_PIECE, len(data)) + ICONV_CARRY) + 64)
+        decoder = codecs.getincrementaldecoder("utf-8")()
+        pieces: list[str] = []
+        produced = carried = 0
+        left = len(data)
+        source = ctypes.c_char_p(data)
+        while True:
+            take = min(left, ICONV_PIECE + carried)
+            source_left = ctypes.c_size_t(take)
+            target, target_left = ctypes.cast(out, ctypes.c_char_p), ctypes.c_size_t(len(out))
+            failed = library.iconv(handle, ctypes.byref(source), ctypes.byref(source_left), ctypes.byref(target),
+                                   ctypes.byref(target_left)) == ICONV_ERROR
+            unfinished = failed and ctypes.get_errno() == errno.EINVAL
+            left -= take - source_left.value
+            carried = source_left.value
+            used = len(out) - target_left.value
+            produced += used
+            # EILSEQ, E2BIG past the growth cap, or a sequence still unfinished at the end of the input (git shows the
+            # bytes then), or one longer than ICONV_CARRY.
+            more_follows = left > carried
+            carry_fits = carried <= ICONV_CARRY
+            if failed and not (unfinished and more_follows and carry_fits) or produced > limit:
+                return None
+            pieces.append(decoder.decode(ctypes.string_at(out, used), final=left == 0))
+            if left == 0:
+                return "".join(pieces)
+    except UnicodeDecodeError:
+        return None
+    finally:
+        library.iconv_close(handle)
+
+
+def decode_git_message(message: bytes, declared_encoding: bytes | None = None) -> str | None:
+    """A Git message or header as git converts it: from its declared encoding (iconv_reencode, whose docstring says
+    where git's own text differs), else UTF-8 as it is, else converted from the pushing repository's configured
+    encoding. None when none of these gives text."""
     if declared_encoding is not None:
-        try:
-            encoding = declared_encoding.decode("ascii")
-        except UnicodeDecodeError as error:
-            raise TextError("Git declared an unknown commit message encoding") from error
-    else:
-        try:
-            return message.decode("utf-8")
-        except UnicodeDecodeError:
-            encoding = pushing_repository_commit_encoding()
-            if encoding is None:
-                raise TextError("a Git message is not valid UTF-8")
+        return iconv_reencode(message, declared_encoding)
     try:
-        codec = codecs.lookup(encoding)
-        return message.decode(codec.name)
-    except (LookupError, UnicodeDecodeError) as error:
-        raise TextError("could not decode a Git message") from error
+        return message.decode("utf-8")
+    except UnicodeDecodeError:
+        configured = pushing_repository_commit_encoding()
+        return None if configured is None else iconv_reencode(message, configured)
 
 
 def git_output(arguments: Sequence[str], standard_input: bytes, failure: str) -> bytes:
@@ -1543,25 +1645,6 @@ def destination_object_ids(held: Sequence[str]) -> set[str]:
     )
 
 
-def nul_records(chunks: Iterator[bytes]) -> Iterator[bytes]:
-    """Yield NUL-delimited records while joining each growing record only once."""
-    pieces: list[bytes] = []
-    for chunk in chunks:
-        start = 0
-        while True:
-            boundary = chunk.find(b"\0", start)
-            if boundary < 0:
-                if start < len(chunk):
-                    pieces.append(chunk[start:])
-                break
-            pieces.append(chunk[start:boundary])
-            yield b"".join(pieces)
-            pieces.clear()
-            start = boundary + 1
-    if pieces:
-        yield b"".join(pieces)
-
-
 def newline_records(chunks: Iterator[bytes]) -> Iterator[bytes]:
     """Yield newline-delimited byte records while joining each growing record only once."""
     pieces: list[bytes] = []
@@ -1671,39 +1754,140 @@ def info_attributes_present() -> bool:
         raise TextError("git could not read info attributes") from error
 
 
-def scan_outgoing_messages(commits: Sequence[str], matcher: TermMatcher, findings: list[Finding]) -> None:
-    """Scan commit messages from a NUL-framed producer, where Git messages cannot contain NUL."""
-    arguments = [
-        "log",
-        "--encoding=UTF-8",
-        "--no-walk=unsorted",
-        "--stdin",
-        "-z",
-        "--format=tformat:%H%x00%B",
-        "--no-show-signature",
-        "--no-notes",
-        "--no-decorate",
-    ]
-    expected = set(commits)
-    seen: set[str] = set()
-    records: list[bytes] = []
-    for raw in nul_records(git_chunks(arguments, ("\n".join(commits) + "\n").encode())):
-        records.append(raw)
-        if len(records) != 2:
+# A commit's or tag's header goes to the destination with its message (dispatch://INFRA-4943): `git log`, the
+# repository's web page and every clone show a commit's author and committer and a tag's tagger, by name and e-mail
+# address. Until 2026-11-21 a push read the messages alone, so a listed term in an author's or committer's name or
+# e-mail went to a public repository. An identity is `<name> <<e-mail>> <seconds> <zone>`; the seconds and the zone
+# are not read, and an identity that does not end in them is read whole.
+IDENTITY_HEADERS = frozenset((b"author", b"committer", b"tagger"))
+IDENTITY_DATE = re.compile(rb" [0-9]+ [+-][0-9]{4}\Z")
+# A header whose value is one object id holds nothing anyone wrote; with any other value it is read.
+OBJECT_ID_HEADERS = frozenset((b"tree", b"parent", b"object"))
+# A commit's or tag's signature header, `gpgsig` or `gpgsig-sha256` with its continuation lines, is not read: git signs
+# with gpg or ssh-keygen, which write base64, and sami-devbox's git config signs every commit (commit.gpgsign=true,
+# gpg.format=ssh). A hand-made object can carry other words there; those are not read either.
+SIGNATURE_HEADERS = frozenset((b"gpgsig", b"gpgsig-sha256"))
+# The outgoing commit objects one `cat-file --batch` call reads.
+COMMIT_BATCH = 1000
+
+
+def git_texts(raw: bytes, encoding: bytes | None) -> list[str]:
+    """A commit's or tag's message or header bytes as every text a reader may be shown: the bytes read as UTF-8, each
+    byte that does not decode kept (surrogateescape), and, when it gives other text, the text as git converts it
+    (decode_git_message: converted by the C library's iconv from the declared ENCODING, else from the repository's
+    configured encoding; iconv_reencode says where git's own text differs), else, when git shows the bytes as they
+    are, the bytes read as Latin-1, which decodes every byte. The declared decode alone hid a term: UTF-8 bytes under
+    `encoding UTF-16LE` or `encoding cp500` decode with no error to other characters, though `git log --format=%an`
+    showed the term (the review of INFRA-4943). No encoding, known or not, refuses the push: a message that is not
+    UTF-8 and names no encoding git can convert, which once refused the push unread, is read in Latin-1, so a term
+    with a non-ASCII letter in it is still found. Each header line and the message are converted apart, where git
+    converts the object whole: a sequence that fails in one piece leaves git showing every piece as bytes and here only
+    that one, and a stateful charset (ISO-2022-JP) whose shift a hand-made object carries over a line end reads
+    differently in the next piece here."""
+    texts = [raw.decode("utf-8", errors="surrogateescape")]
+    declared = decode_git_message(raw, encoding)
+    if declared is None:
+        declared = raw.decode("latin-1")
+    return texts if declared == texts[0] else [*texts, declared]
+
+
+def texts_findings(texts: Sequence[str], read: Callable[[str], list[Finding]]) -> list[Finding]:
+    """READ's findings in each of TEXTS (git_texts), a match an earlier text gave at the same place named once."""
+    found: list[Finding] = []
+    for text in texts:
+        known = {(finding.place, finding.matched, finding.scope) for finding in found}
+        found.extend(finding for finding in read(text) if (finding.place, finding.matched, finding.scope) not in known)
+    return found
+
+
+def header_line_findings(number: int, raw: bytes, encoding: bytes | None, place: Callable[[int], str],
+                         matcher: TermMatcher) -> list[Finding]:
+    """The listed terms in one header line, RAW, line NUMBER, in each text git_texts gives, at PLACE(NUMBER)."""
+    return texts_findings(git_texts(raw, encoding), lambda text: line_findings([(number, text)], matcher, False, place))
+
+
+def header_fields(header: bytes) -> list[list[tuple[int, bytes]]]:
+    """A raw header's fields in order, each its lines as (line number, line): the line that names the field, then its
+    continuation lines, which start with a space."""
+    fields: list[list[tuple[int, bytes]]] = []
+    for number, line in enumerate(header.split(b"\n"), start=1):
+        if fields and line.startswith(b" "):
+            fields[-1].append((number, line))
+        else:
+            fields.append([(number, line)])
+    return fields
+
+
+def field_value(fields: Sequence[Sequence[tuple[int, bytes]]], name: bytes) -> bytes | None:
+    """The value on the first line of the first field named NAME. Git reads the first of two `encoding` headers
+    (measured with git 2.43 for INFRA-4943), and parse_tag reads `object`, `type` and `tag` the same way."""
+    for field in fields:
+        word, _, value = field[0][1].partition(b" ")
+        if word == name:
+            return value
+    return None
+
+
+def header_findings(fields: Sequence[Sequence[tuple[int, bytes]]], encoding: bytes | None, place: str,
+                    matcher: TermMatcher) -> list[Finding]:
+    """The listed terms in a raw header's FIELDS (header_fields), each line read in every text git_texts gives with
+    ENCODING: an author, committer or tagger at `PLACE author` (`committer`, `tagger`), without its seconds and zone; a
+    `mergetag`, the signed tag `git merge` writes into a merge commit, read whole as a pushed tag is (object_findings),
+    at `PLACE merged tag NAME` (`PLACE merged tag` when it names none); a signature header (SIGNATURE_HEADERS) and its
+    continuation lines not at all; a `tree`, `parent` or `object` line that holds one object id not at all; and every
+    other line, the continuation lines of an identity or of an id header included, at `PLACE header line N`."""
+    findings: list[Finding] = []
+    for field in fields:
+        number, first = field[0]
+        word, _, value = first.partition(b" ")
+        if word in SIGNATURE_HEADERS:
             continue
-        raw_commit, raw_message = records
-        records.clear()
-        try:
-            commit = raw_commit.decode("ascii")
-        except UnicodeDecodeError as error:
-            raise TextError("git gave malformed commit boundaries") from error
-        if OBJECT_ID.fullmatch(commit) is None or commit not in expected or commit in seen:
-            raise TextError("git gave malformed commit boundaries")
-        seen.add(commit)
-        findings.extend(scan_message(decode_git_message(raw_message), matcher, "verbatim", None, False,
-                                     f"commit {commit[:12]} message"))
-    if records or seen != expected:
-        raise TextError("git gave malformed commit boundaries")
+        if word == b"mergetag":
+            # Read as an object, not through parse_tag, which refuses a tag with no `type` or `tag` line: a commit's
+            # mergetag need not hold them (the review of INFRA-4943 found one in Linux's history, 162e3480246e, that
+            # holds `object <id>` alone). Whatever it holds is read.
+            tag = b"\n".join([value, *(line[1:] for _, line in field[1:])])
+            name = field_value(header_fields(tag.partition(b"\n\n")[0]), b"tag")
+            shown = "" if name is None else f" {c_escape(name.decode('utf-8', errors='surrogateescape'))}"
+            findings.extend(object_findings(tag, f"{place} merged tag{shown}", matcher))
+            continue
+        lines = field
+        if word in IDENTITY_HEADERS:
+            findings.extend(header_line_findings(number, IDENTITY_DATE.sub(b"", value), encoding,
+                                                 lambda _, kind=word.decode(): f"{place} {kind}", matcher))
+            lines = field[1:]
+        elif word in OBJECT_ID_HEADERS and OBJECT_ID.fullmatch(value.decode("ascii", "replace")) is not None:
+            lines = field[1:]
+        for line_number, line in lines:
+            findings.extend(header_line_findings(line_number, line, encoding, lambda n: f"{place} header line {n}",
+                                                 matcher))
+    return findings
+
+
+def object_findings(content: bytes, place: str, matcher: TermMatcher) -> list[Finding]:
+    """The listed terms in a raw commit or tag object: its header (header_findings) and its message, a tag's signature
+    included, at `PLACE message line N`, each read in every text git_texts gives under the object's first `encoding`
+    header. Outgoing commits, the tags a commit carries as `mergetag` and pushed tags are all read here."""
+    header, _, message = content.partition(b"\n\n")
+    fields = header_fields(header)
+    encoding = field_value(fields, b"encoding")
+    findings = header_findings(fields, encoding, place, matcher)
+    findings.extend(texts_findings(git_texts(message, encoding), lambda text: scan_message(
+        text, matcher, "verbatim", None, False, f"{place} message")))
+    return findings
+
+
+def scan_outgoing_commit_objects(commits: Sequence[str], matcher: TermMatcher, findings: list[Finding]) -> None:
+    """Scan each outgoing commit object (object_findings), read whole with `cat-file --batch`, whose every record's id,
+    type and size batch_objects checks. Until 2026-11-21 the message was read through `git log --encoding=UTF-8`,
+    which decodes it as the commit declares, so UTF-8 bytes under `encoding UTF-16LE` or `encoding cp500` were read
+    as other characters and a term in them was missed (the review of INFRA-4943)."""
+    for start in range(0, len(commits), COMMIT_BATCH):
+        chunk = commits[start:start + COMMIT_BATCH]
+        contents = batch_objects(chunk, "commit", "git could not read the outgoing commits",
+                                 "git gave a malformed commit object")
+        for commit in chunk:
+            findings.extend(object_findings(contents[commit], f"commit {commit[:12]}", matcher))
 
 
 DIFF_OPTIONS = (
@@ -1949,7 +2133,8 @@ def scan_outgoing_merges(merges: Mapping[str, Sequence[str]], matcher: TermMatch
 # no listed term, under a key (record_key) that names this program, its interpreter and the lists a push to one
 # destination reads. A push then reads no content of a recorded blob (scan_covered_diffs, scan_outgoing_merges), so a
 # release whose files the internal main already holds reads only the files its cut rewrote. It still reads every commit
-# message, tag, ref name and path, and every file or folder object pushed by itself (scan_outgoing_objects).
+# and tag object (message and header), ref name and path, and every file or folder object pushed by itself
+# (scan_outgoing_objects).
 #
 # Threat model: whoever can write RECORD_REF in the pushing clone, or in the repository it fetches the ref from, can
 # make a push skip a blob's content. A note is trusted as written; nothing here protects it.
@@ -2082,14 +2267,14 @@ def scan_covered_diffs(commits: Sequence[str], matcher: TermMatcher, findings: l
 
 def scan_outgoing_commits(commits: Sequence[str], matcher: TermMatcher, coverage: Coverage | None = None
                           ) -> list[Finding]:
-    """Scan outgoing messages, the diffs of commits that are not merges, and what each merge adds, with separate
-    producers and verified boundaries; with COVERAGE, no content of a file version the record covers. The attribute
-    policy is read once for every producer (diff_policy)."""
+    """Scan outgoing messages and headers, the diffs of commits that are not merges, and what each merge adds, with
+    separate producers and verified boundaries; with COVERAGE, no content of a file version the record covers. The
+    attribute policy is read once for every producer (diff_policy)."""
     if not commits:
         return []
     parents = commit_parents(commits)
     findings: list[Finding] = []
-    scan_outgoing_messages(commits, matcher, findings)
+    scan_outgoing_commit_objects(commits, matcher, findings)
     policy = diff_policy()
     singles = [commit for commit in commits if len(parents[commit]) < 2]
     if coverage is None:
@@ -2163,33 +2348,26 @@ def tag_objects(object_ids: Sequence[str]) -> dict[str, bytes]:
     )
 
 
-def parse_tag(content: bytes) -> tuple[str, str, str, bytes, bytes | None]:
-    """A tag object's target, target type, name, raw message and encoding header."""
-    header, separator, message = content.partition(b"\n\n")
-    fields = dict(line.split(b" ", 1) for line in header.split(b"\n") if b" " in line)
-    target, kind, name = fields.get(b"object"), fields.get(b"type"), fields.get(b"tag")
+def parse_tag(content: bytes) -> tuple[str, str, str]:
+    """A tag object's target, target type and name, each the first of its header (field_value)."""
+    fields = header_fields(content.partition(b"\n\n")[0])
+    target, kind, name = (field_value(fields, word) for word in (b"object", b"type", b"tag"))
     if target is None or kind is None or name is None or OBJECT_ID.fullmatch(target.decode("ascii", "replace")) is None:
         raise TextError("git gave a malformed tag object")
-    return (
-        target.decode("ascii"),
-        kind.decode("ascii", "replace"),
-        name.decode("utf-8", errors="surrogateescape"),
-        message if separator else b"",
-        fields.get(b"encoding"),
-    )
+    return target.decode("ascii"), kind.decode("ascii", "replace"), name.decode("utf-8", errors="surrogateescape")
 
 
 @dataclass
 class TagWalk:
-    """The tag messages and every reached object type from one set of update objects."""
+    """The tags (name, id, raw content) and every reached object type from one set of update objects."""
 
-    tags: list[tuple[str, str, bytes, bytes | None]]
+    tags: list[tuple[str, str, bytes]]
     objects: dict[str, str]
 
 
 def tag_chains(starts: Sequence[tuple[str, str]], known: set[str]) -> TagWalk:
     """Walk the tag objects reached from STARTS, skipping every object in KNOWN."""
-    found: list[tuple[str, str, bytes, bytes | None]] = []
+    found: list[tuple[str, str, bytes]] = []
     objects: dict[str, str] = {}
     seen = set(known)
     pending: list[tuple[str | None, str]] = list(starts)
@@ -2207,8 +2385,8 @@ def tag_chains(starts: Sequence[tuple[str, str]], known: set[str]) -> TagWalk:
         for object_id, name in unique.items():
             if types[object_id] != "tag":
                 continue
-            target, kind, own_name, message, encoding = parse_tag(contents[object_id])
-            found.append((own_name if name is None else name, object_id, message, encoding))
+            target, kind, own_name = parse_tag(contents[object_id])
+            found.append((own_name if name is None else name, object_id, contents[object_id]))
             if kind == "tag":
                 pending.append((None, target))
             elif kind in {"blob", "commit", "tree"}:
@@ -2218,10 +2396,10 @@ def tag_chains(starts: Sequence[tuple[str, str]], known: set[str]) -> TagWalk:
     return TagWalk(found, objects)
 
 
-def outgoing_tag_messages(
+def outgoing_tags(
     updates: Sequence[tuple[str, str]], advertised: Sequence[str], held: set[str]
-) -> tuple[list[tuple[str, str]], dict[str, str]]:
-    """The outgoing tag messages and direct file or folder objects from one object walk over UPDATES."""
+) -> tuple[list[tuple[str, bytes]], dict[str, str]]:
+    """The outgoing tags (name, raw content) and direct file or folder objects from one object walk over UPDATES."""
     starts = [(ref.removeprefix("refs/tags/"), object_id) for ref, object_id in updates]
     known = set(advertised) | held
     outgoing = tag_chains(starts, known)
@@ -2232,8 +2410,8 @@ def outgoing_tag_messages(
     known.update(held_chains.objects)
     return (
         [
-            (name, decode_git_message(message, encoding))
-            for name, object_id, message, encoding in outgoing.tags
+            (name, content)
+            for name, object_id, content in outgoing.tags
             if object_id not in known
         ],
         {object_id: kind for object_id, kind in objects.items() if object_id not in known},
@@ -2597,8 +2775,8 @@ def record_command(url: str, revisions: Sequence[str]) -> int:
 
 
 def scan_push(text: str, remote: str, url: str) -> list[Finding]:
-    """Scan outgoing commits, tags, direct file and folder objects, and created or updated ref names, against the list
-    every repository has and each scoped list whose scope reaches the destination URL."""
+    """Scan outgoing commits, tags (their headers and messages), direct file and folder objects, and created or updated
+    ref names, against the list every repository has and each scoped list whose scope reaches the destination URL."""
     local, prior_remote = push_updates(text)
     if not local:
         return []
@@ -2606,15 +2784,14 @@ def scan_push(text: str, remote: str, url: str) -> list[Finding]:
     advertised = remote_advertisement(destination)
     held = local_object_ids([*advertised, *prior_remote])
     commits = outgoing_commit_ids([object_id for _, object_id in local], sorted(held))
-    tags, objects = outgoing_tag_messages(local, [*advertised, *prior_remote], held)
+    tags, objects = outgoing_tags(local, [*advertised, *prior_remote], held)
     matcher, list_digest = record_terms(repository_of(url), drop_allowed=True)
     coverage = push_coverage(matcher, list_digest) if commits else None
     findings = scan_outgoing_commits(commits, matcher, coverage)
     if coverage is not None:
         print(coverage.summary(), file=sys.stderr)
-    for name, message in tags:
-        place = f"tag {c_escape(name)} message"
-        findings.extend(scan_message(message, matcher, "verbatim", None, False, place))
+    for name, content in tags:
+        findings.extend(object_findings(content, f"tag {c_escape(name)}", matcher))
     findings.extend(scan_outgoing_objects(objects, commits, held, matcher))
     for remote_ref, _ in local:
         name = remote_ref.removeprefix("refs/heads/").removeprefix("refs/tags/")
