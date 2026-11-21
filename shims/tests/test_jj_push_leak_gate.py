@@ -436,8 +436,8 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.env = {
             **{k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG")},
             # The fake gh first, for the check's own gh calls, and again right after this shims dir, for
-            # shims/gh: the shim takes the first gh past its own PATH entry and never one above it (shims/AGENTS.md,
-            # "Adding to a shim"), so with the fake only first, its visibility reads reached the machine's real gh.
+            # shims/gh: the shim takes the first gh past its own PATH entry and never one above it (its real_gh),
+            # so with the fake only first, its visibility reads reached the machine's real gh.
             # Then the recording git and the sink helper.
             "PATH": os.pathsep.join([str(self.ghdir), str(SHIMS), str(self.ghdir), str(fake), str(real_jj().parent),
                                      os.environ["PATH"]]),

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Check diffs, commit messages, outgoing commits and the text a gh call sends against the encrypted leak-term list."""
+"""Check diffs, commit messages, outgoing commits and the text a gh call sends against the encrypted leak-term list.
+
+This is the one matcher: a caller (shims/git's hooks, shims/jj, jj-push-hooks, shims/gh) runs it and matches no term
+itself, and takes any nonzero exit for a refusal, except GH_STDIN_EXIT in `gh` mode, which asks for a second pass with
+the call's stdin. A refusal shows the text that matched (Finding)."""
 from __future__ import annotations
 
 import argparse
@@ -89,7 +93,7 @@ def pinned_sops() -> str | None:
 
 
 def mise_data_dirs(environment: Mapping[str, str]) -> list[Path]:
-    """The mise data dirs a pinned tool may be installed in, as shims/ reads them (shims/AGENTS.md, "A moved HOME"):
+    """The mise data dirs a pinned tool may be installed in, as each shim's copy of mise_paths reads them:
     MISE_DATA_DIR and mise's default ~/.local/share/mise under HOME; with no MISE_DATA_DIR, ~/.mise (.bashrc's) and
     that default under HOME, then the same two under the uid's passwd home, which a caller's HOME does not move."""
     home = environment.get("HOME")
@@ -506,8 +510,8 @@ class Finding:
     """One listed term a refusal names (dispatch://INFRA-4383, R2): PLACE names the file or field and the line, MATCHED
     is the text that matched as written, LINE the line it is on (excerpt), or None where PLACE is the matched name
     itself (a path, a ref, a tag's name), and SCOPE the list that holds the term (Span.scope). The caller wrote the
-    text, so showing it copies nothing to a new place; every place a refusal reaches is the caller's own
-    (shims/AGENTS.md, "Leak-term list")."""
+    text, so showing it copies nothing to a new place while every place a refusal reaches is the caller's own: no
+    refusal may go to a public place (a post, a public CI job's log) while it shows the matched text."""
 
     place: str
     matched: str
@@ -2127,7 +2131,7 @@ def scan_push(text: str, remote: str, url: str) -> list[Finding]:
 
 
 # The text a gh call sends to GitHub, read before gh runs. shims/gh hands this check every call that can carry text, as
-# `gh -- ARGV…`, on the pass that runs gh (shims/AGENTS.md). Until 2026-11-17 nothing read that text, and an agent's
+# `gh -- ARGV…`, on the pass that runs gh. Until 2026-11-17 nothing read that text, and an agent's
 # `gh pr edit` put a listed term into a public pull request's body, where GitHub keeps it in the body's edit history,
 # which only an admin can delete (dispatch://INFRA-4102).
 

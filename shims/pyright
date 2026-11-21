@@ -17,7 +17,7 @@ while [[ "$dir" != "/" ]]; do
 done
 
 # mise_paths: mise as this machine runs it, whatever HOME and PATH the caller set
-# (shims/AGENTS.md, "A moved HOME"). A Legion test pane runs a shim with a
+# (shims/tests/test_shim_moved_home.py). A Legion test pane runs a shim with a
 # temporary HOME and the PATH <bin>:/usr/local/bin:/usr/bin:/bin, where every
 # path under HOME names nothing. Sets, once per process:
 #   _mise_bin     mise on PATH, else the dotfiles checkout's bin/mise, else the
@@ -107,9 +107,9 @@ fi
 
 # Fall back to mise. mise exec resolves the bare name on PATH, putting first only the tool dirs it
 # adds itself; an install dir already on PATH without mise's record of adding it counts as the
-# caller's, so shims/basedpyright, ahead of it, would win and mise would exec it again, forever
-# (AGENTS.md, "A shim composes"). mise therefore starts from PATH without the install dirs of
-# any of mise's data dirs, given mise's configuration (mise_paths).
+# caller's, so shims/basedpyright, ahead of it, would win and mise would exec it again, forever.
+# mise therefore starts from PATH without the install dirs of any of mise's data dirs, given
+# mise's configuration (mise_paths).
 mise_paths
 mise_path=""
 IFS=':' read -ra dirs <<< "$PATH"

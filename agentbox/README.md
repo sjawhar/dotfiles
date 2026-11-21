@@ -11,12 +11,18 @@ agentbox runs each agent session in its own disposable [Sysbox](https://github.c
   login there, work unchanged), the cloud metadata service, the Envoy API, the host's tmux server, and the
   [forward](../forward/) channels, which carry the laptop's YubiKey (PC/SC) and browser. The secretsd socket is
   bind-mounted.
+  Through the relayed bus, `systemctl --user` in a box acts on the host's units, while `journalctl`, `pgrep` and
+  `/sys/fs/cgroup` answer about the box: a unit `systemctl --user` reports active can show no journal and no process
+  in the box.
 - Root in the box is an unprivileged user on the host, so `sudo apt-get install`, an inner Docker daemon and
   nested containers work without host privileges.
+- A box's `/proc` lists only the box's processes. A tool in a box that sweeps scratch by testing pids in its own
+  `/proc` reads every host run as dead, so a sweeper keeps what it cannot prove dead, and an in-box tool's `TMPDIR` never points at a host run's, or the reverse.
 - Each box has its own cpu, memory, pids and disk limit. When the session ends, everything in the box is deleted:
   its clones (uncommitted changes and commits no remote has too), its home, `/tmp` and its inner Docker store.
   Push what you want kept before the session ends. A box whose launcher died is deleted later by the collector
   that every `agentbox new` starts.
+  `scripts/path-outlives-box <path>…` says whether a write there outlives the box.
 - A box ends when its container stops, not when the launcher's Docker client ends. When dockerd restarts (an
   upgrade, a crash) with `live-restore` on, the container runs on, and the launcher attaches to it again in the
   same pane. When Docker does not answer for 5 minutes (`AGENTBOX_REATTACH_WAIT`), the launcher leaves the box
@@ -27,7 +33,7 @@ agentbox runs each agent session in its own disposable [Sysbox](https://github.c
 
 This is part of Sami's dotfiles, not a stand-alone tool. It expects a host set up by this repository's
 `install.sh`. (`devbox/gce-host.sh` is for Sami's own Google Cloud devbox only: it needs its disks and must run
-before `install.sh`.) The traps to know before you change a box are in
+before `install.sh`.) The commands that test a change to a box, and the rules for changing one, are in
 [AGENTS.md](AGENTS.md).
 
 ## What the host must have
@@ -46,7 +52,7 @@ before `install.sh`.) The traps to know before you change a box are in
 | A session bus at `/run/user/$UID/bus` | relayed into the box for the keyring | a login session or lingering |
 | secretsd listening on `/run/user/$UID/secretsd.sock` | `agentbox new` stops without it | `installers/secretsd.sh` (it skips when mise has no `secretsd` binary) |
 | `git`, `socat`, `jq`, `python3`, `ss` (iproute2) | clones, relays and launcher | `sudo apt-get install -y git socat jq python3 iproute2` |
-| The `agent-secrets` helper with a live launcher credential, or a `gh-app.<profile>.key-secret` in `~/.config/git/config` | git in the box, and the clone `agentbox new` makes, get GitHub tokens from `shims/gh-app-token`; with neither, every github.com credential request fails, so private repositories cannot be cloned | `installers/agent-secrets.sh` (see `agent-secrets/AGENTS.md`); `shims/gh-app-token --help` for `key-secret` |
+| The `agent-secrets` helper with a live launcher credential, or a `gh-app.<profile>.key-secret` in `~/.config/git/config` | git in the box, and the clone `agentbox new` makes, get GitHub tokens from `shims/gh-app-token`; with neither, every github.com credential request fails, so private repositories cannot be cloned | `installers/agent-secrets.sh`, then `scripts/agent-secrets-login <email>` once per machine; `shims/gh-app-token --help` for `key-secret` |
 | Optional: `forward serve` running | YubiKey and browser access from the box | `forward/` |
 
 ### Install Sysbox
@@ -153,6 +159,10 @@ The sparse disk defaults to 128 GiB on sami-devbox and 32 GiB on other hosts.
 Creating an image requires at least 500 GiB free on its host filesystem. Sparse capacity reserves no space.
 `grow` runs on the host. It extends the image, refreshes its loop device, and resizes ext4.
 It accepts sizes up to 512 GiB and refuses to shrink a filesystem.
+Under the CPU quota, wall time is not cost: work that wants more cores waits out the rest of each period.
+Before you call work in a box slow, read its CPU time and `/sys/fs/cgroup/cpu.stat` (`nr_throttled`, `throttled_usec`).
+Before you ask for more CPU, list your own processes, finished subagents' leftovers included (`ps` twice: supervisors respawn), and compare 30-second `cpu.stat` deltas; stop a runner before its children, and check that each one stopped.
+Then raise one box (`agentbox new --cpus N`), or run the parallel work on the host, as a transient scope over ssh.
 
 ## What it assumes about the host
 

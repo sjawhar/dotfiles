@@ -1,5 +1,7 @@
 #!/bin/bash
-# Shared helpers for dotfiles installers
+# Shared helpers for dotfiles installers. An installer uses them rather than its own link, clone,
+# JSON edit, .deb install or systemd unit: each is safe to run twice, and the comments above them
+# name the refusals and checks a hand-made step would lack.
 
 DOTFILES_DIR="${DOTFILES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 

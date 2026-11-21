@@ -57,7 +57,7 @@ class Base(unittest.TestCase):
         self.env = {
             **{k: v for k, v in os.environ.items()
                if not k.startswith(("GIT_CONFIG_", "PUBLIC_LEAK_CHECK"))},
-            # The shim takes no gh above its own PATH entry (shims/AGENTS.md, "Adding to a shim"), so this checkout's
+            # The shim takes no gh above its own PATH entry (real_gh in shims/gh), so this checkout's
             # shims/, which a run inside the checkout has on PATH, is left out: the shim runs from outside PATH and
             # takes the fake gh first.
             "PATH": os.pathsep.join([str(self.bin), *(entry for entry in os.environ["PATH"].split(os.pathsep)

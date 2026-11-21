@@ -116,7 +116,7 @@ export ANTHROPIC_1M_CONTEXT=true
 
 # Playwright's `install` deletes every browser in its browsers directory (~/.cache/ms-playwright, or
 # PLAYWRIGHT_BROWSERS_PATH below on a machine with the big disk) whose .links target it cannot read,
-# and the cache is shared with every agent box, whose checkouts this shell cannot see (agentbox/AGENTS.md).
+# and the cache is shared with every agent box, whose checkouts this shell cannot see (agentbox/mounts).
 # Boxes get the same setting from scripts/agentbox's session_env.
 export PLAYWRIGHT_SKIP_BROWSER_GC=1
 

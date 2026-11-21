@@ -1087,7 +1087,7 @@ find_real_gcloud() {
     # dotfiles shims nor the SDK's own bin dir; fall back to the documented
     # install location, under the home gcloud itself would use, then under the
     # uid's passwd home, which a moved HOME (a test's temporary one) does not
-    # move (shims/AGENTS.md, "A moved HOME"), before failing.
+    # move (shims/tests/test_shim_moved_home.py), before failing.
     local home
     local -a homes=() tried=()
     if resolve_user_home; then
