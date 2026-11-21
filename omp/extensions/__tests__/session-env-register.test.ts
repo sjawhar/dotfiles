@@ -36,8 +36,8 @@ beforeEach(() => {
 	fakeBin = path.join(home, "bin");
 	mkdirSync(fakeBin);
 	// One line per call. `identity` exits FAKE_IDENTITY_EXIT (0 by default: the caller is in a
-	// session the helper registered); `register` prints FAKE_REGISTER_ERR on stderr and exits
-	// FAKE_REGISTER_EXIT.
+	// session the helper registered); session-env never asks it, so an `identity` line in the log
+	// is a failure. `register` prints FAKE_REGISTER_ERR on stderr and exits FAKE_REGISTER_EXIT.
 	writeFileSync(
 		path.join(fakeBin, "agent-secrets"),
 		[
@@ -107,22 +107,24 @@ describe("a host omp session names itself to the secrets helper", () => {
 	test("namesTheSessionToTheHelperOnce", async () => {
 		const sock = await listen(path.join(home, "h.sock"));
 		const started = await start({ kind: "main", file: transcript, starts: 2 }, { AGENT_SECRETS_HELPER_SOCK: sock });
-		expect(logged()).toEqual(["identity", `register --session-id ${ROOT}`]);
+		expect(logged()).toEqual([`register --session-id ${ROOT}`]);
 		expect(started.id).toBe(ROOT);
 	});
 
 	test("finds the helper's default socket under XDG_RUNTIME_DIR, as the launcher does", async () => {
 		await listen(path.join(home, "run", "agent-secrets", "helper.sock"));
 		await start({ kind: "main", file: transcript }, {});
-		expect(logged()).toEqual(["identity", `register --session-id ${ROOT}`]);
+		expect(logged()).toEqual([`register --session-id ${ROOT}`]);
 	});
 
-	test("doesNotRegisterOutsideARegisteredSession", async () => {
-		// identity exits 1: the process is in no session the helper registered. A register here
-		// would make the helper admit the command's own short-lived pid as a session's root.
+	test("namesASessionTheLauncherDidNotRegister", async () => {
+		// identity exits 1: no launcher registered this omp (one resumed without the shims), so it
+		// has no broker identity yet. Since cybermonklabs/legion#4151 the register attaches the omp
+		// above it, this process, so the session still names itself.
 		const sock = await listen(path.join(home, "h.sock"));
-		await start({ kind: "main", file: transcript }, { AGENT_SECRETS_HELPER_SOCK: sock, FAKE_IDENTITY_EXIT: "1" });
-		expect(logged()).toEqual(["identity"]);
+		const started = await start({ kind: "main", file: transcript }, { AGENT_SECRETS_HELPER_SOCK: sock, FAKE_IDENTITY_EXIT: "1" });
+		expect(logged()).toEqual([`register --session-id ${ROOT}`]);
+		expect(started.id).toBe(ROOT);
 	});
 
 	test.each([
@@ -152,9 +154,14 @@ describe("a host omp session names itself to the secrets helper", () => {
 		expect(logged()).toEqual([]);
 	});
 
-	test("saysWhyWhenTheHelperRefusesTheName", async () => {
+	test.each([
+		["a session of another name", `agent-secrets register: BAD_REQUEST: this process is in session 01a1a3b9-f15e-7307-af39-d0e9f1e3a3b4, which cannot become session ${ROOT}`],
+		[
+			"no omp above the call",
+			"agent-secrets register: NOT_A_SESSION: pid 4242 is in no registered session and no session launcher (omp) is an ancestor of it, so a session registered for it would end with this command; relaunch the session under agent-secrets register --exec -- omp …",
+		],
+	] as const)("saysWhatToRunWhenTheHelperRefusesTheName: %s", async (_name, refusal) => {
 		const sock = await listen(path.join(home, "h.sock"));
-		const refusal = `agent-secrets register: BAD_REQUEST: this process is in session 01a1a3b9-f15e-7307-af39-d0e9f1e3a3b4, which cannot become session ${ROOT}`;
 		const started = await start(
 			{ kind: "main", file: transcript },
 			{ AGENT_SECRETS_HELPER_SOCK: sock, FAKE_REGISTER_EXIT: "1", FAKE_REGISTER_ERR: refusal },
@@ -162,7 +169,8 @@ describe("a host omp session names itself to the secrets helper", () => {
 		expect(started.id).toBe(ROOT);
 		const lines = started.stderr.split("\n").filter(line => line.includes("session-env:"));
 		expect(lines).toHaveLength(1);
-		expect(lines[0]).toContain(ROOT);
+		expect(lines[0]).toContain(`agent-secrets register --session-id ${ROOT}`);
+		expect(lines[0]).toContain(`~/.dotfiles/shims/omp --resume ${ROOT}`);
 		expect(lines[0]).toContain(refusal);
 	});
 });
