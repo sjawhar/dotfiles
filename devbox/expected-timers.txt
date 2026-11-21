@@ -99,8 +99,9 @@ unit-health-watch.timer            # owner: box-health lead. This list, and ever
 # One box-cleanup schedule folds docker-cap, gocache-cap, nvme-cache-cap,
 # session-scratch-reap, session-tmp-reap, tmp-empty-prune and tmp-stale-reap together
 # (dispatch://INFRA-993/ask/d44b73ba-3ac6-4307-9dd7-065cb035ec9b). Each keeps its own script,
-# caps, ages, refusals and ConditionPath*. Every 15 minutes the guarded cache caps run;
-# the session and temporary-file sweeps run only when their 86400-second interval is due.
+# caps, ages, refusals and ConditionPath*. Every 15 minutes the guarded cache caps and the
+# session-scratch reaper run; the temporary-file sweeps run only when their 86400-second interval
+# is due.
 # One timer and one log still cover all seven (devbox/box-cleanup.md). Since 2026-11-21 it also runs
 # the leak check's hook sweep as two steps (devbox/hook-sweep: fast roots every pass, 420 s; fast and
 # slow roots hourly, 1000 s), which dotfiles-follow.timer ran before (dispatch://INFRA-4953).

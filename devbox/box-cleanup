@@ -125,7 +125,7 @@ floor_for() { # floor_for MOUNT TOTAL_BYTES
 # whose target is not on this machine is recorded as skipped, not run and not failed.
 # devbox/session-scratch-reap is listed twice because it is two jobs: the reaper, and --tmp,
 # which only reports. tmp-stale-reap carries TMP_REAP_RUN_SECONDS from its own unit, which is
-# the budget it stops its walk at.
+# the budget it stops its walk at; the reaper's SESSION_SCRATCH_RUN_SECONDS is the same thing.
 user="$(id -un)"
 STEPS=(
     # The leak check's hook sweep over the fast roots, where sessions make checkouts: every tick, and
@@ -135,8 +135,13 @@ STEPS=(
     "tmp-empty-prune|86400|/mnt/nvme/$user/tmp /mnt/scratch/$user/tmp|$here/tmp-empty-prune"
     # A /tmp walk with a 1680-second budget is daily work, not a cheap usage check.
     "tmp-stale-reap|86400|/tmp|TMP_REAP_RUN_SECONDS=1680 $here/tmp-stale-reap --apply"
-    # Session-directory census and liveness checks keep their daily cadence.
-    "session-scratch-reap|86400|/mnt/nvme/$user/session-tmp /mnt/scratch/$user/session-tmp|$here/session-scratch-reap"
+    # Each agent session's own scratch directory, removed once the session is gone: every pass,
+    # not daily. Once a day it met a whole day of dead sessions at once (449 directories in the
+    # run that started 2026-11-20T23:36Z), and the first run of the day ran into the 30-minute
+    # step limit on 2026-11-18, 11-19 and 11-20 (log.jsonl), where a pass with little to remove
+    # took 3-15 s (every pass from 02:30Z to 06:01Z on 2026-11-21). Its deadline ends a long
+    # removal inside that limit, and the next pass carries it on.
+    "session-scratch-reap|0|/mnt/nvme/$user/session-tmp /mnt/scratch/$user/session-tmp|SESSION_SCRATCH_RUN_SECONDS=1500 $here/session-scratch-reap"
     # The report-only TMPDIR census took 409-828 seconds when that comment was written; on
     # 2026-11-06 it ran past the 30-minute step timeout on every pass, so box-cleanup exited 1
     # daily and unit-health-watch alarmed on a unit whose cleaners had all worked. Its own walk
