@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """shims/gh never takes a gh wrapper that runs it again for the real gh, and a wrapper that hands it the same call
-back is skipped, so the call reaches the real gh or fails at once with exit 127 (shims/AGENTS.md, "Adding to a shim").
+back is skipped, so the call reaches the real gh or fails at once with exit 127.
 Where the shim cannot tell that the call is the same (no sha256sum on PATH, or an argv that changes on each pass), the
 hop count in its marker ends the chain at its bound with exit 127.
 

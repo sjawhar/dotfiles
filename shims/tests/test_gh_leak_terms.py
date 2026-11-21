@@ -52,7 +52,7 @@ MUTATION = "a raw GraphQL mutation, which is read as public"
 ESCAPED_MUTATION = ('query=mutation { addComment(input: {subjectId: "I_1", body: "see \\u%04x%s"}) '
                     '{ clientMutationId } }' % (ord(CANARY[0]), CANARY[1:]))
 SEARCH_QUERY = 'query=query { search(query: "see %s", type: ISSUE, first: 1) { issueCount } }' % CANARY
-# The variables that make a shim read its caller as an agent (shims/AGENTS.md, "Who is an agent").
+# The variables that make a shim read its caller as an agent (shims/tests/test_shim_agent_context.py).
 AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION", "CLAUDECODE",
                  "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "SSH_CONNECTION", "SSH_TTY")
 # gh's config files, in the layout gh 2.98.0 writes them, with a fake token: config.yml's version line, and the entry
@@ -133,7 +133,7 @@ class GhLeakTerms(unittest.TestCase):
         self.env = {
             **inherited,
             **fixture_environment(),
-            # The shim takes no gh above its own PATH entry (shims/AGENTS.md, "Adding to a shim"), so this checkout's
+            # The shim takes no gh above its own PATH entry (real_gh in shims/gh), so this checkout's
             # shims/, which a run inside the checkout has on PATH, is left out: the shim runs from outside PATH and
             # takes the fake gh first.
             "PATH": os.pathsep.join([str(self.bin), *(entry for entry in os.environ["PATH"].split(os.pathsep)

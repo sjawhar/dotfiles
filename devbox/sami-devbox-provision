@@ -203,7 +203,7 @@ step_secrets() {
     # The built-in `anthropic` provider is left alone on purpose: this machine does hold a direct
     # Anthropic login (verified 2026-11-03), and every Claude chain ends on `anthropic/...`, so
     # giving it the gateway's baseUrl would send the whole chain through the gateway and leave a
-    # down gateway with no Claude at all (omp/AGENTS.md). installers/omp.sh merges the overlay at
+    # down gateway with no Claude at all (omp/models.yml). installers/omp.sh merges the overlay at
     # step tools; yq is not here before that.
     remote 'set -e
         f=~/.dotfiles/omp/models.local.yml

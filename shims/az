@@ -65,7 +65,7 @@ for pass in after-self from-top; do
     $past_self && break
 done
 # mise_paths: mise as this machine runs it, whatever HOME and PATH the caller set
-# (shims/AGENTS.md, "A moved HOME"). A Legion test pane runs a shim with a
+# (shims/tests/test_shim_moved_home.py). A Legion test pane runs a shim with a
 # temporary HOME and the PATH <bin>:/usr/local/bin:/usr/bin:/bin, where every
 # path under HOME names nothing. Sets, once per process:
 #   _mise_bin     mise on PATH, else the dotfiles checkout's bin/mise, else the
@@ -159,11 +159,11 @@ if [ -z "$real" ] || { is_mise_shim "$real" && [ "$_mise_config" != "${XDG_CONFI
 fi
 [ -n "$real" ] || { echo "shims/az: no real az on PATH ($PATH), and $_mise_bin, given $_mise_config and the data dir $_mise_data, names none" >&2; exit 127; }
 
-# The one test every identity shim makes, copied into each of them (shims/AGENTS.md, "Who is an
-# agent"): a session marker of any harness — omp, a pi tool bridge, Claude Code, an envoy
-# session, an agent box, a Legion pane (LEGION_ROLE and the rest of its runtime-owned set,
-# packages/daemon/internal/runtime/tmux/spawn.go) — or the gh-app routing include, or a command
-# over SSH in a session with no terminal.
+# The one test every identity shim makes, copied into each of them
+# (shims/tests/test_shim_agent_context.py): a session marker of any harness — omp, a pi tool
+# bridge, Claude Code, an envoy session, an agent box, a Legion pane (LEGION_ROLE and the rest of
+# its runtime-owned set, packages/daemon/internal/runtime/tmux/spawn.go) — or the gh-app routing
+# include, or a command over SSH in a session with no terminal.
 agent_context() {
     [[ -n "${OMP_SESSION_ID:-}${PI_SESSION_FILE:-}${PI_TOOL_BRIDGE_URL:-}${AGENTBOX_SESSION:-}${CLAUDECODE:-}${ENVOY_SESSION_ID:-}${AGENT_SHIM_AGENT:-}${LEGION_ROLE:-}${LEGION_TREE:-}${LEGION_CONTROLLER:-}${LEGION_DAEMON_URL:-}" ]] && return 0
     local i v

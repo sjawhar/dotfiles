@@ -1,10 +1,11 @@
 """pytest plugin, loaded in every agent box: says loudly when sandbox tests were skipped.
 
-A test that needs bubblewrap or an unprivileged user namespace cannot run in an agent box: Sysbox
+A test that needs an unprivileged user namespace cannot run in an agent box: Sysbox
 (the box runtime) handles every procfs mount itself and refuses one made from a nested user
-namespace, so a bwrap run that mounts its own /proc fails, and the image ships no bwrap. Such tests skip ("bwrap
-not installed") and pytest still ends green. This plugin prints a banner after the summary that
-names how many were skipped and why, so the run is not read as proof that the sandbox works.
+namespace, so a bwrap run that makes one and mounts its own /proc fails (the image's bwrap is
+setuid, so a run that makes none works: agentbox/Dockerfile). Such tests skip and pytest still
+ends green. This plugin prints a banner after the summary that names how many were skipped and
+why, so the run is not read as proof that the sandbox works.
 """
 
 import os
@@ -38,9 +39,9 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     for reason, count in sorted(reasons.items(), key=lambda item: -item[1]):
         tr.write_line(f"  {count} x {reason}", red=True, bold=True)
     tr.write_line(
-        "  An agent box cannot run bubblewrap: Sysbox refuses a /proc mount from a nested user namespace."
+        "  An agent box cannot run a sandbox that makes its own user namespace: Sysbox refuses its /proc mount."
         " These tests did not run, so this result says nothing about the sandbox. Run them on the host"
-        " or in CI before you report them green (agentbox/AGENTS.md).",
+        " or in CI before you report them green.",
         red=True,
         bold=True,
     )

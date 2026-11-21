@@ -1190,8 +1190,8 @@ host() {
     # built models.yml (dispatch://INFRA-993/comment/be112388). The built-in `anthropic` provider
     # is deliberately NOT given the gateway's baseUrl: every Claude chain ends on `anthropic/...`,
     # so routing it through the gateway too would leave a down gateway with no Claude at all
-    # (omp/AGENTS.md; the assertion that demanded the opposite stood here until 2026-11-05 and had
-    # been failing since the direct route was restored).
+    # (omp/models.yml, the `anthropic` provider's comment; the assertion that demanded the opposite
+    # stood here until 2026-11-05 and had been failing since the direct route was restored).
     local want="!$DOTFILES_DIR/scripts/gateway-token"
     missing="$(WANT="$want" yq '.providers["model-gateway"].apiKey == strenv(WANT) and .providers["model-gateway-openai"].apiKey == strenv(WANT)' "$HOME/.omp/agent/models.yml" 2>&1)"
     [[ "$missing" == true ]] && ok "omp models.yml: both gateway providers mint their token per call ($want)" || fail "omp models.yml: a gateway provider does not use $want: $missing"

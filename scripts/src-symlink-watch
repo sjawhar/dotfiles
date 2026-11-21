@@ -18,7 +18,7 @@ boxes that will therefore mount it.
 
 It reports; it changes nothing. Removing a link is a decision per lane, and the hazard of
 removing one is real: a path a box is NOT given is silently writable inside the box and lost at
-its exit, with no error (agentbox/AGENTS.md).
+its exit, with no error (agentbox/README.md).
 """
 import argparse
 import json
