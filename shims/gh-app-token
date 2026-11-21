@@ -36,9 +36,11 @@ A machine refuses an owner for a profile by naming it in refuse-owner, in its ow
 repository's config do not. For a refused owner the helper reads and seeds no cache, mints no
 App token and falls back to no personal token: it prints one line on stderr, prints `quit=1` on
 stdout in credential mode, logs `refused` in decisions.log and exits 1. An owner-wide broker
-release minted for another owner caches no token for a refused owner. A
-`~/.config/git/config` that git cannot read refuses every owner. refuse-owner is multi-valued
-and matches without regard to case. Add each owner with
+release minted for another owner caches no token for a refused owner. With no
+`~/.config/git/config`, no owner is refused. A dangling link at that path, a file this process
+may not read, an unsearchable ~/.config or ~/.config/git, and a file git cannot parse each
+refuse every owner. git's stderr is not read: GIT_TRACE and a git wrapper on PATH write there.
+refuse-owner is multi-valued and matches without regard to case. Add each owner with
   git config --file ~/.config/git/config --add gh-app.<profile>.refuse-owner <login>
 oryx refuses trajectory-labs-pbc for the agent profile (HOME-216).
 
@@ -241,22 +243,34 @@ def refused_owners(profile: str) -> frozenset[str]:
     """The owners this machine refuses for profile, casefolded: every gh-app.<profile>.refuse-owner
     in ~/.config/git/config, the machine's own git config, found from HOME at each call.
 
-    git reads that one file, named with --file. A plain `git config` reads
-    $XDG_CONFIG_HOME/git/config in its place whenever XDG_CONFIG_HOME is set, and Legion panes set
-    it to a directory with no git config, so there every refusal was skipped (HOME-216). ~/.gitconfig,
-    GIT_CONFIG_GLOBAL, the system config and a repository's config are never read: other machines
-    share the first, and a repository is not the machine.
+    git reads that one file, named with --file, and runs in / so that it finds no repository. A plain
+    `git config` reads $XDG_CONFIG_HOME/git/config in its place whenever XDG_CONFIG_HOME is set, and
+    Legion panes set it to a directory with no git config, so there every refusal was skipped
+    (HOME-216). ~/.gitconfig, GIT_CONFIG_GLOBAL, the system config and a repository's config are never
+    read: other machines share the first, and a repository is not the machine.
 
     Not lenient like git_config_optional, for which any failure means "not set": that would serve a
-    refused owner whenever git cannot read the file. Only exit 1 with no output at all, on stdout or
-    stderr (no such file, or no such key), means no owner is refused. git also exits 1 for a file it
-    may not read, with only a warning on stderr, so a file that exists and this process cannot read
-    is refused before git runs, and a warning on stderr is a failure too. Any other failure, such as a
-    file git cannot parse or a git that cannot run, raises AppTokenError, so every owner is refused."""
+    refused owner whenever git cannot read the file. git exits 1 for a missing file and for a file it
+    may not open alike, so the file system decides "missing" against "cannot see" before git runs:
+    - No file at the path: no owner is refused.
+    - A dangling link at the path, a file this process may not read, or a path it cannot look up
+      (an unsearchable ~/.config or ~/.config/git): every owner is refused.
+    Then git's exit 0 gives the owners, and exit 1 with nothing on stdout means the key is not set, so
+    no owner is refused. git's stderr is not read: GIT_TRACE and a git wrapper on PATH write there on
+    every call. Any other exit, such as 128 for a file git cannot parse, or a git that cannot run,
+    raises AppTokenError, so every owner is refused."""
     key = f"gh-app.{profile}.refuse-owner"
     config = Path.home() / ".config" / "git" / "config"
     failure = f"failed to read {key} from {config}, so every owner is refused"
-    if os.path.lexists(config) and not os.access(config, os.R_OK):
+    try:
+        os.stat(config)
+    except (FileNotFoundError, NotADirectoryError) as error:
+        if os.path.islink(config):
+            raise AppTokenError(failure) from error
+        return frozenset()
+    except OSError as error:
+        raise AppTokenError(failure) from error
+    if not os.access(config, os.R_OK):
         raise AppTokenError(failure)
     try:
         result = subprocess.run(
@@ -264,12 +278,13 @@ def refused_owners(profile: str) -> frozenset[str]:
             capture_output=True,
             text=True,
             check=False,
+            cwd="/",
         )
     except (OSError, UnicodeDecodeError) as error:
         raise AppTokenError(failure) from error
     if result.returncode == 0:
         return frozenset(value.casefold() for value in result.stdout.splitlines())
-    if result.returncode == 1 and not result.stdout and not result.stderr.strip():
+    if result.returncode == 1 and not result.stdout:
         return frozenset()
     raise AppTokenError(failure)
 
@@ -852,7 +867,7 @@ def get_token(
     min_lifetime: int = TOKEN_REFRESH_MARGIN,
     scope: dict[str, Any] | None = None,
     *,
-    refused: frozenset[str] = frozenset(),
+    refused: frozenset[str],
 ) -> str:
     """Return a token for one owner (narrowed by scope when given), never reusing another owner's
     or another scope's cache, and never a cached one with min_lifetime seconds or less left. An

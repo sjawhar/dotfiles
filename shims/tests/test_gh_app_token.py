@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -442,7 +443,7 @@ class GhAppTokenTests(unittest.TestCase):
 
         def cache_miss(owner):
             try:
-                results[owner] = gh_app_token.get_token("agent", owner)
+                results[owner] = gh_app_token.get_token("agent", owner, refused=frozenset())
             except Exception as error:
                 errors.append(error)
 
@@ -607,14 +608,21 @@ class GhAppTokenTests(unittest.TestCase):
         )
 
     def test_refuse_owner_matching_is_case_insensitive(self):
-        self.refuse_owner("Trajectory-Labs-PBC")
+        # git hands back the owner as the machine config spells it, here in lowercase; a remote URL or
+        # a person may spell it in mixed case. Matching the owner as requested would mint its token.
+        self.refuse_owner("trajectory-labs-pbc")
+        requested = "Trajectory-Labs-PBC"
+        detail = self.refusal_detail("agent", requested)
 
-        rc, stdout, stderr = self.run_main(["agent", "--owner", "trajectory-labs-pbc"])
-
-        self.assertEqual(
-            (rc, stdout, stderr),
-            (1, "", self.refusal_detail("agent", "trajectory-labs-pbc") + "\n"),
+        direct = self.run_main(["agent", "--owner", requested])
+        credential = self.run_main(
+            ["agent", "get"], stdin=f"host=github.com\npath={requested}/agent-c.git\n\n"
         )
+
+        self.assertEqual(direct, (1, "", detail + "\n"))
+        self.assertEqual(credential, (1, "quit=1\n", detail + "\n"))
+        self.assertEqual(self.secret_run_calls(), [])
+        self.assertEqual(self.secrets_calls(), [])
 
     def test_gh_app_owner_refusal_stops_the_direct_owner_override(self):
         owner = "trajectory-labs-pbc"
@@ -791,7 +799,7 @@ class GhAppTokenTests(unittest.TestCase):
         # A caller asking for more than GitHub's hour gets the fresh token, not a loop.
         with redirect_stderr(io.StringIO()):
             self.assertEqual(
-                gh_app_token.get_token("agent", "sjawhar", 10**9),
+                gh_app_token.get_token("agent", "sjawhar", 10**9, refused=frozenset()),
                 "broker-token-sjawhar",
             )
         self.assertEqual(self.secret_run_calls(), self.broker_command("sjawhar"))
@@ -1186,7 +1194,7 @@ class RefuseOwnerReadsOnlyTheMachinesOwnConfig(unittest.TestCase):
             json.dumps({"token": token, "expires_at": "2099-01-01T00:00:00Z"})
         )
 
-    def run_shim(self, env, *argv, stdin=""):
+    def run_shim(self, env, *argv, stdin="", cwd=None):
         result = subprocess.run(
             [sys.executable, str(MODULE_PATH), "agent", *argv],
             env=env,
@@ -1195,7 +1203,7 @@ class RefuseOwnerReadsOnlyTheMachinesOwnConfig(unittest.TestCase):
             text=True,
             timeout=60,
             check=False,
-            cwd=self.root,
+            cwd=self.root if cwd is None else cwd,
         )
         return result.returncode, result.stdout, result.stderr
 
@@ -1295,6 +1303,148 @@ class RefuseOwnerReadsOnlyTheMachinesOwnConfig(unittest.TestCase):
 
         self.assertEqual(direct, (1, "", failure))
         self.assertEqual(credential, (1, "quit=1\n", failure))
+        self.assertEqual(self.calls(self.secrets_log), [])
+        self.assertEqual(self.calls(self.secret_run_log), [])
+
+    def test_a_machine_config_this_process_cannot_see_refuses_every_owner(self):
+        # git exits 1 with nothing on stdout for a dangling link at the path, and for a file or a
+        # directory it may not open (with only a warning on stderr): the same status as no file at
+        # all. So each is decided before git runs. A file git cannot parse is its exit 128. In each
+        # case the config names the refused owner and that owner's token is cached, so reading the
+        # case as "nothing refused" serves it.
+        refusing = '[gh-app "agent"]\n\trefuse-owner = trajectory-labs-pbc\n'
+        git_dir = self.machine_config.parent
+
+        def unreadable_file():
+            self.machine_config.write_text(refusing)
+            self.machine_config.chmod(0)
+
+        def unsearchable_directory():
+            self.machine_config.write_text(refusing)
+            git_dir.chmod(0)
+
+        def dangling_link():
+            # The file the link named, which held the refusal, is gone.
+            self.machine_config.symlink_to(self.root / "removed-config")
+
+        def parse_error():
+            self.machine_config.write_text('[gh-app "agent"\n\trefuse-owner = trajectory-labs-pbc\n')
+
+        self.cache_token("trajectory-labs-pbc", "ghs_cached_refused")
+        self.cache_token("allowed-owner", "ghs_cached_allowed")
+        env = {**self.env, "XDG_CONFIG_HOME": str(self.legion_xdg_config_home)}
+        failure = (
+            f"gh-app-token: failed to read gh-app.agent.refuse-owner from {self.machine_config}, "
+            "so every owner is refused\n"
+        )
+
+        for name, (arrange, needs_file_modes) in {
+            "a file this user may not read (mode 000)": (unreadable_file, True),
+            "an unsearchable ~/.config/git (mode 000)": (unsearchable_directory, True),
+            "a dangling link at ~/.config/git/config": (dangling_link, False),
+            "a file git cannot parse": (parse_error, False),
+        }.items():
+            with self.subTest(name):
+                if needs_file_modes and os.geteuid() == 0:
+                    self.skipTest("root reads a file whatever its mode")
+                try:
+                    arrange()
+                    answers = {
+                        "refused owner": self.run_shim(env, "--owner", "trajectory-labs-pbc"),
+                        "allowed owner": self.run_shim(env, "--owner", "allowed-owner"),
+                        "credential mode": self.run_shim(
+                            env,
+                            "get",
+                            stdin="protocol=https\nhost=github.com\npath=trajectory-labs-pbc/agent-c.git\n\n",
+                        ),
+                    }
+                finally:
+                    git_dir.chmod(0o700)
+                    self.machine_config.unlink(missing_ok=True)
+                self.assertEqual(
+                    answers,
+                    {
+                        "refused owner": (1, "", failure),
+                        "allowed owner": (1, "", failure),
+                        "credential mode": (1, "quit=1\n", failure),
+                    },
+                )
+        self.assertEqual(self.calls(self.secrets_log), [])
+        self.assertEqual(self.calls(self.secret_run_log), [])
+
+    def test_without_a_refuse_owner_for_the_profile_no_owner_is_refused(self):
+        # Two machine configs refuse no owner: none at all, which is decided before git runs, and one
+        # that refuses an owner for another profile only, for which git exits 1 with nothing on stdout.
+        # What git writes on stderr then says nothing about the file: GIT_TRACE traces every call
+        # there, and a git wrapper on PATH may write there too. A repository the caller stands in is
+        # not the machine, so a refuse-owner in its config refuses nothing.
+        key = "gh-app.agent.refuse-owner"
+        self.cache_token("trajectory-labs-pbc", "ghs_cached_trajectory")
+        self.cache_token("allowed-owner", "ghs_cached_allowed")
+        real_git = shutil.which("git", path=self.env["PATH"])
+        self.assertIsNotNone(real_git)
+        noisy_bin = self.root / "noisy-git-bin"
+        noisy_bin.mkdir()
+        (noisy_bin / "git").write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' 'noisy-git: a wrapper line on stderr' >&2\n"
+            f'exec "{real_git}" "$@"\n'
+        )
+        (noisy_bin / "git").chmod(0o700)
+        repository = self.root / "repository"
+        subprocess.run([real_git, "init", "--quiet", str(repository)], env=self.env, capture_output=True, check=True)
+        subprocess.run(
+            [real_git, "config", "--file", str(repository / ".git" / "config"), "--add", key, "trajectory-labs-pbc"],
+            env=self.env,
+            capture_output=True,
+            check=True,
+        )
+        # A plain `git config` in the repository reads the refusal: the repository is valid.
+        in_repository = subprocess.run(
+            [real_git, "config", "--get-all", key], env=self.env, cwd=repository, capture_output=True, text=True
+        )
+        self.assertEqual((in_repository.returncode, in_repository.stdout), (0, "trajectory-labs-pbc\n"))
+
+        cases = {
+            "plain environment": (self.env, self.root, False),
+            "GIT_TRACE=1": ({**self.env, "GIT_TRACE": "1"}, self.root, True),
+            "a git on PATH that writes on stderr": (
+                {**self.env, "PATH": f"{noisy_bin}{os.pathsep}{self.env['PATH']}"}, self.root, True
+            ),
+            "run in a repository whose config refuses the owner": (self.env, repository, False),
+        }
+        for config, contents in {
+            "no ~/.config/git/config": None,
+            "a ~/.config/git/config that refuses the owner for another profile only": (
+                '[gh-app "review"]\n\trefuse-owner = trajectory-labs-pbc\n'
+            ),
+        }.items():
+            if contents is None:
+                self.assertFalse(os.path.lexists(self.machine_config))
+            else:
+                self.machine_config.write_text(contents)
+            for name, (env, cwd, git_writes_stderr) in cases.items():
+                with self.subTest(config=config, case=name):
+                    # The lookup the shim makes, by the git the shim finds: it writes on stderr or not.
+                    lookup = subprocess.run(
+                        ["git", "config", "--file", str(self.machine_config), "--get-all", key],
+                        env=env,
+                        cwd=cwd,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(
+                        (lookup.returncode, lookup.stdout, bool(lookup.stderr)),
+                        (1, "", git_writes_stderr),
+                        lookup.stderr,
+                    )
+                    self.assertEqual(
+                        self.run_shim(env, "--owner", "trajectory-labs-pbc", cwd=cwd),
+                        (0, "ghs_cached_trajectory\n", ""),
+                    )
+                    self.assertEqual(
+                        self.run_shim(env, "--owner", "allowed-owner", cwd=cwd), (0, "ghs_cached_allowed\n", "")
+                    )
         self.assertEqual(self.calls(self.secrets_log), [])
         self.assertEqual(self.calls(self.secret_run_log), [])
 
