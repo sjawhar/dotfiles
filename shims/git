@@ -15,6 +15,10 @@
 # prune there deletes live sessions' registrations in the shared store
 # (AGENTC-431: 17 bare prunes on 2026-09-26, from five boxes). A locked
 # registration survives a prune. Everything else goes straight to the real git.
+# A git that hands a call back to this shim by exec (a test's fake that runs it again by its path)
+# is not chosen again, and a chain of passes, a fake that runs it as a child included, is refused
+# past 8 hops with a named error. DOTFILES_GIT_SHIM may change which git the shim picks, never
+# which checks run.
 set -euo pipefail
 
 # This shim's own directory, through a link to it: a caller may run the shim by a link in a
@@ -29,9 +33,42 @@ LOCK_REASON="agent session: locked on add (AGENTC-431)"
 # already (a `jj workspace add` outside an agent session). Ours as well.
 JJ_LOCK_REASON="jj shim: locked on add (AGENTC-431)"
 
-# The first git on PATH past this shim, judged by content like shims/gh. Entries
-# before the shim's own (`-ef`: its directory however PATH spells it) already had
-# their turn: a wrapper there that hands off positionally (knives gh's jj-bookmark
+# A git that hands the call back to this shim re-enters it: in the same pid, a test's fake git
+# that execs, by its path, the git it found on PATH, which is this shim where the shim comes
+# first, run with a PATH that holds the fake and not this shim (a Legion test's fake old git and
+# this shim exec'd each other about 120 times in one pid until the test's 30 s limit killed it,
+# 2026-11-21); in a new pid each time, a fake that runs that git as a child. DOTFILES_GIT_SHIM
+# ("<pid> <hops> <git>:<git>…", as DOTFILES_GH_SHIM in shims/gh) names every git this shim has
+# handed the call to in that pid, and how many passes through this shim the chain of processes
+# above has made. A pass in that pid skips each git named, and any path to the same file, so the
+# call reaches the git past them or fails. The hop count stops the loop the skip cannot see, a new
+# pid each time: the pass past _max_hops refuses with exit 127 and one line. The deepest chain that
+# is no loop has about four (a wrapper's hand-off, the pass it hands back, jj's git, a nested test
+# suite's git); 8 leaves room for that, as in shims/gh.
+# The marker changes only which git a pass hands the call to. It never turns a check off: every
+# pass, the first or one a git handed back, runs every check below on the call it got (a set
+# marker is the caller's to set, so it must give nothing a caller could not get otherwise).
+_max_hops=8
+_handed=""
+read -r _marker_pid _marker_hops _marker_handed <<< "${DOTFILES_GIT_SHIM:-}"
+[[ "$_marker_hops" =~ ^[0-9]{1,4}$ ]] && _marker_hops=$((10#$_marker_hops)) || _marker_hops=0
+if ((_marker_hops >= _max_hops)); then
+    echo "git shim: refusing: this chain of processes already ran this shim $_marker_hops times (DOTFILES_GIT_SHIM, at most $_max_hops), so a git on PATH ($PATH) keeps handing calls back to it${_marker_handed:+; the last pass handed one to ${_marker_handed//:/, }}" >&2
+    exit 127
+fi
+[[ "$_marker_pid" == "$$" ]] && _handed="$_marker_handed"
+handed_back() {
+    local IFS=':'
+    local git
+    for git in $_handed; do
+        [[ -n "$git" && "$1" -ef "$git" ]] && return 0
+    done
+    return 1
+}
+
+# The first git on PATH past this shim, judged by content like shims/gh, and not one that handed
+# the call back. Entries before the shim's own (`-ef`: its directory however PATH spells it)
+# already had their turn: a wrapper there that hands off positionally (knives gh's jj-bookmark
 # wrapper) would otherwise be chosen again and the two exec each other forever.
 # A PATH that does not carry this shim is scanned whole, then the system dirs.
 real_git() {
@@ -47,6 +84,7 @@ real_git() {
         header=""
         IFS= read -r -n 512 -d '' header < "$candidate" || true
         [[ "$header" == *git-worktree-shim* ]] && continue
+        handed_back "$candidate" && continue
         if [[ "$seen_self" == 1 ]]; then
             echo "$candidate"
             return
@@ -63,15 +101,18 @@ real_git() {
         header=""
         IFS= read -r -n 512 -d '' header < "$candidate" || true
         [[ "$header" == *git-worktree-shim* ]] && continue
+        handed_back "$candidate" && continue
         echo "$candidate"
         return
     done
     return 1
 }
 if ! _real="$(real_git)"; then
-    echo "git shim: no real git found on PATH" >&2
+    echo "git shim: no real git found on PATH${_handed:+; ${_handed//:/, } handed the call back to this shim}" >&2
     exit 127
 fi
+_handed="${_handed:+$_handed:}$_real"
+export DOTFILES_GIT_SHIM="$$ $((_marker_hops + 1)) $_handed"
 # The shim's own tools (cat, awk, realpath, mktemp) must exist even when the
 # caller's PATH omits the system dirs; appending keeps the caller's dirs first.
 PATH="$PATH:/usr/bin:/bin"
@@ -405,6 +446,44 @@ if [[ "${DOTFILES_GIT_SHIM_READ_GLOBALS:-}" == 1 ]]; then
 fi
 git_expand_aliases
 git_read_global_options args
+
+# A pass a git handed the call back to gets it as the pass before rewrote it: with a last
+# `-c core.hooksPath=` at the git-hooks/ or jj-push-hooks/ of this shim. Read as the caller's choice,
+# that hooks path turned off the commit's leak-term scan and the push's public check, and its
+# second copy kept the hook from finding the hook git would otherwise run. Such a hooks path, a
+# git-hooks/ or jj-push-hooks/ beside a copy of this shim (its git carries the marker), is a shim's
+# own and never the caller's: an entry spelled as this shim writes it, `-c core.hooksPath=<dir>`, is
+# dropped here, and this pass adds its own again wherever it adds one. A caller that names one that
+# way gets this shim's checks, as with no hooks path at all; another spelling (`--config-env`, another
+# case of the key) stays the caller's hooks path, as any hooks path the caller sets is.
+# Bash alone reads it, so an ordinary call pays one loop over its -c entries.
+shim_hooks_dir() {
+    local header=""
+    [[ "$1" == */git-hooks || "$1" == */jj-push-hooks ]] && [[ -f "${1%/*}/git" ]] || return 1
+    IFS= read -r -n 512 -d '' header < "${1%/*}/git" || true
+    [[ "$header" == *git-worktree-shim* ]]
+}
+for config in "${git_global_configs[@]}"; do
+    [[ "$config" == core.hooksPath=* ]] && shim_hooks_dir "${config#*=}" || continue
+    kept=() k=0
+    while ((k < i)); do
+        entry="${git_global_options[${args[k]}]:-}"
+        if [[ "${args[k]}" == -c ]] && ((k + 1 < i)) && [[ "${args[k + 1]}" == core.hooksPath=* ]] &&
+            shim_hooks_dir "${args[k + 1]#*=}"; then
+            ((k += 2))
+            continue
+        fi
+        kept+=("${args[k]}")
+        if [[ "$entry" == separate\|* || "$entry" == separate-or-equals\|* ]] && ((k + 1 < i)); then
+            kept+=("${args[k + 1]}")
+            ((k += 1))
+        fi
+        ((k += 1))
+    done
+    args=("${kept[@]}" "${args[@]:i}")
+    git_read_global_options args
+    break
+done
 set -- "${args[@]}"
 
 # A caller who selects a hooks path owns that command, and the scanner does not run. The shared

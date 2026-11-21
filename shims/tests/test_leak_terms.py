@@ -25,7 +25,7 @@ from pathlib import Path
 from unittest import mock
 
 from leak_terms_fixture import (ALLOWED_TEST_TOKENS, REGISTRY_TEST_TERMS, SCOPED_TEST_TERMS, TEST_TERMS, encrypt_yaml,
-                                fixture_environment, real_sops, unrelated_key_file)
+                                fixture_environment, real_sops, sops_directory, unrelated_key_file)
 from test_jj_push_leak_gate import SERVER_SIDE, SINK_HELPER
 
 
@@ -63,11 +63,14 @@ AGE_PUBLIC_KEY = re.compile(r"\bage1[02-9ac-hj-np-z]{58}\b")
 
 
 def base_environment(*dropped: str) -> dict[str, str]:
-    """os.environ without the agent markers, the PI_/LEGION_/GIT_CONFIG_ variables, and DROPPED."""
+    """os.environ without the agent markers, the PI_/LEGION_/GIT_CONFIG_ variables, shims/git's DOTFILES_GIT_SHIM (a
+    suite run under a git, from a hook or `git rebase -x`, would start each case with that git's hop count), and
+    DROPPED."""
     return {
         name: value
         for name, value in os.environ.items()
-        if name not in AGENT_MARKERS and name not in dropped and not name.startswith(("PI_", "LEGION_", "GIT_CONFIG_"))
+        if name not in AGENT_MARKERS and name not in dropped and name != "DOTFILES_GIT_SHIM"
+        and not name.startswith(("PI_", "LEGION_", "GIT_CONFIG_"))
     }
 
 
@@ -5520,6 +5523,71 @@ class OutgoingLeaks(SinkRepositoryCase):
             self.person | {"DOTFILES_JJ_NO_LEAK_CHECK": "1"},
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def marked_push(self, marker: str, commit: str, ref: str, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        """`git push origin COMMIT:refs/heads/REF` through the shim, with DOTFILES_GIT_SHIM=MARKER; a `$$` in MARKER is
+        the pid the shim runs in, since bash execs it."""
+        self.refresh_visibility()
+        return self.command(["/bin/bash", "-c", f'DOTFILES_GIT_SHIM="{marker}" exec git "$@"', "bash", "push", "origin",
+                             f"{commit}:refs/heads/{ref}"], environment)
+
+    def test_a_marker_the_caller_sets_skips_no_push_check(self) -> None:
+        # DOTFILES_GIT_SHIM changes only which git the shim hands a call to, never which checks run: a push that names
+        # the caller's own pid, or a hop count one below the limit, gets the term scan and the public check an unmarked
+        # push gets; at the limit the shim refuses with the hop count's named error, and sends nothing.
+        for agent, environment in self.callers():
+            before = self.public_checks()
+            clean = self.commit(f"{self.unique('unmarked')}.txt", "clean", "unmarked", parent=self.base)
+            self.assert_pushed(self.git_push("origin", clean, self.unique("unmarked"), environment), self.public_url, clean)
+            unmarked_checks = self.public_checks() - before
+            if agent:
+                self.assertEqual(unmarked_checks, 1)
+            for name, marker in (("its own pid", "$$ 0 /nonexistent/git"), ("a hop count one below the limit", "1 7 /usr/bin/git")):
+                with self.subTest(agent=agent, marker=name):
+                    path = f"{self.unique('marked')}.txt"
+                    leaky = self.commit(path, self.term, "marked", parent=self.base)
+                    ref = self.unique("marked")
+                    self.assert_push_refused(lambda: self.marked_push(marker, leaky, ref, environment), leaky, f"{path}:1",
+                                             self.public_url)
+                    clean = self.commit(f"{self.unique('marked-clean')}.txt", "clean", "marked clean", parent=self.base)
+                    before = self.public_checks()
+                    self.assert_pushed(self.marked_push(marker, clean, self.unique("marked-clean"), environment),
+                                       self.public_url, clean)
+                    self.assertEqual(self.public_checks() - before, unmarked_checks)
+            for content in (self.term, "clean"):
+                with self.subTest(agent=agent, marker="a hop count at the limit", leaky=content == self.term):
+                    made = self.commit(f"{self.unique('limit')}.txt", content, "limit", parent=self.base)
+                    sink = self.sink_state(self.public_url)
+                    result = self.marked_push("1 8 /usr/bin/git", made, self.unique("limit"), environment)
+                    self.assertEqual(result.returncode, 127, result.stderr)
+                    self.assertIn("git shim: refusing: this chain of processes already ran this shim 8 times", result.stderr)
+                    self.assertEqual(self.sink_state(self.public_url), sink)
+
+    def test_a_push_a_git_hands_back_to_the_shim_is_checked_once(self) -> None:
+        # A fake git that execs the shim by its path, with the shim off PATH, as a Legion test's fake old git does: the
+        # shim hands the push to the fake once and the fake hands it back. The push reaches the one real git with the
+        # gate's hooks path, so the term scan and the public check run in its pre-push hook, once each.
+        handed = self.root / "handed"
+        handed.mkdir()
+        write_executable(handed / "git", f"#!/bin/sh\nexec {shlex.quote(str(ROOT / 'shims' / 'git'))} \"$@\"\n")
+        path = os.pathsep.join([str(handed), str(self.fake), "/usr/bin", "/bin", sops_directory()])
+        for agent, environment in self.callers():
+            with self.subTest(agent=agent):
+                before = self.public_checks()
+                clean = self.commit(f"{self.unique('direct')}.txt", "clean", "direct", parent=self.base)
+                self.assert_pushed(self.git_push("origin", clean, self.unique("direct"), environment), self.public_url, clean)
+                direct_checks = self.public_checks() - before
+                via = {**environment, "PATH": path}
+                file = f"{self.unique('handed')}.txt"
+                leaky = self.commit(file, self.term, "handed", parent=self.base)
+                ref = self.unique("handed")
+                result = self.assert_push_refused(lambda: self.git_push("origin", leaky, ref, via), leaky, f"{file}:1",
+                                                  self.public_url)
+                self.assertEqual(refusal_places(result.stderr, "error: "), [f"commit {leaky[:12]} {file}:1"], result.stderr)
+                clean = self.commit(f"{self.unique('handed-clean')}.txt", "clean", "handed clean", parent=self.base)
+                before = self.public_checks()
+                self.assert_pushed(self.git_push("origin", clean, self.unique("handed-clean"), via), self.public_url, clean)
+                self.assertEqual(self.public_checks() - before, direct_checks)
 
     def test_push_refuses_force_and_direct_url_pushes_and_lets_deletions_go(self) -> None:
         for agent, environment, url in self.combinations():
