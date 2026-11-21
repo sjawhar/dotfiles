@@ -10,7 +10,10 @@
 # `leak-terms-check push --remote <remote> --url <url>` with git's own update
 # lines on stdin. So the URL is the one git is pushing to, and the updates are
 # the ones it is about to send: an up-to-date ref is not among them. Then, when
-# GIT_SHIM_PUBLIC_CHECK=1, it makes the call the hook that install-prepush-hook.sh
+# GIT_SHIM_PUBLIC_CHECK=1, or when it is `url` and that URL is a public or
+# unreadable GitHub repository (shims/git sets `url` for a checkout that is not
+# guarded, pushing to a destination that is no configured remote), it makes the
+# call the hook that install-prepush-hook.sh
 # installs makes (a hook that runs no term check), with the same
 # `$PUBLIC_LEAK_CHECK`, PATH, then
 # `${XDG_CONFIG_HOME:-~/.config}/public-leak-check/path` lookup for the shared
@@ -46,23 +49,27 @@ in="$(cat)" || refuse "cannot read the updates git gave the pre-push hook, so th
 scripts="${0%/*}/../../scripts"
 sshcmd="$(git config --get core.sshCommand 2> /dev/null)" || sshcmd=""
 visibility="$(GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-$sshcmd}" "$scripts/github-repo-visibility" "$url" 2> /dev/null)" || visibility=unknown
+# The URL git pushes to is guarded by the rule a checkout's remote URL is (shims/git): a public or unreadable GitHub
+# repository, or a URL whose host part cannot be parsed. It decides the term scan here, and the public check below
+# when GIT_SHIM_PUBLIC_CHECK=url.
 case "$visibility" in
-    private | internal | not-github) ;;
-    *)
-        term_rc=0
-        term_out="$(
-            printf '%s' "$in" | "$scripts/leak-terms-check" push --remote "${1:-}" --url "$url" 2>&1
-            statuses=("${PIPESTATUS[@]}")
-            ((statuses[0] == 0)) || exit "${statuses[0]}"
-            exit "${statuses[1]}"
-        )" || term_rc=$?
-        if ((term_rc)); then
-            while IFS= read -r line; do [[ -z "$line" ]] || printf 'error: %s\n' "$line"; done <<< "$term_out" >&2
-            ((term_rc != 3)) || refuse "this push to $url holds a listed leak term. Nothing was pushed."
-            refuse "the leak-term check did not pass, so this push to $url is refused. Nothing was pushed."
-        fi
-        ;;
+    private | internal | not-github) url_guarded=0 ;;
+    *) url_guarded=1 ;;
 esac
+if ((url_guarded)); then
+    term_rc=0
+    term_out="$(
+        printf '%s' "$in" | "$scripts/leak-terms-check" push --remote "${1:-}" --url "$url" 2>&1
+        statuses=("${PIPESTATUS[@]}")
+        ((statuses[0] == 0)) || exit "${statuses[0]}"
+        exit "${statuses[1]}"
+    )" || term_rc=$?
+    if ((term_rc)); then
+        while IFS= read -r line; do [[ -z "$line" ]] || printf 'error: %s\n' "$line"; done <<< "$term_out" >&2
+        ((term_rc != 3)) || refuse "this push to $url holds a listed leak term. Nothing was pushed."
+        refuse "the leak-term check did not pass, so this push to $url is refused. Nothing was pushed."
+    fi
+fi
 exec_own_hook() {
     [[ -n "$own" && -x "$own/pre-push" ]] || exit 0
     # The shim's entry comes back out of GIT_CONFIG_PARAMETERS, as ./hook takes it out (the last one equal to it).
@@ -82,6 +89,8 @@ exec_own_hook() {
     if [[ -n "$in" ]]; then exec "$own/pre-push" "$@" <<< "$in"; fi
     exec "$own/pre-push" "$@" < /dev/null
 }
+# `url`: the URL git pushes to decides, as a remote's URL guards a checkout.
+[[ "$public" != url ]] || public=$url_guarded
 [[ "$public" == 1 ]] || exec_own_hook "$@"
 chk="${PUBLIC_LEAK_CHECK:-}"
 [[ -n "$chk" ]] || chk="$(command -v public-leak-check.sh 2> /dev/null || true)"

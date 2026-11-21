@@ -4,7 +4,6 @@
 GitHub-looking URLs use only git-remote-sink, whose transport is a local bare path.
 No network protocol is allowed, and every push asserts the local transport first.
 """
-import os
 import subprocess
 import unittest
 from pathlib import Path
@@ -14,14 +13,6 @@ import test_jj_push_leak_gate as gate
 from stdin_cases import run_with_tty
 from test_jj_push_leak_gate import ROCQ, PRIVATE
 from test_jj_lock_shim import real_jj, run_bounded
-
-# The agent markers shims/jj reads, and its own agent_context function, cut from the shim, so the harness can prove a
-# "person" environment is one the shim does not take for an agent session.
-AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION",
-                 "CLAUDECODE", "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE",
-                 "LEGION_CONTROLLER", "LEGION_DAEMON_URL")
-_JJ_SHIM = (Path(__file__).parents[1] / "jj").read_text(encoding="utf-8")
-AGENT_CONTEXT = _JJ_SHIM[_JJ_SHIM.index("agent_context() {"):_JJ_SHIM.index("\n}\n", _JJ_SHIM.index("agent_context() {")) + 3]
 
 
 class DirectPushGateTest(gate.JjPushLeakGateTest):
@@ -248,24 +239,9 @@ class DirectPushGateTest(gate.JjPushLeakGateTest):
             self.assertEqual(self.received(commit), [])
 
     # Round 8 (dispatch://BET-706, Sami: dispatch://BET-64/ask/0b96691d-1104-4a08-bda7-e544a32215b5): a person's own
-    # `jj git push` outside an agent session runs the same gate where this machine has the check installed.
-    def as_person(self):
-        """No agent marker shims/jj reads (agent_context): none of the four session variables, no GIT_CONFIG_*
-        entries (the gh-app routing include is one), no SSH_CONNECTION, which in a session with no terminal is
-        an agent's command too, and no SSH_TTY or TMUX, which would make a case that means an agent a person
-        (INFRA-1538), whatever the environment running this test holds."""
-        dropped = (*AGENT_MARKERS, "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON")
-        self.env = {k: v for k, v in self.env.items() if k not in dropped and not k.startswith("GIT_CONFIG_")}
-        probe = subprocess.run(["bash", "-c", "set -u; " + AGENT_CONTEXT + "\nagent_context"], env=self.env,
-                               stdin=subprocess.DEVNULL, capture_output=True, text=True)
-        self.assertEqual(probe.returncode, 1, "an agent marker is still set: " + probe.stderr)
-
-    def without_check(self):
-        """No check on this machine, by any of the three ways the shim looks: PUBLIC_LEAK_CHECK, PATH, the pointer."""
-        self.env.pop("PUBLIC_LEAK_CHECK", None)
-        self.env["XDG_CONFIG_HOME"] = str(self.tmp / "no-check-config")
-        self.env["PATH"] = os.pathsep.join(p for p in self.env["PATH"].split(os.pathsep) if not (Path(p) / "public-leak-check.sh").exists())
-
+    # `jj git push` outside an agent session runs the same gate where this machine has the check installed. as_person,
+    # without_check and broken_install_environments are the base class's: shims/jj reads the same agent markers and
+    # the same check sources as shims/git.
     def test_a_persons_leaking_push_is_refused_where_the_check_is_installed(self):
         # (a)
         self.as_person()
@@ -294,6 +270,23 @@ class DirectPushGateTest(gate.JjPushLeakGateTest):
         result = self.push("-b", "b1")
         self.assert_pushed(result, commit)
         self.assertNotIn("jj shim", result.stderr)
+
+    def test_a_persons_push_with_a_named_check_that_is_missing_is_refused(self):
+        # (c2) A broken install: the check is named and missing, by PUBLIC_LEAK_CHECK, and by the machine pointer with
+        # no PUBLIC_LEAK_CHECK and no check on PATH. The push is refused with the setup message, as the leak check's
+        # wrapper and dispatcher refuse a git push in that state (shims/git refuses a person's plain push likewise),
+        # and sends nothing.
+        self.as_person()
+        commit = self.leak()
+        for source, env in self.broken_install_environments():
+            with self.subTest(source=source):
+                self.env = env
+                result = self.push("-b", "b1")
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn("error: jj shim: this machine has no public leak check, and origin is not confirmed private. Nothing was pushed.",
+                              result.stderr)
+                self.assertIn("Point PUBLIC_LEAK_CHECK at the check", result.stderr)
+                self.assertEqual(self.received(commit), [])
 
     def test_a_person_may_skip_the_check_for_one_command(self):
         # (d) DOTFILES_JJ_NO_LEAK_CHECK=1 outside an agent session: no check runs, the push goes through.

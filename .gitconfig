@@ -127,7 +127,8 @@
 # the leak check's install-global-hooks.sh (devbox/sami-devbox-provision, step prepush), sets
 # core.hooksPath to its global hooks dispatcher. That runs the check on a pre-push to any URL with
 # a host, then the repository's own hook of every name. A repository's own core.hooksPath still
-# wins (shims/git checks an agent session's push from one). git ignores a missing include, so a
-# machine without the install is unchanged; `install-global-hooks.sh --remove` turns it off.
+# wins (shims/git checks a push through it from one: an agent's, and a person's where the check is
+# installed). git ignores a missing include, so a machine without the install is unchanged;
+# `install-global-hooks.sh --remove` turns it off.
 [include]
 	path = ~/.local/share/public-leak-check-hooks/global.gitconfig
