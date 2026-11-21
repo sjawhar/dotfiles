@@ -136,7 +136,9 @@ if ((extra > 0)); then
     searched+=" and $extra more a running go command builds in"
 fi
 if ((unread > 0)); then
-    searched+="; $unread directories there could not be read, and a cache inside one is not capped"
+    noun=directories
+    if ((unread == 1)); then noun=directory; fi
+    echo "gocache-cap: $unread $noun under ${roots[*]} could not be read, so a Go build cache inside one is not capped"
     grep -v ': No such file or directory$' "$find_errs" | head -n 5 >&2 || true
 fi
 

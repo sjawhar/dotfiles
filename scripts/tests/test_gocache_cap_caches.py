@@ -129,7 +129,10 @@ class GocacheCapCaches(Harness):
         finally:
             locked.chmod(0o755)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("1 directories there could not be read, and a cache inside one is not capped", r.stdout)
+        self.assertIn(f"gocache-cap: 1 directory under {self.scratch} {self.home_cache} could not be read, so a Go "
+                      "build cache inside one is not capped\n", r.stdout)
+        self.assertIn(f"gocache-cap: 1 Go build cache under {self.scratch} {self.home_cache} (to depth 4) held",
+                      r.stdout)
         self.assertFalse(old.exists(), r.stdout)
 
 
