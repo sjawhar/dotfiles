@@ -35,7 +35,8 @@ What one run does:
      disk's directory was absent is rendered again once it is there, and a merged change to the
      render script renders again. A failed render is a condition and stops nothing: the tools
      step still runs. A checkout with no scripts/knives-registry-render (a main older than the
-     step) or no knives/repos.toml skips it.
+     step) or no knives/repos.toml skips it. Only ~/.dotfiles renders, since
+     scripts/leak-terms-check reads the copy: another --repo logs that the copy is not written.
   7. After a fast-forward or marketplace-lock recovery, and on later runs until it passes at HEAD:
      `mise install`, `bun install --frozen-lockfile` in omp/plugins, marketplace catalog refresh and
      upgrade for registered marketplace plugins below the lowest version their committed lock entries
@@ -212,15 +213,26 @@ def kept_paths(repo: Path, provision: Path) -> tuple[set[str], str]:
     """(repo-relative paths that may differ from their commit, a note when the list is unread).
 
     SECRET_FILES' paths are relative to $HOME; those inside this checkout that git tracks are kept.
-    Untracked ones need no exception: git ignores them (.gitignore) or this tool refuses them.
+    An entry is inside when its directory, resolved, lies in the checkout's resolved path, so a
+    ~/.dotfiles that is a symlink to a directory outside HOME keeps .dotfiles/secrets.env whether
+    the run names it ~/.dotfiles or by its real path. The entry's last part is never resolved: a
+    kept file that is itself a link is still its path in the checkout. Untracked ones need no
+    exception: git ignores them (.gitignore) or this tool refuses them.
     """
     try:
         entries = secret_files(provision)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         return set(), f"SECRET_FILES could not be read, so no file is kept: {error}"
-    prefix = os.path.relpath(repo.resolve(), Path.home().resolve()) + "/"
-    inside = [entry[len(prefix):] for entry in entries if entry.startswith(prefix)]
-    inside = [entry for entry in inside if entry]
+    root = repo.resolve()
+    inside = []
+    for entry in entries:
+        path = Path.home() / entry
+        try:
+            relative = (path.parent.resolve() / path.name).relative_to(root)
+        except ValueError:
+            continue
+        if relative.parts:
+            inside.append(relative.as_posix())
     if not inside:
         return set(), ""
     done = git(repo, "ls-files", "-z", "--", *inside)
@@ -913,6 +925,11 @@ def run_registry_step(
     """Render knives/repos.toml into this machine's copy, ~/.config/knives/repos.toml, at HEAD
     (scripts/knives-registry-render --if-changed), shared by git mode and jj mode.
 
+    Only ~/.dotfiles writes the copy: scripts/leak-terms-check reads it, so a render from another
+    checkout (git mode takes any --repo) would put that checkout's registry there. For another
+    checkout the step logs that it wrote no copy and renders nothing, as for a checkout with no
+    render script.
+
     The render writes the copy when the copy is missing or not a plain file, or when the record it
     wrote beside the copy at its last render does not hold the file's sha256, the oh-my-pi
     workspaces path this run would write (the big local disk's directory where it exists) and the
@@ -922,6 +939,9 @@ def run_registry_step(
     with no render script or no knives/repos.toml has nothing to render. The run's footer names a
     write of the copy, judged by the copy's inode and mtime before and after the render."""
     judged.add("registry")
+    if repo.resolve() != (Path.home() / ".dotfiles").resolve():
+        log(f"registry: {display_path(repo)} is not ~/.dotfiles; knives registry copy not written")
+        return
     render = repo / "scripts/knives-registry-render"
     if not render.exists() or not (repo / "knives/repos.toml").exists():
         return

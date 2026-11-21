@@ -143,7 +143,10 @@ ledger = "sjawhar/.knives-ledger"
 # Internal names an upstream-bound diff must not add: knives audit reports each added line that
 # holds one (a fork-only branch is exempt). Not oh-my-pi's list: "notch" is a word of the fork's
 # own tests. scripts/leak-terms-check also refuses these terms in gh text bound for any public
-# repository named ygo, theorem-labs/ygo included.
+# repository named ygo. To the public theorem-labs/ygo, a term wholly inside that destination's
+# own name counts for nothing (gh_own_name): `-R theorem-labs/ygo`, its URL and its endpoint go
+# there, and so does `theorem-labs` as a whole word. A `theorem-labs` that begins a longer word is
+# refused, and so is `INFRA-` anywhere in the text.
 forbidden = ["INFRA-", "theorem-labs"]
 
 # The v1.55.1 line. Its base is the fork's branch rc/v1.55.1-sami.10 (42c0196a, which the tag

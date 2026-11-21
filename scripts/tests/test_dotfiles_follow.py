@@ -1489,6 +1489,127 @@ class KnivesRegistry(RegistryCopy, Harness):
             messages[0],
         )
 
+    def other_checkout(self) -> Path:
+        """A clone that is not ~/.dotfiles, at the main of an origin of its own whose
+        knives/repos.toml is REGISTRY_V2, while ~/.dotfiles and its origin hold REGISTRY_V1: a copy
+        rendered from it would show, and a run in it leaves ~/.dotfiles where it is."""
+        root = Path(self.tmp.name)
+        origin, other = root / "other-origin.git", root / "other"
+        self.sh("git", "clone", "-q", "--bare", str(self.origin), str(origin))
+        self.sh("git", "clone", "-q", str(origin), str(other))
+        (other / "knives/repos.toml").write_text(REGISTRY_V2)
+        self.sh("git", "commit", "-q", "-am", "knives: another registry", cwd=other)
+        self.sh("git", "push", "-q", "origin", "HEAD:main", cwd=other)
+        return other
+
+    def logged_run(self, now: float, **overrides) -> list[str]:
+        """The log lines of one run_follow that reports nothing."""
+        with unittest.mock.patch.object(FOLLOW, "log", wraps=FOLLOW.log) as logged:
+            self.assertEqual(self.run_follow(now=now, **overrides), [])
+        return [call.args[0] for call in logged.call_args_list]
+
+    def logged_main(self, *argv: str) -> list[str]:
+        """The log lines of one run of main(), started with ARGV as the unit starts it, but on this
+        case's state and with no hook sweep."""
+        args = ["dotfiles-follow", "--state", str(self.state), "--hooks-dir", str(self.hooks_dir), "--no-hook-sweep", *argv]
+        with unittest.mock.patch.object(sys, "argv", args), unittest.mock.patch.object(FOLLOW, "log", wraps=FOLLOW.log) as logged:
+            self.assertEqual(FOLLOW.main(), 0)
+        return [call.args[0] for call in logged.call_args_list]
+
+    def test_a_checkout_that_is_not_home_dotfiles_writes_no_copy(self) -> None:
+        # The copy is what scripts/leak-terms-check reads, so only ~/.dotfiles writes it: git mode
+        # follows any --repo, and DOTFILES_DIR names the default one. A run in another clone at its
+        # main writes no copy when there is none yet, leaves the one ~/.dotfiles wrote as it was,
+        # named by --repo or by DOTFILES_DIR, and writes none in a HOME with no ~/.dotfiles. Each
+        # run logs why.
+        other = self.other_checkout()
+        skipped = f"registry: {other} is not ~/.dotfiles; knives registry copy not written"
+        provision = other / "devbox/sami-devbox-provision"
+        with self.subTest(copy="none yet"):
+            lines = self.logged_run(1_000_000.0, repo=other, provision=provision)
+            self.assertFalse(self.copy.exists(), lines)
+            self.assertIn(skipped, lines)
+        # ~/.dotfiles writes the copy, over any copy a failed row above left.
+        self.assertEqual(self.run_follow(now=1_000_300.0), [])
+        self.assert_copy_renders(REGISTRY_V1)
+        written = (self.copy.read_text(), self.identity(self.copy), self.identity(self.render_record))
+        with self.subTest(copy="written by ~/.dotfiles", named="--repo"):
+            lines = self.logged_run(1_000_600.0, repo=other, provision=provision)
+            self.assertEqual((self.copy.read_text(), self.identity(self.copy), self.identity(self.render_record)), written)
+            self.assertIn(skipped, lines)
+        with self.subTest(copy="written by ~/.dotfiles", named="DOTFILES_DIR"):
+            with unittest.mock.patch.dict(os.environ, {"DOTFILES_DIR": str(other)}):
+                lines = self.logged_main()
+            self.assertEqual((self.copy.read_text(), self.identity(self.copy), self.identity(self.render_record)), written)
+            self.assertIn(skipped, lines)
+        with self.subTest(home="no ~/.dotfiles"):
+            bare = Path(self.tmp.name) / "bare-home"
+            bare.mkdir()
+            with unittest.mock.patch.dict(os.environ, {"HOME": str(bare)}):
+                lines = self.logged_run(1_001_200.0, repo=other, provision=provision)
+            self.assertFalse((bare / REGISTRY_COPY).exists(), lines)
+            self.assertIn(skipped, lines)
+
+    def test_home_dotfiles_writes_a_stale_copy_by_any_spelling_of_its_path(self) -> None:
+        # The control of the case above: ~/.dotfiles writes the copy, followed by default (no --repo
+        # and no DOTFILES_DIR), as --repo ~/.dotfiles, $HOME/./.dotfiles or $HOME//.dotfiles/, and,
+        # with ~/.dotfiles a symlink, by its real path or as ~/.dotfiles. A copy that holds the
+        # render's bytes already gets the record alone, so each row first gives the copy other
+        # bytes and removes the record.
+        self.first_render()
+        sha = hashlib.sha256(REGISTRY_V1.encode()).hexdigest()
+        wrote = f"registry: knives-registry-render: wrote ~/.config/knives/repos.toml from knives/repos.toml (sha256 {sha[:12]})"
+
+        def writes(*argv: str) -> None:
+            self.copy.write_text("# stale\n")
+            self.render_record.unlink(missing_ok=True)
+            stale = self.identity(self.copy)
+            lines = self.logged_main(*argv)
+            self.assertIn(wrote, lines)
+            self.assertFalse([line for line in lines if "knives registry copy not written" in line], lines)
+            self.assert_copy_renders(REGISTRY_V1)
+            self.assertNotEqual(self.identity(self.copy), stale)
+
+        for argv in ((), ("--repo", str(self.repo)), ("--repo", f"{self.home}/./.dotfiles"), ("--repo", f"{self.home}//.dotfiles/")):
+            with self.subTest(argv=argv):
+                writes(*argv)
+        real = Path(self.tmp.name) / "real-dotfiles"
+        self.repo.rename(real)
+        self.repo.symlink_to(real)
+        for named in (real, self.repo):
+            with self.subTest(symlinked_home_dotfiles=str(named)):
+                writes("--repo", str(named))
+
+    def test_a_home_dotfiles_symlinked_out_of_home_keeps_secrets_env_moves_and_renders(self) -> None:
+        # SECRET_FILES names .dotfiles/secrets.env relative to HOME. With ~/.dotfiles a symlink to a
+        # directory outside HOME, kept_paths took the checkout's resolved path, ../real-dotfiles/,
+        # as the prefix, kept nothing, and every run refused the step-2 secrets.env as UNCOMMITTED
+        # CHANGES. Now the run keeps it, fast-forwards and renders, whether it names the checkout
+        # ~/.dotfiles or by its real path. The plain ~/.dotfiles row is the control: as before.
+        registries = iter((REGISTRY_V2, REGISTRY_V1, REGISTRY_V2))
+
+        def moves_and_renders(repo: Path, now: float) -> None:
+            source = next(registries)
+            new = self.commit_upstream("knives: another registry", **{"knives/repos.toml": source})
+            with unittest.mock.patch.object(FOLLOW, "log", wraps=FOLLOW.log) as logged:
+                messages = self.run_follow(now=now, repo=repo, provision=repo / "devbox/sami-devbox-provision")
+            lines = [call.args[0] for call in logged.call_args_list]
+            self.assertEqual(messages, [])
+            self.assertEqual(self.head(), new)
+            self.assertTrue([line for line in lines if "; kept: secrets.env;" in line], lines)
+            self.assertEqual((repo / "secrets.env").read_text(), "COMMITTED=1\nWORKING_COPY=1\n")
+            self.assert_copy_renders(source)
+
+        with self.subTest(home_dotfiles="plain"):
+            moves_and_renders(self.repo, 1_000_000.0)
+        real = Path(self.tmp.name) / "real-dotfiles"
+        self.repo.rename(real)
+        self.repo.symlink_to(real)
+        with self.subTest(home_dotfiles="a symlink out of HOME", named="~/.dotfiles"):
+            moves_and_renders(self.repo, 1_000_600.0)
+        with self.subTest(home_dotfiles="a symlink out of HOME", named="its real path"):
+            moves_and_renders(real, 1_001_200.0)
+
 
 class SendsNothing(Harness):
     """dotfiles-follow sends no alert and no message

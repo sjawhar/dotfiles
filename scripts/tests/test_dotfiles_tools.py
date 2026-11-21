@@ -23,7 +23,7 @@ import unittest
 from collections.abc import Iterator
 from pathlib import Path
 
-from scripts.tests.test_dotfiles_follow import REGISTRY_V1, REGISTRY_V2, RegistryCopy, add_registry_render
+from scripts.tests.test_dotfiles_follow import REGISTRY_COPY, REGISTRY_V1, REGISTRY_V2, RegistryCopy, add_registry_render
 
 ROOT = Path(__file__).resolve().parents[2]
 SYNC = ROOT / "scripts" / "dotfiles-sync"
@@ -1091,6 +1091,88 @@ class KnivesRegistry(RegistryCopy, ToolsStep):
         self.assertIn(self.render_passed(checkout), result.stdout)
         self.assert_copy_renders(REGISTRY_V2, home)
         self.assert_tools_ran()
+
+    def other_clone(self) -> Path:
+        """A clone of origin that is not ~/.dotfiles, whose knives/repos.toml (REGISTRY_V2) differs
+        from the one ~/.dotfiles holds (REGISTRY_V1), so a copy rendered from it would show."""
+        clone = self.root / "clone"
+        self.run_ok("git", "clone", "-q", str(self.origin), str(clone))
+        (clone / "knives" / "repos.toml").write_text(REGISTRY_V2)
+        self._write_standin("mise", clone / "bin" / "mise")
+        return clone
+
+    def test_tools_mode_in_a_checkout_that_is_not_home_dotfiles_writes_no_copy(self) -> None:
+        # The copy is what scripts/leak-terms-check reads, so only ~/.dotfiles writes it, as only
+        # ~/.dotfiles links the omp rules; a publish from another clone runs `--tools` there. That
+        # clone writes no copy when there is none yet, leaves the one ~/.dotfiles wrote as it was,
+        # whichever dotfiles-sync runs, and writes none in a HOME with no ~/.dotfiles. mise and Bun
+        # still run, and the step passes.
+        clone = self.other_clone()
+        skipped = f"tools: {clone} is not ~/.dotfiles; knives registry copy not written\n"
+
+        def refused(result: subprocess.CompletedProcess[str]) -> None:
+            """The step passed, said it wrote no copy, ran no render, and ran mise and Bun."""
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(skipped, result.stdout)
+            self.assertNotIn(RENDER, result.stdout + result.stderr)
+            self.assert_tools_ran()
+
+        with self.subTest(copy="none yet"):
+            result = self._run(SYNC, "--tools", str(clone))
+            self.assertFalse(self.copy.exists(), result.stdout)
+            refused(result)
+        moved = self.sync("local")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.assert_copy_renders(REGISTRY_V1)
+        written = (self.copy.read_text(), self.identity(self.copy), self.identity(self.render_record))
+        own = self.checkout / "scripts" / "dotfiles-sync"
+        own.write_bytes(SYNC.read_bytes())
+        for name, script in (("this checkout's dotfiles-sync", SYNC), ("~/.dotfiles's own dotfiles-sync", own)):
+            with self.subTest(copy="written by ~/.dotfiles", script=name):
+                self.clear_records()
+                result = self._run(script, "--tools", str(clone))
+                self.assertEqual((self.copy.read_text(), self.identity(self.copy), self.identity(self.render_record)), written)
+                refused(result)
+        with self.subTest(home="no ~/.dotfiles"):
+            bare = self.root / "bare-home"
+            bare.mkdir()
+            self.clear_records()
+            result = self._run(SYNC, "--tools", str(clone), env={**self.env, "HOME": str(bare)})
+            self.assertFalse((bare / REGISTRY_COPY).exists(), result.stdout)
+            refused(result)
+
+    def test_tools_mode_in_home_dotfiles_writes_a_stale_copy_by_any_spelling_of_its_path(self) -> None:
+        # The control of the case above: `--tools` writes the copy for ~/.dotfiles named as
+        # $HOME/.dotfiles, $HOME/./.dotfiles or $HOME//.dotfiles/, and, with ~/.dotfiles a symlink,
+        # by its real path or as ~/.dotfiles. A copy that holds the render's bytes already gets the
+        # record alone, so each row first gives the copy other bytes and removes the record.
+        moved = self.sync("local")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.assert_copy_renders(REGISTRY_V1)
+
+        def writes(named: str, entered: Path) -> None:
+            """`--tools NAMED` renders over a stale copy; the step names the checkout as ENTERED."""
+            self.copy.write_text("# stale\n")
+            self.render_record.unlink(missing_ok=True)
+            stale = self.identity(self.copy)
+            self.clear_records()
+            result = self._run(SYNC, "--tools", named)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(self.render_passed(entered), result.stdout)
+            self.assertNotIn("knives registry copy not written", result.stdout)
+            self.assert_copy_renders(REGISTRY_V1)
+            self.assertNotEqual(self.identity(self.copy), stale)
+            self.assert_tools_ran()
+
+        for named in (str(self.checkout), f"{self.home}/./.dotfiles", f"{self.home}//.dotfiles/"):
+            with self.subTest(named=named):
+                writes(named, self.checkout)
+        real = self.root / "real-dotfiles"
+        self.checkout.rename(real)
+        self.checkout.symlink_to(real)
+        for named, entered in ((str(real), real), (str(self.checkout), self.checkout)):
+            with self.subTest(symlinked_home_dotfiles=named):
+                writes(named, entered)
 
     def test_a_publish_whose_rebase_brings_the_registry_writes_the_copy(self) -> None:
         # dotfiles-publish runs `dotfiles-sync --tools` after the rebase moved the files.

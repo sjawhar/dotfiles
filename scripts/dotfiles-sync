@@ -15,7 +15,9 @@
 # knives/repos.toml into ~/.config/knives/repos.toml and records beside it the source's sha256,
 # the oh-my-pi workspaces path it wrote and its own sha256; it writes nothing while the copy is a
 # plain file and the record holds all three as this run has them, and a checkout without the
-# script skips it. Then `mise install` in the checkout, then `bun install --frozen-lockfile`
+# script skips it. The render too runs only for ~/.dotfiles, since the copy is what
+# scripts/leak-terms-check reads: for another checkout the step says it wrote no copy, and goes
+# on. Then `mise install` in the checkout, then `bun install --frozen-lockfile`
 # in omp/plugins when its package.json is there, with the mise binary and MISE_DATA_DIR (and
 # MISE_CACHE_DIR where it sets one) that the checkout's .bashrc gives a shell. It runs after every
 # move that ends on main, also when main brought nothing new, so a later sync installs a pin an
@@ -214,10 +216,14 @@ tools_step() (
   else
     tools_run "omp-link-rules" "$dir" "$limit" env DOTFILES_DIR="$dir" "$dir/scripts/omp-link-rules" || rules_status=$?
   fi
-  # Then the knives registry copy. A failed render stops nothing: mise and Bun still run, and the
+  # Then the knives registry copy, only from ~/.dotfiles as well: a copy rendered from another
+  # checkout would put that checkout's registry into ~/.config/knives/repos.toml, which
+  # scripts/leak-terms-check reads. A failed render stops nothing: mise and Bun still run, and the
   # step returns the render's status when they and the rule link pass. DOTFILES_DIR names this
   # checkout, never an inherited value: it is exported above only when the checkout has a .bashrc.
-  if [[ -x "$dir/scripts/knives-registry-render" ]]; then
+  if [[ ! "$dir" -ef "$HOME/.dotfiles" ]]; then
+    printf 'tools: %s is not ~/.dotfiles; knives registry copy not written\n' "$dir"
+  elif [[ -x "$dir/scripts/knives-registry-render" ]]; then
     tools_run "knives-registry-render --if-changed" "$dir" "$limit" \
       env DOTFILES_DIR="$dir" "$dir/scripts/knives-registry-render" --if-changed || render_status=$?
   fi

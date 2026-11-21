@@ -97,7 +97,8 @@ Follow restores the managed marketplace lock before it calls the sync.
    fails. The first run of this version renders once, since no record of this form exists yet.
    A failed render is a condition and stops nothing: the tools step still runs. A checkout with
    no `scripts/knives-registry-render` (a main older than the step) or no `knives/repos.toml`
-   skips it.
+   skips it. The render runs only for `~/.dotfiles`: another `--repo` (or `DOTFILES_DIR`) logs
+   `registry: <repo> is not ~/.dotfiles; knives registry copy not written` and writes no copy.
 7. After a fast-forward or managed-lock recovery, and on later runs until it passes at HEAD:
    `mise install`, `bun install --frozen-lockfile` in `omp/plugins`, then, for each registered
    non-Bun marketplace plugin below the lowest version its lock entry requires,
@@ -198,7 +199,10 @@ the follower would refuse on it for ever.
 So a path that `SECRET_FILES` names inside the checkout **and** git tracks may be modified (in the
 work tree or the index). It may not be deleted, renamed or in conflict. The list is read from
 `devbox/sami-devbox-provision` on every run (bash evaluates the array), never copied, so a file
-added there is kept here too. Today that is `secrets.env` alone.
+added there is kept here too. Today that is `secrets.env` alone. Its paths are relative to
+`$HOME`, and one is inside the checkout when its directory, resolved, lies in the checkout's real
+path: a `~/.dotfiles` that is a symlink to a directory outside `$HOME` keeps `secrets.env` too,
+whether the run names it `~/.dotfiles` or by its real path.
 
 `git merge --ff-only` keeps a modified file that the merge does not touch and refuses one that it
 touches. The follower checks this first: when the commits to take change a kept file that is
@@ -281,6 +285,12 @@ record and not the copy, whose bytes are the same, and the next run writes nothi
 The first run of this version at HEAD renders once. A read-only `~/.config/knives` opens
 `KNIVES REGISTRY NOT WRITTEN` and stops neither the fast-forward nor the tools step, and the next
 render clears it. A refused jj sync leaves that condition open.
+`test_a_checkout_that_is_not_home_dotfiles_writes_no_copy` follows another clone, by `--repo` and
+by `DOTFILES_DIR`, and leaves the copy as it was, and its control
+`test_home_dotfiles_writes_a_stale_copy_by_any_spelling_of_its_path` writes it from `~/.dotfiles`.
+`test_a_home_dotfiles_symlinked_out_of_home_keeps_secrets_env_moves_and_renders` keeps
+`secrets.env`, fast-forwards and renders with `~/.dotfiles` a symlink out of `$HOME`, named either
+way, and the plain `~/.dotfiles` as before.
 `SendsNothing` runs the follower as each unit runs it (`main()` in a child): the dev box's unit with
 a `BOX_HEALTH_OWNER`, and oryx's drop-in as loaded before this change, with `--box-health-role`.
 With `ENVOY_URL` at a local listener and an `ENVOY_TOKEN` set, each opens a condition, and the
