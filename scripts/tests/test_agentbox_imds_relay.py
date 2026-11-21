@@ -79,7 +79,7 @@ class ImdsRelay(unittest.TestCase):
         return subprocess.run(
             ["bash", "-c", '''source "$1"
              NETWORK_GATEWAY=172.31.0.1 NETWORK_SUBNET=172.31.0.0/16
-             ensure_tcp_forwarder() { :; }; ensure_unix_forwarder() { :; }; ensure_tmux_forwarder() { :; }
+             ensure_tcp_forwarder() { :; }; ensure_bus_relay() { :; }; ensure_tmux_forwarder() { :; }
              ensure_forward_channels() { :; }; ensure_loopback_services() { :; }; ensure_tailnet_serve() { :; }
              wait_for() { :; }
              ensure_forwarders agentbox-0123456789ab''', "--", str(AGENTBOX)],

@@ -13,7 +13,10 @@ agentbox runs each agent session in its own disposable [Sysbox](https://github.c
   bind-mounted.
   Through the relayed bus, `systemctl --user` in a box acts on the host's units, while `journalctl`, `pgrep` and
   `/sys/fs/cgroup` answer about the box: a unit `systemctl --user` reports active can show no journal and no process
-  in the box.
+  in the box. The bus relay (`scripts/agentbox-bus-relay`) refuses the two calls that hand the host's systemd a
+  pid, a scope's `StartTransientUnit` and `AttachProcessesToUnit`: a box pid names a different process on the host,
+  and Chromium's start-up scope request from a box moved a host omp out of its memory ceiling. They fail with
+  UnknownMethod `BoxPidsNotHostPids` (or `BoxPidsAreNotHostPids`); a box caps its own runs with `shims/systemd-run`.
 - Root in the box is an unprivileged user on the host, so `sudo apt-get install`, an inner Docker daemon and
   nested containers work without host privileges.
 - A box's `/proc` lists only the box's processes. A tool in a box that sweeps scratch by testing pids in its own
