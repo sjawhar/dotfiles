@@ -78,6 +78,8 @@ class GhAppTokenTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.git_config = dict(GIT_CONFIG)
+        self.git_config_all = {}
+        self.real_git_config_all = gh_app_token.git_config_all
         self.cache_dir = Path(self.temp_dir.name) / "cache"
         self.stub_dir = Path(self.temp_dir.name) / "bin"
         self.stub_dir.mkdir()
@@ -91,6 +93,7 @@ class GhAppTokenTests(unittest.TestCase):
             patch.object(gh_app_token, "CACHE_DIR", self.cache_dir),
             patch.object(gh_app_token, "git_config", side_effect=self.config_value),
             patch.object(gh_app_token, "git_config_optional", side_effect=self.git_config.get),
+            patch.object(gh_app_token, "git_config_all", side_effect=self.config_values),
             patch.dict(
                 os.environ,
                 {
@@ -114,6 +117,28 @@ class GhAppTokenTests(unittest.TestCase):
         if value is None:
             raise gh_app_token.AppTokenError(f"missing git config: {key}")
         return value
+
+    def config_values(self, key):
+        return list(self.git_config_all.get(key, ()))
+
+    @staticmethod
+    def refusal_detail(profile, owner):
+        return (
+            f"gh-app-token: owner {owner} is refused for profile {profile} on this machine "
+            f"(gh-app.{profile}.refuse-owner): no token"
+        )
+
+    def refuse_owner(self, *owners):
+        self.git_config_all["gh-app.agent.refuse-owner"] = list(owners)
+
+    def assert_refusal_decision(self, profile, owner, detail):
+        decisions = (self.cache_dir / "decisions.log").read_text().splitlines()
+        self.assertEqual(len(decisions), 1)
+        decision = json.loads(decisions[0])
+        self.assertEqual(decision["profile"], profile)
+        self.assertEqual(decision["owner"], owner)
+        self.assertEqual(decision["decision"], "refused")
+        self.assertEqual(decision["detail"], detail)
 
     def secrets_calls(self):
         return self.secrets_log.read_text().splitlines() if self.secrets_log.exists() else []
@@ -496,6 +521,119 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertNotIn("personal", stderr)
         self.assertEqual(self.secret_run_calls(), self.broker_command("sjawhar"))
         self.assertEqual(self.secrets_calls(), [])
+
+    def assert_refusal_stops_every_token_path(self, credential_mode):
+        owner = "trajectory-labs-pbc"
+        self.refuse_owner(owner)
+        self.git_config["gh-app.agent.key-secret"] = "GITHUB_APP_PRIVATE_KEY"
+        old_cache_dir = Path(self.temp_dir.name) / "old-cache"
+        old_cache_dir.mkdir()
+        old_cache_file = old_cache_dir / gh_app_token.token_cache_file("agent", owner).name
+        old_cache_file.write_text(json.dumps({
+            "token": "cached-token-that-must-not-be-served",
+            "expires_at": "2099-01-01T00:00:00Z",
+        }))
+        detail = self.refusal_detail("agent", owner)
+        argv = ["agent", "get"] if credential_mode else ["agent", "--owner", owner]
+        stdin = "host=github.com\npath=trajectory-labs-pbc/repo.git\n\n" if credential_mode else ""
+
+        def forbidden(name):
+            def called(*args, **kwargs):
+                self.fail(f"{name} was called for a refused owner")
+
+            return called
+
+        with (
+            patch.object(gh_app_token, "DEFAULT_CACHE_DIR", self.cache_dir),
+            patch.object(gh_app_token, "OLD_CACHE_DIR", old_cache_dir),
+            patch.object(gh_app_token, "seed_cache_dir", side_effect=forbidden("seed_cache_dir")),
+            patch.object(gh_app_token, "get_cached_token", side_effect=forbidden("get_cached_token")),
+            patch.object(gh_app_token, "mint_from_secretsd", side_effect=forbidden("mint_from_secretsd")),
+            patch.object(gh_app_token, "fallback_token", side_effect=forbidden("fallback_token")),
+        ):
+            rc, stdout, stderr = self.run_main(argv, stdin=stdin)
+
+        expected_stdout = "quit=1\n" if credential_mode else ""
+        self.assertEqual((rc, stdout, stderr), (1, expected_stdout, detail + "\n"))
+        self.assertEqual(self.secrets_calls(), [])
+        self.assertEqual(self.secret_run_calls(), [])
+        self.assertEqual(sorted(path.name for path in self.cache_dir.iterdir()), ["decisions.log"])
+        self.assertFalse((old_cache_dir / gh_app_token.MOVED_NOTE).exists())
+        self.assert_refusal_decision("agent", owner, detail)
+
+    def test_refused_owner_stops_every_token_path_in_direct_mode(self):
+        self.assert_refusal_stops_every_token_path(credential_mode=False)
+
+    def test_refused_owner_stops_every_token_path_in_credential_mode(self):
+        self.assert_refusal_stops_every_token_path(credential_mode=True)
+
+    def test_same_owner_without_refusal_uses_cached_token_in_direct_and_credential_modes(self):
+        owner = "trajectory-labs-pbc"
+        gh_app_token.write_cache_file(
+            gh_app_token.token_cache_file("agent", owner),
+            {"token": "cached-token", "expires_at": "2099-01-01T00:00:00Z"},
+        )
+
+        direct = self.run_main(["agent", "--owner", owner])
+        credential = self.run_main(
+            ["agent", "get"], stdin="host=github.com\npath=trajectory-labs-pbc/repo.git\n\n"
+        )
+
+        self.assertEqual(direct, (0, "cached-token\n", ""))
+        self.assertEqual(credential[0], 0)
+        self.assertIn("password=cached-token", credential[1])
+        self.assertEqual(credential[2], "")
+        self.assertEqual(self.secrets_calls(), [])
+        self.assertEqual(self.secret_run_calls(), [])
+
+    def test_two_refuse_owner_values_refuse_first_and_second(self):
+        owners = ("first-refused-owner", "second-refused-owner")
+        for owner in owners:
+            gh_app_token.write_cache_file(
+                gh_app_token.token_cache_file("agent", owner),
+                {"token": f"cached-token-{owner}", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+        gitconfig = Path(self.temp_dir.name) / "gitconfig"
+        gitconfig.write_text(
+            '[gh-app "agent"]\n'
+            "\trefuse-owner = first-refused-owner\n"
+            "\trefuse-owner = second-refused-owner\n"
+        )
+        with (
+            patch.object(gh_app_token, "git_config_all", self.real_git_config_all),
+            patch.dict(
+                os.environ,
+                {"GIT_CONFIG_GLOBAL": str(gitconfig), "GIT_CONFIG_NOSYSTEM": "1"},
+            ),
+        ):
+            for owner in owners:
+                rc, stdout, stderr = self.run_main(["agent", "--owner", owner])
+                self.assertEqual(
+                    (rc, stdout, stderr),
+                    (1, "", self.refusal_detail("agent", owner) + "\n"),
+                )
+
+    def test_refuse_owner_matching_is_case_insensitive(self):
+        self.refuse_owner("Trajectory-Labs-PBC")
+
+        rc, stdout, stderr = self.run_main(["agent", "--owner", "trajectory-labs-pbc"])
+
+        self.assertEqual(
+            (rc, stdout, stderr),
+            (1, "", self.refusal_detail("agent", "trajectory-labs-pbc") + "\n"),
+        )
+
+    def test_gh_app_owner_refusal_stops_the_direct_owner_override(self):
+        owner = "trajectory-labs-pbc"
+        self.refuse_owner(owner)
+
+        with patch.dict(os.environ, {"GH_APP_OWNER": owner}):
+            rc, stdout, stderr = self.run_main(["agent"])
+
+        self.assertEqual(
+            (rc, stdout, stderr),
+            (1, "", self.refusal_detail("agent", owner) + "\n"),
+        )
 
     def test_broker_pending_or_denied_names_machine_login(self):
         # This catches propagating a broker refusal without the actionable
@@ -885,6 +1023,61 @@ class CacheOffTheRootDisk(unittest.TestCase):
         with mock.patch.dict(os.environ, {"USER": "someone"}), \
                 mock.patch.object(Path, "is_dir", return_value=False):
             self.assertEqual(gh_app_token.default_cache_dir(), home_cache)
+
+    def test_real_git_config_refuses_one_owner_and_serves_another_cached_owner(self):
+        home = self.root / "home"
+        cache = home / ".cache" / "gh-app-token"
+        cache.mkdir(parents=True, mode=0o700)
+        expires = "2099-01-01T00:00:00Z"
+        for owner, token in {
+            "trajectory-labs-pbc": "ghs_cached_refused",
+            "allowed-owner": "ghs_cached_allowed",
+        }.items():
+            (cache / f"token-agent--app-123--{owner}.json").write_text(
+                json.dumps({"token": token, "expires_at": expires})
+            )
+        gitconfig = self.root / "gitconfig"
+        gitconfig.write_text(
+            '[gh-app "agent"]\n'
+            "\tapp-id = 123\n"
+            "\trefuse-owner = trajectory-labs-pbc\n"
+            "\trefuse-owner = another-refused-owner\n"
+        )
+        env = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(home),
+            "USER": "no-such-user-gh-app-token-test",
+            "GIT_CONFIG_GLOBAL": str(gitconfig),
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+
+        refused = subprocess.run(
+            [sys.executable, str(MODULE_PATH), "agent", "--owner", "trajectory-labs-pbc"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        cached = subprocess.run(
+            [sys.executable, str(MODULE_PATH), "agent", "--owner", "allowed-owner"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+        self.assertEqual(
+            (refused.returncode, refused.stdout, refused.stderr),
+            (
+                1,
+                "",
+                "gh-app-token: owner trajectory-labs-pbc is refused for profile agent on this "
+                "machine (gh-app.agent.refuse-owner): no token\n",
+            ),
+        )
+        self.assertEqual((cached.returncode, cached.stdout, cached.stderr), (0, "ghs_cached_allowed\n", ""))
 
     def test_the_answer_comes_while_the_decision_log_cannot_be_written(self):
         home = self.root / "home"

@@ -133,6 +133,8 @@ AWS_PROFILE=default secrets PULUMI_CONFIG_PASSPHRASE -- pulumi up --stack laptop
 The state is in S3 (`Pulumi.yaml`'s `backend`): the devbox reads it with its
 instance role, and the laptop with Sami's AWS SSO login (`aws sso login --sso-session trajectorylabs`).
 
+oryx's `agent` account holds no Trajectory AWS profile or sign-in (HOME-216), so the `laptop` stack is not applied from oryx.
+
 ## Secrets
 
 Pulumi encrypts secrets in `Pulumi.prod.yaml` using a passphrase it reads from

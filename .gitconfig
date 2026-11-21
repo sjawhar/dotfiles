@@ -30,9 +30,18 @@
 # box; per-repo overrides go through `git-identity cm|th`. Tools that commit with
 # plain git (agent worktrees, scripts) inherit this, which is what keeps their
 # commits signed and keeps jj from dropping the signature when it rewrites them.
+# A machine sets its own default in ~/.config/git/identity.gitconfig (below), and
+# in ~/.config/jj/config.toml for jj, so the two tools still agree there.
 [user]
 	email = sami@trajectorylabs.net
 	name = Sami Jawhar
+# This machine's own default identity, if it has one. git reads it after [user]
+# above, so its user.email wins; the includeIf rules below come after it, so
+# they still win; a repository's own config still wins; git skips the file where
+# it is missing, so a machine without it keeps the default above. oryx sets
+# sami@thecybermonk.com there (HOME-216).
+[include]
+	path = ~/.config/git/identity.gitconfig
 # A repository's identity by rule: every clone of it, on every machine, is
 # matched by its remote URL (`hasconfig:`, git 2.36+), and `/**` matches the rest
 # of the URL, `.git` included. jj's half of each rule is a repository scope in
