@@ -217,12 +217,14 @@ def with_flag_url(check_text: str, url: str) -> str:
 
 
 def guarded_copy(scripts: Path, flag: FlagObject) -> Path:
-    """Copies of agent-private-check (reading FLAG) and agent-private-guard in the directory SCRIPTS,
-    made if missing; the guard's path. A reader that runs the guard beside itself is copied there too."""
+    """Copies of agent-private-check (reading FLAG), the agent_private_launch.py it imports and
+    agent-private-guard in the directory SCRIPTS, made if missing; the guard's path. A reader that
+    runs the guard beside itself is copied there too."""
     scripts.mkdir(parents=True, exist_ok=True)
     check = scripts / "agent-private-check"
     check.write_text(with_flag_url((SCRIPTS / "agent-private-check").read_text(encoding="utf-8"), flag.url),
                      encoding="utf-8")
+    shutil.copyfile(SCRIPTS / "agent_private_launch.py", scripts / "agent_private_launch.py")
     guard = scripts / "agent-private-guard"
     shutil.copyfile(SCRIPTS / "agent-private-guard", guard)
     for path in (check, guard):

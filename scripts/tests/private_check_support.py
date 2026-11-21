@@ -44,7 +44,8 @@ CHECK = DOTFILES / "scripts" / "agent-private-check"
 # What the launchers run, copied into each scratch tree.
 TREE = (
     "shims/omp", "shims/claude", "scripts/agent-session", "scripts/cld", "scripts/agent-private-check",
-    "scripts/agent-private-guard", "scripts/agent-private.sh", "scripts/agent-secrets-session", "scripts/agent-spend-env.sh", "scripts/envoy",
+    "scripts/agent-private-guard", "scripts/agent_private_launch.py", "scripts/agent-private.sh",
+    "scripts/agent-secrets-session", "scripts/agent-spend-env.sh", "scripts/envoy",
     "scripts/on-google-vm", "scripts/omp-session-live", "scripts/gh-agent-config", "agent-secrets/broker-url.sh",
     "agent-secrets/broker.env",
 )
@@ -93,9 +94,12 @@ def strip_check(text: str) -> str:
 
 
 def load_check(directory: Path, flag_url: str = f"http://{CLOSED}/no-flag") -> ModuleType:
-    """scripts/agent-private-check as a module, from a copy in DIRECTORY whose flag is FLAG_URL."""
+    """scripts/agent-private-check as a module, from a copy in DIRECTORY whose flag is FLAG_URL, beside a
+    copy of the agent_private_launch.py it imports; launching(check) is that module."""
     copy = directory / "agent-private-check"
     copy.write_text(with_flag_url(CHECK.read_text(encoding="utf-8"), flag_url), encoding="utf-8")
+    shutil.copyfile(CHECK.parent / "agent_private_launch.py", directory / "agent_private_launch.py")
+    sys.modules.pop("agent_private_launch", None)  # each copy imports its own
     loader = importlib.machinery.SourceFileLoader(f"agent_private_check_{hashlib.sha256(str(copy).encode()).hexdigest()[:8]}",
                                                   str(copy))
     spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -104,6 +108,11 @@ def load_check(directory: Path, flag_url: str = f"http://{CLOSED}/no-flag") -> M
     sys.modules[loader.name] = module  # its dataclasses look their module up by name
     loader.exec_module(module)
     return module
+
+
+def launching(check: ModuleType) -> ModuleType:
+    """The agent_private_launch module CHECK imported."""
+    return sys.modules[check.launch_for.__module__]
 
 
 class Machine:

@@ -608,9 +608,25 @@ class AResumedSession(Case):
 
 
 class ClaudeCodeSettings(Case):
-    def test_an_untrusted_clones_settings_are_not_read_by_an_interactive_start(self) -> None:
-        """Claude Code applies a project's `env` block only in a -p run or once its folder is trusted, so
-        an interactive start in an untrusted clone reads no file it names and sends nothing to a server it names."""
+    TRUST = "for Dispatch, and Claude Code applies it once this folder's trust is accepted"
+
+    def claude(self, cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return self.m.run([str(self.m.tree / "shims" / "claude"), *args], {}, self.m.tree, cwd=cwd)
+
+    def trust(self, *folders: Path) -> None:
+        (self.m.home / ".claude.json").write_text(json.dumps(
+            {"projects": {str(folder): {"hasTrustDialogAccepted": True} for folder in folders}}))
+
+    def private_settings(self, folder: Path) -> None:
+        (folder / ".claude").mkdir(parents=True)
+        (folder / ".claude" / "settings.json").write_text(json.dumps(
+            {"env": {"DISPATCH_TOKEN": PRIV_TOKEN, "DISPATCH_URL": self.m.dispatch.url}}))
+
+    def test_an_untrusted_clones_settings_refuse_an_interactive_start_and_are_not_sent(self) -> None:
+        """Claude Code applies a project's `env` block in a -p run, in a trusted folder, or once the
+        person accepts the folder's trust dialog, which no check can see before the start: so an
+        interactive start in an untrusted clone whose settings name a bearer is refused, and nothing
+        the file names is read or sent."""
         listener = DispatchStub({PUB_TOKEN: WHOAMI_PUB})
         self.addCleanup(listener.stop)
         clone = self.tmp / "untrusted-clone"
@@ -619,16 +635,50 @@ class ClaudeCodeSettings(Case):
         secret.write_text(PUB_TOKEN + "\n")
         (clone / ".claude" / "settings.json").write_text(json.dumps({"env": {
             "DISPATCH_TOKEN_FILE": str(secret), "DISPATCH_URL": listener.url}}))
-        claude = [str(self.m.tree / "shims" / "claude")]
-        self.started(self.m.run([*claude, "hello"], {}, self.m.tree, cwd=clone), "claude")
-        self.started(self.m.run([str(self.m.tree / "scripts" / "cld"), "hello"], {}, self.m.tree, cwd=clone), "claude")
+        self.refused(self.claude(clone, "hello"), self.TRUST)
+        self.refused(self.m.run([str(self.m.tree / "scripts" / "cld"), "hello"], {}, self.m.tree, cwd=clone), self.TRUST)
         self.assertEqual(listener.calls, [])
         # Controls: a -p run applies the block, and so does an interactive start once the folder is trusted.
-        self.started(self.m.run([*claude, "-p", "hello"], {}, self.m.tree, cwd=clone), "claude")
+        self.started(self.claude(clone, "-p", "hello"), "claude")
         self.assertEqual(listener.paths(), [WHOAMI])
-        (self.m.home / ".claude.json").write_text(json.dumps({"projects": {str(clone): {"hasTrustDialogAccepted": True}}}))
-        self.started(self.m.run([*claude, "hello"], {}, self.m.tree, cwd=clone), "claude")
+        self.trust(clone)
+        self.started(self.claude(clone, "hello"), "claude")
         self.assertEqual(listener.paths(), [WHOAMI, WHOAMI])
+
+    def test_a_subfolder_of_a_trusted_repository_is_checked(self) -> None:
+        repo = self.tmp / "trusted-repo"
+        (repo / ".git").mkdir(parents=True)
+        self.private_settings(repo / "sub")
+        self.trust(repo)
+        self.refused(self.claude(repo / "sub", "hello"), PRIVATE)
+        # Control: a record above the repository's root does not reach it, so its settings are not
+        # read: the start is refused for trust, and Dispatch is asked nothing.
+        self.trust(self.tmp)
+        self.refused(self.claude(repo / "sub", "hello"), self.TRUST)
+        self.assertEqual(self.m.dispatch.paths(), [WHOAMI])
+
+    def test_a_clone_under_a_trusted_parent_is_not_trusted(self) -> None:
+        parent = self.tmp / "trusted-parent"
+        clone = parent / "clone"
+        (clone / ".git").mkdir(parents=True)
+        self.private_settings(clone)
+        self.trust(parent)
+        self.refused(self.claude(clone, "hello"), self.TRUST)
+        self.assertEqual(self.m.dispatch.paths(), [])
+        # Control: the same folder outside a repository is trusted through its parent, and checked.
+        shutil.rmtree(clone / ".git")
+        self.refused(self.claude(clone, "hello"), PRIVATE)
+
+    def test_a_short_flag_cluster_holding_p_is_print_mode(self) -> None:
+        folder = self.tmp / "untrusted-folder"
+        self.private_settings(folder)
+        for flags in ("-cp", "-pc", "--print"):
+            with self.subTest(flags=flags):
+                self.refused(self.claude(folder, flags, "hi"), PRIVATE)
+        # Control: `-c` is an interactive start, so the settings are not read: refused for trust, never asked.
+        calls = len(self.m.dispatch.paths())
+        self.refused(self.claude(folder, "-c", "hi"), self.TRUST)
+        self.assertEqual(len(self.m.dispatch.paths()), calls)
 
     def test_a_settings_env_block_bearer_is_checked(self) -> None:
         project = self.tmp / "claude-project"

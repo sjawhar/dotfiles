@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from private_check_support import DOTFILES, executable, load_check
+from private_check_support import DOTFILES, executable, launching, load_check
 from private_project_stubs import PRIV_TOKEN, PUB_TOKEN, WHOAMI, DispatchStub
 
 
@@ -36,6 +36,7 @@ class Unit(unittest.TestCase):
     tmp: Path
     home: Path
     check: Any  # the check as a module: a case sets its constants
+    launching: Any  # the agent_private_launch module that check imported
 
     def setUp(self) -> None:
         scratch = tempfile.TemporaryDirectory(prefix="agent-private-check-unit-")
@@ -44,6 +45,7 @@ class Unit(unittest.TestCase):
         self.home = self.tmp / "home"
         self.home.mkdir()
         self.check = load_check(self.tmp)
+        self.launching = launching(self.check)
 
     def dispatch(self, answers: dict[str, Any] | None = None, routes: dict[str, Any] | None = None) -> DispatchStub:
         server = DispatchStub(answers, routes)
@@ -175,7 +177,7 @@ class AResumedSession(Unit):
                             {"type": "session", "id": self.ID, "cwd": "/srv/checkout"}, {"type": "model_change"})
         for target in (str(file), self.ID, self.ID[:13]):
             with self.subTest(target=target):
-                self.assertEqual(self.check.resumed_cwd(target, self.tmp, agent), Path("/srv/checkout"))
+                self.assertEqual(self.launching.resumed_cwd(target, self.tmp, agent), Path("/srv/checkout"))
 
     def test_what_cannot_be_resolved_is_none(self) -> None:
         agent = self.home / ".omp" / "agent"
@@ -183,9 +185,9 @@ class AResumedSession(Unit):
         self.session(self.ID[:8] + "-ffff-7abc-8def-0123456789ab", {"type": "session", "cwd": "/srv/b"})
         for target in (self.ID[:8], "not-an-id", "--model", str(self.tmp / "missing.jsonl")):
             with self.subTest(target=target):
-                self.assertIsNone(self.check.resumed_cwd(target, self.tmp, agent))
+                self.assertIsNone(self.launching.resumed_cwd(target, self.tmp, agent))
         relative = self.session("relative", {"type": "session", "cwd": "srv/a"})
-        self.assertIsNone(self.check.resumed_cwd(str(relative), self.tmp, agent))
+        self.assertIsNone(self.launching.resumed_cwd(str(relative), self.tmp, agent))
 
     def test_a_session_dir_is_where_an_id_is_looked_up(self) -> None:
         agent = self.home / ".omp" / "agent"
@@ -193,9 +195,9 @@ class AResumedSession(Unit):
         elsewhere.mkdir()
         (elsewhere / f"2026-11-21T00-00-00-000Z_{self.ID}.jsonl").write_text(
             json.dumps({"type": "session", "id": self.ID, "cwd": "/srv/elsewhere"}) + "\n")
-        self.assertEqual(self.check.resumed_cwd(self.ID, self.tmp, agent, elsewhere), Path("/srv/elsewhere"))
+        self.assertEqual(self.launching.resumed_cwd(self.ID, self.tmp, agent, elsewhere), Path("/srv/elsewhere"))
         # Control: without the session directory the id is under the agent's sessions only, where it is not.
-        self.assertIsNone(self.check.resumed_cwd(self.ID, self.tmp, agent))
+        self.assertIsNone(self.launching.resumed_cwd(self.ID, self.tmp, agent))
 
 
 class TheLaunch(Unit):
@@ -289,22 +291,33 @@ class TheLaunch(Unit):
             return [values["DISPATCH_TOKEN"] for where, values in self.launch("claude", "claude", *args, **extra).sources
                     if str(settings.parent) in where and "DISPATCH_TOKEN" in values]
 
-        self.assertEqual(project_tokens("ok"), [], "an interactive start in an untrusted folder")
+        def refused(*args: str, **extra: str) -> None:
+            # Claude Code applies the file once the folder's trust is accepted, which no check can see first.
+            with self.assertRaisesRegex(self.check.Refused, "names DISPATCH_TOKEN for Dispatch.*trust is accepted"):
+                self.launch("claude", "claude", *args, **extra)
+
+        refused("ok")
         self.assertEqual(project_tokens("-p", "ok"), ["from-project"])
         self.assertEqual(project_tokens("--print", "ok"), ["from-project"])
+        self.assertEqual(project_tokens("-cp", "ok"), ["from-project"])
+        self.assertEqual(project_tokens("ok", CLAUDE_CODE_SANDBOXED="1"), ["from-project"])
         record = self.home / ".claude.json"
         record.write_text(json.dumps({"projects": {str(self.tmp): {"hasTrustDialogAccepted": True}}}))
         self.assertEqual(project_tokens("ok"), ["from-project"], "a folder whose trust is accepted")
-        self.assertEqual(project_tokens("ok", CLAUDE_CODE_IGNORE_PERSISTED_TRUST="1"), [])
+        refused("ok", CLAUDE_CODE_IGNORE_PERSISTED_TRUST="1")
         # Claude Code keeps its record beside CLAUDE_CONFIG_DIR's settings when that names a directory.
         config = self.tmp / "claude-config"
         config.mkdir()
-        self.assertEqual(project_tokens("ok", CLAUDE_CONFIG_DIR=str(config)), [])
+        refused("ok", CLAUDE_CONFIG_DIR=str(config))
         (config / ".claude.json").write_text(record.read_text())
         self.assertEqual(project_tokens("ok", CLAUDE_CONFIG_DIR=str(config)), ["from-project"])
         # A record that cannot be read for certain trusts nothing.
         record.write_text("{not json")
-        self.assertEqual(project_tokens("ok"), [])
+        refused("ok")
+        # Control: in a folder not trusted yet, a project file that names no bearer is neither refused nor read.
+        settings.write_text(json.dumps({"env": {"SOMETHING_ELSE": "x"}}))
+        self.assertEqual([where for where, _ in self.launch("claude", "claude", "ok").sources if str(settings.parent) in where],
+                         [])
 
     def test_codex_reads_its_cd_directory(self) -> None:
         project = self.tmp / "codex-project"
@@ -321,6 +334,85 @@ class TheLaunch(Unit):
         self.assertEqual((launch.command, launch.cwd, launch.sources, launch.checkouts),
                          ("--cwd", self.tmp, [], [self.tmp]))
         self.assertEqual(launch.envoy_json, self.home / ".config" / "legion" / "envoy.json")
+
+
+class ClaudeCodesTrust(Unit):
+    """claude_trusts against Claude Code 2.1.316's trust function: its environment switches, its
+    record looked up from the folder up to the repository root and never past it, and a linked
+    worktree's main repository as the repository's key."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # The walk outside a repository goes to `/`: this case's folders must be in none.
+        self.assertIsNone(self.launching.git_root(self.tmp), "the scratch folder is inside a repository")
+
+    def trusts(self, cwd: Path, trusted: list[Path], **extra: str) -> bool:
+        (self.home / ".claude.json").write_text(json.dumps(
+            {"projects": {str(folder): {"hasTrustDialogAccepted": True} for folder in trusted}}))
+        with self.environment(**extra):
+            return self.launching.claude_trusts(cwd)
+
+    def repository(self, name: str) -> Path:
+        root = self.tmp / name
+        (root / ".git").mkdir(parents=True)
+        return root
+
+    def test_a_folder_below_a_trusted_repository_root_is_trusted(self) -> None:
+        repo = self.repository("repo")
+        below = repo / "sub" / "deeper"
+        below.mkdir(parents=True)
+        self.assertTrue(self.trusts(below, [repo]))
+        self.assertTrue(self.trusts(below, [repo / "sub"]))
+        # Control: with no record in the repository, the same folder is not trusted.
+        self.assertFalse(self.trusts(below, []))
+
+    def test_the_walk_never_passes_the_repository_root(self) -> None:
+        clone = self.repository("clone")
+        (clone / "sub").mkdir()
+        for folder in (clone, clone / "sub"):
+            with self.subTest(folder=folder):
+                self.assertFalse(self.trusts(folder, [self.tmp]), "a trusted folder above the clone's root")
+        # Control: outside any repository the same record trusts the folder, since the walk goes to `/`.
+        plain = self.tmp / "plain" / "sub"
+        plain.mkdir(parents=True)
+        self.assertTrue(self.trusts(plain, [self.tmp]))
+
+    def test_a_linked_worktree_takes_its_main_repositorys_record(self) -> None:
+        main = self.repository("main")
+        tree = self.tmp / "tree"
+        tree.mkdir()
+        gitdir = main / ".git" / "worktrees" / "tree"
+        gitdir.mkdir(parents=True)
+        (gitdir / "commondir").write_text("../..\n")
+        (gitdir / "gitdir").write_text(f"{tree / '.git'}\n")
+        (tree / ".git").write_text(f"gitdir: {gitdir}\n")
+        self.assertTrue(self.trusts(tree, [main]))
+        # Control: a worktree whose gitdir file points at another folder is its own key.
+        (gitdir / "gitdir").write_text(f"{self.tmp / 'other' / '.git'}\n")
+        self.assertFalse(self.trusts(tree, [main]))
+
+    def test_the_environment_switches(self) -> None:
+        folder = self.tmp / "folder"
+        folder.mkdir()
+        self.assertTrue(self.trusts(folder, [folder]))
+        self.assertFalse(self.trusts(folder, [folder], CLAUDE_CODE_IGNORE_PERSISTED_TRUST="1"))
+        self.assertTrue(self.trusts(folder, [], CLAUDE_CODE_SANDBOXED="1"))
+        self.assertTrue(self.trusts(folder, [], CLAUDE_CODE_SANDBOXED="1", CLAUDE_CODE_IGNORE_PERSISTED_TRUST="1"))
+        self.assertTrue(self.trusts(folder, [], CLAUDE_BG_WORKSPACE_TRUSTED="1"))
+        # Control: no record and no switch.
+        self.assertFalse(self.trusts(folder, []))
+
+    def test_print_mode_is_print_or_a_short_flag_cluster_holding_p(self) -> None:
+        for args in (["-p"], ["-cp", "hi"], ["-pc", "hi"], ["--print", "hi"], ["--model", "x", "-p", "hi"]):
+            with self.subTest(args=args):
+                self.assertTrue(self.launching.prints(args))
+        # Controls: no p, a long flag, and a prompt after `--`.
+        for args in (["-c", "hi"], ["hi"], ["--permission-mode", "plan"], ["-c", "--", "-p"]):
+            with self.subTest(args=args):
+                self.assertFalse(self.launching.prints(args))
+
+    def test_the_bearer_keys_are_the_keys_the_check_reads(self) -> None:
+        self.assertEqual(self.launching.BEARER_KEYS, {"DISPATCH_TOKEN", "DISPATCH_TOKEN_FILE", *self.check.CONFIG_KEYS})
 
 
 class TheCacheAndFaults(Unit):
@@ -470,8 +562,12 @@ class NoSessionWords(unittest.TestCase):
             if binary is None:
                 continue
             ran += 1
-            done = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
-            text = done.stdout + done.stderr
+            # Through a file: Claude Code exits before a pipe takes all of its help (8190 of 8 KiB+ bytes seen).
+            with tempfile.TemporaryFile() as out:
+                subprocess.run([binary, "--help"], stdout=out, stderr=subprocess.STDOUT, timeout=60,
+                               stdin=subprocess.DEVNULL, check=False)
+                out.seek(0)
+                text = out.read().decode(errors="replace")
             listed = self.commands(text)
             with self.subTest(harness=harness, binary=binary):
                 self.assertTrue(listed, f"{binary} --help listed no commands to compare with")
