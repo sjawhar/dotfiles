@@ -1,0 +1,51 @@
+#!/bin/bash
+# hook-sweep: one pass of the leak check's hook sweep, as a step of devbox/box-cleanup.
+#
+#   hook-sweep fast    one pass over the sweep's fast_roots (where sessions make checkouts)
+#   hook-sweep slow    one pass over its fast_roots and slow_roots together
+#
+# The sweep is sweep-hooks.sh of the installed leak-check tag, in ~/.local/share/public-leak-check-hooks
+# (devbox/sami-devbox-provision's step prepush installs it; HOOK_SWEEP_DIR overrides the directory for a test).
+# It installs the pre-push hook in each checkout of a public repository under those roots that lacks it
+# (theorem-labs/agent-infra leak-check/README.md, "The pre-push hook"). sweep-hooks.sh loops for ever, so
+# its code up to that loop (`i=0`) is loaded and `sweep` runs once, as step prepush runs it, with the
+# directory as its `here` (its memos, its queue and sweep.lock) and its log in a private temporary file.
+#
+# Before 2026-11-21 these passes ran in dotfiles-follow.timer, which devbox/install.sh no longer arms
+# (dispatch://INFRA-2022); box-cleanup.timer, which Sami approved
+# (dispatch://INFRA-993/ask/d44b73ba-3ac6-4307-9dd7-065cb035ec9b), runs them now, as two of its steps.
+#
+# It prints the pass's INSTALLED, FAILED, DEFERRED and OPTED-OUT lines and its summary, then
+# `reclaimed-bytes: 0` (it frees nothing, and box-cleanup counts a step without that line as unmeasured).
+# Exit 0 when the pass ended with its summary line and failed nothing; 1 when it failed a checkout or
+# ended without its summary; 2 on a usage error or a missing sweep. A deferred checkout is not a failure:
+# the sweep's next pass reaches it (its per-pass cap on GitHub visibility lookups).
+set -uo pipefail
+
+kind=${1:-}
+dir=${HOOK_SWEEP_DIR:-$HOME/.local/share/public-leak-check-hooks}
+script=$dir/sweep-hooks.sh
+# shellcheck disable=SC2016  # the roots are for the sweep's own shell to expand, not this one
+case $kind in
+    fast) roots='"${fast_roots[@]}"' ;;
+    slow) roots='"${fast_roots[@]}" "${slow_roots[@]}"' ;;
+    *) echo "usage: hook-sweep fast|slow" >&2; exit 2 ;;
+esac
+if [[ ! -f "$script" ]]; then
+    echo "hook-sweep: $script is missing, so no checkout's pre-push hook was checked or installed; install it: sami-devbox-provision --only prepush" >&2
+    exit 2
+fi
+log=$(mktemp "${TMPDIR:-/tmp}/hook-sweep-$kind-XXXXXX") || { echo "hook-sweep: cannot make a log file" >&2; exit 1; }
+trap 'rm -f "$log"' EXIT
+bash -c 'eval "$(sed "/^i=0\$/,\$d" "$1")" && here=$2 && log=$3 && sweep '"$roots" _ "$script" "$dir" "$log" </dev/null >/dev/null 2>&1
+rc=$?
+grep -E ' (INSTALLED|FAILED|DEFERRED|OPTED-OUT) ' "$log"
+summary=$(grep -E ' sweep \[[^]]*\]: [0-9]+ checkouts.*, [0-9]+ installed, [0-9]+ failed$' "$log" | tail -n 1)
+echo "reclaimed-bytes: 0"
+if [[ -z "$summary" ]]; then
+    echo "hook-sweep: the $kind pass exited $rc without its summary line, so some checkouts may lack the pre-push hook" >&2
+    exit 1
+fi
+echo "$summary"
+[[ "$summary" == *", 0 failed" ]] || exit 1
+exit 0

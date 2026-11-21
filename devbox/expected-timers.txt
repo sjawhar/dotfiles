@@ -101,7 +101,9 @@ unit-health-watch.timer            # owner: box-health lead. This list, and ever
 # (dispatch://INFRA-993/ask/d44b73ba-3ac6-4307-9dd7-065cb035ec9b). Each keeps its own script,
 # caps, ages, refusals and ConditionPath*. Every 15 minutes the guarded cache caps run;
 # the session and temporary-file sweeps run only when their 86400-second interval is due.
-# One timer and one log still cover all seven (devbox/box-cleanup.md).
+# One timer and one log still cover all seven (devbox/box-cleanup.md). Since 2026-11-21 it also runs
+# the leak check's hook sweep as two steps (devbox/hook-sweep: fast roots every pass, 420 s; fast and
+# slow roots hourly, 1000 s), which dotfiles-follow.timer ran before (dispatch://INFRA-4953).
 # max_run is its own 4h TimeoutStartSec: seven steps, each killed at 30 min, and session-tmp-reap
 # alone took 409-828 s on 2026-11-04.
 box-cleanup.timer  max_run=4h        # owner: box-health lead. Cache caps every 15 min; costly sweeps daily.
