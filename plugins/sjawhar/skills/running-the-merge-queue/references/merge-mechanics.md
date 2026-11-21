@@ -1,6 +1,6 @@
 # Protected merge and literal evidence writes
 
-Read before you post evidence or merge. Write as the current approved identity, never with a reused personal token or `--admin`. Sami's admin token from the credential broker is for an admin action only ("Admin actions" in `landing-a-pr`'s repo merge rules); no approval uses a person's token, the admin token included.
+Read before you post evidence or merge. Write as the current approved identity, never with a reused personal token or `--admin`. An admin credential from the credential broker (the admin App grant `GITHUB_ADMIN_APP` on theorem-labs, Sami's admin token on his own repositories) is for an admin action only ("Admin actions" in `landing-a-pr`'s repo merge rules); no approval uses a person's token or an admin credential.
 
 ## Gate, then merge pinned
 

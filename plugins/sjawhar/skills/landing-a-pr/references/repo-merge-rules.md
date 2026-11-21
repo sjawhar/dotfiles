@@ -1,6 +1,6 @@
 # Repository merge rules
 
-Read before you change an enabled auto-merge, merge in a repository named below, use an admin token, or merge a PR that adds or changes a database migration.
+Read before you change an enabled auto-merge, merge in a repository named below, take a GitHub admin action, or merge a PR that adds or changes a database migration.
 
 ## Changing an enabled auto-merge
 
@@ -12,18 +12,28 @@ Do not decide from `gh api repos/<owner>/<repo> -q .permissions`: it reports a u
 
 ## Admin actions
 
-A GitHub admin action that work Sami already asked for needs (an App permission or installation, an admin merge, a repository or branch setting) is yours to do with his admin token from the credential broker; do not ask him to do it. `GITHUB_ADMIN_PAT` reaches theorem-labs repositories, `GITHUB_PERSONAL_ADMIN_PAT` sjawhar's own. The broker puts the token in the variable of its own name and gh reads only `GH_TOKEN` or `GITHUB_TOKEN`, so pass it in the command:
+On theorem-labs, no role writes as an administrator with a person's token:
+
+- A repository or branch setting changes in the code of the program that declares it, through a pull request (agent-infra's `root/` or `github/`).
+- An App's permissions or installation is the App owner's own step: ask the owner through Dispatch, with the full `https://` URL of the App's settings page.
+- An admin write that no program makes (a probe, `root/` applied by hand) takes the admin App grant `GITHUB_ADMIN_APP` from the credential broker. It is human tier: Sami approves each grant, and it lasts one hour at most. Narrow it to the repository you write. The broker puts the token in `GITHUB_ADMIN_APP` and gh reads only `GH_TOKEN` or `GITHUB_TOKEN`, so pass it in the command:
 
 ```sh
-secret-run --register --reason '<what and why>' GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh "$@"' gh <the call>
+secret-run --register --reason '<what and why>' --ttl 15m --github-owner theorem-labs --github-repo <repo> GITHUB_ADMIN_APP -- sh -c 'GH_TOKEN=$GITHUB_ADMIN_APP exec gh "$@"' gh <the call>
 ```
 
-- Sami approves the broker's grant card once per session. `--register` gives a session with no broker identity one, with no restart.
-- The token never skips a check that tests the work.
+On sjawhar's own repositories, a GitHub admin action that work Sami already asked for needs (an App permission or installation, an admin merge, a repository or branch setting) is yours to do with his admin token `GITHUB_PERSONAL_ADMIN_PAT` from the credential broker; do not ask him to do it. Pass it in the command the same way:
+
+```sh
+secret-run --register --reason '<what and why>' GITHUB_PERSONAL_ADMIN_PAT -- sh -c 'GH_TOKEN=$GITHUB_PERSONAL_ADMIN_PAT exec gh "$@"' gh <the call>
+```
+
+- Sami approves the broker's grant card. `--register` gives a session with no broker identity one, with no restart.
+- No admin credential skips a check that tests the work.
 
 ## Approvals
 
-- An approval of a pull request is not an admin action. No approval uses a person's token, the admin token included.
+- An approval of a pull request is not an admin action. No approval uses a person's token or an admin credential.
 - Where a code owner owns the files changed, the approval is that person's: ask them through Dispatch, with the pull request, its head and the review verdict it got.
 - You may approve a pull request your own session wrote when the work had cross-family review under `sdd` and Sami authorized the work.
 - An approval counts only at the head it names: a push after approval needs a new review and approval at the new head.
