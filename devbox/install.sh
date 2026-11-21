@@ -135,6 +135,10 @@ fi
 # installers/go-env.sh).
 bash "${DOTFILES_DIR}/installers/go-env.sh"
 
+# UV_CACHE_DIR, PIP_CACHE_DIR and BUN_INSTALL_CACHE_DIR in uv's, pip's and bun's own config
+# files, for the same processes (see installers/cache-config.sh).
+bash "${DOTFILES_DIR}/installers/cache-config.sh"
+
 # ~/.ssh/known_hosts append-only, so no session's program can write over the file every session
 # shares; ssh's UpdateHostKeys is off for this user (see installers/ssh-known-hosts.sh).
 bash "${DOTFILES_DIR}/installers/ssh-known-hosts.sh"
