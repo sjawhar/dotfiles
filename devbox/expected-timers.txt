@@ -8,7 +8,8 @@
 #     from this user manager, is not enabled, or has not fired for more than three times its
 #     own interval.
 #   - installers/expected-timers.sh. It links and `enable --now`s every timer named here, which
-#     is idempotent: run it as often as you like, and after every reset of the box.
+#     is idempotent: run it as often as you like, and after every reset of the box. A timer
+#     someone disabled and stopped it leaves alone, and names.
 #
 # How to add one: one timer name per line, with a comment saying who owns it. A name with no
 # `.timer` suffix gets one. `#` starts a comment anywhere in a line. Blank lines are ignored.
