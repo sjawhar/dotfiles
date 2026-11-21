@@ -32,7 +32,16 @@ Put each step's output in the commit message or the pull request, so that the ne
 
 2. **Brief a fresh agent** with the old text, the new text and the drop list, and not your reasoning:
 
-   > List every instruction in OLD: each thing it tells the agent to do, not do, check or know. For each one, give the line in NEW that carries the same meaning and scope, or the drop-list row that covers it. Mark it with a verdict: KEPT (NEW carries it), LOST (neither exists), NARROWED (NEW keeps the rule for fewer cases, or with a lost command, path or number), or BAD-DROP (the drop-list reason is not one of the codes, or its evidence does not show what it claims). Output a table: old line, instruction, new line or drop row, verdict.
+   > List every instruction in OLD: each thing it tells the agent to do, not do, check or know. For each one, give the line in NEW that carries the same meaning and scope, or the drop-list row that covers it. Mark it with one verdict:
+   >
+   > | Verdict | When |
+   > | --- | --- |
+   > | KEPT | NEW carries it |
+   > | LOST | Neither exists |
+   > | NARROWED | NEW keeps the rule for fewer cases, or with a lost command, path or number |
+   > | BAD-DROP | The drop-list reason is not one of the codes, or its evidence does not show what it claims |
+   >
+   > Output a table: old line, instruction, new line or drop row, verdict.
 
 3. **Fix every LOST, NARROWED and BAD-DROP:** restore the rule, or drop it with a real reason. A narrowed rule fails where the old one held.
 4. **Map the changed rows again**, and only those.
@@ -43,7 +52,7 @@ Put each step's output in the commit message or the pull request, so that the ne
 
    | Class | Example | Replace it with |
    | --- | --- | --- |
-   | Vague or empty phrase: the agent cannot act on it | "Be thorough and rigorous" | A step and an object: "Before you report a finding, open the cited file:line and quote the line that supports it." |
+   | Vague or empty phrase: the agent cannot act on it | "Be thorough and rigorous" | A step and an object: "Before you report a finding, quote the cited file:line that supports it." |
    | Abstract noun in place of an action: the agent does not know what to send to whom | "settle ownership" | The message and its recipient |
    | Undefined term | "a settled snapshot" | Its definition at first use, or what it stands for |
    | Rule nobody could check | "predict his judgment, not his mood" | An action a transcript can show, such as citing the earlier decision the prediction rests on |

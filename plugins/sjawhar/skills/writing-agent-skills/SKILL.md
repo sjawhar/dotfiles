@@ -13,29 +13,6 @@ For an agent guide (AGENTS.md, CLAUDE.md), take its shape and size from `updatin
 
 Use steps 1 and 3 for an agent guide's rules too.
 
-## Limits
-
-| Part | Limit | `check_skill.py` |
-| --- | --- | --- |
-| `description` | Starts "Use when", at most 300 characters, says when to load the skill and never its steps | Fails a wrong start or length |
-| `SKILL.md` and each markdown file outside `assets/` and `templates/` | At most 8,000 bytes, the whole file counted; no line limit | Fails it |
-| Rules in `SKILL.md` (a list item, or a sentence of a paragraph) | At most 40 | Warns |
-
-- **Keep the steps out of the description:** an agent that reads them there follows them and skips the body.
-- **Put the trigger words first**, with the case where the agent thinks it can do without the skill ("also when the diff is pasted inline"): omp shows the model a hint of about 12 words made from the description, or its first 99 characters until that hint exists.
-- **Over 40 rules, split the skill, move blocks into references, or delete rules (step 4):** a model obeys fewer of its rules as their number grows.
-- **Keep in SKILL.md only the routing and the rules the model would not follow by default.**
-- **Put required steps and stop rules first:** a harness that cuts a long file keeps only its start.
-
-| A file or block | Do |
-| --- | --- |
-| A block that only some tasks need | Move it into `references/<topic>.md`, one level deep, and name it at the step that needs it, with its condition |
-| A reference that every task reads | Merge it into SKILL.md when the merged file stays within the limits |
-| A reference that nothing names | Delete it |
-| A file the skill tells an agent to copy whole into another place (a brief, a form) | It may go under `assets/`, where the Agent Skills specification puts templates; `check_skill.py` reads `templates/` the same way. Only those two directories make a file a template. The limits do not hold a template |
-
-- **Before you rename, move or delete a skill, one of its paths or a frontmatter field such as `mcp:`, fix each code, prompt or skill that names it, in the same change:** `git grep -n <name>` finds them.
-
 ## Step 1: Decide that a rule is needed
 
 1. **Find it twice.** Find the failure in at least two sessions with `tq search` (`using-transcript-store`): one incident turned into one rule is how instruction files triple in size.
@@ -58,7 +35,6 @@ Choose the form by the failure:
 | A program can check it | The check, and the command that runs it |
 | The agent already does it in a control run | Nothing |
 
-- **Give a reason only where the rule would look arbitrary** (style rule 5). Never give one that restates the rule.
 - **Use the words the code uses.**
 - **Give every instruction a verb and an object.**
 - **Write plain English, not ASD-STE100:** a strict rewrite drops facts.
@@ -79,10 +55,12 @@ Read its section "Measuring a harness change" when the change is to the harness 
 3. **Blind runs.** Run each case in a fresh session that gets the raw task, not your diagnosis, and is not told it is a test.
 4. **Three arms.** Run the old text, the new text and a no-guidance control 3 times each. Run 3 more of each when the arms differ by one or two runs.
 5. **Near misses.** For a description, also run near-miss prompts that must not load it.
-6. **Held-out cases.** Before you tune, set aside 40% of the cases (rounded down, at least one). Tune on the rest. Report the held-out ones: a variant tuned on the cases you report wins only those.
-7. **Tuned-only gains.** Revert a change that improves only the tuned ones.
-8. **Three review rounds.** Stop a review loop after three rounds.
-9. **Only the change.** In each later round, check only what changed. Repeat no finding.
+6. **Held-out cases.** Before you tune, set aside 40% of the cases (rounded down, at least one), and tune on the rest.
+7. **Report the held-out cases:** a variant tuned on the cases you report wins only those.
+8. **Tuned-only gains.** Revert a change that improves only the tuned ones.
+9. **Three review rounds.** Stop a review loop after three rounds.
+10. **Only the change.** In each later round, check only what changed.
+11. **No repeats.** Repeat no finding.
 
 ## Step 4: Remove rules
 
@@ -102,3 +80,25 @@ Read its section "Measuring a harness change" when the change is to the harness 
 ## Step 6: Rewrite an existing skill
 
 **Read `references/rewriting-a-skill.md` now**, before you rewrite or shorten an existing skill: it has the instruction map, the slop check, the behavior test and the size checks.
+
+## Limits
+
+| Part | Limit | `check_skill.py` |
+| --- | --- | --- |
+| `description` | Starts "Use when", at most 300 characters, says when to load the skill and never its steps | Fails a wrong start or length |
+| `SKILL.md` and each markdown file outside `assets/` and `templates/` | At most 8,000 bytes, the whole file counted; no line limit | Fails it |
+| Rules in `SKILL.md` (a list item, or a sentence of a paragraph) | At most 40. Over it, split the skill, move blocks into references, or delete rules (step 4): a model obeys fewer of its rules as their number grows | Warns |
+
+- **Keep the steps out of the description:** an agent that reads them there follows them and skips the body.
+- **Put the trigger words first**, with the case where the agent thinks it can do without the skill ("also when the diff is pasted inline"): omp shows the model a hint of about 12 words made from the description, or its first 99 characters until that hint exists.
+- **Keep in SKILL.md only the routing and the rules the model would not follow by default.**
+- **Put required steps and stop rules first:** a harness that cuts a long file keeps only its start.
+
+| A file or block | Do |
+| --- | --- |
+| A block that only some tasks need | Move it into `references/<topic>.md`, one level deep. Name it at the step that needs it, with its condition |
+| A reference that every task reads | Merge it into SKILL.md when the merged file stays within the limits |
+| A reference that nothing names | Delete it |
+| A file the skill tells an agent to copy whole into another place (a brief, a form) | Put it under `assets/` when it would go over a limit: that is where the Agent Skills specification puts templates, and `check_skill.py` reads `templates/` the same way. Only those two directories make a file a template. The limits do not hold a template |
+
+- **Before you rename, move or delete a skill, one of its paths or a frontmatter field such as `mcp:`, fix each code, prompt or skill that names it, in the same change:** `git grep -n <name>` finds them.
