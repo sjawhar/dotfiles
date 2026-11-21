@@ -66,6 +66,18 @@ t "g=false p=false n=false sha=-"        "please merge 486fc48e when you can - a
 t "g=false p=false n=false sha=-"        $'Re-cite requested.\n  merge conflict at 486fc48e resolved by rebase'
 t "g=false p=false n=false sha=-"        "Reviewer: post \`MERGE 486fc48e\` as the first line"
 t "g=false p=false n=false sha=-"        "@claude review  Delta since your verdict at 1d64f1ca: one commit, $H"
+echo "== 'merge at', 'approve(d) at', 'accept(ed) at' and the negative 'X at' forms count only with a sha after them (agent-infra#3861) =="
+# A merge-hold notice's "#3181 failed to merge at five heads" read as a positive verdict: one hex letter ('f') was enough.
+# The sha may follow 'head', bold or a code span.
+HOLD="**Do not enqueue #3861 until #3181's window ends.** Under Sami's answer on dispatch://INFRA-1478/ask/$U, #3181 failed to merge at five heads in a row because main conflicted with it."
+t "g=false p=false n=false sha=-"        "$HOLD"
+t "g=false p=true n=false sha=-"         "I will approve at the next round, once CI settles"
+t "g=false p=false n=false sha=-"        "Accepted at face value: the census numbers hold"
+t "g=false p=false n=false sha=-"        "Two lanes had changes requested at first, then nothing"
+t "g=true p=true n=false sha=f2314fb2"   "delta fda41a10 -> f2314fb2: MERGE at head f2314fb2"
+t "g=true p=true n=false sha=188327f0"   "approve at \`188327f0\` - one nit left"
+t "g=true p=true n=false sha=188327f0"   "Accepted at **188327f0**."
+t "g=true p=true n=false sha=$H"         "Approved at head $H."
 echo "== a later-line bare VERB <sha> is NOT a verdict (first-line rule; jq ^ is string start) =="
 t "g=false p=false n=false sha=-"        $'Some preamble line\nMERGE 486fc48e\nmore text'
 echo "== polarity is decided by the FIRST hit (legion#1430: an APPROVE recounting its earlier REQUEST_CHANGES) =="
@@ -84,6 +96,8 @@ C4=8e4f40648cfe6d0f37673d8a74e7994d007e13fc
 CRB=$(printf 'Changes requested at `%s`. The one blocking item is the gate, not the code.\n\n**What I reviewed.** Only what changed since `3e05f653`, which I approved in round 1.\n [review state REQUEST_CHANGES at %s]' "$C4" "$C4")
 tp neg  "$CRB"
 t "g=true p=true n=true sha=$C4"         "$CRB"
+# The same with 'head' before the sha: the negative 'X at' forms take it as the positive ones do.
+tp neg  "$(printf 'Changes requested at head `8e4f4064`. I approved the round before.\n [review state REQUEST_CHANGES at %s]' "$C4")"
 echo "== the oracle's DOES NOT BLOCK is verdict-bearing, in neither polarity set by itself (agent-c#20410, AGENTC-1070) =="
 t "g=true p=false n=false sha=4f659f925529e430a0497de212dbaec240397ee1" "Verdict: DOES NOT BLOCK at 4f659f925529e430a0497de212dbaec240397ee1 (UNPROVEN CLAIMS: 5, none blocking) Oracle re-judge after the owner's census. This supersedes the BLOCKS verdict in 5861618968."
 t "g=true p=false n=true sha=4f659f925529e430a0497de212dbaec240397ee1" "Verdict: BLOCKS at 4f659f925529e430a0497de212dbaec240397ee1 (UNPROVEN CLAIMS: 7, 1 blocking: staging only)"
@@ -144,6 +158,9 @@ tv "blocked at-head"   "$NEW" "$(appseq "$RC1" "$AP2" "$(app "$NEW" '["2"]' "$PN
 # agent-infra#3861: the App approved the head, then a later verdict named only a Dispatch ask link. Its sha is none, so the
 # gate runs no carry compare against the UUID (the old read: not-at-head, a 404 and a false CHANGED).
 tv "green no-sha"      "$NEW" "$(appseq "$(app "$NEW" '[]' "$PA" APPROVED)" "**Verdict: APPROVE**, on Sami's answer dispatch://INFRA-1478/ask/$U")"
+# #3861 itself: the App approved the head, then the merge-hold notice. The notice is no verdict, so the App's approval at
+# the head is the newest one (the old read: the notice was the newest verdict, with no sha).
+tv "green at-head"     "$NEW" "$(appseq "$(app "$NEW" '[]' "$PA" APPROVED)" "$HOLD")"
 # agent-infra#4645's shape: an approve of an old head, then a change request AT the head whose prose recounts that approve. It
 # blocks; read as an approve of the old sha, a diff identical since then would have carried it to green.
 tv "blocked at-head"   "$C4" "$(appseq "$(printf 'Approved at `3e05f653786fd6259ce666dea6146b8655584f1f`. I find no correctness defect in this head.\n [review state APPROVED at 3e05f653786fd6259ce666dea6146b8655584f1f]')" "$CRB")"
