@@ -4,8 +4,9 @@
 Claude Code's async SessionStart hook (.claude/settings.json) runs it with the hook's JSON on
 stdin. It runs `agent-secrets register --session-id <session_id>` only after `agent-secrets
 identity` exits 0 (dispatch://INFRA-3848), and not when `agent-secrets-helper sessions` shows the
-nearest session root above it named already: a claude process names one id, and `/clear` gives it
-another. It does nothing in an agent box, with no helper socket, or with no session id. A refusal
+nearest session root above it named already or an omp process: a claude process names one id,
+`/clear` gives it another, and an omp root is another session, which a claude id must never name.
+It does nothing in an agent box, with no helper socket, or with no session id. A refusal
 writes one line on stderr and exits 0. Claude owns the background process and collects its output
 without delaying session start; the script keeps its parent link. The hook is registered for the
 sources startup, resume and clear and not compact; SessionStart does not fire for a subagent.
@@ -54,6 +55,16 @@ sleep "${FAKE_SESSIONS_DELAY:-0}"
 [ -n "${FAKE_SESSIONS:-}" ] && printf '%s\\n' "$FAKE_SESSIONS"
 exit "${FAKE_SESSIONS_EXIT:-0}"
 """
+# A process above the hook, installed as `omp` and as `claude`: its kernel comm is its file's name,
+# and it adds itself to FAKE_SESSIONS as a session root that no register has named. It runs the
+# hook as a child, never by exec, so it stays in the hook's ancestry.
+ROOT_STUB = """#!/bin/sh
+FAKE_SESSIONS="${FAKE_SESSIONS:+$FAKE_SESSIONS
+}$$\thost:$$:138752288\t7d8bb9de-bea6-4c08-ad54-0470028a348a\tenrolled"
+export FAKE_SESSIONS
+"$@"
+exit $?
+"""
 
 
 def session_row(pid: int, runtime_id: str) -> str:
@@ -71,7 +82,7 @@ class NameSessionTest(unittest.TestCase):
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)], check=False))
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
-        for name, text in (("agent-secrets", STUB), ("agent-secrets-helper", HELPER_STUB)):
+        for name, text in (("agent-secrets", STUB), ("agent-secrets-helper", HELPER_STUB), ("omp", ROOT_STUB), ("claude", ROOT_STUB)):
             stub = self.bin / name
             stub.write_text(text)
             stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
@@ -94,10 +105,11 @@ class NameSessionTest(unittest.TestCase):
         base.update(env)
         return base
 
-    def run_hook(self, payload: dict, timeout: float = 30, **env: str) -> subprocess.CompletedProcess[str]:
+    def run_hook(self, payload: dict, timeout: float = 30, above: tuple[str, ...] = (), **env: str) -> subprocess.CompletedProcess[str]:
+        """Run the hook, under the root stubs `above` names, outermost first."""
         return subprocess.run(
-            [str(SCRIPT)], input=json.dumps(payload), env=self.hook_env(**env),
-            capture_output=True, text=True, timeout=timeout,
+            [*(str(self.bin / name) for name in above), str(SCRIPT)], input=json.dumps(payload),
+            env=self.hook_env(**env), capture_output=True, text=True, timeout=timeout,
         )
 
     def logged(self) -> list[str]:
@@ -188,6 +200,21 @@ class NameSessionTest(unittest.TestCase):
         # is not its own (a pid that is no ancestor of the hook) has one.
         rows = "\n".join([session_row(4194303, f"session-{FIRST}"), UNNAMED_ROOT])
         done = self.run_hook({"session_id": SESSION, "source": "startup"}, FAKE_SESSIONS=rows)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.logged(), ["identity", f"register --session-id {SESSION}"])
+
+    def test_never_names_an_omp_session_above_the_hook(self) -> None:
+        # claude run from an omp session's shell, with no session of its own: the nearest root above
+        # the hook is that omp, whose session no register has named. The claude id must not name it.
+        done = self.run_hook({"session_id": SESSION, "source": "startup"}, above=("omp",))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((done.stdout, done.stderr), ("", ""))
+        self.assertEqual(self.logged(), ["identity"])
+
+    def test_names_its_own_session_under_an_omp_session(self) -> None:
+        # Control: scripts/cld run from an omp session's shell registers claude as a session of its
+        # own, below the omp's; the nearest root is that claude, so the hook names it.
+        done = self.run_hook({"session_id": SESSION, "source": "startup"}, above=("omp", "claude"))
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(self.logged(), ["identity", f"register --session-id {SESSION}"])
 
