@@ -79,15 +79,17 @@
 // in the background, so a restart of the helper keeps the session's broker
 // identity and its grants. The launcher (scripts/agent-secrets-session) registers
 // the session before omp has a transcript, so it can name no id; the helper takes
-// the name from inside the session it registered, finding the session's root from
-// the caller's pid. It runs only from inside such a session (`agent-secrets
-// identity` exits 0), since a register from outside one makes the helper admit the
-// command's own short-lived pid as a session root (dispatch://INFRA-3890). It does
-// nothing in a box (AGENTBOX_BOX: the box's launcher names its session), with no
-// helper socket, and for a subagent transcript resumed on its own: that process
-// commits as its session but is not it, and naming it would take that session's
-// broker identity from the process that holds it. A refusal writes one line and
-// never fails the session start.
+// the name from inside the session it registered. A session no launcher registered
+// (one resumed without the shims) is registered by the same call: since
+// cybermonklabs/legion#4151 (agent-secrets legion-envoy-v30.45.0), a register
+// without --exec attaches the nearest omp above it, which is this process, and the
+// helper refuses it when there is none. So every host top-level session runs it,
+// whatever started it. It does nothing in a box (AGENTBOX_BOX: the box's launcher
+// names its session), with no helper socket, for a subagent (below), and for a
+// subagent transcript resumed on its own: that process commits as its session but
+// is not it, and naming it would take that session's broker identity from the
+// process that holds it. A refusal writes one line that says what to run instead,
+// and never fails the session start.
 //
 // omp binds this extension to every subagent too, and a subagent shares its
 // parent's process and environment. A session family deliberately shares one
@@ -168,8 +170,7 @@ const ATTRIBUTION_OVERLAY = /^omp-attribution-.*\.toml$/;
 const OVERLAY_DIR = path.join(homedir(), ".cache", "omp", "jj");
 // `jj config path --user` reads no repository and answers in milliseconds.
 const JJ_CONFIG_PATH_TIMEOUT_MS = 10_000;
-// Each agent-secrets call the helper naming makes: `identity` asks the helper once with a 2 s
-// deadline of its own, and `register` redials a helper that is starting for up to 10 s.
+// The register the helper naming runs redials a helper that is starting for up to 10 s.
 const AGENT_SECRETS_TIMEOUT_MS = 10_000;
 const execFileAsync = promisify(execFile);
 // The ids this process has named, or is naming, to the helper.
@@ -197,17 +198,12 @@ function nameSessionToHelper(id: string, report: (message: string) => void): voi
 	const env = { ...process.env, AGENT_SECRETS_HELPER_SOCK: sock };
 	void (async () => {
 		try {
-			await execFileAsync("agent-secrets", ["identity"], { env, timeout: AGENT_SECRETS_TIMEOUT_MS });
-		} catch {
-			return; // no session the helper registered: nothing to name
-		}
-		try {
 			await execFileAsync("agent-secrets", ["register", "--session-id", id], { env, timeout: AGENT_SECRETS_TIMEOUT_MS });
 		} catch (error) {
 			const stderr = error && typeof error === "object" && "stderr" in error && typeof error.stderr === "string" ? error.stderr.trim() : "";
 			const why = stderr || String(error);
 			report(
-				`session-env: agent-secrets register --session-id ${id} failed, so a helper restart ends this session's broker identity: ${why.split("\n").at(-1)}`,
+				`session-env: agent-secrets register --session-id ${id} failed, so this session may have no broker identity, and a helper restart ends any it has. Run that command again from this session's shell with --wait 10; if the helper refuses it again (it refuses a call with no omp above it), quit and run ~/.dotfiles/shims/omp --resume ${id}, which registers the session as it starts. Reason: ${why.split("\n").at(-1)}`,
 			);
 		}
 	})();
