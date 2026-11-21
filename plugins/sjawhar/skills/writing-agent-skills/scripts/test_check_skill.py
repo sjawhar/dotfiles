@@ -343,6 +343,10 @@ def test_a_thematic_break_of_spaced_stars_is_not_a_rule(tmp_path: Path) -> None:
     assert warns(tmp_path, forty_items_and("\n* * *\n")) == []
 
 
+def test_a_nested_list_item_is_a_rule(tmp_path: Path) -> None:
+    assert warns(tmp_path, forty_items_and("  - A nested rule.\n")) == [WARN_41]
+
+
 def test_a_table_and_a_fenced_block_are_not_rules(tmp_path: Path) -> None:
     # Each would be over 40 rules if it were counted: the table as a paragraph, the fenced block as list items.
     rows = "".join(f"| {i} | Rule {i} is one sentence. Rule {i} has a second. |\n" for i in range(1, 46))
