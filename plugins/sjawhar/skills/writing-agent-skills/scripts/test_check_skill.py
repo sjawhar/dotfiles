@@ -109,6 +109,13 @@ def test_a_double_quoted_description_on_two_lines_passes(tmp_path: Path) -> None
     assert_passes(tmp_path, {"SKILL.md": head(desc) + "x\n"})
 
 
+def test_a_double_quoted_description_counts_the_characters_yaml_reads(tmp_path: Path) -> None:
+    # As yaml.safe_dump writes a description with an em dash: \u2014 is one character, and a
+    # backslash at a line's end joins the next line, whose "\ " is one space. YAML reads 300.
+    desc = '"Use when ' + "x" * 60 + " \\u2014\\\n  \\ " + "y" * 228 + '"'
+    assert_passes(tmp_path, {"SKILL.md": head(desc) + "x\n"})
+
+
 def test_skill_md_of_150_lines_passes(tmp_path: Path) -> None:
     assert_passes(tmp_path, {"SKILL.md": text_of(150, 2_000, head())})
 
