@@ -6705,9 +6705,11 @@ move_relaunch() {
 # (CALLER, its ancestors and descendants). A server, a watcher or a dashboard started from a tool
 # call is a child of the omp, and a hang-up ends it: KNOTCURVE's dashboard, started by hand from
 # its session, died with the move at 16:21Z on 2026-11-02 and was down about four hours. One row
-# per top process, with how many processes are under it. A process `setsid` detached - its own
-# session leader, so the pane's hang-up does not reach it - is not an orphan, and neither is what
-# it started; nor is a systemd unit, which is not under the omp at all.
+# per top process, with how many processes are under it. Leading a session of its own saves
+# nothing: omp's hang-up teardown signals what is still reachable from it BY PARENT LINK, and
+# plain `setsid` changes the session but not the parent (move_orphans_gate has the measurement),
+# so a plain-setsid child and what it started are listed. What `setsid --fork` started, or a
+# systemd unit, has a parent other than the omp, so this walk down from the omp never reaches it.
 move_orphans() {
     local omp="$1" caller="${2:-}" p q cmd n
     local -A skip=()
@@ -6737,24 +6739,10 @@ move_orphans() {
         case "$cmd" in
             *__omp_worker*|*/omp-python-runner*/runner-*.py*) skip[$p]=helper ;;
         esac
-        # Field 6 of /proc/<pid>/stat is the session id: its own means `setsid`, and SIGHUP of the
-        # pane's session does not reach it.
-        if [[ -z "${skip[$p]:-}" ]]; then
-            local stat_line sess
-            if stat_line="$(<"$PROC/$p/stat")" 2>/dev/null; then
-                stat_line="${stat_line##*) }"
-                set -- $stat_line
-                sess="${4:-}"
-                [[ "$sess" == "$p" ]] && skip[$p]=detached
-            fi
-        fi
         if [[ -n "${skip[$p]:-}" ]]; then
-            # A detached process takes its own children with it: the hang-up reaches none of them.
-            # omp's helpers and the move's own chain do not, so what they started is still listed.
-            if [[ "${skip[$p]}" != detached ]]; then
-                read -r -a q <<<"${MOVE_KIDS[$p]:-}"
-                queue+=(${q[@]+"${q[@]}"})
-            fi
+            # omp's helpers and the move's own chain are not listed, but what they started is.
+            read -r -a q <<<"${MOVE_KIDS[$p]:-}"
+            queue+=(${q[@]+"${q[@]}"})
             continue
         fi
         n="$(move_descendants "$p" | wc -l)"
@@ -7250,7 +7238,7 @@ cmd_move_notify() {
         # What dies with the hang-up, so the session decides before it runs the move.
         local orphans
         orphans="$(move_orphans "$pid")"
-        [[ -z "$orphans" ]] || notice+=" Your move refuses until you deal with these: the hang-up ends them: $(move_orphans_list "$orphans"). Start each one detached (\`setsid <command> </dev/null >>log 2>&1 &\`) or as an omp background job, stop it, or run the move with --accept-orphans."
+        [[ -z "$orphans" ]] || notice+=" Your move refuses until you deal with these: the hang-up ends them: $(move_orphans_list "$orphans"). Start each one with \`setsid --fork <command> </dev/null >>log 2>&1\`, which makes init its parent (plain \`setsid\` does not save it, and an omp background job is a child of your omp too), stop it, or run the move with --accept-orphans."
         if $dry; then
             echo "agentbox: would notify $sid (pane $pane, $at): $notice"
             continue
@@ -10657,9 +10645,10 @@ MOVE_USAGE='usage:
   agentbox move --to <machine> --clear-halt        the box-health lead lets moves to <machine> go
                                                     on after a halt (two failed moves in a row, or
                                                     a session found running on both machines)
-Every move refuses before the hang-up while the session has a process that is not a systemd unit
-and would die with it (a server, a watcher, a dashboard started from a tool call); the plans list
-them. Make each a unit, stop it, or pass --accept-orphans.
+Every move refuses before the hang-up while the session has a process still under its omp by
+parent link, which dies with it (a server, a watcher, a dashboard started from a tool call, even
+one plain `setsid` started); the plans list them. Start each with `setsid --fork`, which makes init
+its parent, make it a unit, stop it, or pass --accept-orphans.
 More than one `move --plan` may run at once: it writes only this host'"'"'s plan files, one per
 session, each renamed into place.'
 
