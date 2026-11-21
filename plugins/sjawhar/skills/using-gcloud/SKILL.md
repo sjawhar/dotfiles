@@ -1,6 +1,6 @@
 ---
 name: using-gcloud
-description: Use when gcloud, az, a registry or a Google client is refused (PERMISSION_DENIED, 403, "Reauthentication failed"); before a grant request, docker login, a credential helper or using another's credential; to create or expose a VM or service, or add a public IP; on gcloud ssh/scp or host key errors.
+description: Use when gcloud, az, a registry or a Google client is refused (PERMISSION_DENIED, 403, denied, Reauthentication failed); before a grant request, docker login, a credential helper or using another's credential; to create or expose a VM or service or add a public IP; on gcloud ssh/scp/host-key errors.
 ---
 
 # Using gcloud
