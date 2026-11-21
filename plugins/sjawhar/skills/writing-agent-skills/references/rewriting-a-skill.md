@@ -11,9 +11,10 @@ Put each step's output in the commit message or the pull request, so that the ne
 ## Before you start
 
 1. **Copy the old text** to a scratch directory: `cp -r <skill> "$(mktemp -d)"/old`. Steps 1 and 3 compare against it.
-2. **Measure the old text** with step 4. Keep the output: the commit reports old and new numbers.
-3. **Find what the skill is for in practice.** `tq search --commands 'skill://<name>' --days 30 --limit 20` lists sessions that loaded it. Read two or three at the point of load, and list what each needed: a command, a fact, a correction the user gave.
-4. **Write rules for those needs**, not for what the old text says.
+2. **Measure the old text** with step 4.
+3. **Keep that output:** the commit reports old and new numbers.
+4. **Find what the skill is for in practice.** `tq search --commands 'skill://<name>' --days 30 --limit 20` lists sessions that loaded it. Read two or three at the point of load, and list what each needed: a command, a fact, a correction the user gave.
+5. **Write rules for those needs**, not for what the old text says.
 
 ## Step 1: Map every instruction
 
@@ -78,18 +79,20 @@ Treat a skill that the harness injects at session start (such as `dispatch-first
 
 Run no control arm: this step compares old and new text, to show that the rewrite lost nothing.
 
-1. **Pick three cases** from real sessions that loaded the skill, at least one where the agent got it wrong or the user corrected it (`tq search --human '<the skill's subject>'`). Write each as the raw task the session got, with no hint of the expected answer.
-2. **Write the pass bar** for each case: an action or output a transcript shows.
-3. **Run both arms.** Run each case three times with the old text and three times with the new, each in a fresh session that is not told it is a test, as `testing.md`'s "Running a body test" says.
-4. **Score blind.** Give each transcript, under a random ID and with the pass bar from step 2, to a fresh scorer that does not know the arm (`testing.md`, "Scoring").
-5. **Report `old k/n, new k/n` per case.** The new text passes when, for every case, new k is at least old k minus 1.
-6. **Restore what a failing case needed.** If a case fails, restore the dropped rule that its failing transcripts show was needed, and run that case again, alone.
+1. **Pick three cases** from real sessions that loaded the skill, at least one where the agent got it wrong or the user corrected it (`tq search --human '<the skill's subject>'`).
+2. **Write each case as the raw task** the session got, with no hint of the expected answer.
+3. **Write the pass bar** for each case: an action or output a transcript shows.
+4. **Run both arms.** Run each case three times with the old text and three times with the new, each in a fresh session that is not told it is a test, as `testing.md`'s "Running a body test" says.
+5. **Score blind.** Give each transcript, under a random ID and with the pass bar from step 3, to a fresh scorer that does not know the arm (`testing.md`, "Scoring").
+6. **Report `old k/n, new k/n` per case.** The new text passes when, for every case, new k is at least old k minus 1.
+7. **Restore what a failing case needed:** the dropped rule that its failing transcripts show was needed.
+8. **Run that case again**, alone.
 
 ## Step 4: Check the size and the description
 
 1. **Run `check_skill.py`** on each skill, as SKILL.md's "Step 5: Check the skill" says.
 2. **Move a rule that would not fit** into a reference, with its whole block, named at its step.
-3. **Never go over the limits** to keep a rule.
+3. **Never go over the limits** in SKILL.md's "Limits" to keep a rule.
 4. **Watch the week after it lands.** Run the check on each rewritten skill daily for a week, with `--log ~/.cache/skill-sizes.tsv` (one dated row per skill): rewritten instruction files regrow.
 5. **Post the week's rows** on the rewrite's pull request.
 6. **Shrink a skill that goes over a limit** as SKILL.md, "Step 4: Remove rules", says.

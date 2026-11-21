@@ -12,7 +12,7 @@ Measure whether a skill, an edit or one line changes what an agent does.
 | Is an edit better? | The old text, the new text, and the control |
 | Does one line do anything? | The skill with the line, and the skill without it |
 
-The control shows whether the model does the thing anyway: a rule that restates the model's default passes every test and still costs tokens on every load.
+**Why a control:** it shows whether the model does the thing anyway, and a rule that restates the model's default passes every test and still costs tokens on every load.
 
 ## Running a body test
 
@@ -28,7 +28,9 @@ The control shows whether the model does the thing anyway: a rule that restates 
 4. **Batch the subagents.** Send all runs of all arms in one batch, in random order, so that they share the same conditions.
 5. **Give each subagent its arm:** "Follow this skill:" and the full text in its context, or no skill for the control.
 6. **Hide the arms from the scorer.** Name each output file by a random ID, and keep the ID-to-arm key away from the scorer.
-7. **Run the sandbox for a real brief.** The sandbox reaches only the model API, writes only its own directory, and finds HOME, /tmp and /run empty. Do not use omp's `--tools read,grep,glob` instead: plugin and MCP tools, Envoy and Slack sends among them, stay callable through `write`.
+7. **Run the sandbox for a real brief:** it reaches only the model API, writes only its own directory, and finds HOME, /tmp and /run empty.
+8. **Do not use omp's `--tools read,grep,glob` in its place:** plugin and MCP tools, Envoy and Slack sends among them, stay callable through `write`.
+9. **Run each arm with the settings of its test** (below), in this command:
 
    ```bash
    run=~/.dotfiles/.secrets/dotfiles/skill-sandbox/run.sh   # in the private dotfiles clone
@@ -36,16 +38,23 @@ The control shows whether the model does the thing anyway: a rule that restates 
      [--append-system-prompt "$(cat /path/to/arm/SKILL.md)"] "<raw task or prompt>"
    ```
 
-   For a body test, use `timeout 900` and `--thinking medium`, leave out `--box-skills`, and leave out `--append-system-prompt` for the control. The transcript lands in `runs/<id>/stdout`, and the files the run wrote in `runs/<id>/home`. The script's header lists its options.
-8. **Interleave the arms.** Run sessions in parallel, with the arms interleaved, so that a change in model or load hits each arm.
+   | Test | `timeout` | `--thinking` | `--box-skills` | `--append-system-prompt` |
+   | --- | --- | --- | --- | --- |
+   | Body test, skill arm | 900 | medium | no | the arm's SKILL.md |
+   | Body test, control | 900 | medium | no | none |
+   | Description test | 300 | low | yes: the skill listing a real session on this box gets | none |
+
+   The transcript lands in `runs/<id>/stdout`, and the files the run wrote in `runs/<id>/home`. The script's header lists its options.
+10. **Interleave the arms.** Run sessions in parallel, with the arms interleaved, so that a change in model or load hits each arm.
 
 ## Running a description test
 
 1. **Write the prompts.** Write 8 to 10 prompts that should load the skill and 8 to 10 near misses that share its words but need something else. Make each a real task of two or more sentences: a one-line request often loads no skill even when the description matches.
-2. **Run each prompt three times** in the sandbox, with `--box-skills`, which gives the session the skill listing a real session on this box gets, `timeout 300 ... --thinking low`, and no `--append-system-prompt`.
+2. **Run each prompt three times** in the sandbox, with the description test's settings.
 3. **Count the reads:** `grep -c 'skill://<name>' runs/<id>/stdout` is more than 0 when the session read the skill.
-4. **Tune on 60%.** Keep 40% of the prompts aside, tune the description on the rest, and report the held-out rate.
-5. **Pick the version with the best held-out rate**, which is often not the last one.
+4. **Tune on 60%.** Keep 40% of the prompts aside, and tune the description on the rest.
+5. **Report the held-out rate.**
+6. **Pick the version with the best held-out rate**, which is often not the last one.
 
 ## Scoring
 

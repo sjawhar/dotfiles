@@ -26,7 +26,7 @@ The table puts rules 1, 2, 6 and 10 in order.
 2. **Write a procedure as numbered steps, each starting with its name.**
    - Example: `1. **Reproduce.** Run the failing command.`
    - Source: sp `systematic-debugging/SKILL.md:52` ("1. **Read Error Messages Carefully**"); ce `ce-noslop/SKILL.md:37` ("1. **Mechanism.** Does the sentence say what the thing does").
-3. **Put one rule in a list item, starting with the rule or with a bold label.** Its detail follows: how, when, the exception, the reason.
+3. **Put one rule in a list item, starting with the rule or with a bold label.** Its detail follows: how, when, the exception, and a reason as rule 5 allows.
    - Example: `- **Read before you edit.** Open the file and its callers first.`
    - Source: sp `using-git-worktrees/SKILL.md:26` ("**Submodule guard:** `GIT_DIR != GIT_COMMON` is also true inside git submodules."); ce `ce-code-review/SKILL.md:37` ("- **Report-only by default; never push.** A bare `ce-code-review` invocation produces findings and does not apply them.").
 4. **Write short sentences, one idea each.** Split a sentence at its second rule.

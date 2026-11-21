@@ -32,14 +32,14 @@ Use steps 1 and 3 for an agent guide's rules too.
 | A block that only some tasks need | Move it into `references/<topic>.md`, one level deep, and name it at the step that needs it, with its condition |
 | A reference that every task reads | Merge it into SKILL.md when the merged file stays within the limits |
 | A reference that nothing names | Delete it |
-| A file the skill tells an agent to copy whole into another place (a brief, a form) | It may go under `assets/`, where the Agent Skills specification puts templates; `check_skill.py` reads `templates/` the same way. Only that directory makes a file a template, and the limits do not hold a template |
+| A file the skill tells an agent to copy whole into another place (a brief, a form) | It may go under `assets/`, where the Agent Skills specification puts templates; `check_skill.py` reads `templates/` the same way. Only those two directories make a file a template, and the limits do not hold a template |
 
-- **Before you rename, move or delete a skill, one of its paths or a frontmatter field, run `git grep -n <name>` and fix each namer in the same change:** code, prompts and other skills that name it, or read a field such as `mcp:`, break.
+- **Before you rename, move or delete a skill, one of its paths or a frontmatter field, run `git grep -n <name>` and fix each namer in the same change:** each code, prompt or skill that uses the name breaks, and code reads some fields, such as `mcp:`.
 
 ## Step 1: Decide that a rule is needed
 
 1. **Find it twice.** Find the failure in at least two sessions with `tq search` (`using-transcript-store`): one incident turned into one rule is how instruction files triple in size.
-2. **Run a control.** Run the task in a fresh session with no guidance, and write the rule only if it fails in at least 2 of 3 runs: a rule the model follows anyway costs tokens on every load.
+2. **Run a control.** Run the task in a fresh session with no guidance. Write the rule only if it fails in at least 2 of 3 runs: a rule the model follows anyway costs tokens on every load.
 3. **Prefer a program.** Fix the tool, or add a script or a hook, before you write prose: a check a program runs holds where prose does not.
 4. **Extend first.** Extend a skill that already loads for the task before you create one: four or more skills in one task help less than one to three.
 5. **Separate by scope.** If two skills load on the same prompts after one description rewrite, merge them or split their scope: more words will not separate them.
@@ -58,7 +58,7 @@ Choose the form by the failure:
 | A program can check it | The check, and the command that runs it |
 | The agent already does it in a control run | Nothing |
 
-- **Give a reason only where the rule would look arbitrary** (style rule 5), and never one that restates the rule.
+- **Give a reason only where the rule would look arbitrary** (style rule 5). Never give one that restates the rule.
 - **Use the words the code uses.**
 - **Give every instruction a verb and an object.**
 - **Write plain English, not ASD-STE100:** a strict rewrite drops facts.
@@ -70,19 +70,19 @@ Choose the form by the failure:
 
 ## Step 3: Test it
 
-**Read `references/testing.md` now**, before you test a new skill or an edit that changes what an agent does: it has the arms, the sandbox command and the scoring rules.
+**Read `references/testing.md` now**, before you run any test, a control run included: it has the arms, the sandbox command and the scoring rules.
 
 Read its section "Measuring a harness change" when the change is to the harness (an extension feature, a context line, an advisor prompt) or to a gate or classifier that predicts Sami's decisions, or when you judge text by the fleet's records.
 
 1. **Real cases.** Take cases from real sessions where the failure happened: invented cases pass where real ones fail.
 2. **Freeze first.** Before any model call, freeze the cases, the arms and each case's pass bar, so that no result steers them.
 3. **Blind runs.** Run each case in a fresh session that gets the raw task, not your diagnosis, and is not told it is a test.
-4. **Three arms.** Run the old text, the new text and a no-guidance control 3 times each, and 3 more when the arms differ by one or two runs.
+4. **Three arms.** Run the old text, the new text and a no-guidance control 3 times each. Run 3 more of each when the arms differ by one or two runs.
 5. **Near misses.** For a description, also run near-miss prompts that must not load it.
-6. **Held-out cases.** Before you tune, set aside 40% of the cases (rounded down, at least one); tune on the rest and report the held-out ones: a variant tuned on the cases you report wins only those.
+6. **Held-out cases.** Before you tune, set aside 40% of the cases (rounded down, at least one). Tune on the rest, and report the held-out ones: a variant tuned on the cases you report wins only those.
 7. **Tuned-only gains.** Revert a change that improves only the tuned ones.
 8. **Three review rounds.** Stop a review loop after three rounds.
-9. **Only the change.** In each later round, check only what changed, and repeat no finding.
+9. **Only the change.** In each later round, check only what changed. Repeat no finding.
 
 ## Step 4: Remove rules
 
@@ -90,7 +90,7 @@ Read its section "Measuring a harness change" when the change is to the harness 
 | --- | --- |
 | Agents disobey a rule | Delete it, run the same task 3 times with the rest unchanged, and rewrite it only if the failure shows in 2 of the 3 |
 | A rule's reason no longer holds: a duplicate, written for an older model, obeyed in a control run, one incident that never recurred, or now done by the code or the harness | Delete it |
-| A rule never fires | Run the control first: "it never fires" is no reason by itself, and deleting ignored rules can remove helpful ones |
+| A rule never fires, which is no reason by itself to delete it | Run the control first: deleting ignored rules can remove helpful ones |
 | You remove a required step | Name what now makes it happen (a script, a hook, another rule); if nothing does, keep the step, because a step left to choice gets skipped |
 | A skill is too long | Move or delete whole blocks, not words: squeezing wording drops rules unnoticed |
 
