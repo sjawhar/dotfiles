@@ -1,6 +1,6 @@
 #!/bin/bash
 # docker-cap: hold Docker's build cache under a size cap, and remove the Docker data that no
-# build or run can ask for again. devbox/docker-cap.service runs it every hour; the unit's
+# build or run can ask for again. devbox/box-cleanup runs it every hour; the docker-cap.service
 # comment says why each bound is what it is.
 #
 # It acts only when the filesystem of Docker's data root is more than DOCKER_CAP_HIGH_PCT

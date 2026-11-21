@@ -160,7 +160,7 @@ if [ -d "/mnt/nvme/${USER:-$(id -un)}" ]; then
     # tested for writability before anything points at it, and a value the caller already has
     # wins: an agent session's own per-session scratch (scripts/agent-session) and an explicitly
     # exported TMPDIR both keep their value. Empty tmp* dirs left here are pruned daily
-    # (devbox/tmp-empty-prune.timer).
+    # (devbox/tmp-empty-prune, a step of devbox/box-cleanup).
     _nvme_tmp="$_scratch/tmp"
     if [ -z "${TMPDIR:-}" ] && mkdir -p "$_nvme_tmp" 2>/dev/null && [ -w "$_nvme_tmp" ]; then
         export TMPDIR="$_nvme_tmp"

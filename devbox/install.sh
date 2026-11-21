@@ -60,36 +60,18 @@ AGENT_SPEND_LANE="$(hostname -s)" bash "${DOTFILES_DIR}/installers/agent-spend.s
 # installers/omp-box-memory-guard.sh).
 bash "${DOTFILES_DIR}/installers/omp-box-memory-guard.sh"
 
-# The empty tmp* directories Python's mkdtemp leaves in TMPDIR on the big disk, pruned daily
-# (devbox/tmp-empty-prune.service).
-arm_user_timer devbox tmp-empty-prune
-
-# Every Go build cache on the box (<scratch>/gocache, the GOCACHE .bashrc sets, where <scratch> is
-# /mnt/scratch/<user> where devbox/gce-disks makes it, else /mnt/nvme/<user>; a lane's own; Go's
-# default ~/.cache/go-build), trimmed past 25 GB together without removing an entry a running build
-# may read (devbox/gocache-cap.service).
-arm_user_timer devbox gocache-cap
-
-# Each agent session's own TMPDIR under <scratch>/session-tmp (scripts/agent-session),
-# removed once no live process holds it (devbox/session-scratch-reap.md).
-arm_user_timer devbox session-scratch-reap
-
-# The working directories agents make by hand under /mnt/nvme/<user>/tmp, which nothing owns:
-# report-only until a review of a week of its decisions passes (devbox/session-scratch-reap.md).
-arm_user_timer devbox session-tmp-reap
-
-# The /tmp/<name> paths tools and agents write by hand, which no TMPDIR redirect reaches and
-# which systemd-tmpfiles' 30d rule never catches, removed once no process holds them and
-# nothing in them has been written for 48 h (devbox/tmp-stale-reap.md).
-arm_user_timer devbox tmp-stale-reap
-
-# The shared uv, cargo and Go module caches on /mnt/nvme/<user>, each held under its own cap
-# (devbox/nvme-cache-cap.md).
-arm_user_timer devbox nvme-cache-cap
-
-# Docker's build cache held under 50 GB, and untagged images and the anonymous volumes of removed
-# containers removed, hourly, while Docker's disk is over 80% used (devbox/docker-cap.service).
-arm_user_timer devbox docker-cap
+# The box's seven disk cleaners run from one timer, box-cleanup.timer, every 15 minutes, each at
+# its own minimum interval and with one log, and so does the leak check's hook sweep
+# (devbox/box-cleanup.md says what each step does): tmp-empty-prune, tmp-stale-reap,
+# session-scratch-reap, session-tmp-reap, gocache-cap, nvme-cache-cap and docker-cap. This
+# installer used to arm each cleaner's own timer and never box-cleanup.timer, which sami-devbox had
+# linked by hand on 2026-11-04, so a re-run would have run every cleaner twice. A box that still
+# has one of those timers loses it here.
+arm_user_timer devbox box-cleanup
+for cleaner in tmp-empty-prune tmp-stale-reap session-scratch-reap session-tmp-reap gocache-cap \
+    nvme-cache-cap docker-cap; do
+    disarm_user_timer devbox "$cleaner"
+done
 
 # Every 5 min, tell the box-health owner over Envoy when a timer-driven user unit stops completing
 # its runs, has them killed at its time limit, or its timer stops firing; the units come from the
@@ -107,24 +89,7 @@ arm_user_timer devbox unit-health-watch
 # its links, so they come off here: the timer is disabled and stopped (a run under way ends by
 # itself), and each link is removed only when it points at this repository's unit.
 if "${DOTFILES_DIR}/scripts/on-google-vm"; then
-    follow_links="$HOME/.config/systemd/user"
-    follow_removed=0
-    if [[ -L "$follow_links/dotfiles-follow.timer" \
-        && "$(readlink -- "$follow_links/dotfiles-follow.timer")" == "$HOME/.dotfiles/devbox/dotfiles-follow.timer" ]]; then
-        echo "dotfiles-follow: timer was $(systemctl --user is-enabled dotfiles-follow.timer 2>&1 || true)/$(systemctl --user is-active dotfiles-follow.timer 2>&1 || true); disabling it"
-        systemctl --user disable --now dotfiles-follow.timer
-    fi
-    for suffix in timer service; do
-        if [[ -L "$follow_links/dotfiles-follow.$suffix" \
-            && "$(readlink -- "$follow_links/dotfiles-follow.$suffix")" == "$HOME/.dotfiles/devbox/dotfiles-follow.$suffix" ]]; then
-            rm -- "$follow_links/dotfiles-follow.$suffix"
-            echo "dotfiles-follow: removed $follow_links/dotfiles-follow.$suffix"
-            follow_removed=1
-        fi
-    done
-    if (( follow_removed )); then
-        systemctl --user daemon-reload
-    fi
+    disarm_user_timer devbox dotfiles-follow
 fi
 
 # transcript-lag-watch is NOT armed here, and both halves of that are deliberate.
