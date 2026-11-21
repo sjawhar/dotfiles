@@ -16,10 +16,11 @@ Use steps 1 and 3 for an agent guide's rules too.
 ## Step 1: Decide that a rule is needed
 
 1. **Find it twice.** Find the failure in at least two sessions with `tq search` (`using-transcript-store`): one incident turned into one rule is how instruction files triple in size.
-2. **Run a control.** Run the task in a fresh session with no guidance. Write the rule only if it fails in at least 2 of 3 runs: a rule the model follows anyway costs tokens on every load.
-3. **Prefer a program.** Fix the tool, or add a script or a hook, before you write prose: a check a program runs holds where prose does not.
-4. **Extend first.** Extend a skill that already loads for the task before you create one: four or more skills in one task help less than one to three.
-5. **Separate by scope.** If two skills load on the same prompts after one description rewrite, merge them or split their scope: more words will not separate them.
+2. **Run a control.** Run the task in a fresh session with no guidance.
+3. **Write the rule only if the control fails** in at least 2 of 3 runs: a rule the model follows anyway costs tokens on every load.
+4. **Prefer a program.** Fix the tool, or add a script or a hook, before you write prose: a check a program runs holds where prose does not.
+5. **Extend first.** Extend a skill that already loads for the task before you create one: four or more skills in one task help less than one to three.
+6. **Separate by scope.** If two skills load on the same prompts after one description rewrite, merge them or split their scope: more words will not separate them.
 
 ## Step 2: Write the body
 
@@ -55,7 +56,7 @@ Read its section "Measuring a harness change" when the change is to the harness 
 3. **Blind runs.** Run each case in a fresh session that gets the raw task, not your diagnosis, and is not told it is a test.
 4. **Three arms.** Run the old text, the new text and a no-guidance control 3 times each. Run 3 more of each when the arms differ by one or two runs.
 5. **Near misses.** For a description, also run near-miss prompts that must not load it.
-6. **Held-out cases.** Before you tune, set aside 40% of the cases (rounded down, at least one), and tune on the rest.
+6. **Held-out cases.** Before you tune, set aside 40% of the cases (rounded down, at least one). Tune on the rest.
 7. **Report the held-out cases:** a variant tuned on the cases you report wins only those.
 8. **Tuned-only gains.** Revert a change that improves only the tuned ones.
 9. **Three review rounds.** Stop a review loop after three rounds.
@@ -85,11 +86,10 @@ Read its section "Measuring a harness change" when the change is to the harness 
 
 | Part | Limit | `check_skill.py` |
 | --- | --- | --- |
-| `description` | Starts "Use when". At most 300 characters. Says when to load the skill, never its steps. Names the case where the agent thinks it can do without the skill ("also when the diff is pasted inline") | Fails a wrong start or length |
+| `description` | Starts "Use when". At most 300 characters. Says when to load the skill, never its steps: an agent that reads them there follows them and skips the body. Names the case where the agent thinks it can do without the skill ("also when the diff is pasted inline") | Fails a wrong start or length |
 | `SKILL.md` and each markdown file outside `assets/` and `templates/` | At most 8,000 bytes, the whole file counted; no line limit | Fails it |
 | Rules in `SKILL.md` (a list item, or a sentence of a paragraph) | At most 40. Over it, split the skill, move blocks into references, or delete rules (step 4): a model obeys fewer of its rules as their number grows | Warns |
 
-- **Keep the steps out of the description:** an agent that reads them there follows them and skips the body.
 - **Put the trigger words first:** omp shows the model a hint of about 12 words made from the description, or its first 99 characters until that hint exists.
 - **Keep in SKILL.md only the routing and the rules the model would not follow by default.**
 - **Put required steps and stop rules first:** a harness that cuts a long file keeps only its start.

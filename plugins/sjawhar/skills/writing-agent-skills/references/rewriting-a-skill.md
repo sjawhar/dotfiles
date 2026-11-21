@@ -93,9 +93,10 @@ Run no control arm: this step compares old and new text, to show that the rewrit
 3. **Write the pass bar** for each case: an action or output a transcript shows.
 4. **Run both arms.** Run each case three times with the old text and three times with the new, each in a fresh session that is not told it is a test, as `testing.md`'s "Running a body test" says.
 5. **Score blind.** Give each transcript, under a random ID and with the pass bar from item 3, to a fresh scorer that does not know the arm (`testing.md`, "Scoring").
-6. **Report `old k/n, new k/n` per case.** The new text passes when, for every case, new k is at least old k minus 1.
-7. **Restore what a failing case needed:** the dropped rule that its failing transcripts show was needed.
-8. **Run that case again**, alone.
+6. **Report `old k/n, new k/n` per case.**
+7. **Pass the new text** when, for every case, new k is at least old k minus 1.
+8. **Restore what a failing case needed:** the dropped rule that its failing transcripts show was needed.
+9. **Run that case again**, alone.
 
 ## Step 4: Check the size and the description
 
