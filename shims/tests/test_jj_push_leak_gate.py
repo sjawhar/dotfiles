@@ -2567,9 +2567,20 @@ class JjPushLeakGateTest(unittest.TestCase):
             path.parent.mkdir()
             path.write_text(body, encoding="utf-8")
             path.chmod(0o755)
-            r = subprocess.run(["/bin/bash", "-x", str(path), "status", "--porcelain"], cwd=self.repo, env=self.env,
-                               capture_output=True, text=True, check=True)
-            traces[name] = r.stderr.replace(str(path.parent), "<shim dir>").splitlines()
+            traced = subprocess.Popen(["/bin/bash", "-x", str(path), "status", "--porcelain"], cwd=self.repo, env=self.env,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                _, stderr = traced.communicate(timeout=60)
+            except subprocess.TimeoutExpired:
+                traced.kill()
+                traced.wait()
+                raise
+            self.assertEqual(traced.returncode, 0, stderr)
+            # The shim writes its own pid into DOTFILES_GIT_SHIM, which bash -x prints as it is and, in a [[ ]]
+            # pattern, with each digit escaped; each copy runs in a pid of its own, read as one placeholder.
+            pid = str(traced.pid)
+            traces[name] = (stderr.replace(str(path.parent), "<shim dir>").replace("".join(f"\\{d}" for d in pid), "<pid>")
+                            .replace(pid, "<pid>").splitlines())
         self.assertEqual(traces["with the gate"], traces["without it"], "the jj push gate runs a command on the path of git status")
         self.assertNotEqual(traces["with one git call added"], traces["without it"],
                             "the trace does not show a git call added to the path of git status")
