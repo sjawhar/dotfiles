@@ -2,11 +2,12 @@
 
 Run: uvx pytest plugins/sjawhar/skills/writing-agent-skills/scripts
 Each test builds a skill under tmp_path that passes every check but the one under test, runs the
-script on it, and reads its exit status and FAIL lines.
+script on it, and reads its exit status and FAIL lines. The script runs with the interpreter uv
+builds from its own `# /// script` block (it needs PyYAML), never the one running the tests.
 """
 
+import functools
 import subprocess
-import sys
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent / "check_skill.py"
@@ -32,6 +33,20 @@ def text_of(lines: int, size: int, start: str = "", final_newline: bool = True) 
     return text
 
 
+def uv(*args: str) -> str:
+    proc = subprocess.run(["uv", *args], capture_output=True, text=True, timeout=300, check=False)
+    assert proc.returncode == 0, f"uv {' '.join(args)} exited {proc.returncode}: {proc.stderr}"
+    return proc.stdout
+
+
+@functools.cache
+def script_python() -> str:
+    """The interpreter uv builds for SCRIPT from its `# /// script` block."""
+    # `find` only locates the environment; with none built it names a bare interpreter.
+    _ = uv("sync", "--quiet", "--script", str(SCRIPT))
+    return uv("python", "find", "--script", str(SCRIPT)).strip()
+
+
 def run(tmp_path: Path, files: dict[str, str], args: tuple[str, ...] = ()) -> tuple[int, list[str], str]:
     """Write the good skill with `files` over it, check it with `args`; return exit status, FAIL lines, output."""
     skill = tmp_path / NAME
@@ -39,7 +54,7 @@ def run(tmp_path: Path, files: dict[str, str], args: tuple[str, ...] = ()) -> tu
         path = skill / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         _ = path.write_bytes(text.encode())
-    proc = subprocess.run([sys.executable, str(SCRIPT), *args, str(skill)], capture_output=True, text=True, check=False)
+    proc = subprocess.run([script_python(), str(SCRIPT), *args, str(skill)], capture_output=True, text=True, check=False)
     fails = [line.strip() for line in proc.stdout.splitlines() if line.strip().startswith("FAIL ")]
     return proc.returncode, fails, proc.stdout + proc.stderr
 

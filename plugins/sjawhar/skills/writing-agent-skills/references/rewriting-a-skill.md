@@ -68,7 +68,7 @@ Step C checks that the rewrite lost nothing, so it compares old and new text and
 ## Step D: size and description checks
 
 ```bash
-python3 ~/.dotfiles/plugins/sjawhar/skills/writing-agent-skills/scripts/check_skill.py [--old <scratch>/old] <skill dir>...
+uv run --script ~/.dotfiles/plugins/sjawhar/skills/writing-agent-skills/scripts/check_skill.py [--old <scratch>/old] <skill dir>...
 ```
 
 The limits are in SKILL.md, "Limits"; `--help` lists each check. For a rewrite, pass `--old` with the copy from "Before you start": the check then also fails when the new SKILL.md is more than 200 bytes larger than the old one, because a rewrite that grows defeats its purpose. A rule that would not fit moves with its whole block into a reference named at its step, never past the limits.

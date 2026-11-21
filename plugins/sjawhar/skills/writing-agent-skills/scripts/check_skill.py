@@ -1,10 +1,15 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["pyyaml>=6"]
+# ///
 """Size, description, name and link checks for agent skills (writing-agent-skills: "Limits").
 
 Usage: check_skill.py [--old OLD] [--log FILE] <skill dir or SKILL.md>...
 
 It prints a FAIL line and exits 1 when a skill breaks any of these:
-- The description is empty or missing.
+- SKILL.md's frontmatter is not valid YAML, or is not a mapping.
+- The description is empty or missing, or is not a string.
 - The description does not start "Use when".
 - The description has more than 300 characters.
 - The name is not lowercase words joined by hyphens.
@@ -21,7 +26,8 @@ never the words in the file. Templates, scripts and other files that are not mar
 measured.
 
 It prints a warn line and still passes when the body has more than 40 rule lines, or when the
-name differs from the directory. Standard library only.
+name differs from the directory. Run it with `uv run --script`, which installs PyYAML from the
+block above; the frontmatter is read with yaml.safe_load, as a YAML reader of a host reads it.
 """
 
 import argparse
@@ -29,7 +35,9 @@ import datetime
 import re
 import sys
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, cast
+
+import yaml
 
 # Limits: SKILL.md or a reference over TARGET_BYTES or TARGET_LINES, or a description over TARGET_DESC, fails.
 TARGET_BYTES = 8_000  # Codex injects only the first 8,000 bytes
@@ -41,16 +49,7 @@ NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 LINK_RE = re.compile(r"\]\(([^)#\s]+)\)|`((?:references|scripts|assets|templates)/[^`\s]+)`")
 TEMPLATE_DIRS = frozenset({"assets", "templates"})
 MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
-# A YAML scalar in double or single quotes, which may run over several lines: for each quote, the
-# pattern that finds the closing quote, and the pattern of what YAML rewrites between the quotes.
-# Each unescaped line break, with the white space around it, folds to one space, or to one newline
-# per blank line it spans; in double quotes \" and \\ stand for " and \, and a backslash at the
-# end of a line joins the next line with no space; in single quotes '' stands for '.
-_FOLD = r"[ \t]*\n((?:[ \t]*\n)*)[ \t]*"
-QUOTED = {
-    '"': (re.compile(r'"((?:[^"\\]|\\.)*)"', re.S), re.compile(r'\\\n[ \t]*|\\(["\\])|' + _FOLD)),
-    "'": (re.compile(r"'((?:[^']|'')*)'(?!')"), re.compile(r"'(')|" + _FOLD)),
-}
+FRONTMATTER = "SKILL.md frontmatter"
 
 
 class Stats(TypedDict):
@@ -62,42 +61,28 @@ class Stats(TypedDict):
     rule_lines: int
 
 
-def unquote(m: re.Match[str]) -> str:
-    """The text YAML reads for one match of a QUOTED rewrite pattern."""
-    char, blanks = m.group(1), m.group(2)
-    if char:
-        return char
-    if blanks is not None:
-        return "\n" * blanks.count("\n") or " "
-    return ""
-
-
-def split_frontmatter(text: str) -> tuple[dict[str, str], str]:
+def split_frontmatter(text: str) -> tuple[dict[object, object], str, str | None]:
+    """The frontmatter mapping, the body, and why the frontmatter cannot be read (None when it can)."""
     if not text.startswith("---\n"):
-        return {}, text
+        return {}, text, None
     end = text.find("\n---", 4)
     if end < 0:
-        return {}, text
-    fields: dict[str, str] = {}
-    key = None
-    lines = text[4:end].splitlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        i += 1
-        m = re.match(r"^([A-Za-z_][\w-]*):\s*(.*)$", line)
-        if m:
-            key, value = m.group(1), m.group(2).strip()
-            quoted = QUOTED.get(value[:1])
-            # A quoted value runs to its closing quote, on this line or a later one.
-            if quoted and (scalar := quoted[0].match("\n".join([value, *lines[i:]]))):
-                i += scalar.group(0).count("\n")
-                fields[key] = quoted[1].sub(unquote, scalar.group(1))
-            else:
-                fields[key] = "" if value in (">", "|", ">-", "|-") else value
-        elif key and line.startswith((" ", "\t")):
-            fields[key] = (fields[key] + " " + line.strip()).strip()
-    return fields, text[end + 4 :].lstrip("\n")
+        return {}, text, None
+    body = text[end + 4 :].lstrip("\n")
+    try:
+        data = cast(object, yaml.safe_load(text[4:end]))
+    except yaml.YAMLError as error:
+        if isinstance(error, yaml.MarkedYAMLError) and error.problem and error.problem_mark:
+            # problem_mark counts from 0 within the block, which starts on SKILL.md's line 2.
+            reason = f" at line {error.problem_mark.line + 2}: {error.problem}"
+        else:
+            reason = f": {str(error).splitlines()[0]}"
+        return {}, body, f"{FRONTMATTER} is not valid YAML{reason}"
+    if data is None:
+        return {}, body, None
+    if not isinstance(data, dict):
+        return {}, body, f"{FRONTMATTER} is not a mapping"
+    return cast(dict[object, object], data), body, None
 
 
 def references(skill_dir: Path) -> list[Path]:
@@ -130,9 +115,11 @@ def check(path: Path) -> tuple[Stats, list[str], list[str]]:
     skill_dir = skill_md.parent
     raw = skill_md.read_bytes()
     text = raw.decode("utf-8")
-    fields, body = split_frontmatter(text)
-    desc = fields.get("description", "")
-    name = fields.get("name", "")
+    fields, body, unreadable = split_frontmatter(text)
+    desc_value = fields.get("description")
+    name_value = fields.get("name")
+    desc = desc_value if isinstance(desc_value, str) else ""
+    name = name_value if isinstance(name_value, str) else ""
     rule_lines = sum(1 for line in body.splitlines() if re.match(r"^\s*(?:[-*]|\d+\.)\s+\S", line))
     lines = len(text.splitlines())
     stats: Stats = {
@@ -149,17 +136,24 @@ def check(path: Path) -> tuple[Stats, list[str], list[str]]:
         ref_lines = len(ref_raw.decode("utf-8", errors="replace").splitlines())
         fails += size_fails(ref.relative_to(skill_dir).as_posix(), ref_lines, len(ref_raw))
     warns: list[str] = []
-    if not desc:
+    if unreadable:
+        fails.append(unreadable)
+    elif desc_value is not None and not isinstance(desc_value, str):
+        fails.append(f"description is not a string: YAML reads it as {type(desc_value).__name__}")
+    elif not desc:
         fails.append("description is empty or missing")
     else:
         if not re.match(r"Use when\b", desc):
             fails.append('description does not start "Use when"')
         if len(desc) > TARGET_DESC:
             fails.append(f"description has {len(desc):,} characters, over the {TARGET_DESC}-character limit")
-    if not NAME_RE.match(name):
-        fails.append(f"name {name!r} is not lowercase words joined by hyphens")
-    elif name != skill_dir.name:
-        warns.append(f"name {name!r} differs from directory {skill_dir.name!r}")
+    if unreadable is None:
+        if name_value is not None and not isinstance(name_value, str):
+            fails.append(f"name is not a string: YAML reads it as {type(name_value).__name__}")
+        elif not NAME_RE.match(name):
+            fails.append(f"name {name!r} is not lowercase words joined by hyphens")
+        elif name != skill_dir.name:
+            warns.append(f"name {name!r} differs from directory {skill_dir.name!r}")
     if rule_lines > RULE_LINES:
         warns.append(f"{rule_lines} rule lines, over {RULE_LINES}: split or delete")
     # A skill inside a repository may name a repo-root path (`scripts/deploy/x.sh`) as well as its own files.
