@@ -411,18 +411,6 @@ if [[ -n "$profile" && ! -e "$root/profiles/$profile/.no-shared-setup" ]]; then
     fi
 fi
 
-# >>> private-project check (scripts/agent-private-check)
-# A named profile's own envoy.json, which this session's pi-envoy reads ahead of ENVOY_CONFIG_FILE
-# and the neutral file: agent-session's private-project check asks about its Dispatch bearer, and
-# leaves the variable out of the session's environment. agent-session finds the default profile's
-# file itself (envoy/AGENTS.md), after the machine's env file may have named one.
-if [[ -n "$profile" ]]; then
-    export AGENT_PRIVATE_ENVOY_JSON="$root/profiles/$profile/agent/envoy.json"
-else
-    unset AGENT_PRIVATE_ENVOY_JSON
-fi
-# <<< private-project check
-
 # OMP_MEMORY_MAX=<systemd size, e.g. 32G> runs this session in a transient systemd user scope with
 # that hard memory cap and swap off. A session that runs away is then killed inside its own cgroup
 # instead of the kernel picking a victim anywhere on the box: on 2026-10-26 at 05:47Z one omp

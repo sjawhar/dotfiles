@@ -1,0 +1,52 @@
+name: private-project check
+
+# The launchers' private-project check (scripts/agent-private-check) and the guard the Dispatch
+# readers run: its launcher tests, its unit tests, and the test that every reader runs the guard.
+# scripts-tests.yml runs the last two too; it leaves out the launcher tests, which need the user
+# manager this job starts.
+on:
+  pull_request:
+    paths:
+      - "scripts/agent-private-check"
+      - "scripts/agent-private-guard"
+      - "scripts/agent-session"
+      - "shims/**"
+      - "scripts/tests/**"
+      - ".github/workflows/private-project-check.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          # The version mise.toml pins for the dev box.
+          version: "0.12.5"
+      # scripts/tests/conftest.py encrypts a test term list with age and sops, as in scripts-tests.yml.
+      - name: age and sops
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q age
+          curl -fsSLo sops https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.linux.amd64
+          echo "e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b  sops" | sha256sum -c -
+          sudo install -m 0755 sops /usr/local/bin/sops
+      # The launcher tests start every shim with `systemd-run --user --scope` (a task limit per
+      # test, shims/tests/test_leak_terms.py's LeakTestCase.launch), which needs a user manager.
+      - name: Start the runner user's systemd manager
+        run: |
+          sudo loginctl enable-linger "$USER"
+          for _ in $(seq 100); do [ -S "/run/user/$(id -u)/bus" ] && break; sleep 0.1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+      - name: Test
+        env:
+          PYTHONPATH: .
+        run: >-
+          uvx pytest@9.2.0 -p no:cacheprovider -q -rs
+          scripts/tests/test_agent_private_check.py
+          scripts/tests/test_agent_private_check_units.py
+          scripts/tests/test_dispatch_readers_use_the_guard.py

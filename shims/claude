@@ -135,12 +135,13 @@ fi
 
 # >>> private-project check (scripts/agent-private-check)
 # A claude or codex started by name, not through scripts/agent-session, gets the check every
-# launcher runs (its header has the rule): exit 2 with the reason when the session's Dispatch bearer
-# lists a private project, or when Dispatch cannot say; while no project is private it makes no
-# Dispatch call. claude's bearer is the claude-envoy bridge's envoy.json: $CLAUDE_CONFIG_DIR's, else
-# the one ENVOY_CONFIG_FILE names, else the neutral one. codex uses the Dispatch client's command
-# config order. Its -C/--cd directory, including the checkout's bearer, is checked before it starts.
-# The check is the one in this file's checkout, through a link to it.
+# launcher runs (its header has the rule): exit 2 with the reason when a Dispatch bearer the session
+# can reach lists a private project, or when Dispatch cannot say; while no project is private it
+# makes no Dispatch call, and a management command (`codex login`, `--version`) gets no check.
+# claude's bearer is the claude-envoy bridge's envoy.json: $CLAUDE_CONFIG_DIR's, else the one
+# ENVOY_CONFIG_FILE names, else the neutral one, and its settings files' `env` blocks. codex uses the
+# Dispatch client's command config order. Its -C/--cd directory, including the checkout's bearer, is
+# checked before it starts. The check is the one in this file's checkout, through a link to it.
 private_self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")"
 private_envoy_json=""
 if [[ "$name" == claude && -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
@@ -149,10 +150,11 @@ elif [[ "$name" == claude ]]; then
     private_envoy_json="${ENVOY_CONFIG_FILE:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/legion/envoy.json}"
 fi
 private_cwd="$PWD"
-if [[ "$name" == codex ]]; then
-    private_prev=""
-    for private_arg in "$@"; do
-        [[ "$private_arg" == -- ]] && break
+private_settings=""
+private_prev=""
+for private_arg in "$@"; do
+    [[ "$private_arg" == -- ]] && break
+    if [[ "$name" == codex ]]; then
         case "$private_prev" in
             -C|--cd) private_cwd="$private_arg"; private_prev=""; continue ;;
         esac
@@ -160,16 +162,21 @@ if [[ "$name" == codex ]]; then
             --cd=*|-C=*) private_cwd="${private_arg#*=}" ;;
             -C?*) private_cwd="${private_arg#-C}" ;;
         esac
-        private_prev="$private_arg"
-    done
-fi
+    else
+        # Each --settings value's `env` block is one more source of bearers: one line per value,
+        # base64, since an inline JSON value can hold newlines.
+        [[ "$private_prev" == --settings ]] && private_settings+="$(printf '%s' "$private_arg" | base64 -w0)"$'\n'
+        [[ "$private_arg" == --settings=* ]] && private_settings+="$(printf '%s' "${private_arg#*=}" | base64 -w0)"$'\n'
+    fi
+    private_prev="$private_arg"
+done
 # The system's python3 when there is one: the caller's PATH can hold none, or only mise's shim.
 private_python=/usr/bin/python3
 [[ -x "$private_python" ]] || private_python=python3
 private_status=0
 private_answer="$(AGENT_PRIVATE_ENVOY_JSON="$private_envoy_json" AGENT_PRIVATE_CWD="$private_cwd" \
-    AGENT_PRIVATE_HARNESS="$name" "$private_python" \
-    "${private_self%/shims/*}/scripts/agent-private-check" < /dev/null)" || private_status=$?
+    AGENT_PRIVATE_HARNESS="$name" AGENT_PRIVATE_COMMAND="${1-}" AGENT_PRIVATE_SETTINGS="$private_settings" \
+    "$private_python" "${private_self%/shims/*}/scripts/agent-private-check" < /dev/null)" || private_status=$?
 if (( private_status != 0 )) || [[ "$private_answer" != start ]]; then
     if [[ "$private_answer" == "refuse "* ]]; then
         echo "$name: ${private_answer#refuse }" >&2
@@ -178,7 +185,8 @@ if (( private_status != 0 )) || [[ "$private_answer" != start ]]; then
     fi
     exit 2
 fi
-unset private_self private_envoy_json private_python private_status private_answer private_cwd private_prev private_arg
+unset private_self private_envoy_json private_python private_status private_answer private_cwd private_settings \
+    private_prev private_arg
 # <<< private-project check
 
 # The spend library of the dotfiles checkout this file is in, through a link to it (shims/codex),

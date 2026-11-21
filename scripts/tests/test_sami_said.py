@@ -7,8 +7,9 @@ table omp creates), a subagent file below a session, and a shake log. Entry shap
 real sessions of 2026-10-27/28; ids and texts are invented. --dispatch runs against a local fake of
 Dispatch's routes: /api/v1/issues, /api/v1/issues/<key>/events, /api/v1/whoami (scripts/agent-private-guard's
 question before each request) and the event feed on the GET /ws/live socket, served by a small WebSocket
-server of the fake's own. The guard reads a stand-in private-projects flag (private_project_stubs.py),
-`{"enabled": false}` unless a case says otherwise.
+server of the fake's own. Each --dispatch run is of a copy of sami-said beside guarded_copy's copies of
+the check and the guard, whose check reads the class's stand-in private-projects flag
+(private_project_stubs.py), `{"enabled": false}` unless a case says otherwise.
 """
 
 from __future__ import annotations
@@ -31,7 +32,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from gce_metadata_stub import MetadataStub
-from private_project_stubs import FLAG_OFF, FLAG_ON, PRIV_TOKEN, PUB_TOKEN, WHOAMI, WHOAMI_PRIV, WHOAMI_PUB, FlagObject, flag_env
+from private_project_stubs import (FLAG_OFF, FLAG_ON, PRIV_TOKEN, PUB_TOKEN, WHOAMI, WHOAMI_PRIV, WHOAMI_PUB, FlagObject,
+                                   flag_env, guarded_copy)
 
 SCRIPT = Path(__file__).parents[1] / "sami-said"
 UTC = timezone.utc
@@ -211,14 +213,14 @@ class Store:
         ])
 
 
-def run(root: Path, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
+def run(root: Path, *args: str, env: dict | None = None, script: Path = SCRIPT) -> subprocess.CompletedProcess:
     # The walk keeps its directory listings in XDG_RUNTIME_DIR: the fixture's own temporary directory.
-    return subprocess.run([str(SCRIPT), "--agent-dir", str(root), *WINDOW, *args], capture_output=True, text=True,
+    return subprocess.run([str(script), "--agent-dir", str(root), *WINDOW, *args], capture_output=True, text=True,
                           env={**os.environ, "XDG_RUNTIME_DIR": str(root.parent), **(env or {})}, timeout=60)
 
 
-def rows(root: Path, *args: str, env: dict | None = None) -> list[dict]:
-    done = run(root, "--json", *args, env=env)
+def rows(root: Path, *args: str, env: dict | None = None, script: Path = SCRIPT) -> list[dict]:
+    done = run(root, "--json", *args, env=env, script=script)
     assert done.returncode == 0, done.stderr
     return [json.loads(line) for line in done.stdout.splitlines()]
 
@@ -707,8 +709,22 @@ def event(eid: int, t: datetime, kind: str, payload: dict, actor: str = "sami@th
             "actor": {"kind": "user", "id": actor}, "notify": True, "created_at": stamp(t), "payload": payload}
 
 
-def start_dispatch(base: Path) -> tuple[http.server.ThreadingHTTPServer, dict]:
-    """The fake Dispatch with its events, serving; and the environment that points sami-said at it."""
+def stand_ins(cls: type[unittest.TestCase]) -> tuple[FlagObject, MetadataStub]:
+    """The private-projects flag, off, and the metadata server whose token reads it, for CLS's --dispatch
+    runs; each stops when CLS's cases end, and so does one already started when the other fails to."""
+    flag = FlagObject(FLAG_OFF)
+    cls.addClassCleanup(flag.stop)
+    metadata = MetadataStub.start()
+    cls.addClassCleanup(metadata.stop)
+    return flag, metadata
+
+
+def start_dispatch(cls: type[unittest.TestCase], base: Path, flag: FlagObject,
+                   metadata: MetadataStub) -> tuple[http.server.ThreadingHTTPServer, dict, Path]:
+    """The fake Dispatch with its events, serving, stopped and closed when CLS's cases end (registered the
+    moment it starts); the environment that points sami-said at it; and a copy of sami-said in BASE/scripts
+    beside the envoy command it asks for envoy.json and guarded_copy's check (reading FLAG with METADATA's
+    token) and guard, which it runs as the guard of its own checkout."""
     older = [event(i, at(-300 + i), "artifact.version", {"name": "spec.md"}) for i in range(1, 200)]
     FakeDispatch.mode = None
     FakeDispatch.seen, FakeDispatch.subscribes, FakeDispatch.pongs, FakeDispatch.faults = [], [], [], []
@@ -735,18 +751,19 @@ def start_dispatch(base: Path) -> tuple[http.server.ThreadingHTTPServer, dict]:
         event(310, at(130), "comment.created", {"id": "c-late", "body": "after the window"}),
     ]
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeDispatch)
+    cls.addClassCleanup(server.server_close)
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    # After the thread starts (shutdown waits for serve_forever), and run before server_close: last in, first out.
+    cls.addClassCleanup(server.shutdown)
     config = base / "envoy.json"
     config.write_text(json.dumps({"dispatch": {"enabled": True, "serverUrl": f"http://127.0.0.1:{server.server_port}",
                                                "token": "test-token"}}))
-    FLAG.body = FLAG_OFF
+    scripts = base / "scripts"
+    guarded_copy(scripts, flag)
+    for name in ("sami-said", "envoy"):
+        shutil.copy2(SCRIPT.parent / name, scripts / name)
     return server, {"ENVOY_CONFIG_FILE": str(config), "DISPATCH_URL": "", "DISPATCH_TOKEN": "", "DISPATCH_TOKEN_FILE": "",
-                    **flag_env(FLAG, METADATA.host, str(base / "cache"))}
-
-
-# The private-projects flag and the metadata server whose token reads it, for every --dispatch run.
-FLAG = FlagObject(FLAG_OFF)
-METADATA = MetadataStub.start()
+                    **flag_env(metadata.host, str(base / "cache"))}, scripts / "sami-said"
 
 
 DISPATCH_ROWS = [
@@ -764,12 +781,12 @@ class DispatchOption(unittest.TestCase):
         base = Path(cls.tmp.name)
         cls.root = base / "agent"
         Store(cls.root)
-        cls.server, env = start_dispatch(base)
-        cls.rows = rows(cls.root, "--dispatch", env=env)
+        flag, metadata = stand_ins(cls)
+        cls.server, env, script = start_dispatch(cls, base, flag, metadata)
+        cls.rows = rows(cls.root, "--dispatch", env=env, script=script)
 
     @classmethod
     def tearDownClass(cls):
-        cls.server.shutdown()
         cls.tmp.cleanup()
 
     def test_dispatch_rows_are_labelled_and_windowed(self):
@@ -816,19 +833,19 @@ class DispatchFeedFaults(unittest.TestCase):
         base = Path(cls.tmp.name)
         cls.root = base / "agent"
         Store(cls.root)
-        cls.server, cls.env = start_dispatch(base)
+        flag, metadata = stand_ins(cls)
+        cls.server, cls.env, cls.script = start_dispatch(cls, base, flag, metadata)
 
     @classmethod
     def tearDownClass(cls):
         FakeDispatch.mode = None
-        cls.server.shutdown()
         cls.tmp.cleanup()
 
     def run_with(self, mode: str | None, events: list[dict] | None = None) -> tuple[subprocess.CompletedProcess, list[dict]]:
         FakeDispatch.mode, FakeDispatch.subscribes, kept = mode, [], FakeDispatch.events
         FakeDispatch.events = events or kept
         try:
-            done = run(self.root, "--json", "--dispatch", env=self.env)
+            done = run(self.root, "--json", "--dispatch", env=self.env, script=self.script)
         finally:
             FakeDispatch.events = kept
         return done, [json.loads(line) for line in done.stdout.splitlines()]
@@ -932,24 +949,26 @@ class PrivateProjects(unittest.TestCase):
         base = Path(cls.tmp.name)
         cls.root = base / "agent"
         Store(cls.root)
-        cls.server, cls.env = start_dispatch(base)
+        cls.flag, metadata = stand_ins(cls)
+        cls.server, cls.env, cls.script = start_dispatch(cls, base, cls.flag, metadata)
         cls.cache = base / "cache"
 
     @classmethod
     def tearDownClass(cls):
-        cls.server.shutdown()
         cls.tmp.cleanup()
 
     def run_as(self, token: str, flag: dict[str, object]) -> subprocess.CompletedProcess[str]:
-        FLAG.body = flag
+        self.flag.body = flag
+        self.flag.auth.clear()
         FakeDispatch.paths, FakeDispatch.subscribes = [], []
         shutil.rmtree(self.cache / "agent-private", ignore_errors=True)
-        return run(self.root, "--json", "--dispatch", env={**self.env, "DISPATCH_TOKEN": token})
+        return run(self.root, "--json", "--dispatch", env={**self.env, "DISPATCH_TOKEN": token}, script=self.script)
 
     def test_a_priv_bearer_exits_2_before_its_first_request(self):
         done = self.run_as(PRIV_TOKEN, FLAG_ON)
         self.assertEqual(done.returncode, 2, done.stderr)
         self.assertIn("PRIV is private", done.stderr)
+        self.assertTrue(self.flag.auth, "the guard read some flag other than the stand-in")
         self.assertEqual(FakeDispatch.requests(), [])
         self.assertEqual(FakeDispatch.subscribes, [])
         self.assertEqual(done.stdout, "")

@@ -5,7 +5,9 @@ standup thread records the refusal as the room's error and reads again; with a p
 requests are those of a run with no private project.
 
 The stand-ins are scripts/tests' private_project_stubs.py (the flag object and Dispatch, whose whoami
-the guard asks) and gce_metadata_stub.py (the token the flag is read with).
+the guard asks) and gce_metadata_stub.py (the token the flag is read with). The guard is a copy whose
+check reads the stand-in flag (guarded_copy), in a dotfiles tree of each test's own beside a copy of
+the package, so a command run from that copy finds it as the package finds a checkout's guard.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ from private_project_stubs import (  # noqa: E402
     DispatchStub,
     FlagObject,
     flag_env,
+    guarded_copy,
 )
 
 PROJECTS = [{"key": "PUB"}]
@@ -44,14 +47,18 @@ PROJECTS = [{"key": "PUB"}]
 
 class World:
     def __init__(self, tmp: Path) -> None:
+        self.package = tmp / "dotfiles" / "chief-dashboard"
+        shutil.copytree(PACKAGE / "chief_dashboard", self.package / "chief_dashboard",
+                        ignore=shutil.ignore_patterns("__pycache__"))
         self.metadata = MetadataStub.start()
         self.flag = FlagObject(FLAG_ON)
         self.dispatch = DispatchStub({PRIV_TOKEN: WHOAMI_PRIV, PUB_TOKEN: WHOAMI_PUB},
                                      {"/api/v1/projects": PROJECTS,
                                       "/api/v1/issues?label=stream&open=true": [],
                                       f"/api/v1/issues/{standup.ISSUE}/messages": {"message": {"id": "m1"}}})
+        self.guard = guarded_copy(tmp / "dotfiles" / "scripts", self.flag)
         self.config = tmp / "envoy.json"
-        self.env = {**flag_env(self.flag, self.metadata.host, str(tmp / "cache")), "ENVOY_CONFIG_FILE": str(self.config)}
+        self.env = {**flag_env(self.metadata.host, str(tmp / "cache")), "ENVOY_CONFIG_FILE": str(self.config)}
 
     def bearer(self, token: str) -> None:
         self.config.write_text(json.dumps({"dispatch": {"serverUrl": self.dispatch.url, "token": token}}))
@@ -59,6 +66,12 @@ class World:
     def stop(self) -> None:
         for server in (self.metadata, self.flag, self.dispatch):
             server.stop()
+
+    def command(self, *args: str) -> subprocess.CompletedProcess[str]:
+        """`python -m chief_dashboard ARGS` from the tree's copy of the package, which runs the tree's guard."""
+        return subprocess.run([sys.executable, "-m", "chief_dashboard", *args], cwd=self.package,
+                              env={**os.environ, **self.env, "PYTHONPATH": str(self.package)},
+                              capture_output=True, text=True, timeout=120)
 
 
 @pytest.fixture
@@ -68,6 +81,7 @@ def world(tmp_path, monkeypatch):
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(sources, "ENVOY_CONFIG", w.config)
     monkeypatch.setattr(standup, "ENVOY_CONFIG", w.config)
+    monkeypatch.setattr(sources, "GUARD", w.guard)
     yield w
     w.stop()
 
@@ -87,22 +101,20 @@ def test_a_priv_bearer_stops_with_exit_2_before_the_first_request(world, capsys)
 
 def test_a_priv_bearer_stops_the_command_with_exit_2(world):
     world.bearer(PRIV_TOKEN)
-    done = subprocess.run([sys.executable, "-m", "chief_dashboard", "lead-times", "--all-streams"], cwd=PACKAGE,
-                          env={**os.environ, **world.env, "PYTHONPATH": str(PACKAGE)},
-                          capture_output=True, text=True, timeout=120)
+    done = world.command("lead-times", "--all-streams")
     assert done.returncode == 2, done.stderr
     assert "PRIV is private" in done.stderr
+    assert world.flag.auth, "the command's guard read some flag other than the stand-in"
     assert world.dispatch.others() == []
 
 
 def test_dispatch_check_with_a_priv_bearer_stops_with_exit_2_before_its_first_request(world):
     world.bearer(PRIV_TOKEN)
     # --no-redrive: should the guard ever let the run through, it sends no re-drive and records none.
-    done = subprocess.run([sys.executable, "-m", "chief_dashboard", "dispatch-check", "--project", "PUB", "--no-redrive"],
-                          cwd=PACKAGE, env={**os.environ, **world.env, "PYTHONPATH": str(PACKAGE)},
-                          capture_output=True, text=True, timeout=120)
+    done = world.command("dispatch-check", "--project", "PUB", "--no-redrive")
     assert done.returncode == 2, done.stderr
     assert "PRIV is private" in done.stderr
+    assert world.flag.auth, "the command's guard read some flag other than the stand-in"
     assert world.dispatch.paths() == [WHOAMI]  # the guard asked; the command asked nothing
 
 
@@ -168,7 +180,7 @@ def test_a_guard_that_cannot_run_or_fails_stops_the_request_with_exit_2(world, t
     # Flag off and a public bearer, which the guard itself lets through: only the guard's fault refuses.
     world.bearer(PUB_TOKEN)
     world.flag.body = FLAG_OFF
-    assert sources.Dispatch().projects() == PROJECTS  # the control: the real guard passes this world
+    assert sources.Dispatch().projects() == PROJECTS  # the control: the world's guard passes this world
     world.dispatch.calls.clear()
     failing = tmp_path / "failing-guard"
     failing.write_text("import sys\nsys.exit(1)\n")

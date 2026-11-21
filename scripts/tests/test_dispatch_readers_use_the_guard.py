@@ -6,11 +6,16 @@ A reader is a file of the checkout (`git ls-files --cached --others --exclude-st
 new files not yet added) that is neither a test (a tests, __tests__ or test path segment, a test_ or
 .test. name) nor documentation (.md) nor a link, and that holds a Dispatch API path, `/api/v1`,
 `/ws/live` or `/ws/doc/`, outside a comment. The rule a reader must pass:
-  - Python: in every function that sends a request, each send (a call of urlopen,
-    socket.create_connection or http.client's connections) and each urllib.request.Request built
-    before it come after a call of `private_guard(...)` made since the previous send, in evaluation
-    order, unless OTHER_SERVICES names the function with the service it talks to instead. (The
-    order is the source's: a guard call inside a branch that does not run still counts.) That
+  - Python: in every function that sends a request, and in the module's own statements (named
+    `<module>`, what runs at import), each send (a call of urlopen, urlretrieve,
+    socket.create_connection or http.client's connections, or an opener's open: the receiver calls
+    build_opener or OpenerDirector, is one of them, or is a name the file binds to such a call; a
+    file's or a Path's .open is no send) and each urllib.request.Request built before it come
+    after a call of `private_guard(...)` made since the previous send, in evaluation order, unless
+    OTHER_SERVICES names the function with the service it talks to instead. (The order is the
+    source's: a guard call inside a branch that does not run still counts.) A scope's calls are
+    those its body runs: a class body defined in it, and a nested function's or lambda's
+    decorators and defaults, but not that function's body. That
     `private_guard` is defined in the reader, or imported from a module beside it (a relative
     import), as a function that runs `agent-private-guard` (a module-level constant names it and the function
     calls subprocess.run). A module whose Dispatch requests all go through another module's client
@@ -37,8 +42,9 @@ DOTFILES = Path(__file__).resolve().parents[2]
 DISPATCH_PATH = re.compile(r"/api/v1(?![\w.-])|/ws/live|/ws/doc/")
 GUARD = "agent-private-guard"
 TEST_SEGMENTS = {"tests", "__tests__", "test"}
-SEND_CALLS = {"urlopen", "create_connection", "HTTPConnection", "HTTPSConnection"}
-REQUEST_CALLS = SEND_CALLS | {"Request"}
+SEND_CALLS = {"urlopen", "urlretrieve", "create_connection", "HTTPConnection", "HTTPSConnection"}
+OPENERS = {"build_opener", "OpenerDirector"}
+MODULE = "<module>"  # the name of a module's own statements, as a scope beside its functions
 GUARD_ITSELF = {"scripts/agent-private-check", "scripts/agent-private-guard"}
 # Request functions of a reader that talk to another service, never to Dispatch, with that service.
 OTHER_SERVICES = {
@@ -130,20 +136,56 @@ def functions(tree: ast.Module) -> dict[str, ast.FunctionDef | ast.AsyncFunction
     return found
 
 
-def own_calls(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.Call]:
-    """The calls in FN's own body, not in a function or class defined inside it, in source order."""
+def own_calls(scope: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.Call]:
+    """The calls SCOPE's body runs (a module's at import), in source order: a class body defined in it runs
+    with it, and so do a nested function's or lambda's decorators and defaults, but not that function's body."""
     calls: list[ast.Call] = []
 
-    def walk(node: ast.AST) -> None:
+    def visit(node: ast.AST) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            for part in [*getattr(node, "decorator_list", []), *node.args.defaults, *node.args.kw_defaults]:
+                if part is not None:
+                    visit(part)
+            return
+        if isinstance(node, ast.Call):
+            calls.append(node)
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
-                continue
-            if isinstance(child, ast.Call):
-                calls.append(child)
-            walk(child)
+            visit(child)
 
-    walk(fn)
+    for statement in scope.body:
+        visit(statement)
     return sorted(calls, key=lambda c: (c.lineno, c.col_offset))
+
+
+def opener_names(tree: ast.Module) -> set[str]:
+    """The names TREE binds to an opener: the `x` of `x = …` or `….x = …` whose value calls build_opener or
+    OpenerDirector."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and isinstance(node.value, ast.Call) \
+                and called(node.value) in OPENERS:
+            for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+                elif isinstance(target, ast.Attribute):
+                    names.add(target.attr)
+    return names
+
+
+def request_kind(call: ast.Call, openers: set[str]) -> str | None:
+    """"send" for a call that sends a request, "build" for a urllib.request.Request built for one, else None.
+    An `.open(…)` sends when its receiver is an opener: a call of build_opener or OpenerDirector, one of those
+    names, or a name the file binds to one (`openers`, from opener_names); a file's or a Path's .open is none."""
+    name = called(call)
+    if name in SEND_CALLS:
+        return "send"
+    if name == "open" and isinstance(call.func, ast.Attribute):
+        receiver = call.func.value
+        owner = (called(receiver) if isinstance(receiver, ast.Call) else receiver.id if isinstance(receiver, ast.Name)
+                 else receiver.attr if isinstance(receiver, ast.Attribute) else None)
+        if owner in OPENERS or owner in openers:
+            return "send"
+    return "build" if name == "Request" else None
 
 
 def runs_the_guard(tree: ast.Module) -> bool:
@@ -173,26 +215,29 @@ def guard_source(root: Path, rel: str, tree: ast.Module) -> bool:
 
 
 def unguarded_requests(root: Path, rel: str) -> list[str]:
-    """REL's request functions that do not run the guard first, as `REL: qualname`."""
+    """REL's request scopes (its functions, and MODULE for its own statements) that do not run the guard
+    first, as `REL: qualname`."""
     text = (root / rel).read_text(encoding="utf-8")
     if not is_python(rel, text):
         return [] if GUARD in without_comments(rel, text) else [f"{rel}: names no {GUARD}"]
     tree = ast.parse(text)
     guarded_by = guard_source(root, rel, tree)
+    openers = opener_names(tree)
     missing = []
-    for name, fn in functions(tree).items():
+    scopes: dict[str, ast.Module | ast.FunctionDef | ast.AsyncFunctionDef] = {**functions(tree), MODULE: tree}
+    for name, scope in scopes.items():
         if (rel, name) in OTHER_SERVICES:
             continue
         # Evaluation order: a call's arguments (urlopen(Request(...))) finish before the call.
-        calls = sorted(own_calls(fn), key=lambda c: (c.end_lineno or 0, c.end_col_offset or 0))
+        calls = sorted(own_calls(scope), key=lambda c: (c.end_lineno or 0, c.end_col_offset or 0))
         armed, bare = False, False
         for call in calls:
-            kind = called(call)
-            if kind == "private_guard":
+            kind = request_kind(call, openers)
+            if called(call) == "private_guard":
                 armed = guarded_by
-            elif kind in REQUEST_CALLS:
+            elif kind is not None:
                 bare = bare or not armed
-                if kind in SEND_CALLS:
+                if kind == "send":
                     armed = False  # one guard answers for one request
         if bare:
             missing.append(f"{rel}: {name}")
@@ -200,7 +245,7 @@ def unguarded_requests(root: Path, rel: str) -> list[str]:
 
 
 def unguarded(root: Path, files: list[str]) -> list[str]:
-    """Every request function of a reader among FILES that does not run the guard first."""
+    """Every request scope of a reader among FILES that does not run the guard first."""
     return sorted(m for rel in readers(root, files) if rel not in GUARD_ITSELF for m in unguarded_requests(root, rel))
 
 
@@ -216,9 +261,10 @@ class DispatchReadersUseTheGuard(unittest.TestCase):
         self.assertNotIn("scripts/pod-memory-peak", found)  # the Kubernetes API, in a comment
         # Every function OTHER_SERVICES names still sends a request, so the list cannot hide a new one.
         for rel, name in OTHER_SERVICES:
-            fn = functions(ast.parse((DOTFILES / rel).read_text(encoding="utf-8"))).get(name)
+            tree = ast.parse((DOTFILES / rel).read_text(encoding="utf-8"))
+            fn = functions(tree).get(name)
             self.assertIsNotNone(fn, f"{rel} has no {name}")
-            self.assertTrue(fn and any(called(c) in REQUEST_CALLS for c in own_calls(fn)), f"{rel}: {name} sends nothing")
+            self.assertTrue(fn and any(request_kind(c, opener_names(tree)) for c in own_calls(fn)), f"{rel}: {name} sends nothing")
 
     def control(self, rel: str, change: tuple[str, str] | None = None, append: str = "") -> list[str]:
         """unguarded() over the known readers copied to a scratch tree, with one text replaced in REL, or
@@ -270,6 +316,57 @@ class DispatchReadersUseTheGuard(unittest.TestCase):
         twice = ("    with urllib.request.urlopen(req, timeout=30) as resp:\n",
                  "    urllib.request.urlopen(req, timeout=30).close()\n    with urllib.request.urlopen(req, timeout=30) as resp:\n")
         self.assertEqual(self.control(rel, twice), [f"{rel}: api_get"])
+
+    def test_control_a_module_level_request_is_named(self) -> None:
+        rel = "scripts/sami-said"
+        stray = "\nurllib.request.urlopen(DEFAULT_DISPATCH_URL + '/api/v1/issues').close()\n"
+        self.assertEqual(self.control(rel, append=stray), [f"{rel}: {MODULE}"])
+
+    def test_control_a_module_level_request_after_a_module_level_guard_call_passes(self) -> None:
+        stray = ("\nprivate_guard(dispatch_config())\n"
+                 "urllib.request.urlopen(DEFAULT_DISPATCH_URL + '/api/v1/issues').close()\n")
+        self.assertEqual(self.control("scripts/sami-said", append=stray), [])
+
+    def test_control_a_request_a_class_body_or_a_default_makes_at_import_is_named(self) -> None:
+        rel = "chief-dashboard/chief_dashboard/videos.py"
+        request = "urllib.request.urlopen('http://127.0.0.1:1/api/v1/issues')"
+        for what, stray in (("a class body", f"\n\nclass Catalog:\n    ISSUES = {request}\n"),
+                            ("a default", f"\n\ndef later(issues={request}):\n    return issues\n"),
+                            ("a decorator", f"\n\n@functools.wraps({request})\ndef later():\n    return None\n")):
+            with self.subTest(what):
+                self.assertEqual(self.control(rel, append=stray), [f"{rel}: {MODULE}"])
+
+    def test_control_an_unguarded_opener_open_is_named(self) -> None:
+        rel = "chief-dashboard/chief_dashboard/videos.py"
+        stray = "\n\ndef stray(server):\n    return urllib.request.build_opener().open(f'{server}/api/v1/issues')\n"
+        self.assertEqual(self.control(rel, append=stray), [f"{rel}: stray"])
+
+    def test_control_an_unguarded_urlretrieve_is_named(self) -> None:
+        rel = "chief-dashboard/chief_dashboard/videos.py"
+        stray = "\n\ndef stray(server, path):\n    return urllib.request.urlretrieve(f'{server}/api/v1/issues', path)\n"
+        self.assertEqual(self.control(rel, append=stray), [f"{rel}: stray"])
+
+    def test_control_each_send_shape_uses_up_the_guard_call(self) -> None:
+        # After api_get's guard call, each shape is a send, so api_get's own request after it is named.
+        rel = "scripts/sami-said"
+        for what, shape in (
+                ("urlretrieve", "urllib.request.urlretrieve(url, '/dev/null')"),
+                ("a call of build_opener", "urllib.request.build_opener().open(url).close()"),
+                ("a call of OpenerDirector", "urllib.request.OpenerDirector().open(url).close()"),
+                ("OpenerDirector.open", "urllib.request.OpenerDirector.open(urllib.request.OpenerDirector(), url)"),
+                ("a name bound to an opener", "opener = urllib.request.build_opener()\n    opener.open(url).close()"),
+                ("an attribute bound to an opener", "cfg.opener = urllib.request.build_opener()\n    cfg.opener.open(url).close()")):
+            with self.subTest(what):
+                found = self.control(rel, ("    private_guard(cfg)\n    url = cfg.url",
+                                           f"    private_guard(cfg)\n    url = cfg.url\n    {shape}\n    url = cfg.url"))
+                self.assertEqual(found, [f"{rel}: api_get"])
+
+    def test_control_a_file_open_is_no_request(self) -> None:
+        # The known false positive: open(), a Path's and a file object's .open, and webbrowser.open, unguarded.
+        rel = "chief-dashboard/chief_dashboard/videos.py"
+        quiet = ("\n\ndef quiet(path, url):\n    with open(path) as f, Path(path).open() as g, path.open('rb') as h:\n"
+                 "        webbrowser.open(url)\n        return f, g, h\n")
+        self.assertEqual(self.control(rel, append=quiet), [])
 
 
 if __name__ == "__main__":

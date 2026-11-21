@@ -17,13 +17,20 @@ iam_credentials_stub.py serves the third.
 
 Each binds 127.0.0.1 on an ephemeral port; `.url` names the server, or the object (FlagObject).
 Tokens and bodies are made-up values; nothing here is a credential.
+
+The check reads no variable for where the flag is: guarded_copy writes copies of agent-private-check
+(its FLAG_URL rewritten to a FlagObject) and agent-private-guard into a test's own directory, and
+flag_env gives the variables such a copy reads.
 """
 
 from __future__ import annotations
 
 import http.server
 import json
+import re
+import shutil
 import threading
+from pathlib import Path
 from typing import Any
 
 FLAG_ON: dict[str, Any] = {"enabled": True, "enabled_since": "2026-11-20T00:00:00Z"}
@@ -31,7 +38,7 @@ FLAG_OFF: dict[str, Any] = {"enabled": False}
 PRIV_TOKEN = "dsp_test_lists_priv_0123456789abcdef"
 PUB_TOKEN = "dsp_test_lists_pub_0123456789abcdef"
 WHOAMI_PRIV = {"kind": "agent", "projects": ["PRIV", "PUB"], "private_projects": ["PRIV"]}
-WHOAMI_PUB = {"kind": "agent", "projects": ["PUB"]}
+WHOAMI_PUB = {"kind": "agent", "projects": ["PUB"], "private_projects": []}
 WHOAMI = "/api/v1/whoami"
 
 
@@ -197,8 +204,34 @@ class _FederationHandler(_Handler):
             self.reply(404, {"error": "not found"})
 
 
-def flag_env(flag: FlagObject, metadata_host: str, cache: str) -> dict[str, str]:
-    """The variables that point the check at FLAG, read with the token of the metadata server at
-    METADATA_HOST (gce_metadata_stub.py, or a closed port for "no metadata server"), and keep its
-    copies under CACHE."""
-    return {"AGENT_PRIVATE_FLAG_URL": flag.url, "GCE_METADATA_HOST": metadata_host, "XDG_CACHE_HOME": cache}
+SCRIPTS = Path(__file__).resolve().parents[1]
+FLAG_URL_LINE = re.compile(r"^FLAG_URL = .*$", re.M)
+
+
+def with_flag_url(check_text: str, url: str) -> str:
+    """scripts/agent-private-check's text with its flag object at URL. The check reads no variable
+    for it, so a test points a copy of the check at a stand-in flag this way."""
+    rewritten, count = FLAG_URL_LINE.subn(f"FLAG_URL = {url!r}", check_text)
+    assert count == 1, "scripts/agent-private-check holds no single `FLAG_URL = ...` line"
+    return rewritten
+
+
+def guarded_copy(scripts: Path, flag: FlagObject) -> Path:
+    """Copies of agent-private-check (reading FLAG) and agent-private-guard in the directory SCRIPTS,
+    made if missing; the guard's path. A reader that runs the guard beside itself is copied there too."""
+    scripts.mkdir(parents=True, exist_ok=True)
+    check = scripts / "agent-private-check"
+    check.write_text(with_flag_url((SCRIPTS / "agent-private-check").read_text(encoding="utf-8"), flag.url),
+                     encoding="utf-8")
+    guard = scripts / "agent-private-guard"
+    shutil.copyfile(SCRIPTS / "agent-private-guard", guard)
+    for path in (check, guard):
+        path.chmod(0o755)
+    return guard
+
+
+def flag_env(metadata_host: str, cache: str) -> dict[str, str]:
+    """The variables a copy of the check from guarded_copy reads: the metadata server whose token
+    reads the flag (gce_metadata_stub.py, or a closed port for "no metadata server"), and where it
+    keeps its copies."""
+    return {"GCE_METADATA_HOST": metadata_host, "XDG_CACHE_HOME": cache}

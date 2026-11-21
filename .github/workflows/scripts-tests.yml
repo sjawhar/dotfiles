@@ -56,6 +56,8 @@ jobs:
       # on a dev box:
       #   test_az_reader.py: the runner's own Azure CLI, not the pinned one, starts no telemetry
       #     uploader in the test's control.
+      #   test_agent_private_check.py: starts every shim with `systemd-run --user`, which needs the
+      #     runner user's systemd manager; private-project-check.yml starts one, then runs it.
       - name: pytest scripts/tests
         env:
           PYTHONPATH: .
@@ -65,3 +67,4 @@ jobs:
         run: >-
           uvx pytest@9.2.0 -p no:cacheprovider scripts/tests
           --ignore=scripts/tests/test_az_reader.py
+          --ignore=scripts/tests/test_agent_private_check.py
