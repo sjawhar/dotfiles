@@ -99,7 +99,7 @@ from pathlib import Path
 
 # scripts/ is this file's own directory; how one agent start reads its arguments and files lives beside it.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from agent_private_launch import Launch, Refused, env, launch_for  # noqa: E402
+from agent_private_launch import CONFIG_KEYS, Launch, Refused, env, launch_for  # noqa: E402
 
 # One line, which a test's copy of this file rewrites to read a stand-in (no variable can move it).
 FLAG_URL = "https://storage.googleapis.com/storage/v1/b/theorem-app-transcripts-private-flags/o/flags%2Fprivate-projects.json?alt=media"
@@ -482,16 +482,6 @@ def file_bearer(path: Path, section: dict[str, object], kind: str, named_by: str
         if run.returncode != 0 or not token:
             raise Refused(f"the dispatch.token command in {path} failed; retry")
     return url, token.strip()
-
-
-# Keys that move the envoy.json the Dispatch client reads, to the file each names. A dotenv
-# PI_CODING_AGENT_DIR is not one: omp applies it only in the default profile, where the client
-# reads no envoy.json from it (envoy-client's namedDirectory).
-CONFIG_KEYS = {
-    "ENVOY_CONFIG_FILE": lambda value: Path(value),
-    "XDG_CONFIG_HOME": lambda value: Path(value) / "legion" / "envoy.json",
-    "HOME": lambda value: Path(value) / ".config" / "legion" / "envoy.json",
-}
 
 
 def bearers(launch: Launch) -> list[tuple[str, str, str]]:

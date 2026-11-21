@@ -402,17 +402,24 @@ class ClaudeCodesTrust(Unit):
         # Control: no record and no switch.
         self.assertFalse(self.trusts(folder, []))
 
-    def test_print_mode_is_print_or_a_short_flag_cluster_holding_p(self) -> None:
-        for args in (["-p"], ["-cp", "hi"], ["-pc", "hi"], ["--print", "hi"], ["--model", "x", "-p", "hi"]):
+    def test_print_mode_is_read_as_claude_codes_parser_reads_it(self) -> None:
+        cld = ["--dangerously-skip-permissions", "--channels", "plugin:x@y", "--settings", "s.json"]
+        for args in (["-p"], ["-cp", "hi"], ["-pc", "hi"], ["--print", "hi"], ["--model", "x", "-p", "hi"],
+                     ["-r", "-p"], ["-pn", "x"], [*cld, "-p", "hi"], ["hi", "-p"]):
             with self.subTest(args=args):
                 self.assertTrue(self.launching.prints(args))
-        # Controls: no p, a long flag, and a prompt after `--`.
-        for args in (["-c", "hi"], ["hi"], ["--permission-mode", "plan"], ["-c", "--", "-p"]):
+        # A short option that takes a value takes the rest of its cluster, or the next argument:
+        # `-nprod` names the session "prod"; `-n -prod` and `--append-system-prompt -plain` too.
+        for args in (["-nprod"], ["-dapi"], ["-wpatch"], ["-rprep"], ["-n", "-prod"], ["-cn", "-p"], ["-c", "-np"],
+                     ["--append-system-prompt", "-plain"], ["--model", "-p"]):
             with self.subTest(args=args):
                 self.assertFalse(self.launching.prints(args))
-
-    def test_the_bearer_keys_are_the_keys_the_check_reads(self) -> None:
-        self.assertEqual(self.launching.BEARER_KEYS, {"DISPATCH_TOKEN", "DISPATCH_TOKEN_FILE", *self.check.CONFIG_KEYS})
+        # Controls: no p; a prompt after `--`; help and version, which start no session; an option
+        # Claude Code does not know, which starts none either.
+        for args in (["-c", "hi"], ["hi"], ["--permission-mode", "plan"], ["-c", "--", "-p"], ["-hp"], ["-p", "-v"],
+                     ["--help", "-p"], ["-xp"]):
+            with self.subTest(args=args):
+                self.assertFalse(self.launching.prints(args))
 
 
 class TheCacheAndFaults(Unit):

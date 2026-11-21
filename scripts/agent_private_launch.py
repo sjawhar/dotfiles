@@ -58,9 +58,16 @@ def command_envoy_json() -> Path:
     return neutral_envoy_json()
 
 
-# The keys of a file the harness applies that name a Dispatch bearer, or the envoy.json one comes
-# from: the variables agent-private-check's bearers() reads, and its CONFIG_KEYS.
-BEARER_KEYS = frozenset({"DISPATCH_TOKEN", "DISPATCH_TOKEN_FILE", "ENVOY_CONFIG_FILE", "XDG_CONFIG_HOME", "HOME"})
+# Keys that move the envoy.json the Dispatch client reads, to the file each names. A dotenv
+# PI_CODING_AGENT_DIR is not one: omp applies it only in the default profile, where the client
+# reads no envoy.json from it (envoy-client's namedDirectory).
+CONFIG_KEYS = {
+    "ENVOY_CONFIG_FILE": lambda value: Path(value),
+    "XDG_CONFIG_HOME": lambda value: Path(value) / "legion" / "envoy.json",
+    "HOME": lambda value: Path(value) / ".config" / "legion" / "envoy.json",
+}
+# The keys of a file the harness applies that name a Dispatch bearer, or the envoy.json one comes from.
+BEARER_KEYS = frozenset({"DISPATCH_TOKEN", "DISPATCH_TOKEN_FILE", *CONFIG_KEYS})
 
 
 def options(args: list[str], names: set[str]) -> list[tuple[str, str]]:
@@ -351,12 +358,53 @@ class OmpLaunch(Launch):
 CLD_FLAGS = {"--dangerously-skip-permissions": 0, "--channels": 1, "--settings": 1}
 
 
+# Claude Code 2.1.316's options, as its `--help` lists them, for reading print mode the way its
+# argument parser does: the long ones that take no value, and those whose value is optional (taken
+# only when the next argument is not an option). Any other long option takes the next argument as
+# its value, whatever it looks like. --help and --version start no session.
+CLAUDE_NO_VALUE = frozenset({
+    "--allow-dangerously-skip-permissions", "--ax-screen-reader", "--bg", "--background", "--bare", "--brief",
+    "--chrome", "--continue", "--dangerously-skip-permissions", "--desktop", "--disable-slash-commands",
+    "--exclude-dynamic-system-prompt-sections", "--fork-session", "--forward-subagent-text", "--ide",
+    "--include-hook-events", "--include-partial-messages", "--no-chrome", "--no-session-persistence", "--print",
+    "--replay-user-messages", "--restricted", "--safe-mode", "--strict-mcp-config", "--tmux", "--verbose",
+})
+CLAUDE_OPTIONAL_VALUE = frozenset({
+    "--cloud", "--debug", "--from-pr", "--prompt-suggestions", "--remote-control", "--resume", "--teleport", "--worktree",
+})
+# Its short options: c and p take no value (h and v exit), n takes one, d, r and w an optional one.
+CLAUDE_SHORT = {"c": None, "p": None, "n": "required", "d": "optional", "r": "optional", "w": "optional"}
+
+
 def prints(args: list[str]) -> bool:
-    """Whether ARGS start Claude Code in print mode: `--print`, or a single-dash cluster holding `p`
-    (`-p`, `-cp`, `-pc`), which Claude Code splits into its short flags."""
-    before = args[:args.index("--")] if "--" in args else args
-    return any(arg == "--print" or (arg.startswith("-") and not arg.startswith("--") and "p" in arg[1:])
-               for arg in before)
+    """Whether ARGS start Claude Code in print mode, read as its argument parser reads them: `--print`,
+    or `p` in a single-dash cluster before the cluster's first letter that takes a value, whose value
+    is the rest of the cluster (`-cp` prints, `-nprod` names the session "prod"), or the next argument
+    when the letter ends the cluster. An option's separate value is skipped (`-n -prod`, `--model -p`).
+    Help, version and an option Claude Code does not know start no session, so nothing prints."""
+    printing, i = False, 0
+    while i < len(args) and args[i] != "--":
+        arg, i = args[i], i + 1
+        follows = i < len(args) and not args[i].startswith("-")  # an optional value is there
+        if arg.startswith("--"):
+            name, eq, _ = arg.partition("=")
+            if name in ("--help", "--version"):
+                return False
+            printing = printing or name == "--print"
+            if not eq and name not in CLAUDE_NO_VALUE and (name not in CLAUDE_OPTIONAL_VALUE or follows):
+                i += 1
+        elif arg.startswith("-") and len(arg) > 1:
+            for at, letter in enumerate(arg[1:], start=2):
+                if letter not in CLAUDE_SHORT:  # -h, -v, or an option Claude Code does not know
+                    return False
+                kind = CLAUDE_SHORT[letter]
+                if kind is None:
+                    printing = printing or letter == "p"
+                    continue
+                if at == len(arg) and (kind == "required" or follows):
+                    i += 1
+                break
+    return printing
 
 
 @dataclass
