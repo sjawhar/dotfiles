@@ -32,6 +32,7 @@ minimum_release_age_excludes = [
   "github:sjawhar/secretsd",  # archived; tags predate the forward merge
   "github:sjawhar/tmux-builds",
   "forward",
+  "secrets",
   "agent-secrets",
 ]
 # The global `rust` pin below makes mise export RUSTUP_TOOLCHAIN, which overrides
@@ -229,7 +230,7 @@ mautrix-instagram = "github:mautrix/meta"
 op = "aqua:1password/cli"
 
 [tools.forward]
-version = "3.8.1"  # filesystem-independent preview health probe
+version = "3.8.3"  # `forward browser grant` works from a Legion pane (sjawhar/forward#78)
 # Public releases are verified with GitHub build attestations during installation.
 platforms.linux-x64   = { asset_pattern = "forward-x86_64-unknown-linux-musl.tar.gz" }
 platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.tar.gz" }
@@ -241,16 +242,16 @@ platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.ta
 # systemd units, which installers/secretsd.sh reads straight out of this
 # install dir.
 [tools.secrets]
-# Pinned to the RUNNING daemon's release, not "latest": the client and daemon
-# share a protocol version that moved in 3.3.0, and the daemon is only
-# restarted by hand (installers/secretsd.sh with SECRETSD_RESTART_WITH_GRANTS=1
-# when grants are live; a restart drops every live grant). Bump this and
-# restart in the same command - 2026-09-21 a "latest" client rolled to 3.3.1
-# under a 3.2.3 daemon and every human-tier request from every box failed
-# VersionMismatch. mise needs a GitHub token for the release lookup (the
-# unauthenticated API limit is 60/h and this machine exhausts it) --
-# [settings.github] credential_command above supplies one (gh-app-token, the same
-# credential git's own GitHub App routing uses).
+# Pinned to an exact release, not "latest": the client and daemon share a protocol version that
+# moved in 3.3.0, and the daemon is only restarted by hand (installers/secretsd.sh with
+# SECRETSD_RESTART_WITH_GRANTS=1 when grants are live; a restart drops every live grant). A bump
+# moves the client at once, and the daemon runs its old release until it is restarted after the
+# merge, at a time its owner allows, so bump only to a release whose protocol version is the
+# running daemon's - 2026-09-21 a "latest" client rolled to 3.3.1 under a 3.2.3 daemon and every
+# human-tier request from every box failed VersionMismatch.
+# mise needs a GitHub token for the release lookup (the unauthenticated API limit is 60/h and this
+# machine exhausts it) -- [settings.github] credential_command above supplies one (gh-app-token, the
+# same credential git's own GitHub App routing uses).
 # 3.7.0 (2026-10-26) names the store behind every answer and refusal (sjawhar/forward#67). Its
 # wire protocol is still 4, the same as 3.3.1 (`git diff v3.3.1 v3.7.0 -- crates/proto` adds only
 # a client-side accessor), so this client was proven read-only against the running 3.3.1 daemon
@@ -262,7 +263,14 @@ platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.ta
 # empty). The daemon keeps registrations in memory, and the omp extension re-registers the same
 # token when the handshake's instance id changes, so a restart costs each session at most one
 # UNKNOWN_TOKEN answer on its first call.
-version = "3.8.2"
+# 3.8.3 (2026-11-16) makes `forward browser grant` work from a Legion pane (sjawhar/forward#78):
+# the daemon scopes an AUTHORIZE that carries no token and no terminal to the caller's nearest omp
+# process, and it retries a failed YubiKey attempt until the request's time to live ends, so a grant
+# from a Legion pane needs a 3.8.3 daemon. Wire protocol is still 4 (`git diff v3.8.2 v3.8.3 --
+# crates/proto` changes one doc comment), so this client was proven read-only against the running
+# 3.8.2 daemon (`secrets grants`, `secrets get <human key> --no-request`). The daemon is restarted
+# after the merge, at a time its owner allows.
+version = "3.8.3"
 platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz" }
 
 # The agent-secrets client and host helper (AGENTC-393), from sjawhar/legion's legion-envoy-v*
@@ -311,6 +319,22 @@ version = "0.2.6"
 platforms.linux-x64   = { asset_pattern = "ctx-x86_64-unknown-linux-musl.tar.gz" }
 platforms.linux-arm64 = { asset_pattern = "ctx-aarch64-unknown-linux-musl.tar.gz" }
 platforms.macos-arm64 = { asset_pattern = "ctx-aarch64-apple-darwin.tar.gz" }
+
+# CodeGraph CLI (colbymchenry/codegraph), which the omp `codegraph` tool runs from PATH
+# (@bopstack/pi-codegraph in omp/plugins/package.json; without the CLI every call answers "CodeGraph
+# CLI is unavailable on PATH"). Same version as Legion's worker image, which pins it in
+# cybermonklabs/legion packages/daemon/docker/codegraph/package.json. Each release archive holds the
+# npm per-platform package (@colbymchenry/codegraph-<platform>): bin/codegraph is a sh wrapper that
+# execs the Node 24 bundled beside it, so it needs no system node. The npm `@colbymchenry/codegraph`
+# package is only a `#!/usr/bin/env node` launcher for that same bundle. A box finds it through
+# ~/.mise/shims, the shared tool store. Digests are the ones GitHub recorded at upload (`gh release
+# view v<version> -R colbymchenry/codegraph --json assets`); bump them with the version.
+[tools."github:colbymchenry/codegraph"]
+version = "1.5.0"
+platforms.linux-x64   = { asset_pattern = "codegraph-linux-x64.tar.gz", checksum = "sha256:2ba65e87a1210b706bb1e67d5e48b5fc4a1935e43dbb3fb5f31c5597840d2e58" }
+platforms.linux-arm64 = { asset_pattern = "codegraph-linux-arm64.tar.gz", checksum = "sha256:9f17750aedf45d51f68caae39ed21d6e2a7290b2326e5c53f95a165918ebd1d8" }
+platforms.macos-x64   = { asset_pattern = "codegraph-darwin-x64.tar.gz", checksum = "sha256:0a0ccc29bf7da9d10be1458d89d7e15c55927ae24cd95e9fa3de4bdfea059dde" }
+platforms.macos-arm64 = { asset_pattern = "codegraph-darwin-arm64.tar.gz", checksum = "sha256:cf5ee435a6e44d097b2f98f2b7b8b9422bb1094844404efed82519c5da1af2cf" }
 
 # Device management CLI (osquery/MDM). Each fleetdm/fleet release bundles two
 # binaries — fleet (server) + fleetctl — so asset_pattern selects the fleetctl

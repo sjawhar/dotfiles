@@ -926,11 +926,16 @@ host_identity() {
 # without cloud=, guard.sh checks the Azure profile and fails datadog_config and fail2ban_ignoreip on
 # this VM (2026-11-03 23:18Z, dispatch://INFRA-993). Any failed check is a FAIL. On a timed box
 # check waits for the timing gate, so it is bounded.
+# The object is read as legion-reader@, through gcloud-reader --as legion: that account holds
+# roles/storage.objectViewer on this one object alone (agent-infra monitoring/gcp_baseline.go,
+# gcpProfileReader; theorem-labs/agent-infra#5201), and dev-box@, which the box's agents act as
+# after dispatch://INFRA-1433's switch, holds no read on the bucket (census row U47).
 GUARD_OBJECT=gs://theorem-agent-infra-monitoring-profile/host/guard.sh
 host_guard() {
     local script out rc=0
     script="$(mktemp)"
-    if ! out="$(gcloud storage cp "$GUARD_OBJECT" "$script" 2>&1)"; then
+    if ! out="$(GCLOUD_READER_REASON='sami-devbox-check: the host profile host/guard.sh' \
+            "$HOME/.dotfiles/scripts/gcloud-reader" --as legion -- gcloud storage cp "$GUARD_OBJECT" "$script" 2>&1)"; then
         fail "guard: gcloud storage cp $GUARD_OBJECT: $(tail -1 <<<"$out")"
         rm -f "$script"
         return

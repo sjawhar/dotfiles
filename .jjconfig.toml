@@ -95,3 +95,19 @@ email = "sami@thecybermonk.com"
 [--scope.user]
 name = "Sami Jawhar"
 email = "sami@theorem.dev"
+
+# oh-my-pi commits as the GitHub noreply address in every workspace. Its origin
+# and upstream are public, so a commit made with the default address puts the
+# company name on GitHub, and knives' forbidden-term list for this fork refuses
+# that address at a release cut. As for Legion, jj matches the checkout by path:
+# every `knives start` workspace of ~/src/oh-my-pi, wherever it lives, has that
+# checkout's repository path, so this one entry covers them all. Until
+# 2026-11-21 the address was set per workspace (`git-identity nr`), and a new
+# knives workspace committed with the default one. git's half is the canonical
+# checkout's local config, which every git worktree of it shares; a clone that
+# lacks it needs `git-identity nr`, or jj drops signatures as described above.
+[[--scope]]
+--when.repositories = ["~/src/oh-my-pi"]
+[--scope.user]
+name = "Sami Jawhar"
+email = "sjawhar@users.noreply.github.com"

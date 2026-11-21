@@ -17,6 +17,12 @@ agentbox runs each agent session in its own disposable [Sysbox](https://github.c
   its clones (uncommitted changes and commits no remote has too), its home, `/tmp` and its inner Docker store.
   Push what you want kept before the session ends. A box whose launcher died is deleted later by the collector
   that every `agentbox new` starts.
+- A box ends when its container stops, not when the launcher's Docker client ends. When dockerd restarts (an
+  upgrade, a crash) with `live-restore` on, the container runs on, and the launcher attaches to it again in the
+  same pane. When Docker does not answer for 5 minutes (`AGENTBOX_REATTACH_WAIT`), the launcher leaves the box
+  running, removes nothing, and prints the commands that attach to it or stop it. A launcher keeps the code it
+  started with: `agentbox adopt <box>` puts a box started by an older launcher under this one in its own pane,
+  stopping nothing in the box.
 - The box gets no route to omp's session database, so a box resumes a session only from its transcript file.
 
 This is part of Sami's dotfiles, not a stand-alone tool. It expects a host set up by this repository's

@@ -1,13 +1,16 @@
 #!/bin/bash
 # Wrapper around voxtype record commands that also captures audio via PipeWire.
 # Audio files are saved to $XDG_DATA_HOME/voxtype/recordings/ as 16kHz mono WAV,
-# compatible with `voxtype transcribe <file>` for re-transcription.
+# compatible with `voxtype transcribe <file>` for re-transcription. A second,
+# full-band copy (48 kHz, 24-bit) of the same take goes to recordings48k/ under
+# the same name, for voice work that needs the frequencies a 16 kHz file drops.
 #
 # On stop, spawns a background check that notifies if transcription failed.
 # Checks for empty recordings after stop and warns if no audio was captured.
 set -euo pipefail
 
 RECORDINGS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/recordings"
+RECORDINGS48_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/recordings48k"
 HISTORY_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/history.jsonl"
 RUNTIME_DIR="/run/user/$(id -u)/voxtype"
 PID_FILE="$RUNTIME_DIR/pw-record.pid"
@@ -15,11 +18,14 @@ WAV_FILE="$RUNTIME_DIR/pw-record.wav"  # Tracks current recording path across in
 STATE_FILE="$RUNTIME_DIR/state"
 WAV_HEADER_SIZE=44  # Bare WAV header with zero audio data
 
-mkdir -p "$RECORDINGS_DIR"
+mkdir -p "$RECORDINGS_DIR" "$RECORDINGS48_DIR"
 
 stop_pw_record() {
     if [ -f "$PID_FILE" ]; then
-        kill "$(cat "$PID_FILE")" 2>/dev/null || true
+        # One pid per line: the 16 kHz capture and the 48 kHz capture.
+        while read -r pid; do
+            [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+        done < "$PID_FILE"
         rm -f "$PID_FILE"
     fi
 }
@@ -80,6 +86,9 @@ case "${1:-}" in
             pw-record --rate=16000 --channels=1 --format=s16 \
                 "$recording_file" &
             echo $! > "$PID_FILE"
+            pw-record --rate=48000 --channels=1 --format=s24 \
+                "$RECORDINGS48_DIR/$timestamp.wav" &
+            echo $! >> "$PID_FILE"
             echo "$recording_file" > "$WAV_FILE"
         else
             # About to stop — kill pw-record (before voxtype toggle so file is finalized)

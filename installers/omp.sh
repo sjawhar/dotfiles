@@ -45,8 +45,8 @@ ensure_link "${DOTFILES_DIR}/omp/keybindings.yml" "${OMP_AGENT_DIR}/keybindings.
 # omp loads <agent dir>/hooks/<pre|post>/*.ts; post/jj-snapshot.ts is the one jj snapshotter.
 ensure_link "${DOTFILES_DIR}/omp/hooks"       "${OMP_AGENT_DIR}/hooks"
 # Standing rules (omp/AGENTS.md, rules/): link every omp/rules/*.md. memory-graph.md is linked by
-# installers/ctx-memory.sh. scripts/dotfiles-follow runs this same script after a pull, so a rule
-# added by commit goes live without a hand-run installer.
+# installers/ctx-memory.sh. scripts/dotfiles-follow after a pull, and dotfiles-sync's tools step
+# after a move, run this same script, so a rule added by commit goes live without a hand-run installer.
 "${DOTFILES_DIR}/scripts/omp-link-rules"
 
 # Extensions: dotfiles-owned sources are linked here; everything else is an OMP

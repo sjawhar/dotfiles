@@ -134,15 +134,22 @@ w0=$(mktemp -d)
 # and its own request read as the verdict: GATE READS GREEN (agent-c#20214, 2026-09-25). Fails safe - a real
 # verdict written in backticks becomes a grammar miss for a human to read, never a false green.
 VS='def vs: gsub("(?s)```.*?```";" ")|gsub("`(?<c>[^`\n]*)`"; if (.c|test("(?i)verdict|approve|accept at|merge at|request.changes|lgtm|do not merge")) then " " else "`\(.c)`" end);'
+# Hex that names no commit is removed before every scan for a sha. A Dispatch ask link's UUID
+# (dispatch://INFRA-1478/ask/94ecea2a-9526-4f83-b461-92348650fd75) holds letter-bearing hex runs of 8 and 12, so the verdict
+# line's first-hex scan took 94ecea2a for the verdict sha, the compare 404'd, and the gate printed 'PR-own diff CHANGED' at a
+# head the CI review App had approved (agent-infra#3861, 2026-11-21). norefs removes every UUID and every dispatch:// link, and
+# an http(s) link except the sha a commit link names in its path (/commit/, /commits/, /blob/, /tree/), which stays in its place.
+# A compare link names a range, not a commit, so it goes too. RF is top-level so pr-gate-corpus can test it.
+RF='def norefs: gsub("(?<u>(?<s>https?|dispatch)://[^\\s<>()\\[\\]`\"]+)"; if .s == "dispatch" then " " else " \([.u|scan("/(?:commits?|blob|tree)/([0-9a-f]{7,40})\\b")[]]|join(" ")) " end) | gsub("(?i)\\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\\b"; " ");'
 api "repos/$repo/pulls/$n/reviews" --paginate --jq "$RS"'.[]|select(notqueue)|{t:.submitted_at,u:.user.login,k:"R",b:rs}' > "$w0/r.jsonl" || true
 api "repos/$repo/issues/$n/comments" --paginate --jq '.[]|select((.user.login|test("github-actions")|not) or (.body|test("^Reviewed `?[0-9a-f]{7,40}`? \\(`?[0-9a-f]{40}`?\\): \\**clean, no findings")))|{t:.created_at,u:.user.login,k:"C",b:(.body//"")}' > "$w0/c.jsonl" || true
 echo "verdict-bearing artifacts (VERDICT:/APPROVE/APPROVED/MERGE at/REQUEST_CHANGES; reviews + comments), newest first:"
-vr=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s "$VS"'[.[]|select(.b|vs|test("(?i:verdict:|approve at|approved at|accept at|accepted at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b|(?i)^[ \\t]*\\**(merge|approve|accept(ed)?)(-with-nits)?\\**:? +(at +)?[0-9a-f]{7,40}|^Reviewed `?[0-9a-f]{7,40}`? \\(`?[0-9a-f]{40}`?\\): \\**clean, no findings"))]|sort_by(.t)|reverse|.[0:6][]|"  \(.k) \(.t[5:16]) \(.u) :: \(.b|gsub("\n";" ")|.[0:110]) :: names=\([.b|gsub("[0-9a-f]{41,}";" ")|scan("[0-9a-f]{40}")]|unique|.[0:2]|map(.[0:8])|join(","))"' -r)
+vr=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s "$VS$RF"'[.[]|select(.b|vs|test("(?i:verdict:|(approved?|accept(ed)?|merge|request[_ ]changes) +at +(head +)?\\**`?[0-9a-f]{7,40}\\b|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b|(?i)^[ \\t]*\\**(merge|approve|accept(ed)?)(-with-nits)?\\**:? +(at +)?[0-9a-f]{7,40}|^Reviewed `?[0-9a-f]{7,40}`? \\(`?[0-9a-f]{40}`?\\): \\**clean, no findings"))]|sort_by(.t)|reverse|.[0:6][]|"  \(.k) \(.t[5:16]) \(.u) :: \(.b|gsub("\n";" ")|.[0:110]) :: names=\([.b|norefs|gsub("[0-9a-f]{41,}";" ")|scan("[0-9a-f]{40}")]|unique|.[0:2]|map(.[0:8])|join(","))"' -r)
 printf '%s\n' "${vr:-  (none)}"
 # The head-naming list above and the grammar list are separate reads; green needs ONE artifact doing both. A lane's
 # "please re-verdict at <head>" names the head, an older verdict carries the grammar, and together they read GREEN
 # with no verdict at the head (agent-c#20214 and a second lane, 2026-09-26). No such artifact -> needs an IDENTICAL carry.
-vh=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg h "$h7" "$VS"'[.[]|select(.b|vs|test("(?i:verdict:|approve at|approved at|accept at|accepted at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b|(?i)^[ \\t]*\\**(merge|approve|accept(ed)?)(-with-nits)?\\**:? +(at +)?[0-9a-f]{7,40}|^Reviewed `?[0-9a-f]{7,40}`? \\(`?[0-9a-f]{40}`?\\): \\**clean, no findings"))|select(.b|test($h))]|length')
+vh=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg h "$h7" "$VS"'[.[]|select(.b|vs|test("(?i:verdict:|(approved?|accept(ed)?|merge|request[_ ]changes) +at +(head +)?\\**`?[0-9a-f]{7,40}\\b|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b|(?i)^[ \\t]*\\**(merge|approve|accept(ed)?)(-with-nits)?\\**:? +(at +)?[0-9a-f]{7,40}|^Reviewed `?[0-9a-f]{7,40}`? \\(`?[0-9a-f]{40}`?\\): \\**clean, no findings"))|select(.b|test($h))]|length')
 if [ -n "$vr" ] && [ "$nohead" = 0 ] && [ "${vh:-0}" = 0 ]; then echo "  (artifacts name $h8 and others carry verdict grammar, but none does both - a request or note naming the head is not a verdict)"; nohead=1; fi
 # A verdict-bearing artifact is REQUIRED for green (#20167). Distinguish two empties: nothing names the
 # head at all (truly no verdict) vs an artifact NAMES the head but the grammar missed it (a real verdict
@@ -168,8 +175,15 @@ fi
 # `Verdict: clean` is the repo's claude-pr-review app's positive form (TRAJECTORY_CLAUDE_REVIEW success); it was in
 # neither set and read GREEN as a neutral, for the wrong reason (agent-c#20291, 2026-09-26). A verdict in NEITHER set
 # is now NOT green: read it. `\**` admits a bold verdict line on both sides.
-NEG='(?i)(request[_ ]changes|changes requested|do not merge) +at +[0-9a-f]|verdict:? *\**(request[_ ]changes|changes requested|changes\b|do not merge|fail\b|block|hold\b|reject|not ready)'
-POS='(?i)approve|accept(ed)? +at +[0-9a-f]|merge +at|lgtm|verdict:? *\**(approve|accept|merge|ship|clean)|^[ \t]*\**(merge|approve|accept(ed)?)(-with-nits)?\**:? +(at +)?[0-9a-f]{7,40}|^reviewed `?[0-9a-f]{7,40}`? \(`?[0-9a-f]{40}`?\): \**clean, no findings'
+# A rejection's sha may sit in a code span or in bold ('Changes requested at `<sha>`', as the verdict-line scan below
+# already reads it). Without that, legion-reviewer's CHANGES_REQUESTED review on agent-infra#4645 missed NEG, its later
+# 'which I approved in round 1' hit POS, and the review read as an APPROVE of the old sha (2026-11-21).
+# 'merge at', 'approve(d) at', 'accept(ed) at' and the negative 'X at' forms count only when a sha of 7-40 follows,
+# after an optional 'head' and bold or a code span: here and in the grammar literals (vr, vh, last). One hex letter was
+# enough before, so "#3181 failed to merge at five heads" in a merge-hold notice on agent-infra#3861 read as a positive
+# verdict, and the same prose naming the head would have read as an APPROVE at it (2026-11-21).
+NEG='(?i)(request[_ ]changes|changes requested|do not merge) +at +(head +)?\**`?[0-9a-f]{7,40}\b|verdict:? *\**(request[_ ]changes|changes requested|changes\b|do not merge|fail\b|block|hold\b|reject|not ready)'
+POS='(?i)approve|accept(ed)? +at +(head +)?\**`?[0-9a-f]{7,40}\b|merge +at +(head +)?\**`?[0-9a-f]{7,40}\b|lgtm|verdict:? *\**(approve|accept|merge|ship|clean)|^[ \t]*\**(merge|approve|accept(ed)?)(-with-nits)?\**:? +(at +)?[0-9a-f]{7,40}|^reviewed `?[0-9a-f]{7,40}`? \(`?[0-9a-f]{40}`?\): \**clean, no findings'
 # THE CI REVIEW APP'S REVIEW IS READ FROM ITS MARKERS, NOT ITS PROSE. Its body (agent-infra's .github/scripts/ci-review-body)
 # has line 2 `<!-- ci-review-verdict {"head":"<sha>","blocking":[..],"person":[..],"missing":[..]} -->` and a last line
 # `<!-- ci-review-head <sha> -->`, and the App posts APPROVE only when blocking and missing are empty and it read the whole PR,
@@ -195,9 +209,9 @@ PL='def pol($pos; $neg): cipol // (. as $v | ([$v|match($pos; "i")][0].offset //
 # clears ANOTHER author's rejection (one reviewer cannot clear another's, #20200's shape), and one with nothing of its own
 # to retract is neutral, so it falls through to the NEITHER-set read below. An APPROVE keeps superseding globally as before.
 # Same head = the two artifacts' verdict shas agree on their first seven characters (either may be the short form).
-SU='def vsha($pos; $neg): cihead // (gsub("[0-9a-f]{41,}";" ") | . as $b | ([split("\n")[] | select(test($pos; "i") or test($neg; "i") or test("(?i)verdict:"))] | first) as $line | (if $line != null then (([$line|scan("(?i)\\bat +\\**`?((?=[0-9a-f]*[a-f])[0-9a-f]{7,40})\\b")]|first|.[0]?) // ([$line|scan("\\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\\b")]|first)) else null end) // ([$b|scan("\\[review state [A-Z_]+ at ([0-9a-f]{40})\\]")]|first|.[0]?) // ([$b|scan("\\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\\b")]|first) // ""); def dnbfirst($pos; $neg): (. as $v | ([$v|match("verdict:? *\\**does +not +block"; "i")][0].offset // null) as $d | ([$v|match($neg; "i")][0].offset // null) as $n | ([$v|match($pos; "i")][0].offset // null) as $p | $d != null and ($n == null or $d < $n) and ($p == null or $d < $p)); def samehead($a; $b): ($a != "" and $b != "" and (($a|startswith($b[0:7])) or ($b|startswith($a[0:7])))); def gate($pos; $neg): [.[] | (.b|vs) as $v | {t, u, sha:($v|vsha($pos;$neg)), pol:(if ($v|cipol) == null and ($v|dnbfirst($pos;$neg)) then "dnb" else ($v|pol($pos;$neg)) end)}] as $vs | ($vs|map(if .pol=="neg" then . as $a | .retracted = any($vs[]; .pol=="dnb" and .u==$a.u and .t>$a.t and samehead(.sha; $a.sha)) elif .pol=="dnb" then . as $d | .retracts = any($vs[]; .pol=="neg" and .u==$d.u and .t<$d.t and samehead(.sha; $d.sha)) else . end)) as $m | {negt:([$m[]|select(.pol=="neg" and (.retracted|not))]|sort_by(.t)|last|.t // ""), post:([$m[]|select(.pol=="pos" or (.pol=="dnb" and .retracts))]|sort_by(.t)|last|.t // "")};'
+SU='def vsha($pos; $neg): cihead // (norefs | gsub("[0-9a-f]{41,}";" ") | . as $b | ([split("\n")[] | select(test($pos; "i") or test($neg; "i") or test("(?i)verdict:"))] | first) as $line | (if $line != null then (([$line|scan("(?i)\\bat +(?:head +)?\\**`?((?=[0-9a-f]*[a-f])[0-9a-f]{7,40})\\b")]|first|.[0]?) // ([$line|scan("\\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\\b")]|first)) else null end) // ([$b|scan("\\[review state [A-Z_]+ at ([0-9a-f]{40})\\]")]|first|.[0]?) // ([$b|scan("\\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\\b")]|first) // ""); def dnbfirst($pos; $neg): (. as $v | ([$v|match("verdict:? *\\**does +not +block"; "i")][0].offset // null) as $d | ([$v|match($neg; "i")][0].offset // null) as $n | ([$v|match($pos; "i")][0].offset // null) as $p | $d != null and ($n == null or $d < $n) and ($p == null or $d < $p)); def samehead($a; $b): ($a != "" and $b != "" and (($a|startswith($b[0:7])) or ($b|startswith($a[0:7])))); def gate($pos; $neg): [.[] | (.b|vs) as $v | {t, u, sha:($v|vsha($pos;$neg)), pol:(if ($v|cipol) == null and ($v|dnbfirst($pos;$neg)) then "dnb" else ($v|pol($pos;$neg)) end)}] as $vs | ($vs|map(if .pol=="neg" then . as $a | .retracted = any($vs[]; .pol=="dnb" and .u==$a.u and .t>$a.t and samehead(.sha; $a.sha)) elif .pol=="dnb" then . as $d | .retracts = any($vs[]; .pol=="neg" and .u==$d.u and .t<$d.t and samehead(.sha; $d.sha)) else . end)) as $m | {negt:([$m[]|select(.pol=="neg" and (.retracted|not))]|sort_by(.t)|last|.t // ""), post:([$m[]|select(.pol=="pos" or (.pol=="dnb" and .retracts))]|sort_by(.t)|last|.t // "")};'
 # The newest verdict-bearing artifact's VERDICT SHA is its CI review marker's head where it has one (CR above), else is read
-# from its VERDICT LINE: the first line hitting the positive or negative set or `verdict:`, taking the hex after 'at' on it,
+# from its VERDICT LINE: the first line hitting the positive or negative set or `verdict:`, taking the hex after 'at' (or 'at head') on it,
 # else that line's first letter-bearing hex of 7-40, else a native review's own commit_id (the `[review state ... at <sha>]`
 # suffix rs appends), else the body's first. A verdict line
 # naming no sha ('**Decision: APPROVE.**') under a header naming the old head first ('`ac451216` -> `8d371b2f`') read as a
@@ -210,16 +224,20 @@ SU='def vsha($pos; $neg): cihead // (gsub("[0-9a-f]{41,}";" ") | . as $b | ([spl
 # (df0e9892, not in agent-c), so the carry compared against a foreign sha and read a false CHANGED (2026-09-26 13:31Z).
 # Strip hex runs of 41+ first: a 64-hex image digest (sha256:556b68...) otherwise yields its first 40 digits as a
 # bogus "verdict sha", the compare 404s, and a PR whose verdicts all hold reports NOT GREEN (sjawhar/legion#1371).
-last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS$CR$PL$SU"'[.[]|select(.b|vs|test("(?i:verdict:|approve at|approved at|accept at|accepted at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b|(?i)^[ \\t]*\\**(merge|approve|accept(ed)?)(-with-nits)?\\**:? +(at +)?[0-9a-f]{7,40}|^Reviewed `?[0-9a-f]{7,40}`? \\(`?[0-9a-f]{40}`?\\): \\**clean, no findings"))]|sort_by(.t)|last|(.b // "")|vs|vsha($pos;$neg)')
-gate=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS$CR$PL$SU"'gate($pos;$neg)|"\(.negt)\t\(.post)"')
+# Before all of these reads, norefs (RF above) removes the hex that names no commit: a UUID, a dispatch:// link, or an
+# http(s) link that is not a commit link (agent-infra#3861).
+last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS$RF$CR$PL$SU"'[.[]|select(.b|vs|test("(?i:verdict:|(approved?|accept(ed)?|merge|request[_ ]changes) +at +(head +)?\\**`?[0-9a-f]{7,40}\\b|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b|(?i)^[ \\t]*\\**(merge|approve|accept(ed)?)(-with-nits)?\\**:? +(at +)?[0-9a-f]{7,40}|^Reviewed `?[0-9a-f]{7,40}`? \\(`?[0-9a-f]{40}`?\\): \\**clean, no findings"))]|sort_by(.t)|last|(.b // "")|vs|vsha($pos;$neg)')
+gate=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS$RF$CR$PL$SU"'gate($pos;$neg)|"\(.negt)\t\(.post)"')
 negt=${gate%%$'\t'*}; post=${gate#*$'\t'}
 if [ -n "$negt" ] && { [ -z "$post" ] || [[ "$negt" > "$post" ]]; }; then echo "  !! LATEST verdict is a CHANGE REQUEST / REJECTION (${negt:0:16}), not superseded by a later clean APPROVE - needs a superseding APPROVE/MERGE at the head, or an explicit documented override (#20188)"; fail=1; fi
 if [ -n "$vr" ] && [ -z "$negt" ] && [ -z "$post" ]; then echo "  !! verdict grammar found but its polarity is in NEITHER set (not APPROVE/MERGE/LGTM/clean, not a rejection) - READ it; PASS alone is a review half or a tester run, not a merge authorization (#20200, #20291)"; fail=1; fi
 rm -rf "$w0"
 if [ -n "$last" ] && [[ "$head" != "$last"* ]]; then
   base=$(jq -r .base <<<"$pr"); w=$(mktemp -d)
-  api "repos/$repo/compare/$base...$last" --jq '.files[]|"\(.filename)\t\(.additions)\t\(.deletions)\t\(.patch // "" | split("\n") | map(select(test("^[+-]"))) | sort | join("\n") | @json)"' | sort > "$w/last.tsv" || true
-  api "repos/$repo/compare/$base...$head" --jq '.files[]|"\(.filename)\t\(.additions)\t\(.deletions)\t\(.patch // "" | split("\n") | map(select(test("^[+-]"))) | sort | join("\n") | @json)"' | sort > "$w/head.tsv" || true
+  # A compare that fails (a 404 on a sha that is not a commit) prints GitHub's error body on stdout, and that JSON read as a
+  # CHANGED file (agent-infra#3861, 2026-11-21). A failed call empties its file, so it reads as no read, below.
+  api "repos/$repo/compare/$base...$last" --jq '.files[]|"\(.filename)\t\(.additions)\t\(.deletions)\t\(.patch // "" | split("\n") | map(select(test("^[+-]"))) | sort | join("\n") | @json)"' | sort > "$w/last.tsv" || : > "$w/last.tsv"
+  api "repos/$repo/compare/$base...$head" --jq '.files[]|"\(.filename)\t\(.additions)\t\(.deletions)\t\(.patch // "" | split("\n") | map(select(test("^[+-]"))) | sort | join("\n") | @json)"' | sort > "$w/head.tsv" || : > "$w/head.tsv"
   # Per file: the SORTED +/- lines, so a clean rebase compares equal. Raw patch text
   # carries @@ offsets and context lines, and git re-aligns a hunk when main moves beside it, so a clean
   # rebase read CHANGED with no content difference (#20149, 2026-09-25).
@@ -229,7 +247,7 @@ if [ -n "$last" ] && [[ "$head" != "$last"* ]]; then
   # count to reconcile, so exactly-300 rows is treated as capped.
   hrows=$(wc -l < "$w/head.tsv"); lrows=$(wc -l < "$w/last.tsv"); ftot=$(jq -r .files <<<"$pr")
   if [ "$hrows" -lt "$ftot" ] || [ "$lrows" -eq 300 ]; then echo "  !! file list SHORT READ (head $hrows/$ftot rows, last $lrows; compare API caps at 300) - carry check unreliable, diff the shas with git or per-commit API before packeting"; fail=1; fi
-  if [ ! -s "$w/last.tsv" ] || [ ! -s "$w/head.tsv" ]; then echo "!! could not read the PR-own diff at ${last:0:8} or at the head (compare API returned nothing) - no carry"; fail=1
+  if [ ! -s "$w/last.tsv" ] || [ ! -s "$w/head.tsv" ]; then echo "!! could not read the PR-own diff at ${last:0:8} or at the head (the compare call failed or returned nothing) - no carry"; fail=1
   elif cmp -s "$w/last.tsv" "$w/head.tsv"; then echo "PR-own diff IDENTICAL between newest verdict sha ${last:0:8} and head - a confirmation, not a round"; carry=1; else echo "!! PR-own diff CHANGED since newest verdict sha ${last:0:8}: $(diff "$w/last.tsv" "$w/head.tsv" | awk -F'\t' '/^[<>] /{sub(/^[<>] /,"",$1); print $1}' | sort -u | tr '\n' ' ' | cut -c1-200) -> that verdict does not cover the head"; fail=1; fi
   rm -rf "$w"
 fi

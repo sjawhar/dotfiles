@@ -8,25 +8,28 @@
 # history is kept and named.
 #
 # After the move, each host path runs the tools step on the machine it moved, in the same ssh
-# session for a remote host. It starts with `scripts/knives-registry-render --if-changed` in the
-# checkout, which renders its knives/repos.toml into ~/.config/knives/repos.toml and records
-# beside it the source's sha256, the oh-my-pi workspaces path it wrote and its own sha256; it
-# writes nothing while the copy is a plain file and the record holds all three as this run has
-# them, and a checkout without the script skips it. Then `mise install` in the checkout, then
-# `bun install --frozen-lockfile` in omp/plugins when its package.json is there,
-# with the mise binary and MISE_DATA_DIR (and MISE_CACHE_DIR where it sets one) that the
-# checkout's .bashrc gives a shell. It runs after every move that ends on main, also when main
-# brought nothing new, so a later sync installs a pin an earlier step did not. `mise install`
-# holds an exclusive lock on $MISE_DATA_DIR/.dotfiles-install.lock, the one dotfiles-follow and
-# agent-session take for their own installs, so a launch during the install waits for it instead
-# of finding no binary. A failed render stops nothing: mise and Bun still run. A failed
+# session for a remote host: `scripts/omp-link-rules`, which links each omp/rules/*.md into
+# ~/.omp/agent/rules/ so a rule a move brought goes live (only for ~/.dotfiles itself, the
+# checkout every session runs; a failure is reported and the installs still run), then
+# `scripts/knives-registry-render --if-changed` in the checkout, which renders its
+# knives/repos.toml into ~/.config/knives/repos.toml and records beside it the source's sha256,
+# the oh-my-pi workspaces path it wrote and its own sha256; it writes nothing while the copy is a
+# plain file and the record holds all three as this run has them, and a checkout without the
+# script skips it. Then `mise install` in the checkout, then `bun install --frozen-lockfile`
+# in omp/plugins when its package.json is there, with the mise binary and MISE_DATA_DIR (and
+# MISE_CACHE_DIR where it sets one) that the checkout's .bashrc gives a shell. It runs after every
+# move that ends on main, also when main brought nothing new, so a later sync installs a pin an
+# earlier step did not. `mise install` holds an exclusive lock on
+# $MISE_DATA_DIR/.dotfiles-install.lock, the one dotfiles-follow and agent-session take for their
+# own installs, so a launch during the install waits for it instead of finding no binary. A failed
+# render stops nothing: mise and Bun still run. A failed
 # `mise install` stops the step before Bun, whose mise shim could install outside that lock. Each
 # command has DOTFILES_TOOLS_TIMEOUT seconds (a whole number 1-600; default 600), the lock wait
 # included; at its limit it gives the command 10 s to exit, then kills every process it left so
 # its lock is free. A failure or a command past its limit prints the command, its status and the
 # last lines of its output, keeps the move, and the run exits non-zero after the other hosts. A
 # remote host's ssh limit is its parts: 180 s for the move, the 300 s default sync-lock wait, and
-# for each of the three commands its limit plus that 10 s kill grace. The sync lock is released
+# for each of the four commands its limit plus that 10 s kill grace. The sync lock is released
 # before the step, so an install does not hold off another move.
 #
 # Internal modes: --here OLD is the move alone, which dotfiles-follow calls and follows with its
@@ -179,7 +182,7 @@ tools_run() {
 }
 
 tools_step() (
-  local dir limit lock mise bun render_status=0
+  local dir limit lock mise bun rules_status=0 render_status=0
   # The checkout as an absolute path: mise reads the pins of the directory it runs in, so the
   # install runs there whatever the caller's directory, and DIR/bin/mise must still name it.
   # shellcheck disable=SC1007
@@ -201,9 +204,19 @@ tools_step() (
   # A directory it cannot make is reported below, as flock's failure to open the lock.
   mkdir -p "$MISE_DATA_DIR" 2>/dev/null || true
   limit="$(tools_limit)"
-  # The knives registry copy first. A failed render stops nothing: mise and Bun still run, and the
-  # step returns the render's status when they pass. DOTFILES_DIR names this checkout, never an
-  # inherited value: it is exported above only when the checkout has a .bashrc.
+  # The rules first, so a rule a move brought goes live even when an install below fails or hangs.
+  # Only from ~/.dotfiles, the checkout every session runs: a link made from another checkout
+  # would point every session's rules at it.
+  if [[ ! "$dir" -ef "$HOME/.dotfiles" ]]; then
+    printf 'tools: %s is not ~/.dotfiles; omp rules not linked\n' "$dir"
+  elif [[ ! -x "$dir/scripts/omp-link-rules" ]]; then
+    printf 'tools: %s has no scripts/omp-link-rules; omp rules not linked\n' "$dir"
+  else
+    tools_run "omp-link-rules" "$dir" "$limit" env DOTFILES_DIR="$dir" "$dir/scripts/omp-link-rules" || rules_status=$?
+  fi
+  # Then the knives registry copy. A failed render stops nothing: mise and Bun still run, and the
+  # step returns the render's status when they and the rule link pass. DOTFILES_DIR names this
+  # checkout, never an inherited value: it is exported above only when the checkout has a .bashrc.
   if [[ -x "$dir/scripts/knives-registry-render" ]]; then
     tools_run "knives-registry-render --if-changed" "$dir" "$limit" \
       env DOTFILES_DIR="$dir" "$dir/scripts/knives-registry-render" --if-changed || render_status=$?
@@ -218,13 +231,17 @@ tools_step() (
   [[ "$mise" = /* ]] || mise="$PWD/$mise"
   tools_run "mise install" "$dir" "$limit" flock "$lock" "$mise" install || return $?
 
-  [[ -f "$dir/omp/plugins/package.json" ]] || return "$render_status"
+  if [[ ! -f "$dir/omp/plugins/package.json" ]]; then
+    ((rules_status)) && return "$rules_status"
+    return "$render_status"
+  fi
   if ! bun="$(command -v bun 2>/dev/null)"; then
     tools_error "bun install --frozen-lockfile" "$dir/omp/plugins" 127 "$limit" <(printf 'bun: command not found\n')
     return 127
   fi
   [[ "$bun" = /* ]] || bun="$PWD/$bun"
   tools_run "bun install --frozen-lockfile" "$dir/omp/plugins" "$limit" "$bun" install --frozen-lockfile || return $?
+  ((rules_status)) && return "$rules_status"
   return "$render_status"
 )
 
@@ -413,8 +430,8 @@ tools_timeout="$(tools_limit)"
 remote_move_timeout=180
 remote_sync_lock_wait=300
 remote_tools_grace="$tools_grace"
-# The render, `mise install` and the Bun install.
-remote_tools_commands=3
+# omp-link-rules, the knives registry render, mise install and bun install, each with the same limit.
+remote_tools_commands=4
 remote_limit=$((remote_move_timeout + remote_sync_lock_wait + remote_tools_commands * (tools_timeout + remote_tools_grace)))
 
 status=0
