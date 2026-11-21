@@ -1609,7 +1609,11 @@ class JjPushLeakGateTest(unittest.TestCase):
                 (self.assertIn if arm == "gate" else self.assertNotIn)("LEAK CHECK: clean", r.stderr, way)
                 seen[arm] = marker.read_text(encoding="utf-8").splitlines()
             self.assertEqual(seen["gate"], seen["no gate"], way)
-            self.assertEqual([ln.split(" ", 2)[:2] for ln in seen["gate"]], [[want, "prepared"], [want, "committed"]], way)
+            # A git newer than Ubuntu's 2.43.0 (a CI runner's 2.56.1) also runs the hook for a `preparing` phase, before
+            # `prepared`; the two arms above are compared whole. Every phase ran WANT's hook.
+            ran = [ln.split(" ", 2)[:2] for ln in seen["gate"]]
+            self.assertEqual({hook for hook, _ in ran}, {want}, way)
+            self.assertEqual([phase for _, phase in ran if phase != "preparing"], ["prepared", "committed"], way)
             self.assertNotIn("jj-push-hooks", "\n".join(seen["gate"]), way)
         self.env = env
 
