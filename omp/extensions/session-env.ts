@@ -262,9 +262,8 @@ export function agentGoogleCredentials(env: NodeJS.ProcessEnv = process.env, onG
 // JJ_CONFIG replaces jj's default config lookup, so the overlay must chain
 // the user layer explicitly. Honor a pre-existing JJ_CONFIG (captured before
 // this extension ever overwrites it, minus any attribution overlays a parent
-// process left in it); otherwise ask jj for its user config paths — chaining
-// them in printed order reproduces the effective user config exactly
-// (verified: `jj config list --user` is identical).
+// process left in it); otherwise ask jj for its user config paths and chain
+// them in .bashrc's order (sharedConfigLast).
 const inheritedJjConfig = process.env.JJ_CONFIG ? withoutOverlays(process.env.JJ_CONFIG) : "";
 let basePromise: Promise<string> | undefined;
 
@@ -294,6 +293,18 @@ function defaultUserConfigChain(env: NodeJS.ProcessEnv = process.env): string {
 	return [path.join(home, ".jjconfig.toml"), path.join(env.XDG_CONFIG_HOME || path.join(home, ".config"), "jj", "config.toml")].join(":");
 }
 
+/**
+ * CHAIN with the shared ~/.jjconfig.toml (the link to the dotfiles' file) after every other
+ * entry, as .bashrc's JJ_CONFIG has it. In jj's own order that file comes first, so the
+ * per-machine ~/.config/jj/config.toml after it wins over its identity scopes, and every
+ * repository commits with the per-machine user.email (.jjconfig.toml).
+ */
+export function sharedConfigLast(chain: string, env: NodeJS.ProcessEnv = process.env): string {
+	const shared = path.join(env.HOME || homedir(), ".jjconfig.toml");
+	const entries = chain.split(":");
+	return entries.includes(shared) ? [...entries.filter((entry) => entry !== shared), shared].join(":") : chain;
+}
+
 function jjConfigBase(): Promise<string> {
 	// Asked without JJ_CONFIG: jj prints JJ_CONFIG's own entries when it is set,
 	// so an inherited chain of nothing but overlays came back as the "user"
@@ -303,8 +314,8 @@ function jjConfigBase(): Promise<string> {
 	const { JJ_CONFIG: _ignored, ...env } = process.env;
 	basePromise ??= inheritedJjConfig
 		? Promise.resolve(inheritedJjConfig)
-		: userConfigChain(JJ_CONFIG_PATH_TIMEOUT_MS, env).then(
-				(chain) => (chain && withoutOverlays(chain)) || defaultUserConfigChain(env),
+		: userConfigChain(JJ_CONFIG_PATH_TIMEOUT_MS, env).then((chain) =>
+				sharedConfigLast((chain && withoutOverlays(chain)) || defaultUserConfigChain(env), env),
 			);
 	return basePromise;
 }
