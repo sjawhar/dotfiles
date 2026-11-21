@@ -103,6 +103,12 @@ def test_a_description_that_starts_use_whenever_fails(tmp_path: Path) -> None:
     )
 
 
+def test_a_double_quoted_description_on_two_lines_passes(tmp_path: Path) -> None:
+    # YAML reads this value as "Use when a test needs a skill whose description wraps."
+    desc = '"Use when a test needs a skill\n  whose description wraps."'
+    assert_passes(tmp_path, {"SKILL.md": head(desc) + "x\n"})
+
+
 def test_skill_md_of_150_lines_passes(tmp_path: Path) -> None:
     assert_passes(tmp_path, {"SKILL.md": text_of(150, 2_000, head())})
 
