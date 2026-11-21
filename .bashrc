@@ -122,10 +122,10 @@ export PLAYWRIGHT_SKIP_BROWSER_GC=1
 
 # Language caches on the big disk, where a machine has one (/mnt/nvme/$USER, as on the devboxes):
 # uv's cache (20 GB) and Go's module cache (9 GB) otherwise grow on a root disk shared with every
-# session (dispatch://INFRA-6). Go's build cache is one directory for every session and lane, which
-# devbox/gocache-cap.timer holds under a size cap; a lane that names a GOCACHE of its own makes a
-# cache outside it that nothing caps. A venv on the root disk can no longer hardlink from uv's
-# cache, so uv falls back to copying.
+# session (dispatch://INFRA-6). Go's build cache is one directory for every session and lane;
+# devbox/gocache-cap holds it, any GOCACHE a lane names under /mnt/scratch/$USER or /mnt/nvme/$USER,
+# and Go's default ~/.cache/go-build under one size cap together. A venv on the root disk can no
+# longer hardlink from uv's cache, so uv falls back to copying.
 # Guarded on the directory, so an agent box, which does not mount it, keeps the home defaults;
 # a value the caller already has wins.
 # On sami-devbox the losable part goes to the local-SSD scratch, /mnt/scratch/$USER, made at

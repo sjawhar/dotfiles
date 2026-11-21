@@ -136,7 +136,7 @@ STEPS=(
     # walk reports less and removes nothing extra, while a SIGKILL at 30m reports nothing.
     "session-tmp-reap|86400|/mnt/nvme/$user/tmp /mnt/scratch/$user/tmp|TMP_REAP_WALK_SECONDS=1500 $here/session-scratch-reap --tmp"
     # Cheap cap checks; their own usage thresholds decide whether trimming is needed.
-    "gocache-cap|0|/mnt/nvme/$user/gocache /mnt/scratch/$user/gocache|$here/gocache-cap"
+    "gocache-cap|0|/mnt/scratch/$user /mnt/nvme/$user $HOME/.cache|$here/gocache-cap"
     "nvme-cache-cap|0|/mnt/nvme/$user|$here/nvme-cache-cap"
     # Docker checks its filesystem against DOCKER_CAP_HIGH_PCT (default 80%) before acting, so on
     # a box UNDER that mark this costs one df. On a box over it, it does the whole job: measured

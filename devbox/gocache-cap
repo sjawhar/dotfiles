@@ -1,7 +1,28 @@
 #!/bin/bash
-# gocache-cap: keep the box's Go build cache near its size limits, and never remove an entry a
-# running build may still read. devbox/box-cleanup runs it every 15 minutes; the
-# gocache-cap.service comment says why the limits are what they are.
+# gocache-cap: keep the box's Go build caches, all of them together, near one pair of size limits,
+# and never remove an entry a running build may still read. devbox/box-cleanup runs it every 15
+# minutes; the gocache-cap.service comment says why the limits are what they are.
+#
+# Which caches. Every Go build cache under the roots /mnt/scratch/<user> (where devbox/gce-disks
+# makes it, as on sami-devbox: the GOCACHE .bashrc, scripts/agent-session and Go's env file set),
+# /mnt/nvme/<user> (the same GOCACHE on a machine without the scratch disk) and ~/.cache (Go's own
+# default, ~/.cache/go-build, for a go command that has no GOCACHE). A Go build cache is a
+# directory holding trim.txt and the README whose first line cmd/go writes into every cache it uses;
+# golangci-lint's cache has the same layout and a README of its own, and its readers are not `go`
+# commands, so it is left alone. The search stays on each root's filesystem (agent box disk images
+# are loop mounts under /mnt/nvme/<user>) and does not enter .git, node_modules, or a directory
+# named with two hex digits, which is where a cache keeps its entries. It takes a trim.txt at most
+# GOCACHE_CAP_DEPTH levels below a root: 4 by default, so a cache at most three directories down,
+# which every pass can afford (1,331 caches in 10 s on sami-devbox on 2026-11-21, against 746 s to
+# depth 6, which found 142 more); 0 means no limit, for a sweep by hand. A deeper cache, or one
+# outside the roots, is capped while a go command builds in it: the GOCACHE in the environment of
+# every running go command this user can read is added. A lane that names its own GOCACHE
+# (gocache/INFRA, <scratch>/<lane>/gocache), an agent box's cache
+# (<scratch>/box-cache/<box>/go-build) and Go's default are all caught. The limits hold for the
+# caches' sum, not for each one: on 2026-11-21 at 03:2xZ sami-devbox held 571 GB in the box's
+# GOCACHE, 475 GB in Go's default, which nothing capped, and 3.4 TB in the 879 caches named gocache*
+# one or two directories below /mnt/scratch/<user>, which nothing capped either; a limit per cache
+# would cap none of the small ones however many there are.
 #
 # What a running build may still read. Go has no size-based trim: it drops only entries unused for
 # 5 days. When a build uses an entry whose mtime is over an hour old, Go sets that mtime to now
@@ -14,8 +35,18 @@
 # ages and sizes below say. A build that starts after the line is drawn refreshes what it uses to a
 # later mtime, so it is covered too. If the processes cannot be listed, nothing is deleted.
 #
+# The `go` commands of every user count, not only this one's: an agent box's builds run on the host
+# as uid 101000 (Sysbox maps the box's uid 1000 there) and write the box's cache, and a container
+# runs as whatever uid it was given. A zombie does not count: it has exited and reads nothing. A
+# `go` started at 2026-11-20 23:16:36Z in the container gw-slice5, whose pid 1 is `sleep infinity`
+# and reaps nothing, was a zombie at 03:2xZ the next morning. Counted as the oldest running build,
+# it held the line at 22:06:36Z in every pass from the one that ended 01:26:56Z, and the passes
+# after that one deleted 0 bytes while the box's GOCACHE grew from 431 GB to 671 GB (04:00:43Z). A
+# process whose main thread is a zombie while other threads run (ps prints Zl) is still running,
+# and counts.
+#
 # Over GOCACHE_TRIM_BYTES it deletes the entries older than GOCACHE_TRIM_AGE_MIN, which keeps every
-# lane's working set warm; a build that wants a deleted entry recompiles it. If the cache is still
+# lane's working set warm; a build that wants a deleted entry recompiles it. If the caches are still
 # over GOCACHE_CAP_BYTES, it deletes the entries older than GOCACHE_CAP_AGE_MIN too, behind the same
 # line. A reader that is not a `go` command (a linter reading export data after `go list` exits)
 # keeps an entry for at least the age less an hour after it looked the entry up.
@@ -30,17 +61,26 @@
 # looks the entry up and checks that the file is there inside that gap loses it. Go's own trim
 # (cmd/go/internal/cache, Trim) deletes the same way.
 #
-# GOCACHE_CAP_DIR (default <scratch>/gocache, where <scratch> is /mnt/scratch/<user> when
-# devbox/gce-disks made it, as on sami-devbox, and /mnt/nvme/<user> otherwise: the GOCACHE .bashrc
-# and scripts/agent-session set), GOCACHE_TRIM_BYTES (default 25 GB), GOCACHE_TRIM_AGE_MIN (default
-# 180), GOCACHE_CAP_BYTES (default 50 GB) and GOCACHE_CAP_AGE_MIN (default 120) can be set to
-# override the defaults, so that a test can run the unit against a scratch cache. No setting moves
-# the line the running builds draw.
+# GOCACHE_CAP_ROOTS (space-separated directories to search instead of the three above),
+# GOCACHE_CAP_DEPTH (default 4; 0 for no limit), GOCACHE_TRIM_BYTES (default 25 GB),
+# GOCACHE_TRIM_AGE_MIN (default 180), GOCACHE_CAP_BYTES (default 50 GB) and GOCACHE_CAP_AGE_MIN
+# (default 120) can be set to override the defaults, so that a test can run the unit against a
+# scratch tree. No setting moves the line the running builds draw.
 set -euo pipefail
 
-scratch="/mnt/nvme/$(id -un)"
-if [[ -d "/mnt/scratch/$(id -un)" ]]; then scratch="/mnt/scratch/$(id -un)"; fi
-dir="${GOCACHE_CAP_DIR:-$scratch/gocache}"
+user="$(id -un)"
+if [[ -n "${GOCACHE_CAP_ROOTS:-}" ]]; then
+    read -ra roots <<<"$GOCACHE_CAP_ROOTS"
+else
+    roots=("/mnt/scratch/$user" "/mnt/nvme/$user" "$HOME/.cache")
+fi
+depth="${GOCACHE_CAP_DEPTH:-4}"
+if [[ ! "$depth" =~ ^[0-9]+$ ]]; then
+    echo "gocache-cap: GOCACHE_CAP_DEPTH must be a whole number, not '$depth'" >&2
+    exit 2
+fi
+depth_args=() searched_depth="to depth $depth"
+if ((depth > 0)); then depth_args=(-maxdepth "$depth"); else searched_depth="at every depth"; fi
 trim_at="${GOCACHE_TRIM_BYTES:-25000000000}"
 trim_age="${GOCACHE_TRIM_AGE_MIN:-180}"
 cap="${GOCACHE_CAP_BYTES:-50000000000}"
@@ -50,20 +90,88 @@ go_refresh_seconds=3600
 # Slack for ps's whole-second ages and for the time between reading the clock and listing processes.
 guard_margin_seconds=600
 
-if [[ ! -d "$dir" ]]; then
-    echo "gocache-cap: $dir is absent; nothing to cap"
+find_errs="$(mktemp)"
+trap 'rm -f "$find_errs"' EXIT
+
+# Every Go build cache under the roots, and every one a running go command names, sorted. Lanes
+# make and remove their caches while find walks, so a directory gone before find reaches it is not
+# an error. Any other error (a directory this user cannot read) is counted and said, because a
+# cache inside it is not capped; it does not stop the caches that were found from being capped.
+go_readme="This directory holds cached build artifacts from the Go build system."
+proc="${PROC_ROOT:-/proc}"
+mapfile -t found < <(
+    for root in "${roots[@]}"; do
+        [[ -d "$root" ]] || continue
+        find "$root" -xdev -mindepth 1 "${depth_args[@]}" \
+            \( -type d \( -name '[0-9a-f][0-9a-f]' -o -name .git -o -name node_modules \) -prune \) \
+            -o \( -type f -name trim.txt -printf '%h\n' \) \
+            2>>"$find_errs" || true
+    done
+)
+# The GOCACHE each running go command names. A box's or a container's go runs as another uid, or
+# in a namespace whose environ this user may not read; a box's cache is under <scratch>/box-cache,
+# which the search finds.
+named=()
+while read -r pid comm; do
+    [[ "$comm" == go ]] || continue
+    value="$(tr '\0' '\n' 2>/dev/null <"$proc/$pid/environ" | grep -m 1 '^GOCACHE=')" || continue
+    value="${value#GOCACHE=}"
+    if [[ "$value" == /* ]]; then named+=("${value%/}"); fi
+done < <(ps -e -o pid=,comm= 2>/dev/null || true)
+mapfile -t candidates < <(printf '%s\n' "${found[@]}" "${named[@]}" | LC_ALL=C sort -u)
+declare -A walked=()
+for dir in "${found[@]}"; do walked["$dir"]=1; done
+caches=() extra=0
+for dir in "${candidates[@]}"; do
+    [[ -n "$dir" && -f "$dir/trim.txt" ]] || continue
+    first=""
+    { IFS= read -r first <"$dir/README"; } 2>/dev/null || true
+    [[ "$first" == "$go_readme" ]] || continue
+    caches+=("$dir")
+    if [[ -z "${walked[$dir]:-}" ]]; then extra=$((extra + 1)); fi
+done
+unread="$(grep -cv ': No such file or directory$' "$find_errs" || true)"
+searched="${roots[*]} ($searched_depth)"
+if ((extra > 0)); then
+    searched+=" and $extra more a running go command builds in"
+fi
+if ((unread > 0)); then
+    searched+="; $unread directories there could not be read, and a cache inside one is not capped"
+    grep -v ': No such file or directory$' "$find_errs" | head -n 5 >&2 || true
+fi
+
+if ((${#caches[@]} == 0)); then
+    echo "gocache-cap: found no Go build cache under $searched; nothing to cap"
     echo "gocache-cap: reclaimed-bytes: 0"
     exit 0
 fi
 
-# Builds add and remove entries while du walks the cache. du still prints the total of what it
-# read, but exits 1 for each entry gone before it got there, which under `set -e` ends the run
-# (devbox/nvme-cache-cap failed this way on 2026-11-02 20:39Z). A vanished entry is not an error
-# here; any other du error still is.
+# The caches no other found cache contains: the sizes are taken over these, so a lane cache inside
+# the box's GOCACHE (gocache/INFRA) is counted once, inside its parent.
+declare -A is_cache=()
+for cache in "${caches[@]}"; do is_cache["$cache"]=1; done
+tops=()
+for cache in "${caches[@]}"; do
+    parent="$cache" nested=no
+    while [[ "$parent" == */* ]]; do
+        parent="${parent%/*}"
+        [[ -n "$parent" ]] || break
+        if [[ -n "${is_cache[$parent]:-}" ]]; then
+            nested=yes
+            break
+        fi
+    done
+    [[ "$nested" == yes ]] || tops+=("$cache")
+done
+
+# Builds add and remove entries while du walks a cache, and lanes remove whole caches. du still
+# prints the total of what it read, but exits 1 for each entry gone before it got there, which under
+# `set -e` ends the run (devbox/nvme-cache-cap failed this way on 2026-11-02 20:39Z). A vanished
+# entry is not an error here; any other du error still is. Prints the sum over its arguments.
 size_of() {
-    local out errs rc=0
+    local out errs rc=0 line total=0
     errs="$(mktemp)"
-    out="$(du -sb "$1" 2>"$errs")" || rc=$?
+    out="$(du -sb "$@" 2>"$errs")" || rc=$?
     if ((rc != 0)) && grep -qv ': No such file or directory$' "$errs"; then
         cat "$errs" >&2
         rm -f "$errs"
@@ -71,46 +179,42 @@ size_of() {
     fi
     rm -f "$errs"
     [[ -n "$out" ]] || return 1
-    printf '%s\n' "${out%%$'\t'*}"
+    while IFS= read -r line; do
+        total=$((total + ${line%%$'\t'*}))
+    done <<<"$out"
+    printf '%s\n' "$total"
 }
 
-size="$(size_of "$dir")"
+count="${#caches[@]} Go build cache" holds=holds
+if ((${#caches[@]} != 1)); then count+="s" holds=hold; fi
+size="$(size_of "${tops[@]}")"
 if ((size <= trim_at)); then
-    echo "gocache-cap: $dir is $size bytes, at or under the trim size of $trim_at"
+    echo "gocache-cap: $count under $searched $holds $size bytes, at or under the trim size of $trim_at"
     echo "gocache-cap: reclaimed-bytes: 0"
     exit 0
 fi
 
-# A lane that named its own GOCACHE under this directory (gocache/INFRA, gocache/LINUX)
-# made a second cache inside it. The size above counts that cache, so treat it too. A Go
-# cache directory is one that holds trim.txt.
-caches=()
-[[ -f "$dir/trim.txt" ]] && caches+=("$dir")
-for sub in "$dir"/*/; do
-    sub="${sub%/}"
-    [[ "${sub##*/}" =~ ^[0-9a-f]{2}$ ]] && continue
-    [[ -f "$sub/trim.txt" ]] && caches+=("$sub")
-done
-
-# The oldest `go` command this user runs, as "<age in seconds> <pid>", or "0 -" when none runs.
-# Every one of this user's processes is listed, this script's own among them, so an empty list
-# means ps could not see, and that is an error, never "no build is running". So is a line it cannot
-# read. errexit does not reach into the $(...) this runs in, so each failure returns by hand.
+# The oldest `go` command any user runs, as "<age in seconds> <pid>", or "0 -" when none runs.
+# Every process is listed, this script's own among them, so an empty list means ps could not see,
+# and that is an error, never "no build is running". So is a line it cannot read. errexit does not
+# reach into the $(...) this runs in, so each failure returns by hand.
 oldest_go() {
-    local up out age pid comm best_age=0 best_pid=-
-    up="$(cut -d. -f1 /proc/uptime)" || return 1
+    local up out age pid stat comm best_age=0 best_pid=-
+    up="$(cut -d. -f1 "$proc/uptime")" || return 1
     [[ "$up" =~ ^[0-9]+$ ]] || return 1
-    out="$(ps -u "$(id -u)" -o etimes=,pid=,comm=)" || return 1
+    out="$(ps -e -o etimes=,pid=,stat=,comm=)" || return 1
     if [[ -z "$out" ]]; then
-        echo "gocache-cap: ps listed no process of $(id -un), not even this one; deleting nothing" >&2
+        echo "gocache-cap: ps listed no process, not even this one; deleting nothing" >&2
         return 1
     fi
-    while read -r age pid comm; do
+    while read -r age pid stat comm; do
         if [[ ! "$age" =~ ^[0-9]+$ ]]; then
-            echo "gocache-cap: cannot read the age in ps's line '$age $pid $comm'; deleting nothing" >&2
+            echo "gocache-cap: cannot read the age in ps's line '$age $pid $stat $comm'; deleting nothing" >&2
             return 1
         fi
         [[ "$comm" == go ]] || continue
+        # Exited and not yet reaped: it reads nothing. A zombie main thread with live threads (Zl) runs.
+        [[ "$stat" == Z* && "$stat" != *l* ]] && continue
         # A process that started after ps read the clock gets a wrapped, huge age: it is new.
         ((age <= up)) || age=0
         if ((age > best_age)); then
@@ -133,8 +237,9 @@ fi
 
 # delete_older AGE_MIN: delete, in every cache, the entries older than AGE_MIN minutes and older
 # than the guard; print the bytes deleted. Entries live in the 00-ff directories; a build that runs
-# now may delete or replace one, so a file gone by the time find reaches it is not an error. -printf
-# follows -delete, so a file counts only once it is gone.
+# now may delete or replace one, so a file gone by the time find reaches it is not an error, and
+# neither is a cache a lane removed meanwhile. -printf follows -delete, so a file counts only once
+# it is gone.
 delete_older() {
     local cutoff=$((now - $1 * 60)) cache bytes=0 n
     ((cutoff < guard)) || cutoff="$guard"
@@ -148,21 +253,21 @@ delete_older() {
 }
 
 removed="$(delete_older "$trim_age")"
-trimmed="$(size_of "$dir")"
+trimmed="$(size_of "${tops[@]}")"
 if ((trimmed <= cap)); then
-    echo "gocache-cap: $dir was $size bytes, over the trim size of $trim_at; deleted $removed bytes of entries unused for $trim_age min ($held); now $trimmed bytes"
+    echo "gocache-cap: $count under $searched held $size bytes, over the trim size of $trim_at; deleted $removed bytes of entries unused for $trim_age min ($held); now $trimmed bytes"
     echo "gocache-cap: reclaimed-bytes: $removed"
     exit 0
 fi
 
 more="$(delete_older "$cap_age")"
 removed=$((removed + more))
-final="$(size_of "$dir")"
+final="$(size_of "${tops[@]}")"
 if ((final <= cap)); then
-    echo "gocache-cap: $dir was $size bytes, $trimmed after deleting entries unused for $trim_age min, over the cap of $cap; deleted entries unused for $cap_age min too, $removed bytes in all ($held); now $final bytes"
+    echo "gocache-cap: $count under $searched held $size bytes, $trimmed after deleting entries unused for $trim_age min, over the cap of $cap; deleted entries unused for $cap_age min too, $removed bytes in all ($held); now $final bytes"
 else
-    echo "gocache-cap: $dir was $size bytes, $trimmed after deleting entries unused for $trim_age min, over the cap of $cap; deleted entries unused for $cap_age min too, $removed bytes in all ($held); now $final bytes, still over the cap: every entry left was used in the last $cap_age min or may be held by a running go command, so nothing more is safe to delete"
+    echo "gocache-cap: $count under $searched held $size bytes, $trimmed after deleting entries unused for $trim_age min, over the cap of $cap; deleted entries unused for $cap_age min too, $removed bytes in all ($held); now $final bytes, still over the cap: every entry left was used in the last $cap_age min or may be held by a running go command, so nothing more is safe to delete"
 fi
 # What a caller may count as reclaimed, for box-cleanup: the bytes of the entries this run deleted,
-# not a before-and-after of the directory, which counts the builds writing into it meanwhile.
+# not a before-and-after of the caches, which counts the builds writing into them meanwhile.
 echo "gocache-cap: reclaimed-bytes: $removed"
