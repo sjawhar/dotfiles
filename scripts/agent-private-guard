@@ -19,5 +19,6 @@ loader = importlib.machinery.SourceFileLoader("agent_private_check", str(Path(__
 spec = importlib.util.spec_from_loader(loader.name, loader)
 assert spec is not None
 check = importlib.util.module_from_spec(spec)
+sys.modules[loader.name] = check  # its dataclasses look their module up by name
 loader.exec_module(check)
 sys.exit(check.guard_main(sys.argv[1:]))

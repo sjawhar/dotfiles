@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """agent-private-check: may a session start on this machine, given the private projects?
 
-  agent-private-check          prints `start`, or `refuse <why>` on one line, and exits 0
+  agent-private-check HARNESS CALLER [ARGS...]
+                               may HARNESS (omp, claude, codex) start with ARGS? Prints `start`, or
+                               `refuse <why>` on one line, and exits 0
   agent-private-guard URL      the same rule for the one bearer on stdin, sent to the Dispatch at URL:
                                exits 0, or 2 with why on stderr
 
@@ -12,17 +14,19 @@ bearer lists a private project, and fails closed when Dispatch cannot say. For s
 person runs `theorem-session launch --project <KEY> --brief-file <path>` and then attaches, from
 their laptop under their own Google login, and reads and writes it in Dispatch's web pages.
 
-Who runs it: scripts/agent-session, through which shims/omp and scripts/cld start every harness,
-exits 2 with the reason on `refuse`; shims/claude and shims/codex run it for a claude or codex
-started by name. agent-private-guard is for the readers that send a bearer to Dispatch outside its
-client (scripts/sami-said, chief-dashboard's sources, the reflect skill's Dispatch reader): each runs
-it with the bearer it is about to send, before every /api/v1/ request and before it opens /ws/live
-or /ws/doc/, and stops on 2. The `dispatch` command and the Envoy plugins hold the same rule in
-their own client.
+Who runs it: scripts/agent-private.sh's agent_private_check, sourced by scripts/agent-session (through
+which shims/omp and scripts/cld start every harness; CALLER agent-session) and by shims/claude and
+shims/codex for a claude or codex started by name (CALLER its own name), with the harness's own
+arguments; it exits 2 with the reason on `refuse`. agent-private-guard is for the readers that send
+a bearer to Dispatch outside its client (scripts/sami-said, chief-dashboard's sources, the reflect
+skill's Dispatch reader): each runs it with the bearer it is about to send, before every /api/v1/
+request and before it opens /ws/live or /ws/doc/, and stops on 2. The `dispatch` command and the
+Envoy plugins hold the same rule in their own client.
 
 The rule:
-0. A command that starts no agent session starts with no check: help, version, and each harness's
-   management commands (NO_SESSION; the launchers pass the first argument as AGENT_PRIVATE_COMMAND).
+0. A command that starts no agent session starts with no check: help, version, and the management
+   commands each harness lists (NO_SESSION), by the first argument (for scripts/cld, the first past
+   its own flags).
 1. The flag, gs://theorem-app-transcripts-private-flags/flags/private-projects.json:
    `{"enabled": false}` while no project is private, `{"enabled": true, ...}` from the moment any
    is. It is read with the machine's own Google identity and nothing else: the token of the
@@ -36,13 +40,14 @@ The rule:
    HTTP request, including DNS and the response body, has a 2 s wall-clock deadline and 64 KiB, and
    the flag's copy is kept at most 5 minutes. `enabled: false` starts the session with no Dispatch call.
 2. `enabled: true`, or the flag unreadable: check every bearer the session can reach at start, not
-   just the one that wins precedence. The launchers give the check AGENT_PRIVATE_HARNESS,
-   AGENT_PRIVATE_CWD (omp --cwd, codex -C/--cd), omp's AGENT_PRIVATE_PROFILE and AGENT_PRIVATE_RESUME
-   (--resume, -r, --session, --restore), and Claude Code's --settings (AGENT_PRIVATE_SETTINGS),
-   without changing the launched process's environment. The bearers: DISPATCH_TOKEN_FILE and
-   DISPATCH_TOKEN in the environment and in each file the harness applies to its own (omp: the
-   launch directory's, agent directory's, config root's and home's .env, which omp reads before
-   --cwd moves it; Claude Code: the `env` block of its settings files and of --settings); the
+   just the one that wins precedence. launch_for reads the harness's arguments (its directory: omp
+   --cwd, codex -C/--cd; omp's --profile and the session a --resume, -r, --session or --restore
+   names, under --session-dir when given; Claude Code's --settings and -p/--print). The bearers:
+   DISPATCH_TOKEN_FILE and DISPATCH_TOKEN in the environment and in each file the harness applies to
+   its own (omp: the launch directory's, agent directory's, config root's and home's .env, which omp
+   reads before --cwd moves it; Claude Code: the `env` block of its user settings, --settings and
+   managed settings, and of the project's settings only in a -p run or a folder whose trust Claude
+   Code's own record accepts, as Claude Code applies them); the
    chosen envoy.json's dispatch.token, when the client would use it (dispatchTarget: a file with no
    serverUrl and no `enabled: true` is Dispatch off, unless DISPATCH_URL is set); an envoy.json only
    such a file names (ENVOY_CONFIG_FILE, XDG_CONFIG_HOME); and the .envoy/envoy.json of the session's
@@ -70,7 +75,6 @@ moves the flag: a test rewrites FLAG_URL in its own copy of this file.
 
 from __future__ import annotations
 
-import base64
 import contextlib
 import fcntl
 import glob
@@ -89,6 +93,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 
 # One line, which a test's copy of this file rewrites to read a stand-in (no variable can move it).
@@ -292,41 +298,63 @@ def copied(copy: Path | None) -> bool | None:
         return None
 
 
-def read_flag() -> tuple[bool | None, str]:
-    """(enabled, "") from the flag or its copy, or (None, why) when it cannot be read.
+@dataclass(frozen=True)
+class Flag:
+    """The flag as read: `enabled`, or None when it cannot be read, why, and whether that is because
+    this machine has no Google identity to read it with (the refusal then names the way to work offline)."""
+
+    enabled: bool | None
+    why: str = ""
+    no_identity: bool = False
+
+
+def read_flag() -> Flag:
+    """The flag, from its copy when that is fresh.
 
     A failed read is remembered for UNREADABLE_KEPT_S, so launches that waited on the lock for it, or
     come right after it, take the whoami path at once instead of each reading again in turn."""
     cache = cache_dir()
     copy = cache / "flag.json" if cache else None
     failed = cache / "flag.unreadable" if cache else None
-    enabled = copied(copy)
-    if enabled is not None:
-        return enabled, ""
-    if (remembered := fresh_copy(failed, UNREADABLE_KEPT_S)) is not None:
-        return None, remembered.decode(errors="replace") or "the private-projects flag could not be read"
+
+    def known() -> Flag | None:
+        """The flag's fresh copy, or a failure remembered seconds ago; None when neither is there."""
+        enabled = copied(copy)
+        if enabled is not None:
+            return Flag(enabled)
+        remembered = fresh_copy(failed, UNREADABLE_KEPT_S)
+        if remembered is None:
+            return None
+        try:
+            record = json.loads(remembered)
+            return Flag(None, str(record["why"]), record["no_identity"] is True)
+        except (ValueError, KeyError, TypeError, RecursionError):
+            return Flag(None, "the private-projects flag could not be read")
+
+    flag = known()
+    if flag is not None:
+        return flag
     lock = take_lock(cache / "flag.lock") if cache else None
     try:
-        enabled = copied(copy)  # read by the launch this one waited for
-        if enabled is not None:
-            return enabled, ""
-        if (remembered := fresh_copy(failed, UNREADABLE_KEPT_S)) is not None:  # or failed while this one waited
-            return None, remembered.decode(errors="replace") or "the private-projects flag could not be read"
+        flag = known()  # read, or failed, while this launch waited for the lock
+        if flag is not None:
+            return flag
         try:
             body = fetch(FLAG_URL, {"Authorization": f"Bearer {flag_token()}"})
             enabled = flag_enabled(body)
         except (NoAnswer, OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as e:
-            why = NO_IDENTITY if isinstance(e, NoIdentity) else (
-                f"the private-projects flag could not be read ({type(e).__name__})")
+            no_identity = isinstance(e, NoIdentity)
+            flag = Flag(None, NO_IDENTITY if no_identity else f"the private-projects flag could not be read ({type(e).__name__})",
+                        no_identity)
             if failed is not None:
-                keep(failed, why.encode())
-            return None, why
+                keep(failed, json.dumps({"why": flag.why, "no_identity": flag.no_identity}).encode())
+            return flag
         if copy is not None:
             keep(copy, body)
         if failed is not None:
             with contextlib.suppress(OSError):
                 failed.unlink(missing_ok=True)
-        return enabled, ""
+        return Flag(enabled)
     finally:
         if lock is not None:
             lock.close()
@@ -371,27 +399,36 @@ def capture_command(argv: list[str], *, pass_fds: tuple[int, ...] = (), cwd: Pat
         return subprocess.CompletedProcess(argv, status, output.read().decode())
 
 
-def envoy_json() -> Path:
-    """The launcher's file, else envoyConfigPath("command") from the Dispatch client.
+def absolute(name: str, value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        raise Refused(f"{name} must name an absolute path; fix it, then start again")
+    return path
 
-    scripts/envoy still reads OPENCODE_CONFIG_DIR, which the client no longer does; using its
-    config-path could check a different bearer from the one the launched session will send.
-    """
-    def absolute(name: str, value: str) -> Path:
-        path = Path(value)
-        if not path.is_absolute():
-            raise Refused(f"{name} must name an absolute path; retry")
-        return path
 
-    for name in ("AGENT_PRIVATE_ENVOY_JSON", "ENVOY_CONFIG_FILE"):
-        if env(name):
-            return absolute(name, env(name))
+def neutral_envoy_json() -> Path:
+    """${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json, the file of no harness (envoy/AGENTS.md)."""
+    config_home = absolute("XDG_CONFIG_HOME", env("XDG_CONFIG_HOME")) if env("XDG_CONFIG_HOME") else Path.home() / ".config"
+    return config_home / "legion" / "envoy.json"
+
+
+def handed_envoy_json() -> Path:
+    """The file ENVOY_CONFIG_FILE names, else the neutral one: what a plugin reads when its own
+    harness names no directory."""
+    return absolute("ENVOY_CONFIG_FILE", env("ENVOY_CONFIG_FILE")) if env("ENVOY_CONFIG_FILE") else neutral_envoy_json()
+
+
+def command_envoy_json() -> Path:
+    """envoyConfigPath("command") from the Dispatch client: ENVOY_CONFIG_FILE, a named omp profile's
+    PI_CODING_AGENT_DIR, Claude Code's CLAUDE_CONFIG_DIR inside a Claude Code session, the neutral
+    file. (scripts/envoy still reads OPENCODE_CONFIG_DIR, which the client no longer does.)"""
+    if env("ENVOY_CONFIG_FILE"):
+        return absolute("ENVOY_CONFIG_FILE", env("ENVOY_CONFIG_FILE"))
     if env("OMP_PROFILE") not in ("", "default") and env("PI_CODING_AGENT_DIR"):
         return absolute("PI_CODING_AGENT_DIR", env("PI_CODING_AGENT_DIR")) / "envoy.json"
     if env("CLAUDE_CODE_CHILD_SESSION") == "1" and env("CLAUDE_CONFIG_DIR"):
         return absolute("CLAUDE_CONFIG_DIR", env("CLAUDE_CONFIG_DIR")) / "envoy.json"
-    config_home = absolute("XDG_CONFIG_HOME", env("XDG_CONFIG_HOME")) if env("XDG_CONFIG_HOME") else Path.home() / ".config"
-    return config_home / "legion" / "envoy.json"
+    return neutral_envoy_json()
 
 
 def dispatch_section(path: Path) -> dict[str, object]:
@@ -433,9 +470,30 @@ def valid_bearer(token: str, where: str = "") -> str:
     return token
 
 
-def effective_cwd() -> Path:
-    """The directory the harness will read, without changing this process's working directory."""
-    return Path(os.path.abspath(env("AGENT_PRIVATE_CWD") or Path.cwd()))
+def options(args: list[str], names: set[str]) -> list[tuple[str, str]]:
+    """Each (name, value) ARGS gives an option of NAMES before `--`, in order: the argument after
+    `NAME`, whatever it looks like, or `NAME=VALUE` for a long one. It scans as scripts/agent-session's
+    resume `target` loop does, argument by argument against the one before, so the two always agree
+    on omp's resume target."""
+    found: list[tuple[str, str]] = []
+    prev = ""
+    for arg in args:
+        if arg == "--":
+            break
+        if prev in names:
+            found.append((prev, arg))
+        name, eq, value = arg.partition("=")
+        if eq and name.startswith("--") and name in names:
+            found.append((name, value))
+        prev = arg
+    return found
+
+
+def last(found: list[tuple[str, str]], *names: str) -> str | None:
+    """The last value FOUND gives one of NAMES."""
+    values = [value for name, value in found if name in names]
+    return values[-1] if values else None
+
 
 
 # Bun's node:util.parseEnv grammar: export, comments, quotes/backticks, multiline values, and
@@ -468,15 +526,13 @@ def dotenv(path: Path) -> dict[str, str]:
     return values
 
 
-def omp_dirs(launch: Path) -> tuple[Path, Path]:
+def omp_dirs(launch: Path, profile: str) -> tuple[Path, Path]:
     """omp's config root and agent directory as utils/dirs.ts resolves them at import: the root is
-    $HOME/${PI_CONFIG_DIR:-.omp} (shims/omp's rule too), a named profile's under profiles/<name>;
+    $HOME/${PI_CONFIG_DIR:-.omp} (shims/omp's rule too), a named PROFILE's under profiles/<name>;
     the default profile's agent directory is PI_CODING_AGENT_DIR, relative to LAUNCH, unless that
     names the agent directory of the profile PI_PROFILE names."""
-    home = Path.home()
-    root = Path(os.path.normpath(str(home / (env("PI_CONFIG_DIR") or ".omp").lstrip("/"))))
-    profile = os.environ.get("AGENT_PRIVATE_PROFILE", os.environ.get("OMP_PROFILE", env("PI_PROFILE")))
-    if profile and profile != "default":
+    root = Path(os.path.normpath(str(Path.home() / (env("PI_CONFIG_DIR") or ".omp").lstrip("/"))))
+    if profile:
         return root / "profiles" / profile, root / "profiles" / profile / "agent"
     agent = Path(os.path.abspath(launch / env("PI_CODING_AGENT_DIR"))) if env("PI_CODING_AGENT_DIR") else root / "agent"
     if env("PI_PROFILE") not in ("", "default") and agent == root / "profiles" / env("PI_PROFILE") / "agent":
@@ -489,15 +545,18 @@ SESSION_HEADER_BYTES = 64 * 1024
 SESSION_ID = re.compile(r"[0-9a-f][0-9a-f-]*")
 
 
-def resumed_cwd(target: str, launch: Path, agent: Path) -> Path | None:
+def resumed_cwd(target: str, launch: Path, agent: Path, session_dir: Path | None = None) -> Path | None:
     """The directory `omp --resume TARGET` (also -r, --session, --restore) moves to: the `cwd` of its
-    session file's `session` line. The file is TARGET when it names a .jsonl, else the one file under
-    AGENT/sessions whose name ends in that id or prefix. None when it cannot be resolved: a picker
-    (no TARGET), an unknown or ambiguous id, an unreadable file."""
+    session file's `session` line. The file is TARGET when it names a .jsonl, else the one file whose
+    name ends in that id or prefix: in SESSION_DIR (`--session-dir`) when given, else under
+    AGENT/sessions. None when it cannot be resolved: a picker (no TARGET), an unknown or ambiguous id,
+    an unreadable file."""
     if target.endswith(".jsonl"):
         files = [launch / target]
     elif SESSION_ID.fullmatch(target):
-        files = [Path(p) for p in glob.glob(str(agent / "sessions" / "*" / f"*_{target}*.jsonl"))]
+        pattern = (session_dir / f"*_{target}*.jsonl" if session_dir is not None
+                   else agent / "sessions" / "*" / f"*_{target}*.jsonl")
+        files = [Path(p) for p in glob.glob(str(pattern))]
     else:
         return None
     if len(files) != 1:
@@ -522,26 +581,197 @@ def resumed_cwd(target: str, launch: Path, agent: Path) -> Path | None:
 CLAUDE_MANAGED_SETTINGS = Path("/etc/claude-code/managed-settings.json")
 
 
-def claude_settings(cwd: Path) -> list[tuple[str, dict[str, str]]]:
-    """Each settings source whose `env` block Claude Code applies to its session, with that block,
-    lowest precedence first: the user's file, the project's, the project's local file, each
-    `--settings` the launcher passes (AGENT_PRIVATE_SETTINGS, one base64 value per line: a file,
-    relative to the launch directory, or inline JSON), the managed settings."""
-    user = Path(env("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
-    files = [user / "settings.json", cwd / ".claude" / "settings.json", cwd / ".claude" / "settings.local.json"]
-    sources = [(f"the env block of {file}", settings_file_env(file)) for file in files]
-    for line in filter(None, os.environ.get("AGENT_PRIVATE_SETTINGS", "").split("\n")):
-        try:
-            value = base64.b64decode(line, validate=True).decode("utf-8")
-        except (ValueError, UnicodeError) as e:
-            raise Refused("a --settings value cannot be read; retry") from e
-        if value.lstrip().startswith("{"):
-            sources.append(("the env block of the inline --settings", settings_env(value, "the inline --settings")))
-        else:
-            file = Path(os.path.abspath(value))
-            sources.append((f"the env block of {file}", settings_file_env(file)))
-    sources.append((f"the env block of {CLAUDE_MANAGED_SETTINGS}", settings_file_env(CLAUDE_MANAGED_SETTINGS)))
-    return sources
+def claude_trusts(cwd: Path) -> bool:
+    """Whether Claude Code has accepted trust for CWD, as it reads its own record: none while
+    CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set, every folder when CLAUDE_CODE_SANDBOXED is, else
+    `projects[<CWD>].hasTrustDialogAccepted` in ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json. Claude
+    Code may also trust a folder through an enclosing one; that is not read here, so such a folder
+    counts as untrusted, as does a record that cannot be read."""
+    if env("CLAUDE_CODE_IGNORE_PERSISTED_TRUST"):
+        return False
+    if env("CLAUDE_CODE_SANDBOXED"):
+        return True
+    try:
+        record = json.loads((Path(env("CLAUDE_CONFIG_DIR") or Path.home()) / ".claude.json").read_text(encoding="utf-8"))
+        projects = record["projects"]
+        return any(projects.get(key, {}).get("hasTrustDialogAccepted") is True
+                   for key in dict.fromkeys((os.path.abspath(cwd), os.path.realpath(cwd))))
+    except (OSError, UnicodeError, ValueError, RecursionError, KeyError, TypeError, AttributeError):
+        return False
+
+
+@dataclass
+class Launch:
+    """One harness start, as its argv says: its first argument (`command`), the directory it starts
+    in (`launch`) and its session's directory (`cwd`). What it reads (its envoy.json, the files it
+    applies to its environment, the checkouts' .envoy/envoy.json) is read only when asked for, once
+    the flag says to: a start the flag lets through reads none of them."""
+
+    command: str
+    launch: Path
+    cwd: Path
+
+    @cached_property
+    def envoy_json(self) -> Path:
+        """The envoy.json the harness's Envoy plugin reads."""
+        return command_envoy_json()
+
+    @cached_property
+    def sources(self) -> list[tuple[str, dict[str, str]]]:
+        """Each file the harness applies to its environment, with its values."""
+        return []
+
+    @cached_property
+    def merged(self) -> tuple[dict[str, str], dict[str, str]]:
+        """The session's environment, those files applied, and the file each value it took came from."""
+        return dict(os.environ), {}
+
+    @cached_property
+    def checkouts(self) -> list[Path]:
+        """The directories whose .envoy/envoy.json the session reads."""
+        return [self.cwd]
+
+
+@dataclass
+class OmpLaunch(Launch):
+    profile: str = ""
+    resume: str | None = None
+    session_dir: Path | None = None
+
+    @classmethod
+    def parse(cls, caller: str, args: list[str]) -> OmpLaunch:
+        launch = Path(os.path.abspath(Path.cwd()))
+        found = options(args, {"--cwd", "--profile", "--resume", "-r", "--session", "--restore", "--session-dir"})
+        cwd, session_dir = last(found, "--cwd"), last(found, "--session-dir")
+        # As omp resolves it: --profile, else OMP_PROFILE when it is set at all, else PI_PROFILE.
+        profile = last(found, "--profile")
+        profile = os.environ.get("OMP_PROFILE", env("PI_PROFILE")) if profile is None else profile
+        return cls(args[0] if args else "", launch, Path(os.path.abspath(launch / cwd)) if cwd else launch,
+                   "" if profile == "default" else profile, last(found, "--resume", "-r", "--session", "--restore"),
+                   Path(os.path.abspath(launch / session_dir)) if session_dir else None)
+
+    @cached_property
+    def dirs(self) -> tuple[Path, Path]:
+        return omp_dirs(self.launch, self.profile)
+
+    @cached_property
+    def envoy_json(self) -> Path:
+        # pi-envoy reads a named profile's agent directory's file, else ENVOY_CONFIG_FILE's or the neutral one.
+        return self.dirs[1] / "envoy.json" if self.profile else handed_envoy_json()
+
+    @cached_property
+    def sources(self) -> list[tuple[str, dict[str, str]]]:
+        # omp reads these four at import, from the directory it starts in, before `--cwd` or a resume
+        # moves it; it never reads the --cwd directory's .env.
+        root, agent = self.dirs
+        files = [self.launch / ".env", agent / ".env", root / ".env", Path.home() / ".env"]
+        return [(str(file), dotenv(file)) for file in dict.fromkeys(files)]
+
+    @cached_property
+    def merged(self) -> tuple[dict[str, str], dict[str, str]]:
+        # Each file fills only what the environment left unset, the first file naming a key first.
+        environment, applied = dict(os.environ), {}
+        for where, values in self.sources:
+            for key, value in values.items():
+                if not environment.get(key):
+                    environment[key], applied[key] = value, where
+        return environment, applied
+
+    @cached_property
+    def checkouts(self) -> list[Path]:
+        resumed = resumed_cwd(self.resume, self.launch, self.dirs[1], self.session_dir) if self.resume else None
+        return [self.cwd] if resumed is None else [self.cwd, resumed]
+
+
+# The flags scripts/cld puts before the person's arguments, with the number of values each takes.
+CLD_FLAGS = {"--dangerously-skip-permissions": 0, "--channels": 1, "--settings": 1}
+
+
+@dataclass
+class ClaudeLaunch(Launch):
+    settings: list[str] = field(default_factory=list)
+    printing: bool = False
+
+    @classmethod
+    def parse(cls, caller: str, args: list[str]) -> ClaudeLaunch:
+        launch = Path(os.path.abspath(Path.cwd()))
+        first = 0
+        if caller == "agent-session":  # only scripts/cld runs claude through agent-session
+            while first < len(args) and args[first] in CLD_FLAGS:
+                first += 1 + CLD_FLAGS[args[first]]
+        before = args[:args.index("--")] if "--" in args else args
+        return cls(args[first] if first < len(args) else "", launch, launch,
+                   [value for _, value in options(args, {"--settings"})], "-p" in before or "--print" in before)
+
+    @cached_property
+    def envoy_json(self) -> Path:
+        # The claude-envoy bridge reads CLAUDE_CONFIG_DIR's file, else ENVOY_CONFIG_FILE's or the neutral one.
+        return (absolute("CLAUDE_CONFIG_DIR", env("CLAUDE_CONFIG_DIR")) / "envoy.json" if env("CLAUDE_CONFIG_DIR")
+                else handed_envoy_json())
+
+    @cached_property
+    def sources(self) -> list[tuple[str, dict[str, str]]]:
+        """The `env` blocks Claude Code applies at startup, lowest precedence first: the user's settings;
+        the project's and its local file only in a `-p` run or a folder whose trust is accepted (Claude
+        Code applies them only then, and an untrusted clone must not name a file or a server here);
+        each `--settings` file (relative to the launch directory) or inline JSON; the managed settings."""
+        user = absolute("CLAUDE_CONFIG_DIR", env("CLAUDE_CONFIG_DIR")) if env("CLAUDE_CONFIG_DIR") else Path.home() / ".claude"
+        files = [user / "settings.json"]
+        if self.printing or claude_trusts(self.cwd):
+            files += [self.cwd / ".claude" / "settings.json", self.cwd / ".claude" / "settings.local.json"]
+        sources = [(f"the env block of {file}", settings_file_env(file)) for file in files]
+        for value in self.settings:
+            if value.lstrip().startswith("{"):
+                sources.append(("the env block of the inline --settings", settings_env(value, "the inline --settings")))
+            else:
+                file = Path(os.path.abspath(self.launch / value))
+                sources.append((f"the env block of {file}", settings_file_env(file)))
+        sources.append((f"the env block of {CLAUDE_MANAGED_SETTINGS}", settings_file_env(CLAUDE_MANAGED_SETTINGS)))
+        return sources
+
+    @cached_property
+    def merged(self) -> tuple[dict[str, str], dict[str, str]]:
+        # Each block overrides the environment and the blocks below it.
+        environment, applied = dict(os.environ), {}
+        for where, values in self.sources:
+            for key, value in values.items():
+                environment[key], applied[key] = value, where
+        return environment, applied
+
+
+@dataclass
+class CodexLaunch(Launch):
+    @classmethod
+    def parse(cls, caller: str, args: list[str]) -> CodexLaunch:
+        launch = Path(os.path.abspath(Path.cwd()))
+        before = args[:args.index("--")] if "--" in args else args
+        cwd, i = None, 0
+        while i < len(before):  # -C DIR, --cd DIR, --cd=DIR, -C=DIR, -CDIR; the last one counts
+            arg = before[i]
+            if arg in ("-C", "--cd") and i + 1 < len(before):
+                cwd, i = before[i + 1], i + 1
+            elif arg.startswith(("--cd=", "-C=")):
+                cwd = arg.partition("=")[2]
+            elif arg.startswith("-C") and len(arg) > 2:
+                cwd = arg[2:]
+            i += 1
+        return cls(args[0] if args else "", launch, Path(os.path.abspath(launch / cwd)) if cwd else launch)
+
+
+LAUNCHES = {"omp": OmpLaunch.parse, "claude": ClaudeLaunch.parse, "codex": CodexLaunch.parse}
+
+
+def launch_for(harness: str, caller: str, args: list[str]) -> Launch:
+    """HARNESS's start with ARGS, run by CALLER (the launcher: agent-session, or the shim's own name).
+    A harness this file does not know (agent-session runs any agent it is given) is read generically:
+    its launch directory, and the envoy.json the Dispatch client's own commands read."""
+    parse = LAUNCHES.get(harness)
+    if parse is None:
+        launch = Path(os.path.abspath(Path.cwd()))
+        return Launch(args[0] if args else "", launch, launch)
+    return parse(caller, args)
+
+
 
 
 def settings_file_env(file: Path) -> dict[str, str]:
@@ -626,41 +856,12 @@ CONFIG_KEYS = {
 }
 
 
-def bearers() -> list[tuple[str, str, str]]:
-    """All launch candidates as (server, bearer, where it comes from), independently of precedence;
-    one refusal stops the launch. Where it comes from names a variable or a file, never the bearer."""
-    cwd = effective_cwd()
-    launch = Path(os.path.abspath(Path.cwd()))
-    harness = env("AGENT_PRIVATE_HARNESS")
-    path = envoy_json()
-    section = dispatch_section(path)
-    # Each file the session applies, with its values. omp's dotenv files fill only what the
-    # environment left unset, the first file naming a key first (utils/env.ts); Claude Code's
-    # settings blocks override it, the managed settings last.
-    sources: list[tuple[str, dict[str, str]]] = []
-    fills = True
-    checkouts = [cwd]
-    if harness == "omp":
-        # omp reads these four at import, from the directory it starts in, before `--cwd` or a resume
-        # moves it; it never reads the --cwd directory's .env.
-        root, agent = omp_dirs(launch)
-        files = [launch / ".env", agent / ".env", root / ".env", Path.home() / ".env"]
-        sources = [(str(file), dotenv(file)) for file in dict.fromkeys(files)]
-        if env("AGENT_PRIVATE_RESUME"):
-            resumed = resumed_cwd(env("AGENT_PRIVATE_RESUME"), launch, agent)
-            if resumed is not None:
-                checkouts.append(resumed)
-    elif harness == "claude":
-        sources = claude_settings(cwd)
-        fills = False
-    # The session's environment, and the file each value it took from a file came from.
-    environment = dict(os.environ)
-    applied: dict[str, str] = {}
-    for where, values in (sources if fills else reversed(sources)):
-        for key, value in values.items():
-            if (fills and not environment.get(key)) or (not fills and key not in applied):
-                environment[key] = value
-                applied[key] = where
+def bearers(launch: Launch) -> list[tuple[str, str, str]]:
+    """All candidates LAUNCH can reach as (server, bearer, where it comes from), independently of
+    precedence; one refusal stops the launch. Where it comes from names a variable or a file, never
+    the bearer."""
+    section = dispatch_section(launch.envoy_json)
+    environment, applied = launch.merged
     found: dict[tuple[str, str], str] = {}
 
     def add(url: str, token: str, where: str) -> None:
@@ -668,22 +869,22 @@ def bearers() -> list[tuple[str, str, str]]:
         found.setdefault((url.rstrip("/"), valid_bearer(token, where)), where)
 
     # Each bearer goes to its own source's DISPATCH_URL or the environment's, never another file's.
-    for where, values in [("the environment", dict(os.environ)), *sources]:
+    for where, values in [("the environment", dict(os.environ)), *launch.sources]:
         url = env("DISPATCH_URL") or values.get("DISPATCH_URL") or server_url(section)
         of = "" if where == "the environment" else f" in {where}"
         pointer = values.get("DISPATCH_TOKEN_FILE")
         if pointer:
             try:
                 token_path = Path(pointer)
-                token = (token_path if token_path.is_absolute() else cwd / token_path).read_text(encoding="utf-8").strip()
+                token = (token_path if token_path.is_absolute() else launch.cwd / token_path).read_text(encoding="utf-8").strip()
             except (OSError, UnicodeError) as e:
                 raise Refused(f"DISPATCH_TOKEN_FILE{of} cannot be read; fix or remove it") from e
             add(url, token, f"DISPATCH_TOKEN_FILE{of}")
         if values.get("DISPATCH_TOKEN"):
             add(url, values["DISPATCH_TOKEN"].strip(), f"DISPATCH_TOKEN{of}")
 
-    configs: dict[Path, tuple[str, str]] = {path: (CHOSEN, "")}
-    for directory in checkouts:
+    configs: dict[Path, tuple[str, str]] = {launch.envoy_json: (CHOSEN, "")}
+    for directory in launch.checkouts:
         configs.setdefault(directory / ".envoy" / "envoy.json", (CHECKOUT, ""))
     for key, named in CONFIG_KEYS.items():
         if key in applied and environment.get(key):
@@ -692,7 +893,7 @@ def bearers() -> list[tuple[str, str, str]]:
                 raise Refused(f"{key} in {applied[key]} must name an absolute path; fix or remove it")
             configs.setdefault(named(value), (NAMED, f"{key} in {applied[key]}"))
     for config, (kind, named_by) in configs.items():
-        own = section if config == path else dispatch_section(config)
+        own = section if config == launch.envoy_json else dispatch_section(config)
         candidate = file_bearer(config, own, kind, named_by, environment)
         if candidate is not None:
             add(*candidate, f"dispatch.token in {config}")
@@ -755,9 +956,9 @@ def kept_refusal(kept: Path | None) -> list[str]:
     return project_keys(keys) or []
 
 
-def decide(url: str, token: str, flag_why: str = "", where: str = "") -> None:
-    """Return when TOKEN may be used here; raise Refused when it may not. WHERE names the bearer's
-    source (a variable or a file) for a bearer Dispatch rejects."""
+def decide(url: str, token: str, flag: Flag, where: str = "") -> None:
+    """Return when TOKEN may be used here; raise Refused when it may not. FLAG is the flag as read;
+    WHERE names the bearer's source (a variable or a file) for a bearer Dispatch rejects."""
     origin(url)
     valid_bearer(token, where)
     cache = cache_dir()
@@ -773,11 +974,11 @@ def decide(url: str, token: str, flag_why: str = "", where: str = "") -> None:
             raise Refused(f"Dispatch rejects the bearer{f' from {where}' if where else ''} (HTTP {e.status}); "
                           "fix or remove it, then start again") from e
         offline = ""
-        if flag_why == NO_IDENTITY:
+        if flag.no_identity:
             # Such a machine can never read the flag; without a bearer it starts with no Dispatch call.
             offline = (f" To work offline, start without the Dispatch bearer"
                        f"{f' from {where}' if where else ''}.")
-        raise Refused(f"{UNANSWERED} ({'; '.join(w for w in (flag_why, str(e)) if w)}).{offline}") from e
+        raise Refused(f"{UNANSWERED} ({'; '.join(w for w in (flag.why, str(e)) if w)}).{offline}") from e
     if keys:
         if kept is not None:
             with contextlib.suppress(OSError):
@@ -789,29 +990,28 @@ def decide(url: str, token: str, flag_why: str = "", where: str = "") -> None:
             kept.unlink(missing_ok=True)
 
 
-# The first arguments that start no agent session, so no check: help and version, and each
-# harness's management commands (omp's cli-commands.ts, `claude --help`, `codex --help`). Only the
-# first argument decides; anything else, a management command behind a flag included, is checked.
+# The first arguments that start no agent session, so no check: help and version, and the
+# management commands each harness lists in its own `--help` (test_agent_private_check_units.py
+# reads that list from each installed binary). Only the first argument decides (for scripts/cld, the
+# first past its own flags); anything else, an alias or a command behind a flag included, is checked.
 NO_SESSION = {
-    "omp": {"--help", "-h", "--version", "-v", "help", "session", "plugin", "plugins", "config", "completions",
-            "__complete", "update", "install", "login", "auth", "models", "ps", "stats", "usage", "gc", "worktree",
-            "wt", "skill", "skills", "setup"},
-    "claude": {"--help", "-h", "--version", "-v", "config", "mcp", "doctor", "update", "install",
-               "migrate-installer", "setup-token", "plugin"},
+    "omp": {"--help", "-h", "--version", "-v", "session", "plugin", "config", "completions", "update", "install",
+            "login", "auth", "models", "ps", "stats", "usage", "gc", "worktree", "skill", "setup"},
+    "claude": {"--help", "-h", "--version", "-v", "mcp", "doctor", "update", "install", "setup-token", "plugin"},
     "codex": {"--help", "-h", "--version", "-V", "help", "login", "logout", "mcp", "plugin", "completion", "update",
-              "doctor", "debug", "apply", "a", "archive", "unarchive", "delete", "migrate-rollouts", "features",
-              "sandbox"},
+              "doctor", "apply", "archive", "unarchive", "delete", "migrate-rollouts", "features", "sandbox"},
 }
 
 
-def check() -> str:
-    if os.environ.get("AGENT_PRIVATE_COMMAND") in NO_SESSION.get(env("AGENT_PRIVATE_HARNESS"), ()):
+def check(harness: str, caller: str, args: list[str]) -> str:
+    launch = launch_for(harness, caller, args)
+    if launch.command in NO_SESSION.get(harness, ()):
         return "start"
-    enabled, why = read_flag()
-    if enabled is False:
+    flag = read_flag()
+    if flag.enabled is False:
         return "start"
-    for url, token, where in bearers():
-        decide(url, token, flag_why=why, where=where)
+    for url, token, where in bearers(launch):
+        decide(url, token, flag, where)
     return "start"
 
 
@@ -820,11 +1020,11 @@ def one_line(text: object) -> str:
 
 
 def check_main(argv: list[str]) -> int:
-    if argv:
-        print("usage: agent-private-check (no arguments; prints start or refuse <why>)", file=sys.stderr)
+    if len(argv) < 2:
+        print("usage: agent-private-check HARNESS CALLER [ARGS...] (prints start or refuse <why>)", file=sys.stderr)
         return 2
     try:
-        answer = check()
+        answer = check(argv[0], argv[1], argv[2:])
     except Refused as e:
         answer = f"refuse {one_line(e)}"
     except Exception as e:  # a fault in the check fails closed
@@ -842,9 +1042,9 @@ def guard_main(argv: list[str]) -> int:
         print("agent-private-guard: no bearer on stdin", file=sys.stderr)
         return 2
     try:
-        enabled, why = read_flag()
-        if enabled is not False:
-            decide(argv[0], token, flag_why=why)
+        flag = read_flag()
+        if flag.enabled is not False:
+            decide(argv[0], token, flag)
     except Refused as e:
         print(one_line(e), file=sys.stderr)
         return 2

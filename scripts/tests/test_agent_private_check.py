@@ -230,10 +230,11 @@ class StartsAsToday(Case):
         leaky = m.make_tree("leaky")
         script = leaky / "scripts" / "agent-session"
         text = script.read_text()
-        self.assertEqual(text.count("private_status=0\n"), 1)
-        script.write_text(text.replace("private_status=0\n", 'export AGENT_PRIVATE_HARNESS="$private_harness"\nprivate_status=0\n'))
+        call = 'agent_private_check "${agent##*/}" agent-session "$@" || exit 2\n'
+        self.assertEqual(text.count(call), 1)
+        script.write_text(text.replace(call, "export AGENT_PRIVATE_LEAK=1\n" + call))
         leaked = agent_env(m.omp, leaky, "-p", "ok")
-        self.assertEqual(leaked.get("AGENT_PRIVATE_HARNESS"), "omp")
+        self.assertEqual(leaked.get("AGENT_PRIVATE_LEAK"), "1")
         self.assertNotEqual(leaked, agent_env(m.omp, base, "-p", "ok"))
 
     def test_r9_flag_unreadable_and_whoami_answering_nothing_private_starts_with_one_call(self) -> None:
@@ -592,8 +593,43 @@ class AResumedSession(Case):
         self.session(public)
         self.started(self.m.omp("--resume", self.ID), "omp")
 
+    def test_a_session_under_session_dir_is_found_there(self) -> None:
+        checkout = self.tmp / "resumed-checkout"
+        self.m.envoy_json(checkout / ".envoy" / "envoy.json", PRIV_TOKEN)
+        store = self.tmp / "session-store"
+        store.mkdir()
+        (store / f"2026-11-21T00-00-00-000Z_{self.ID}.jsonl").write_text(
+            json.dumps({"type": "session", "id": self.ID, "cwd": str(checkout)}) + "\n")
+        self.refused(self.m.omp("--session-dir", str(store), "--resume", self.ID), PRIVATE)
+        self.refused(self.m.omp(f"--session-dir={store}", "-r", self.ID[:13]), PRIVATE)
+        # Control: without --session-dir the id names no session the check can find, so nothing private is read.
+        self.started(self.m.omp("--resume", self.ID), "omp")
+        self.assertEqual(self.m.dispatch.paths(), [WHOAMI, WHOAMI])
+
 
 class ClaudeCodeSettings(Case):
+    def test_an_untrusted_clones_settings_are_not_read_by_an_interactive_start(self) -> None:
+        """Claude Code applies a project's `env` block only in a -p run or once its folder is trusted, so
+        an interactive start in an untrusted clone reads no file it names and sends nothing to a server it names."""
+        listener = DispatchStub({PUB_TOKEN: WHOAMI_PUB})
+        self.addCleanup(listener.stop)
+        clone = self.tmp / "untrusted-clone"
+        (clone / ".claude").mkdir(parents=True)
+        secret = self.tmp / "single-line-secret"
+        secret.write_text(PUB_TOKEN + "\n")
+        (clone / ".claude" / "settings.json").write_text(json.dumps({"env": {
+            "DISPATCH_TOKEN_FILE": str(secret), "DISPATCH_URL": listener.url}}))
+        claude = [str(self.m.tree / "shims" / "claude")]
+        self.started(self.m.run([*claude, "hello"], {}, self.m.tree, cwd=clone), "claude")
+        self.started(self.m.run([str(self.m.tree / "scripts" / "cld"), "hello"], {}, self.m.tree, cwd=clone), "claude")
+        self.assertEqual(listener.calls, [])
+        # Controls: a -p run applies the block, and so does an interactive start once the folder is trusted.
+        self.started(self.m.run([*claude, "-p", "hello"], {}, self.m.tree, cwd=clone), "claude")
+        self.assertEqual(listener.paths(), [WHOAMI])
+        (self.m.home / ".claude.json").write_text(json.dumps({"projects": {str(clone): {"hasTrustDialogAccepted": True}}}))
+        self.started(self.m.run([*claude, "hello"], {}, self.m.tree, cwd=clone), "claude")
+        self.assertEqual(listener.paths(), [WHOAMI, WHOAMI])
+
     def test_a_settings_env_block_bearer_is_checked(self) -> None:
         project = self.tmp / "claude-project"
         settings = project / ".claude" / "settings.json"

@@ -44,7 +44,7 @@ CHECK = DOTFILES / "scripts" / "agent-private-check"
 # What the launchers run, copied into each scratch tree.
 TREE = (
     "shims/omp", "shims/claude", "scripts/agent-session", "scripts/cld", "scripts/agent-private-check",
-    "scripts/agent-private-guard", "scripts/agent-secrets-session", "scripts/agent-spend-env.sh", "scripts/envoy",
+    "scripts/agent-private-guard", "scripts/agent-private.sh", "scripts/agent-secrets-session", "scripts/agent-spend-env.sh", "scripts/envoy",
     "scripts/on-google-vm", "scripts/omp-session-live", "scripts/gh-agent-config", "agent-secrets/broker-url.sh",
     "agent-secrets/broker.env",
 )
@@ -101,6 +101,7 @@ def load_check(directory: Path, flag_url: str = f"http://{CLOSED}/no-flag") -> M
     spec = importlib.util.spec_from_loader(loader.name, loader)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module  # its dataclasses look their module up by name
     loader.exec_module(module)
     return module
 

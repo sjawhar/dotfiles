@@ -75,8 +75,8 @@ if [[ "${agent##*/}" == omp ]]; then
     prev="" target=""
     for arg in "$@"; do
         [[ "$arg" == -- ]] && break
-        case "$prev" in --resume|-r|--session) target="$arg" ;; esac
-        case "$arg" in --resume=*|--session=*) target="${arg#*=}" ;; esac
+        case "$prev" in --resume|-r|--session|--restore) target="$arg" ;; esac
+        case "$arg" in --resume=*|--session=*|--restore=*) target="${arg#*=}" ;; esac
         prev="$arg"
     done
     if [[ -n "$target" ]]; then
@@ -212,87 +212,15 @@ fi
 
 # >>> private-project check (scripts/agent-private-check)
 # A private project's sessions run only in its own cluster namespace, never on a machine like this
-# one, which writes every session's transcript into stores the projects share. The check (its header
-# has the rule) reads the private-projects flag with the machine's own Google identity, a copy kept
-# 5 minutes; while no project is private it answers `start` with no Dispatch call, otherwise it asks
-# Dispatch about every bearer the session can reach and refuses a private project, or no answer. A
-# management command (`omp session …`, `--version`) starts with no check. It runs after the
-# machine's env file above, which can name a profile or a config. Only the check gets the harness,
-# directory, profile, resume target and first argument; the launched process keeps its environment.
-private_harness="${agent##*/}"
-private_cwd="$PWD"
-private_profile="${OMP_PROFILE-${PI_PROFILE-}}"
-private_resume=""
-private_command="${1-}"
-private_settings=""
-private_prev=""
-if [[ "$private_harness" == omp ]]; then
-    for private_arg in "$@"; do
-        [[ "$private_arg" == -- ]] && break
-        case "$private_prev" in
-            --cwd) private_cwd="$private_arg"; private_prev=""; continue ;;
-            --profile) private_profile="$private_arg"; private_prev=""; continue ;;
-            --resume|-r|--session|--restore) private_resume="$private_arg"; private_prev=""; continue ;;
-        esac
-        case "$private_arg" in
-            --cwd=*) private_cwd="${private_arg#*=}" ;;
-            --profile=*) private_profile="${private_arg#*=}" ;;
-            --resume=*|--session=*|--restore=*) private_resume="${private_arg#*=}" ;;
-        esac
-        private_prev="$private_arg"
-    done
-elif [[ "$private_harness" == claude ]]; then
-    # scripts/cld puts its own flags before the person's, so the command is the first argument past
-    # them; and each --settings file's `env` block is one more source of bearers.
-    private_command=""
-    for private_arg in "$@"; do
-        [[ "$private_arg" == -- ]] && break
-        # One line per --settings value, base64: an inline JSON value can hold newlines.
-        case "$private_prev" in
-            --settings) private_settings+="$(printf '%s' "$private_arg" | base64 -w0)"$'\n' ;;
-        esac
-        case "$private_arg" in
-            --settings=*) private_settings+="$(printf '%s' "${private_arg#*=}" | base64 -w0)"$'\n' ;;
-        esac
-        if [[ -z "$private_command" ]]; then
-            case "$private_prev:$private_arg" in
-                --channels:* | --settings:* | *:--dangerously-skip-permissions | *:--channels | *:--settings | *:--settings=*) ;;
-                *) private_command="$private_arg" ;;
-            esac
-        fi
-        private_prev="$private_arg"
-    done
-fi
-[[ "$private_profile" == default ]] && private_profile=""
-# The envoy.json the harness's Envoy plugin reads (envoy/AGENTS.md): Claude Code's CLAUDE_CONFIG_DIR,
-# a named omp profile's agent directory under shims/omp's root ($HOME/${PI_CONFIG_DIR:-.omp}), else
-# the file ENVOY_CONFIG_FILE names, else the neutral one.
-case "$private_harness" in
-    claude) private_envoy_json="${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/envoy.json}" ;;
-    omp) private_envoy_json="${private_profile:+$HOME/${PI_CONFIG_DIR:-.omp}/profiles/$private_profile/agent/envoy.json}" ;;
-    *) private_envoy_json="" ;;
-esac
-private_envoy_json="${private_envoy_json:-${ENVOY_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json}}"
-# The system's python3 when there is one: a launch's PATH can hold none (a unit, a test's bare PATH)
-# or only mise's shim, which depends on HOME.
-private_python=/usr/bin/python3
-[[ -x "$private_python" ]] || private_python=python3
-private_status=0
-private_answer="$(AGENT_PRIVATE_ENVOY_JSON="$private_envoy_json" AGENT_PRIVATE_CWD="$private_cwd" \
-    AGENT_PRIVATE_HARNESS="$private_harness" AGENT_PRIVATE_PROFILE="$private_profile" \
-    AGENT_PRIVATE_RESUME="$private_resume" AGENT_PRIVATE_COMMAND="$private_command" \
-    AGENT_PRIVATE_SETTINGS="$private_settings" "$private_python" \
-    "${_agent_session_self%/*}/agent-private-check" < /dev/null)" || private_status=$?
-if (( private_status != 0 )) || [[ "$private_answer" != start ]]; then
-    if [[ "$private_answer" == "refuse "* ]]; then
-        echo "agent-session: ${private_answer#refuse }" >&2
-    else
-        echo "agent-session: scripts/agent-private-check gave no answer (exit $private_status), so this session does not start; retry" >&2
-    fi
-    exit 2
-fi
-unset private_envoy_json private_python private_answer private_status private_harness private_cwd private_profile \
-    private_resume private_command private_settings private_prev private_arg
+# one, which writes every session's transcript into stores the projects share. The check beside this
+# script (its header has the rule) reads the private-projects flag with the machine's own Google
+# identity; while no project is private it answers `start` with no Dispatch call, otherwise it asks
+# Dispatch about every bearer the session can reach, from the harness's own arguments, and refuses a
+# private project, or no answer. It runs after the machine's env file above, which can name a profile
+# or a config, and changes nothing in the session's environment.
+# shellcheck source=SCRIPTDIR/agent-private.sh
+. "${_agent_session_self%/*}/agent-private.sh"
+agent_private_check "${agent##*/}" agent-session "$@" || exit 2
 # <<< private-project check
 
 # Scratch and language caches on the big disk, where this machine has one (dispatch://INFRA-613).
