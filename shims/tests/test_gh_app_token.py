@@ -1271,6 +1271,33 @@ class RefuseOwnerReadsOnlyTheMachinesOwnConfig(unittest.TestCase):
         self.assertEqual(self.calls(self.secret_run_log), [])
         self.assertEqual([path.name for path in self.cache.iterdir() if path.name != "decisions.log"], [])
 
+    @unittest.skipIf(os.geteuid() == 0, "root reads a file whatever its mode")
+    def test_a_machine_config_the_agent_cannot_read_refuses_every_owner(self):
+        # A well-formed file that names the refused owner, but that this user may not read. git
+        # warns "unable to access … Permission denied" and exits 1 with no output, the same status
+        # as a missing file or key, so reading that status as "nothing refused" served the refused
+        # owner's cached token. The docstring promises that a ~/.config/git/config git cannot read
+        # refuses every owner (HOME-216 test round 2).
+        self.machine_config.write_text('[gh-app "agent"]\n\trefuse-owner = trajectory-labs-pbc\n')
+        self.machine_config.chmod(0)
+        self.addCleanup(self.machine_config.chmod, 0o600)
+        self.cache_token("trajectory-labs-pbc", "ghs_cached_refused")
+        env = {**self.env, "XDG_CONFIG_HOME": str(self.legion_xdg_config_home)}
+        failure = (
+            f"gh-app-token: failed to read gh-app.agent.refuse-owner from {self.machine_config}, "
+            "so every owner is refused\n"
+        )
+
+        direct = self.run_shim(env, "--owner", "trajectory-labs-pbc")
+        credential = self.run_shim(
+            env, "get", stdin="protocol=https\nhost=github.com\npath=trajectory-labs-pbc/agent-c.git\n\n"
+        )
+
+        self.assertEqual(direct, (1, "", failure))
+        self.assertEqual(credential, (1, "quit=1\n", failure))
+        self.assertEqual(self.calls(self.secrets_log), [])
+        self.assertEqual(self.calls(self.secret_run_log), [])
+
 
 if __name__ == "__main__":
     unittest.main()
