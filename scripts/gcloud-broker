@@ -10,7 +10,9 @@
 # The broker releases a one-hour Google access token, never the refresh token. The command runs in
 # a throwaway CLOUDSDK_CONFIG, removed on exit, so no person's login and no box configuration is
 # read or written. The token reaches gcloud through a 0600 file (CLOUDSDK_AUTH_ACCESS_TOKEN_FILE),
-# never through argv. Exit 75 means the grant is pending approval, 77 that it was denied.
+# never through argv, and with file logging off whatever the caller set: gcloud copies a command's
+# output into a log file under CLOUDSDK_CONFIG/logs, so a printed token would land on disk
+# (dispatch://INFRA-4824). Exit 75 means the grant is pending approval, 77 that it was denied.
 set -euo pipefail
 
 usage="usage: gcloud-broker [--reason R] [--] <command...>"
@@ -42,4 +44,4 @@ unset GCLOUD_SAMI GCLOUD_BROKER_INNER GCLOUD_ACCOUNT CLOUDSDK_ACTIVE_CONFIG_NAME
   CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT GOOGLE_APPLICATION_CREDENTIALS
 mkdir "$dir/config"
 CLOUDSDK_CONFIG="$dir/config" CLOUDSDK_AUTH_ACCESS_TOKEN_FILE="$dir/token" CLOUDSDK_CORE_DISABLE_PROMPTS=1 \
-  "$@"
+  CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true "$@"

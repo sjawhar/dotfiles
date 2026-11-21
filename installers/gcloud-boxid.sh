@@ -4,9 +4,11 @@ set -euo pipefail
 # The two box-identity paths that scripts written on sami-rocqperf name, made on a Google VM
 # (sami-devbox, dispatch://INFRA-993) so such a script runs there unchanged:
 #   /mnt/nvme/<user>/boxid/gcloud-box        a gcloud config dir (CLOUDSDK_CONFIG) whose active
-#                                            configuration `box` is the VM's attached account,
-#                                            with no stored credential: installers/gcloud-box.sh's
-#                                            Google branch, run against this dir;
+#                                            configuration `box` is the account the metadata
+#                                            server serves, with no stored credential:
+#                                            installers/gcloud-box.sh's Google branch, run against
+#                                            this dir (installers/agent-identity.sh runs it again
+#                                            through the host's relay);
 #   /mnt/nvme/<user>/boxid/infra-kubeconfig  a kubeconfig (KUBECONFIG) with the one context
 #                                            gke_theorem-agent-infra_us-west1_dispatch, taken from
 #                                            ~/.kube/config (installers/gcloud-sdk.sh writes it);
@@ -42,4 +44,4 @@ if ! cmp -s "$new" "$BOXID_DIR/infra-kubeconfig"; then
     install -m 600 "$new" "$BOXID_DIR/infra-kubeconfig"
     echo "gcloud-boxid: wrote $BOXID_DIR/infra-kubeconfig (context $KUBE_CONTEXT)"
 fi
-echo "gcloud-boxid: $BOXID_DIR/gcloud-box and $BOXID_DIR/infra-kubeconfig act as the VM's attached account"
+echo "gcloud-boxid: $BOXID_DIR/gcloud-box and $BOXID_DIR/infra-kubeconfig act as the account the metadata server serves"

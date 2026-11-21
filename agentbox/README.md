@@ -177,8 +177,9 @@ It accepts sizes up to 512 GiB and refuses to shrink a filesystem.
 - **Metadata service.** A relay on the box network's gateway (port 8169) reaches `169.254.169.254`. On a Google
   Cloud VM (`scripts/on-google-vm`) it is `scripts/agentbox-gce-metadata-relay`, which rewrites the Host header,
   and the box gets `GCE_METADATA_HOST`, `GCE_METADATA_ROOT` and `GCE_METADATA_IP`, so gcloud and Google client
-  libraries act as the VM's service account. Elsewhere it is a plain relay for the AWS metadata service
-  (`AWS_EC2_METADATA_SERVICE_ENDPOINT`). AgentBox adds no metadata firewall to nested workloads.
+  libraries act as the VM's service account, or as the account `~/.config/agent-identity/account` names, whose
+  tokens the relay mints (`installers/agent-identity.sh`). Elsewhere it is a plain relay for the AWS metadata
+  service (`AWS_EC2_METADATA_SERVICE_ENDPOINT`). AgentBox adds no metadata firewall to nested workloads.
 - **Envoy.** The host API is relayed into the box. `ENVOY_MACHINE_ID` is the physical host's short name,
   not the container name. Profile connection settings still come from `envoy.json` without launcher overrides.
   See [the access audit](access-audit.md) for the restriction history and authorization.

@@ -15,6 +15,8 @@
 #     (installers/gcloud-box.sh), so a Google client library or Pulumi acts as the machine, not as
 #     the user, unless the caller names a credential file of its own; on a Google VM it sets
 #     none, and the libraries take the VM's account from the metadata server;
+#   - turns gcloud's file logging off (CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true) unless the caller
+#     set it, so a gcloud run past shims/gcloud writes no token into a log file (below);
 #   - gives the session a TMPDIR of its own on the big disk and points the uv, cargo and Go
 #     caches there, on a machine that has one (below); on one that has not, nothing changes;
 #   - exports the model-spend telemetry variables when this machine holds the collector's token (below);
@@ -176,6 +178,14 @@ if [[ -f "$box_adc" ]] && [[ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" \
     && ! "$DOTFILES_DIR/scripts/on-google-vm"; then
     export GOOGLE_APPLICATION_CREDENTIALS="$box_adc"
 fi
+
+# gcloud copies each command's output into a file under its configuration directory's logs/, so a
+# token it prints lands on disk (dispatch://INFRA-4824). shims/gcloud turns that off for each call
+# it runs and installers/gcloud-sdk.sh for ~/.gcloud's SDK, but a gcloud run by its path past both
+# reads neither: a Google VM's snap /snap/bin/gcloud wrote one log file holding a made-up token on
+# sami-devbox on 2026-11-20. gcloud reads this variable before any configuration file. A value the
+# caller set is kept, as the shim keeps it. session_env in scripts/agentbox does the same in a box.
+export CLOUDSDK_CORE_DISABLE_FILE_LOGGING="${CLOUDSDK_CORE_DISABLE_FILE_LOGGING:-true}"
 
 # Machine-local environment, outside this public repository (dispatch://BET-765). A setting that
 # names a customer may not be committed here, so each machine keeps its own file and this reads it

@@ -523,6 +523,28 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertIn(cause, stderr)
         self.assertEqual(self.secrets_calls(), [])
 
+    def test_the_clients_enrollment_wait_notices_are_never_the_cause(self):
+        # The client says it waits for a launcher still enrolling the box before its own
+        # refusal; the cause is the refusal, whether the launcher finished in that wait and a
+        # later step failed, or the wait ran out.
+        notices = (
+            "agent-secrets: the launcher is still enrolling this process (/run/user/1/agent-secrets/enrollment.pending is there); waiting up to 20s for its key.pem and enrollment\n"
+            "agent-secrets: still waiting for the launcher's enrollment\n"
+        )
+        for cause in (
+            "agent-secrets: nothing answered at 127.0.0.1:9: the connection was refused",
+            "agent-secrets: /run/user/1/agent-secrets/key.pem: not a PEM file (waited 20s while /run/user/1/agent-secrets/enrollment.pending was there)",
+        ):
+            with self.subTest(cause=cause), patch.dict(
+                os.environ, {"SECRET_RUN_STUB_EXIT": "1", "SECRET_RUN_STUB_STDERR": notices + cause}
+            ):
+                rc, stdout, stderr = self.run_main(
+                    ["agent", "get"], stdin="host=github.com\npath=sjawhar/dotfiles.git\n\n"
+                )
+                self.assertEqual((rc, stdout), (1, "quit=1\n"))
+                self.assertIn(f"failed (exit 1): {cause}", stderr)
+        self.assertEqual(self.secrets_calls(), [])
+
     def test_uninstalled_owner_without_fallback_secret_quits(self):
         del self.git_config["gh-app.agent.fallback-secret"]
 
@@ -725,9 +747,11 @@ class BoxEnrollmentWait(unittest.TestCase):
         self.key_dir.mkdir()
         self.marker = self.key_dir / gh_app_token.ENROLLMENT_MARKER
 
-    def wait(self, sleep, key_dir=True):
-        """wait_for_box_enrollment with `sleep` standing in for time.sleep; returns its stderr."""
-        environment = {"AGENT_SECRETS_KEY_DIR": str(self.key_dir)} if key_dir else {}
+    def wait(self, sleep, environment=None):
+        """wait_for_box_enrollment with `sleep` standing in for time.sleep, in environment (by
+        default one naming this test's key dir); returns its stderr."""
+        if environment is None:
+            environment = {"AGENT_SECRETS_KEY_DIR": str(self.key_dir)}
         err = io.StringIO()
         with (
             patch.dict(os.environ, environment, clear=True),
@@ -741,8 +765,13 @@ class BoxEnrollmentWait(unittest.TestCase):
         self.fail(f"waited {seconds}s where nothing says an enrollment is under way")
 
     def test_a_host_session_never_waits(self):
+        """A host session's key dir is its runtime dir's agent-secrets, which holds the helper's
+        socket and no marker; a marker in another dir holds nothing."""
         self.marker.touch()
-        self.assertEqual(self.wait(self.never_sleeps, key_dir=False), "")
+        host = Path(self.temp_dir.name) / "host-runtime"
+        (host / "agent-secrets").mkdir(parents=True)
+        (host / "agent-secrets" / "helper.sock").touch()
+        self.assertEqual(self.wait(self.never_sleeps, environment={"XDG_RUNTIME_DIR": str(host)}), "")
 
     def test_a_box_whose_enrollment_has_ended_never_waits(self):
         self.assertEqual(self.wait(self.never_sleeps), "")
@@ -782,6 +811,35 @@ class BoxEnrollmentWait(unittest.TestCase):
         self.assertEqual(clock[0], gh_app_token.ENROLLMENT_WAIT_SECONDS)
         # Long enough for the 116 s a box took to enroll on 2026-11-01.
         self.assertGreaterEqual(gh_app_token.ENROLLMENT_WAIT_SECONDS, 160)
+
+    def test_an_environment_without_the_key_dir_variable_waits_on_the_clients_default(self):
+        """An environment that dropped AGENT_SECRETS_* (omp's eval kernel) still reaches the
+        box's key dir: the agent-secrets client falls back to $XDG_RUNTIME_DIR/agent-secrets, so
+        the wait does too, or the client would meet the marker with only its own 20 s."""
+        self.marker.touch()
+        slept = []
+
+        def sleep(seconds):
+            slept.append(seconds)
+            self.marker.unlink()
+
+        stderr = self.wait(sleep, environment={"XDG_RUNTIME_DIR": self.temp_dir.name})
+        self.assertEqual(len(slept), 1)
+        self.assertEqual(stderr.count("still being enrolled"), 1)
+
+    def test_a_named_key_dir_is_the_only_one_read(self):
+        """The client reads the default only when AGENT_SECRETS_KEY_DIR is unset, so a marker in
+        the default dir does not hold a call whose named key dir has none."""
+        self.marker.touch()
+        named = Path(self.temp_dir.name) / "named"
+        named.mkdir()
+        environment = {"AGENT_SECRETS_KEY_DIR": str(named), "XDG_RUNTIME_DIR": self.temp_dir.name}
+        self.assertEqual(self.wait(self.never_sleeps, environment=environment), "")
+
+    def test_with_neither_variable_the_key_dir_is_the_clients_last_default(self):
+        """The client's last default is helper.DefaultSocket's directory under /run/user/<uid>."""
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(gh_app_token.box_key_dir(), Path(f"/run/user/{os.getuid()}") / "agent-secrets")
 
 
 

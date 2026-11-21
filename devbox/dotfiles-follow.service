@@ -1,5 +1,5 @@
 [Unit]
-Description=Fast-forward ~/.dotfiles to origin's main, install mise's pins, and alert over Envoy when it cannot
+Description=Fast-forward ~/.dotfiles to origin's main and install mise's pins; log when it cannot
 Documentation=file:%h/.dotfiles/scripts/dotfiles-follow.md
 
 [Service]
@@ -14,7 +14,7 @@ Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.mise/shims:/usr/local/b
 Environment=MISE_DATA_DIR=%h/.mise
 Environment=MISE_TRUSTED_CONFIG_PATHS=%h/.dotfiles
 # dotfiles-follow takes this limit as its --run-limit (default 1170, keep the two equal) and keeps a
-# monotonic deadline from its start: 1170 s less 60 s for the state write and up to three alerts
+# monotonic deadline from its start: 1170 s less 12 s for the state write
 # (scripts/dotfiles-follow.md step 7). Its hook sweep pass never runs past that deadline: a
 # slow-root pass (1000 s) starts only when the time left holds all of it, a fast-root pass is cut to
 # the time left (at most 420 s), and none starts with under 30 s left. The steps before the sweep

@@ -23,16 +23,23 @@ bash "${DOTFILES_DIR}/installers/agent-secrets.sh"
 # dispatch cluster's context (see installers/gcloud-sdk.sh). Before gcloud-box.sh, which needs it.
 bash "${DOTFILES_DIR}/installers/gcloud-sdk.sh"
 
-# On an Azure VM enrolled in box-identity, gcloud and ADC act as dev-sjawhar with no
-# sign-in; an apply impersonates agent-infra's applier from it (see installers/gcloud-box.sh).
+# gcloud and ADC act as the machine's own identity with no sign-in: the account the metadata
+# server serves on a Google VM, the box-identity account on an enrolled Azure VM (see
+# installers/gcloud-box.sh).
 bash "${DOTFILES_DIR}/installers/gcloud-box.sh"
 
 # Outside Google, serve the box's cached token to keyless Delta readers on loopback.
 bash "${DOTFILES_DIR}/installers/gcloud-metadata.sh"
 
 # On a Google VM, the box-identity paths scripts from sami-rocqperf name (/mnt/nvme/<user>/boxid/
-# gcloud-box and infra-kubeconfig), as the VM's account (see installers/gcloud-boxid.sh).
+# gcloud-box and infra-kubeconfig), as the machine's account (see installers/gcloud-boxid.sh).
 bash "${DOTFILES_DIR}/installers/gcloud-boxid.sh"
+
+# On a Google VM, the host's metadata relay and the variables that point every host client at it,
+# when ~/.config/agent-identity/account names an account other than the VM's own; with no such file
+# it changes nothing. After gcloud-box.sh and gcloud-boxid.sh, which it runs again through the
+# relay (see installers/agent-identity.sh).
+bash "${DOTFILES_DIR}/installers/agent-identity.sh"
 
 # On a machine with no person's GitHub login (the Google VM, sami-devbox), git outside an agent
 # session gets the GitHub App's token too, and ssh remotes of github.com go over https (see
@@ -89,14 +96,34 @@ arm_user_timer devbox docker-cap
 ensure_box_health_owner unit-health-watch
 arm_user_timer devbox unit-health-watch
 
-# On a Google VM (sami-devbox, dispatch://INFRA-993), every 10 min: fast-forward ~/.dotfiles to
-# origin's main, then `mise install` and the readiness check's pin lines; tell the box-health owner
-# over Envoy, once per condition, when it refuses (a change git sees, other than the SECRET_FILES
-# copies of devbox/sami-devbox-provision; a main that is not a fast-forward) or a step fails
-# (scripts/dotfiles-follow.md). Other machines are moved by scripts/dotfiles-sync.
+# dotfiles-follow is NOT armed on this box. Sami's test for a timer on his dev box
+# (dispatch://INFRA-2022/ask/b5ddab54-8ba0-40e8-b4ba-c2dcb291ca5c): a unit living in these dotfiles
+# is not authorization for it, and "we don't need custom timer units"; on two timers that watched
+# nothing (dispatch://INFRA-2022/ask/4badbed6-a78d-4405-adcb-cbe2679e12d3): "Both go ... somewhere
+# that is not a timer on my box." Nothing of his approves this one. Here ~/.dotfiles moves onto
+# main when scripts/dotfiles-publish runs from it, or by `scripts/dotfiles-sync local`. oryx arms
+# the follower on oryx (oryx/install.sh). A Google VM that armed it before keeps running it from
+# its links, so they come off here: the timer is disabled and stopped (a run under way ends by
+# itself), and each link is removed only when it points at this repository's unit.
 if "${DOTFILES_DIR}/scripts/on-google-vm"; then
-    ensure_box_health_owner dotfiles-follow
-    arm_user_timer devbox dotfiles-follow
+    follow_links="$HOME/.config/systemd/user"
+    follow_removed=0
+    if [[ -L "$follow_links/dotfiles-follow.timer" \
+        && "$(readlink -- "$follow_links/dotfiles-follow.timer")" == "$HOME/.dotfiles/devbox/dotfiles-follow.timer" ]]; then
+        echo "dotfiles-follow: timer was $(systemctl --user is-enabled dotfiles-follow.timer 2>&1 || true)/$(systemctl --user is-active dotfiles-follow.timer 2>&1 || true); disabling it"
+        systemctl --user disable --now dotfiles-follow.timer
+    fi
+    for suffix in timer service; do
+        if [[ -L "$follow_links/dotfiles-follow.$suffix" \
+            && "$(readlink -- "$follow_links/dotfiles-follow.$suffix")" == "$HOME/.dotfiles/devbox/dotfiles-follow.$suffix" ]]; then
+            rm -- "$follow_links/dotfiles-follow.$suffix"
+            echo "dotfiles-follow: removed $follow_links/dotfiles-follow.$suffix"
+            follow_removed=1
+        fi
+    done
+    if (( follow_removed )); then
+        systemctl --user daemon-reload
+    fi
 fi
 
 # transcript-lag-watch is NOT armed here, and both halves of that are deliberate.
