@@ -70,10 +70,11 @@ of a checkout other than `~/.dotfiles` does:
 - **(B) Judgments and records go to the state file the run uses.** On a file other than
   `~/.dotfiles`' (its own, by default) another checkout opens and clears its own conditions,
   `TOOLS NOT INSTALLED` included, as `~/.dotfiles` does on its file. It records its own tools pass
-  (`tools_ok_head`), and skips its tools step after one at the same HEAD. A run of another checkout
-  on `~/.dotfiles`' file, named by `--state` (by any spelling of its path), records nothing: it
-  takes that file's lock, so it never runs beside the timer's run, and reads the file, but commits
-  nothing to it. `~/.dotfiles`' conditions, `tools_ok_head`, `head`, `target`, `last_outcome`,
+  (`tools_ok_head`), and skips its tools step after one at the same HEAD. It never renders, so it
+  never judges `KNIVES REGISTRY NOT WRITTEN`. A run of another checkout on `~/.dotfiles`' file,
+  named by `--state` (by any spelling of its path), records nothing: it takes that file's lock,
+  so it never runs beside the timer's run, and reads the file, but commits nothing to it.
+  `~/.dotfiles`' conditions, `tools_ok_head`, `head`, `target`, `last_outcome`,
   `last_run`, `fetch_failures` and slow-sweep times stay byte for byte as they were, commits made
   mid-run included. That run opens and clears no condition, so it writes no report: each problem
   it found is a line of its output that starts `not recorded: <repo> is not ~/.dotfiles, and <file>
@@ -404,6 +405,10 @@ makes a fast-root pass and runs its tools step (review 20's second case), where 
 makes the slow-root pass and leaves its tools step. Another clone on `DEFAULT_STATE` leaves that
 file byte-identical, opens and clears nothing, logs both problems as not recorded, runs its tools
 step on both runs before `~/.dotfiles`' pass and on neither after it.
+`OneRule.test_another_checkout_on_a_shared_state_file_leaves_the_registry_condition_open`:
+`~/.dotfiles` opens `KNIVES REGISTRY NOT WRITTEN` on a `--state` file that is not `DEFAULT_STATE`,
+a run of another clone on that file, which records its run there (rule B), leaves it open
+(review 21), and its control, a `~/.dotfiles` run that renders, clears it.
 `SendsNothing` runs the follower as each unit runs it (`main()` in a child): the dev box's unit with
 a `BOX_HEALTH_OWNER`, and oryx's drop-in as loaded before this change, with `--box-health-role`.
 With `ENVOY_URL` at a local listener and an `ENVOY_TOKEN` set, each opens a condition, and the

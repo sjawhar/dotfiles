@@ -100,11 +100,12 @@ and DOTFILES_DIR names the default one):
   (B) Judgments and records go to the state file the run uses. On a file other than DEFAULT_STATE
       (its own, by default) another checkout opens and clears its conditions and records its
       tools pass (tools_ok_head) as ~/.dotfiles does on DEFAULT_STATE, so after a pass it skips
-      its tools step at that HEAD. A run of another checkout on DEFAULT_STATE, named by --state,
-      takes that file's lock and reads it, and commits nothing to it (a State that is not
-      writable): ~/.dotfiles's conditions and records stay byte for byte as they were, each
-      problem the run found is logged as not recorded, and it runs its tools step on every run
-      until ~/.dotfiles passes at that HEAD; after that it skips the step.
+      its tools step at that HEAD. It never renders, so it never judges KNIVES REGISTRY NOT
+      WRITTEN. A run of another checkout on DEFAULT_STATE, named by --state, takes that file's
+      lock and reads it, and commits nothing to it (a State that is not writable): ~/.dotfiles's
+      conditions and records stay byte for byte as they were, each problem the run found is
+      logged as not recorded, and it runs its tools step on every run until ~/.dotfiles passes at
+      that HEAD; after that it skips the step.
   (C) Only ~/.dotfiles makes slow-root hook sweep passes (step 8). Another checkout makes
       fast-root passes only, and never leaves its tools step to the next run for a slow-root pass.
 """
@@ -1018,7 +1019,8 @@ def run_registry_step(
     Only ~/.dotfiles writes the copy (the one rule, A, in the module docstring):
     scripts/leak-terms-check reads it, so a render from another checkout (git mode takes any
     --repo) would put that checkout's registry there. For another checkout the step logs that it
-    wrote no copy and renders nothing.
+    wrote no copy and renders nothing, so it never judges KNIVES REGISTRY NOT WRITTEN, on any
+    state file.
 
     The render writes the copy when the copy is missing or not a plain file, or when the record it
     wrote beside the copy at its last render does not hold the file's sha256, the oh-my-pi
@@ -1029,10 +1031,10 @@ def run_registry_step(
     with no render script or no knives/repos.toml has nothing to render, so it judges the condition
     and an open one clears. The run's footer names a write of the copy, judged by the copy's inode
     and mtime before and after the render."""
-    judged.add("registry")
     if not is_home_dotfiles(repo):
         log(f"registry: {display_path(repo)} is not ~/.dotfiles; knives registry copy not written")
         return
+    judged.add("registry")
     render = repo / "scripts/knives-registry-render"
     if not render.exists() or not (repo / "knives/repos.toml").exists():
         return

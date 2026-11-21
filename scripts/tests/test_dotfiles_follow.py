@@ -1841,8 +1841,9 @@ class KnivesRegistry(RegistryCopy, Harness):
         # WRITTEN and said no action was needed, though it rendered nothing. That state file is
         # ~/.dotfiles's (Harness), so the run records nothing there (rule B). ~/.dotfiles opens the
         # condition with a read-only ~/.config/knives, which is writable again before the other
-        # clone's run, so only rule B keeps the condition open there. The control: the next
-        # ~/.dotfiles run clears it.
+        # clone's run. Two things keep the condition open there: rule B leaves the file unchanged,
+        # and the other clone's registry step never renders, so it does not judge the condition.
+        # The control: the next ~/.dotfiles run clears it.
         self.first_render()
         self.pull_registry_v2()
         knives = self.copy.parent
@@ -2141,6 +2142,42 @@ class OneRule(RegistryCopy, Harness):
                 for cell, value in got.items():
                     print(f"  {cell}: {value}", file=sys.stderr)
                 self.assertEqual(got, want)
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes into a read-only directory")
+    def test_another_checkout_on_a_shared_state_file_leaves_the_registry_condition_open(self) -> None:
+        # Review 21: on a --state file that is not DEFAULT_STATE, which another checkout's run owns
+        # (rule B), that run cleared the KNIVES REGISTRY NOT WRITTEN ~/.dotfiles opened there, though
+        # it never renders. A condition is judged only by a run that does its work, so the run of
+        # another checkout leaves it open; the control, a ~/.dotfiles run that renders, clears it.
+        shared = Path(self.tmp.name) / "shared" / "state.json"
+        self.assertNotEqual(shared.resolve(), FOLLOW.DEFAULT_STATE.resolve())
+        headline = FOLLOW.HEADLINE["registry"]
+        self.assertEqual(self.main_run(self.repo, shared, 1_000_000.0)[0], [])
+        self.assert_copy_renders(REGISTRY_V1)
+        self.commit_upstream("knives: a new oh-my-pi release branch", **{"knives/repos.toml": REGISTRY_V2})
+        knives = self.copy.parent
+        knives.chmod(0o555)
+        try:
+            opened, _ = self.main_run(self.repo, shared, 1_000_300.0)
+        finally:
+            knives.chmod(0o755)
+        self.assertEqual(len(opened), 1, opened)
+        self.assertIn(f"{headline}: `scripts/knives-registry-render --if-changed` in ~/.dotfiles exited 1:", opened[0])
+        incident = json.loads(shared.read_text())["incidents"]["registry"]
+        with self.subTest(run="another checkout, on the shared file"):
+            reports, lines = self.main_run(self.other, shared, 1_000_600.0)
+            data = json.loads(shared.read_text())
+            # The run owns the file (rule B): it recorded its run there, and cleared nothing.
+            self.assertEqual(data["last_run"], 1_000_600.0)
+            self.assertIn(f"registry: {self.other} is not ~/.dotfiles; knives registry copy not written", lines)
+            self.assertEqual(reports, [])
+            self.assertEqual(data["incidents"].get("registry"), incident)
+        with self.subTest(run="~/.dotfiles renders, the control"):
+            cleared, _ = self.main_run(self.repo, shared, 1_000_900.0)
+            self.assertEqual(len(cleared), 1, cleared)
+            self.assertIn(f"{headline} cleared", cleared[0])
+            self.assertNotIn("registry", json.loads(shared.read_text())["incidents"])
+            self.assert_copy_renders(REGISTRY_V2)
 
 
 class SendsNothing(Harness):
