@@ -24,7 +24,7 @@ The table puts rules 1, 2, 6 and 10 in order.
    - Example: `Replace a leaked key with no downtime.` then `**Done when:** the old key is revoked and each service answers with the new one.`
    - Source: sp `verification-before-completion/SKILL.md:10` ("**Core principle:** Evidence before claims, always."); ce `ce-code-review/SKILL.md:11` ("**Done when:** required review and validation are complete"); ce `.agents/skills/ce-skill-work/SKILL.md:31` ("**One done bar first.** Every skill needs a skill-level done condition.").
 2. **Write a procedure as numbered steps, each starting with its name.**
-   - Example: `1. **Reproduce.** Run the failing command and save its output.`
+   - Example: `1. **Reproduce.** Run the failing command.`
    - Source: sp `systematic-debugging/SKILL.md:52` ("1. **Read Error Messages Carefully**"); ce `ce-noslop/SKILL.md:37` ("1. **Mechanism.** Does the sentence say what the thing does").
 3. **Put one rule in a list item, starting with the rule or with a bold label.** Its detail follows: how, when, the exception, the reason.
    - Example: `- **Read before you edit.** Open the file and its callers first.`
@@ -34,7 +34,7 @@ The table puts rules 1, 2, 6 and 10 in order.
    - Source: sp `test-driven-development/SKILL.md:10` ("Write the test first. Watch it fail. Write minimal code to pass."); ce `.agents/skills/ce-skill-work/SKILL.md:33` ("Write one idea per sentence in ordinary English.").
 5. **Give a reason only where the rule would look arbitrary:** one clause after the rule, or a `**Why:**` line, that names the failure the rule prevents.
    - Example: `Run the tests before you push.` stands bare. `Pin the version: a floating tag changes between two runs.` needs its reason.
-   - Source: ce `.agents/skills/ce-skill-work/SKILL.md:28` ("Rationale after a directive that stands alone, effort language, and capability restatement do not."); sp `using-git-worktrees/SKILL.md:88` ("**Why critical:** Prevents accidentally committing worktree contents to repository.").
+   - Source: ce `.agents/skills/ce-skill-work/SKILL.md:28` ("**A line earns its place** by stating a falsifiable constraint, countering a demonstrated default tendency, or supplying a fact the agent cannot derive. Rationale after a directive that stands alone, effort language, and capability restatement do not."); sp `using-git-worktrees/SKILL.md:88` ("**Why critical:** Prevents accidentally committing worktree contents to repository.").
 6. **Put facts that share their attributes in a table:** situation and action, code and meaning, claim and evidence.
    - Example: `| Exit code | Do |` with the rows `| 0 | Go on |` and `| 2 | Fix the arguments |`.
    - Source: sp `using-git-worktrees/SKILL.md:144-146` ("| Situation | Action |", "| Already in linked worktree | Skip creation (Step 0) |").

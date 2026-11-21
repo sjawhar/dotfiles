@@ -12,7 +12,7 @@ Measure whether a skill, an edit or one line changes what an agent does.
 | Is an edit better? | The old text, the new text, and the control |
 | Does one line do anything? | The skill with the line, and the skill without it |
 
-Run the control in every test: a rule that restates the model's default passes every test and still costs tokens on every load.
+The control shows whether the model does the thing anyway: a rule that restates the model's default passes every test and still costs tokens on every load.
 
 ## Running a body test
 
@@ -36,14 +36,16 @@ Run the control in every test: a rule that restates the model's default passes e
      [--append-system-prompt "$(cat /path/to/arm/SKILL.md)"] "<raw task or prompt>"
    ```
 
-   For a body test, use `timeout 900` and `--thinking medium`, and leave out `--append-system-prompt` for the control. The transcript lands in `runs/<id>/stdout`, and the files the run wrote in `runs/<id>/home`. The script's header lists its options.
-8. **Interleave the arms.** Run sessions in parallel, with the arms interleaved, so that a change in model or load hits both.
+   For a body test, use `timeout 900` and `--thinking medium`, leave out `--box-skills`, and leave out `--append-system-prompt` for the control. The transcript lands in `runs/<id>/stdout`, and the files the run wrote in `runs/<id>/home`. The script's header lists its options.
+8. **Interleave the arms.** Run sessions in parallel, with the arms interleaved, so that a change in model or load hits each arm.
 
 ## Running a description test
 
 1. **Write the prompts.** Write 8 to 10 prompts that should load the skill and 8 to 10 near misses that share its words but need something else. Make each a real task of two or more sentences: a one-line request often loads no skill even when the description matches.
-2. **Run each prompt three times** in the sandbox, with `--box-skills`, which gives the session the skill listing a real session on this box gets, and `timeout 300 ... --thinking low`. Count the reads: `grep -c 'skill://<name>' runs/<id>/stdout` is more than 0 when the session read the skill.
-3. **Tune on 60%.** Keep 40% of the prompts aside, tune the description on the rest, and report the held-out rate. Pick the version with the best held-out rate, which is often not the last one.
+2. **Run each prompt three times** in the sandbox, with `--box-skills`, which gives the session the skill listing a real session on this box gets, `timeout 300 ... --thinking low`, and no `--append-system-prompt`.
+3. **Count the reads:** `grep -c 'skill://<name>' runs/<id>/stdout` is more than 0 when the session read the skill.
+4. **Tune on 60%.** Keep 40% of the prompts aside, tune the description on the rest, and report the held-out rate.
+5. **Pick the version with the best held-out rate**, which is often not the last one.
 
 ## Scoring
 
@@ -68,6 +70,6 @@ Pick the route by what the change changes:
 | A prompt that fresh agents follow, each run scored from what its agent wrote | Use cybermonklabs/legion's runner in `packages/pi-legion/scripts/skill-scenarios/`, which compares two checkouts' versions of a skill (`rig.sh`'s header gives its commands and the number of runs), or, where `packages/pi-legion/scripts/skill-cuts/` exists, the runner its README gives, which tests whether a cut of a skill's text keeps what agents do with it. Read both with `gh api repos/cybermonklabs/legion/contents/<path>` |
 | A prompt that neither runner covers | Build its runner in the repository whose prompt it tests, so that it gates that repository's pull requests: `omp --mode rpc` with the production prompt, tools that record each Dispatch, Envoy and Legion call instead of making it, repeated trials, and a control run on the unchanged prompt |
 
-**The readout** (`skill://reflect/references/experiments.md`, which runs `experiments-readout.py`) compares sessions with a feature on against sessions with it off, over a past window in which the feature's committed gate was `random`; `git log -p` on `gates.json` shows when. It cannot measure a feature that was `on` or `off` for every session of the window. For each outcome (the share of Sami's turns that correct the agent, the share of merged pull requests that the delivery dashboard marks as rework, spend per merged pull request) it gives the difference with a 95% interval. Report that interval, never "no effect": a week of traffic detects only large effects.
+**Report the readout's interval, never "no effect":** a week of traffic detects only large effects. The readout (`skill://reflect/references/experiments.md`, which runs `experiments-readout.py`) compares sessions with a feature on against sessions with it off, over a past window in which the feature's committed gate was `random`; `git log -p` on `gates.json` shows when. It cannot measure a feature that was `on` or `off` for every session of the window. For each outcome (the share of Sami's turns that correct the agent, the share of merged pull requests that the delivery dashboard marks as rework, spend per merged pull request) it gives the difference with a 95% interval.
 
 The archived `agent-evals` runs, cases and comparison code are in `sjawhar/agent-eval-data`: reproduce a comparison with `uv run --project <clone> agent-evals compare --run-dir <run>`.

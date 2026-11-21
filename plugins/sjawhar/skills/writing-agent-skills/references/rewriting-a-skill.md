@@ -4,12 +4,14 @@ Rewrite or shorten a skill so that it keeps each rule an agent needs and loses t
 
 **Done when:** steps 1, 2 and 4 pass on each skill you rewrite, step 3 passes on the skills it selects, each step's output is in the commit message or the pull request, and the week of checks after it lands is posted.
 
-Fresh agents run steps 1 and 2, never you: an author does not see the gaps in their own text. Put each step's output in the commit message or the pull request, so that the next editor sees why each line went.
+Have fresh agents run steps 1 and 2, never you: an author does not see the gaps in their own text.
+
+Put each step's output in the commit message or the pull request, so that the next editor sees why each line went.
 
 ## Before you start
 
 1. **Copy the old text** to a scratch directory: `cp -r <skill> "$(mktemp -d)"/old`. Steps 1 and 3 compare against it.
-2. **Measure the old text** with step 4, and keep the output for the commit, which reports old and new numbers.
+2. **Measure the old text** with step 4. Keep the output: the commit reports old and new numbers.
 3. **Find what the skill is for in practice.** `tq search --commands 'skill://<name>' --days 30 --limit 20` lists sessions that loaded it. Read two or three at the point of load, and list what each needed: a command, a fact, a correction the user gave.
 4. **Write rules for those needs**, not for what the old text says.
 
@@ -52,9 +54,10 @@ Fresh agents run steps 1 and 2, never you: an author does not see the gaps in th
    | A sentence a careful engineer would read twice | Three rules packed into one sentence | Short sentences, one idea each |
    | A line that breaks a rule of `style.md` | A rule buried in a paragraph | The line in that rule's form |
 
-2. **Answer each finding:** fix it, or answer it with one line of evidence. Fix a finding by replacing words, and add a clause only for a missing definition.
+2. **Answer each finding:** fix it, or answer it with one line of evidence. Fix a finding by replacing words; where words cannot fix it, add a clause: a missing definition, a reason the rule needs, or the condition that separates two rules.
 3. **Check only the changed lines** in each later round.
-4. **Stop after three rounds**, and report no finding twice.
+4. **Stop after three rounds.**
+5. **Report no finding twice.**
 
 ## Step 3: Test the behavior of the most-loaded skills
 
@@ -69,7 +72,11 @@ tq sql "SELECT extract(command, 'skill://([A-Za-z0-9_.-]+)') AS skill,
         GROUP BY skill ORDER BY sessions DESC LIMIT 40"
 ```
 
-It counts explicit `read` calls only. Treat a skill that the harness injects at session start (such as `dispatch-first`) as most-loaded: it loads in every session. Run no control arm: this step compares old and new text, to show that the rewrite lost nothing.
+It counts explicit `read` calls only.
+
+Treat a skill that the harness injects at session start (such as `dispatch-first`) as most-loaded: it loads in every session.
+
+Run no control arm: this step compares old and new text, to show that the rewrite lost nothing.
 
 1. **Pick three cases** from real sessions that loaded the skill, at least one where the agent got it wrong or the user corrected it (`tq search --human '<the skill's subject>'`). Write each as the raw task the session got, with no hint of the expected answer.
 2. **Write the pass bar** for each case: an action or output a transcript shows.
@@ -80,8 +87,9 @@ It counts explicit `read` calls only. Treat a skill that the harness injects at 
 
 ## Step 4: Check the size and the description
 
-1. **Run `check_skill.py`** on each skill, as SKILL.md's "Limits" says.
-2. **Move a rule that would not fit** into a reference, with its whole block, and name the reference at its step; never pass the limits.
-3. **Watch the week after it lands.** Run the check on each rewritten skill daily for a week, with `--log ~/.cache/skill-sizes.tsv` (one dated row per skill): rewritten instruction files regrow.
-4. **Post the week's rows** on the rewrite's pull request.
-5. **Shrink a skill that passes a limit** as SKILL.md, "Step 4: Remove rules", says.
+1. **Run `check_skill.py`** on each skill, as SKILL.md's "Step 5: Check the skill" says.
+2. **Move a rule that would not fit** into a reference, with its whole block, named at its step.
+3. **Never go over the limits** to keep a rule.
+4. **Watch the week after it lands.** Run the check on each rewritten skill daily for a week, with `--log ~/.cache/skill-sizes.tsv` (one dated row per skill): rewritten instruction files regrow.
+5. **Post the week's rows** on the rewrite's pull request.
+6. **Shrink a skill that goes over a limit** as SKILL.md, "Step 4: Remove rules", says.

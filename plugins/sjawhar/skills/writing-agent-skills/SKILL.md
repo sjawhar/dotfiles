@@ -7,9 +7,11 @@ description: "Use when you need evidence a change helps (an advisor, a skill, ag
 
 Write, test, shorten or delete a skill so that an agent loads it for the right tasks and follows each of its rules.
 
-**Done when:** `check_skill.py` passes the skill with no warning, step 3's test passes for each change to what an agent does, and each file that names a skill you renamed, moved or deleted is fixed.
+**Done when:** step 5's check passes the skill with no warning, step 3's test passes for each change to what an agent does, and each file that names a skill you renamed, moved or deleted is fixed.
 
-For an agent guide (AGENTS.md, CLAUDE.md), take its shape and size from `updating-docs`, and use steps 1 and 3 for its rules.
+For an agent guide (AGENTS.md, CLAUDE.md), take its shape and size from `updating-docs`.
+
+Use steps 1 and 3 for an agent guide's rules too.
 
 ## Limits
 
@@ -30,11 +32,9 @@ For an agent guide (AGENTS.md, CLAUDE.md), take its shape and size from `updatin
 | A block that only some tasks need | Move it into `references/<topic>.md`, one level deep, and name it at the step that needs it, with its condition |
 | A reference that every task reads | Merge it into SKILL.md when the merged file stays within the limits |
 | A reference that nothing names | Delete it |
-| A file the skill tells an agent to copy whole into another place (a brief, a form) | Put it under `assets/`, where the Agent Skills specification puts templates; `check_skill.py` reads `templates/` the same way. Only that directory makes a file a template, and the limits do not hold a template |
+| A file the skill tells an agent to copy whole into another place (a brief, a form) | It may go under `assets/`, where the Agent Skills specification puts templates; `check_skill.py` reads `templates/` the same way. Only that directory makes a file a template, and the limits do not hold a template |
 
-- **Before you rename, move or delete a skill, run `git grep -n <name>` and fix each namer in the same change:** code, prompts and other skills name skills and their paths, and code reads some frontmatter (`mcp:`).
-- **Run the check:** `uv run --script ~/.dotfiles/plugins/sjawhar/skills/writing-agent-skills/scripts/check_skill.py <skill dir>...`; `--help` lists each check.
-- **Fix every FAIL and each warning.**
+- **Before you rename, move or delete a skill, one of its paths or a frontmatter field, run `git grep -n <name>` and fix each namer in the same change:** code, prompts and other skills that name it, or read a field such as `mcp:`, break.
 
 ## Step 1: Decide that a rule is needed
 
@@ -46,7 +46,9 @@ For an agent guide (AGENTS.md, CLAUDE.md), take its shape and size from `updatin
 
 ## Step 2: Write the body
 
-**Read `references/style.md` now**, before you write any line of a skill. Choose the form by the failure:
+**Read `references/style.md` now**, before you write any line of a skill.
+
+Choose the form by the failure:
 
 | The failure | The form |
 | --- | --- |
@@ -57,7 +59,8 @@ For an agent guide (AGENTS.md, CLAUDE.md), take its shape and size from `updatin
 | The agent already does it in a control run | Nothing |
 
 - **Give a reason only where the rule would look arbitrary** (style rule 5), and never one that restates the rule.
-- **Use the words the code uses**, with a verb and an object in every instruction.
+- **Use the words the code uses.**
+- **Give every instruction a verb and an object.**
 - **Write plain English, not ASD-STE100:** a strict rewrite drops facts.
 - **State the condition that decides:** "unless it matters" or "where reasonable" makes the rule optional.
 - **Keep the words that set a rule's scope** ("before every push", "in Rust files"): models apply a rule only as broadly as it says.
@@ -67,15 +70,19 @@ For an agent guide (AGENTS.md, CLAUDE.md), take its shape and size from `updatin
 
 ## Step 3: Test it
 
-Test every new skill and every edit that changes what an agent does. **Read `references/testing.md` now**, before you run a test. Read its section "Measuring a harness change" when the change is to the harness (an extension feature, a context line, an advisor prompt) or to a gate or classifier that predicts Sami's decisions, or when you judge text by the fleet's records.
+**Read `references/testing.md` now**, before you test a new skill or an edit that changes what an agent does: it has the arms, the sandbox command and the scoring rules.
+
+Read its section "Measuring a harness change" when the change is to the harness (an extension feature, a context line, an advisor prompt) or to a gate or classifier that predicts Sami's decisions, or when you judge text by the fleet's records.
 
 1. **Real cases.** Take cases from real sessions where the failure happened: invented cases pass where real ones fail.
 2. **Freeze first.** Before any model call, freeze the cases, the arms and each case's pass bar, so that no result steers them.
 3. **Blind runs.** Run each case in a fresh session that gets the raw task, not your diagnosis, and is not told it is a test.
 4. **Three arms.** Run the old text, the new text and a no-guidance control 3 times each, and 3 more when the arms differ by one or two runs.
 5. **Near misses.** For a description, also run near-miss prompts that must not load it.
-6. **Held-out cases.** Before you tune, set aside 40% of the cases (rounded down, at least one), tune on the rest, and report the held-out ones: a variant tuned on the cases you report wins only those. Revert a change that improves only the tuned ones.
-7. **Three review rounds.** Stop a review loop after three rounds, check only what changed in each, and never repeat a finding.
+6. **Held-out cases.** Before you tune, set aside 40% of the cases (rounded down, at least one); tune on the rest and report the held-out ones: a variant tuned on the cases you report wins only those.
+7. **Tuned-only gains.** Revert a change that improves only the tuned ones.
+8. **Three review rounds.** Stop a review loop after three rounds.
+9. **Only the change.** In each later round, check only what changed, and repeat no finding.
 
 ## Step 4: Remove rules
 
@@ -87,6 +94,11 @@ Test every new skill and every edit that changes what an agent does. **Read `ref
 | You remove a required step | Name what now makes it happen (a script, a hook, another rule); if nothing does, keep the step, because a step left to choice gets skipped |
 | A skill is too long | Move or delete whole blocks, not words: squeezing wording drops rules unnoticed |
 
-## Step 5: Rewrite an existing skill
+## Step 5: Check the skill
+
+1. **Run the check:** `uv run --script ~/.dotfiles/plugins/sjawhar/skills/writing-agent-skills/scripts/check_skill.py <skill dir>...`; `--help` lists each check.
+2. **Fix every FAIL and each warning.**
+
+## Step 6: Rewrite an existing skill
 
 **Read `references/rewriting-a-skill.md` now**, before you rewrite or shorten an existing skill: it has the instruction map, the slop check, the behavior test and the size checks.
