@@ -75,6 +75,18 @@ class ClaudeCodeSettings(Case):
         self.started(self.claude(clone, "-cp", "hi"), "claude")
         self.assertEqual(listener.paths(), [WHOAMI])
 
+    def test_a_flag_given_a_value_is_not_print_mode(self) -> None:
+        """Claude Code rejects `--print=false` (`error: unknown option '--print=false'`) and starts
+        nothing, so the untrusted clone's settings are refused, not read and sent."""
+        clone, listener = self.listening_clone()
+        for args in (("--print=false", "hi"), ("--verbose=x", "-p")):
+            with self.subTest(args=args):
+                self.refused(self.claude(clone, *args), self.TRUST)
+        self.assertEqual(listener.calls, [])
+        # Control: `--print hi` is print mode, so the block is read and its bearer asked about once.
+        self.started(self.claude(clone, "--print", "hi"), "claude")
+        self.assertEqual(listener.paths(), [WHOAMI])
+
     def test_a_subfolder_of_a_trusted_repository_is_checked(self) -> None:
         repo = self.tmp / "trusted-repo"
         (repo / ".git").mkdir(parents=True)

@@ -415,9 +415,10 @@ class ClaudeCodesTrust(Unit):
             with self.subTest(args=args):
                 self.assertFalse(self.launching.prints(args))
         # Controls: no p; a prompt after `--`; help and version, which start no session; an option
-        # Claude Code does not know, which starts none either.
+        # Claude Code does not know, or a flag given a value (`error: unknown option '--print=false'`),
+        # which start none either.
         for args in (["-c", "hi"], ["hi"], ["--permission-mode", "plan"], ["-c", "--", "-p"], ["-hp"], ["-p", "-v"],
-                     ["--help", "-p"], ["-xp"]):
+                     ["--help", "-p"], ["-xp"], ["--print=false", "hi"], ["--verbose=x", "-p"], ["-p", "--print=1"]):
             with self.subTest(args=args):
                 self.assertFalse(self.launching.prints(args))
 

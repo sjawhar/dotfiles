@@ -381,15 +381,16 @@ def prints(args: list[str]) -> bool:
     or `p` in a single-dash cluster before the cluster's first letter that takes a value, whose value
     is the rest of the cluster (`-cp` prints, `-nprod` names the session "prod"), or the next argument
     when the letter ends the cluster. An option's separate value is skipped (`-n -prod`, `--model -p`).
-    Help, version and an option Claude Code does not know start no session, so nothing prints."""
+    Help, version and an option Claude Code does not know, a flag given a value (`--print=false`)
+    among them, start no session, so nothing prints."""
     printing, i = False, 0
     while i < len(args) and args[i] != "--":
         arg, i = args[i], i + 1
         follows = i < len(args) and not args[i].startswith("-")  # an optional value is there
         if arg.startswith("--"):
             name, eq, _ = arg.partition("=")
-            if name in ("--help", "--version"):
-                return False
+            if name in ("--help", "--version") or (eq and name in CLAUDE_NO_VALUE):
+                return False  # `--print=false` is `error: unknown option '--print=false'`
             printing = printing or name == "--print"
             if not eq and name not in CLAUDE_NO_VALUE and (name not in CLAUDE_OPTIONAL_VALUE or follows):
                 i += 1
