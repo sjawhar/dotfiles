@@ -3694,14 +3694,6 @@ cmd_adopt() {
     [[ ! -e "$AGENTBOX_IDENTITY_FILE" ]] || die "adopt runs on the host, where the box's launcher runs"
     state="$(box_container_state "$box")"
     [[ "$state" == running ]] || die "Docker says $box is $state, not running; nothing was done"
-    # One adopt of a box at a time, from its first read to its respawn: a second adopt that also
-    # found the old launcher would respawn the pane again, and that respawn's hangup reaches the
-    # first adopt's new launcher, whose HUP trap hangs the box up. The lock is in the box's
-    # runtime directory, which no box reaches; the respawned launcher does not inherit it.
-    local lock_fd
-    [[ -d "$RUN_BASE/$box" ]] || die "$box has no runtime directory $RUN_BASE/$box on this host; nothing was done"
-    exec {lock_fd}>>"$RUN_BASE/$box/adopt.lock" || die "cannot open $RUN_BASE/$box/adopt.lock; nothing was done"
-    flock -n "$lock_fd" || die "another agentbox adopt of $box runs; nothing was done"
     for p in "$PROC"/[0-9]*; do
         [[ -O "$p" ]] || continue
         mapfile -d '' -t args <"$p/cmdline" 2>/dev/null || continue
@@ -3735,6 +3727,27 @@ cmd_adopt() {
     server="${tmux_env%%,*}" spid="${tmux_env#*,}" spid="${spid%%,*}"
     [[ "$pane" =~ ^%[0-9]+$ && -S "$server" ]] || die "$box's launcher (pid $launcher) names no tmux pane and server (TMUX_PANE='$pane', TMUX='$tmux_env'), so its pane cannot be given to a new launcher; nothing was done"
     move_tmux_bin "$spid"
+    # The box's runtime directory and record are where its launcher put them: its own
+    # AGENTBOX_RUN_BASE, AGENTBOX_DISKS and AGENTBOX_RECORDS, when it had them, not this shell's.
+    local rb="" dk="" rc=""
+    for kv in ${carry[@]+"${carry[@]}"}; do
+        case "$kv" in
+            AGENTBOX_RUN_BASE=*) rb="${kv#*=}" ;;
+            AGENTBOX_DISKS=*) dk="${kv#*=}" ;;
+            AGENTBOX_RECORDS=*) rc="${kv#*=}" ;;
+        esac
+    done
+    [[ -z "$rb" ]] || RUN_BASE="$rb"
+    [[ -z "$dk" ]] || BOX_DISKS="$dk" BOX_RECORDS="$dk"
+    [[ -z "$rc" ]] || BOX_RECORDS="$rc"
+    # One adopt of a box at a time, from its first read to its respawn: a second adopt that also
+    # found the old launcher would respawn the pane again, and that respawn's hangup reaches the
+    # first adopt's new launcher, whose HUP trap hangs the box up. The lock is in the box's
+    # runtime directory, which no box reaches; the respawned launcher does not inherit it.
+    local lock_fd
+    [[ -d "$RUN_BASE/$box" ]] || die "$box has no runtime directory $RUN_BASE/$box on this host; nothing was done"
+    exec {lock_fd}>>"$RUN_BASE/$box/adopt.lock" || die "cannot open $RUN_BASE/$box/adopt.lock; nothing was done"
+    flock -n "$lock_fd" || die "another agentbox adopt of $box runs; nothing was done"
     cwd="$(readlink "$PROC/$launcher/cwd" 2>/dev/null)" || cwd="$HOME"
     if ! cstart="$(proc_start "$PROC/$client")" || ! lstart="$(proc_start "$PROC/$launcher")"; then
         die "$box's launcher (pid $launcher) or client (pid $client) ended while it was read; nothing was done"

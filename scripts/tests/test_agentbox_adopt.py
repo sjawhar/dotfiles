@@ -116,15 +116,19 @@ class Fixture(unittest.TestCase):
         self.fake(launcher.pid, upper.pid, launcher_argv, 200, {
             "TMUX_PANE": "%7", "TMUX": f"{self.sock},4242,0", "AGENTBOX_BOXES": "/boxes/of/that/launcher",
             "AGENTBOX_SELF_COPY": "/tmp/agentbox-self-AbCdEf", "PATH": "/bin",
+            "AGENTBOX_RUN_BASE": str(self.run_base), "AGENTBOX_DISKS": str(self.disks),
         }, session=launcher.pid if leader else upper.pid)
         self.fake(client.pid, launcher.pid, ["docker", "run", "--init", "--name", BOX, "-it", "img", "omp"], 300,
                   session=launcher.pid if leader else upper.pid)
         return upper, launcher, client
 
     def adopt(self, prelude: str = "", **env: str) -> subprocess.CompletedProcess[str]:
+        """`agentbox adopt BOX` from a shell whose AGENTBOX_RUN_BASE and AGENTBOX_DISKS are not the
+        launcher's: the box's runtime directory and record are where its launcher put them."""
+        operator = {"AGENTBOX_RUN_BASE": str(self.root / "operator-run"), "AGENTBOX_DISKS": str(self.root / "operator-disks")}
         return subprocess.run(
             ["bash", "-c", f'source "{AGENTBOX}"\n{prelude}cmd_adopt {BOX}'],
-            capture_output=True, text=True, env={**self.env, **env}, check=False, timeout=120,
+            capture_output=True, text=True, env={**self.env, **operator, **env}, check=False, timeout=120,
         )
 
     def calls(self, prefix: str) -> list[str]:
@@ -186,7 +190,8 @@ class Adopt(Fixture):
         inner = args[11]
         # DOTFILES_DIR too: without it the new launcher reads ~/.dotfiles' files beside a checkout
         # elsewhere, which ended it on the test VM (2026-11-21, no broker-url.sh there).
-        self.assertIn(f"env DOTFILES_DIR={DOTFILES} AGENTBOX_BOXES=/boxes/of/that/launcher {DOTFILES}/scripts/agentbox adopt --pane {BOX};", inner)
+        self.assertIn(f"env DOTFILES_DIR={DOTFILES} AGENTBOX_BOXES=/boxes/of/that/launcher AGENTBOX_RUN_BASE={self.run_base}"
+                      f" AGENTBOX_DISKS={self.disks} {DOTFILES}/scripts/agentbox adopt --pane {BOX};", inner)
         self.assertNotIn("AGENTBOX_SELF_COPY", inner)
         self.assertIn("exec bash -i", inner)
 
