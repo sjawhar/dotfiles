@@ -75,8 +75,8 @@ def default_layout(root: Path, config_dir: str = ".omp") -> Scratch:
         "HOME": str(home),
         "PATH": f"{stubs}:/usr/bin:/bin",
         "XDG_CONFIG_HOME": str(home / ".config"),
-        # No memory scope: with no user manager here each launch would wait out the shim's
-        # 10 s scope retry, and the memory ceiling has its own test.
+        # No memory scope: each launch would otherwise ask the real user manager for a transient
+        # scope, and the memory ceiling has its own test.
         "OMP_MEMORY_SCOPE": "off",
         # scripts/agent-session makes directories under /mnt/nvme/<user> (or /mnt/scratch/<user>)
         # and /mnt/durable/<user> where they exist. A big-disk home that does not exist and no

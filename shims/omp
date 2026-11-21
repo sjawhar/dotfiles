@@ -489,16 +489,28 @@ elif [[ -n "${OMP_MEMORY_MAX:-}" ]] && command -v systemd-run >/dev/null 2>&1; t
     mem_max="$OMP_MEMORY_MAX"
     unset OMP_MEMORY_MAX
     export OMP_MEMORY_SCOPE="$mem_max"
+    # systemd-run --user finds the user manager through XDG_RUNTIME_DIR. A caller that scrubs its
+    # environment (`env -i`, a harness that builds one from nothing) drops it while the user's
+    # runtime directory is there, so it is taken from /run/user/<uid> (OMP_USER_RUNTIME_DIR, for
+    # tests). With neither, no probe can reach the manager, so none is made.
+    if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
+        user_runtime="${OMP_USER_RUNTIME_DIR:-/run/user/$(id -u)}"
+        [[ -d "$user_runtime" ]] && export XDG_RUNTIME_DIR="$user_runtime"
+    fi
     # Under load the systemd user manager waits on the kernel's cgroup lock and a scope request
     # times out ("Failed to start transient scope unit: Connection timed out"): 5 of 7 tries did
     # between 05:04 and 05:20Z on 2026-11-02, at load 450-520. A session started then would run
-    # with no ceiling and no OOMPolicy, so the probe tries once more after 10 s before falling
-    # back. A box never reaches here: it took the branch above.
+    # with no ceiling and no OOMPolicy, so after a timeout the probe tries once more 10 s later.
+    # Any other failure (no user manager to reach) would fail again, so it is not retried: from a
+    # scrubbed environment that retry cost every omp 10 s for nothing. A box never reaches here: it
+    # took the branch above.
+    probe_err=""
     scope_probe() {
-        systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 -p OOMPolicy=continue -- true \
-            >/dev/null 2>&1
+        probe_err="$(systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 -p OOMPolicy=continue \
+            -- true 2>&1 >/dev/null)"
     }
-    if scope_probe || { sleep 10 && scope_probe; }; then
+    if [[ -n "${XDG_RUNTIME_DIR:-}" ]] \
+        && { scope_probe || { [[ "$probe_err" == *"timed out"* ]] && sleep 10 && scope_probe; }; }; then
         # A non-interactive shell gives a background job /dev/null as stdin unless the job names
         # its own, and interactive omp then refuses to start ("stdin is not a TTY"). So hand the
         # job the wrapper's own stdin through a spare descriptor. With job control off the job
@@ -526,7 +538,12 @@ elif [[ -n "${OMP_MEMORY_MAX:-}" ]] && command -v systemd-run >/dev/null 2>&1; t
         fi
         exit "$omp_status"
     fi
-    echo "omp: systemd-run refused a $mem_max scope; starting without a memory ceiling" >&2
+    if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
+        echo "omp: no user runtime directory (XDG_RUNTIME_DIR, /run/user/$(id -u)); starting without a memory ceiling" >&2
+    else
+        probe_err="${probe_err//$'\n'/; }"
+        echo "omp: systemd-run refused a $mem_max scope (${probe_err:-no reason given}); starting without a memory ceiling" >&2
+    fi
 fi
 
 exec "$DOTFILES_DIR/scripts/agent-session" omp "$@"
