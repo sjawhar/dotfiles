@@ -15,21 +15,25 @@
 # xhigh too, and that route cost $13,112 of OpenAI on 11-06..11-08. This script:
 #   1. in omp/models.local.yml, declares GPT-6.1 Sol and its Flex tier twice on the same
 #      route: as the provider `model-gateway-openai` (OpenAI Responses at <gateway>/v1),
-#      sami-rocqperf's ids, and as `model-gateway/openai/gpt-6.1-sol[-flex]`, the ids
-#      omp/config.yml's Sol chains name second. It removes every other `openai/` model from
-#      `model-gateway`, so nothing here reaches Terra, Astra or Luna;
+#      sami-rocqperf's ids, and as `model-gateway/openai/gpt-6.1-sol[-flex]`, ids a session
+#      started before 2026-11-07 knew and omp/config.yml still names as chain keys. It removes
+#      every other `openai/` model from `model-gateway`, so nothing here reaches Terra, Astra or Luna;
 #   2. in omp/config.local.yml, points the cross-family astra, astra-api and gpt-api agents at
-#      `model-gateway/openai/gpt-6.1-sol` (the id a session started before step 1 already knows: a
-#      live session re-reads config.local.yml at each subagent spawn but keeps the models.yml it
-#      started with); removes any slow or deep role and any sami-proxy override, so those take
-#      config.yml's Codex models and their Claude fallback; leaves review and oracle to omp/config.yml;
-#      and removes the fallback chains that sent openai-codex/<id> and openai/<id> to gateway models;
+#      `model-gateway-openai/openai/gpt-6.1-sol`, the id the review and oracle roles resolve to.
+#      Not `model-gateway/openai/...`: that walk goes to Codex Sol, whose chain names
+#      `model-gateway-openai/openai/gpt-6.1-sol`, so one request reached the same gateway route
+#      twice. Every omp on this box started after ~/.omp/agent/models.yml declared
+#      `model-gateway-openai` (2026-11-07 01:55Z), so a live session that re-reads config.local.yml
+#      at a subagent spawn resolves the id. It removes any slow or deep role and any sami-proxy
+#      override, so those take config.yml's Codex models and their Claude fallback; leaves review and
+#      oracle to omp/config.yml; and removes the fallback chains that sent openai-codex/<id> and
+#      openai/<id> to gateway models;
 #   3. rebuilds ~/.omp/agent/models.yml with scripts/omp-models-build, so a new omp reads it.
 # sami-rocqperf's overlays are not touched.
 set -euo pipefail
 
 [[ "$(hostname -s)" == sami-devbox ]] || { echo "sami-devbox-model-routes: sami-devbox only" >&2; exit 1; }
-DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+export DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 models="$DOTFILES_DIR/omp/models.local.yml"
 config="$DOTFILES_DIR/omp/config.local.yml"
 for f in "$models" "$config"; do [[ -f "$f" ]] || { echo "sami-devbox-model-routes: no $f" >&2; exit 1; }; done
@@ -43,7 +47,7 @@ SOL=openai/gpt-6.1-sol
 # @review and @oracle lead on the Flex tier (omp/config.yml, 2026-11-04), so this box must
 # declare it as well, or those chains fall through to the standard ids below it.
 FLEX=openai/gpt-6.1-sol-flex
-ROUTE="model-gateway/$SOL"
+ROUTE="model-gateway-openai/$SOL"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -93,7 +97,7 @@ ROUTE="$ROUTE" yq -i '
 cmp -s "$tmp/models.yml" "$models" || mv "$tmp/models.yml" "$models"
 cmp -s "$tmp/config.yml" "$config" || mv "$tmp/config.yml" "$config"
 
-DOTFILES_DIR="$DOTFILES_DIR" "$DOTFILES_DIR/scripts/omp-models-build"
+"$DOTFILES_DIR/scripts/omp-models-build"
 
 out="${OMP_AGENT_DIR:-$HOME/.omp/agent}/models.yml"
 echo "sami-devbox-model-routes: model-gateway-openai: $(yq -r '[.providers["model-gateway-openai"].models[].id] | join(" ")' "$out"); model-gateway openai/: $(yq -r '[.providers["model-gateway"].models[].id | select(test("^openai/"))] | join(" ")' "$out") at $url/v1"

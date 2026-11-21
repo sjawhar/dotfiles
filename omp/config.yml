@@ -179,7 +179,8 @@ retry:
     # machines declare the gateway's Sol as `model-gateway-openai/openai/gpt-6.1-sol`;
     # sami-devbox also declares the same route as `model-gateway/openai/gpt-6.1-sol`
     # (devbox/sami-devbox-model-routes: one URL, one `scripts/gateway-token`
-    # key), the id its own agent overrides name. So a chain names the gateway once,
+    # key), an id older sessions there still know; its agent overrides name
+    # `model-gateway-openai/openai/gpt-6.1-sol`. So a chain names the gateway once,
     # and no chain walks from one of those ids to the other: on sami-devbox that
     # hop sends the same request to the same route again (two cyber_policy
     # refusals of one Sol review on 2026-11-21 were sent again exactly that way).
