@@ -3663,9 +3663,11 @@ box_run() {
 #      parent, which is the box's launcher (`bash <copy> new …`), and the launcher's pane and tmux
 #      server (TMUX_PANE and TMUX in its environment).
 #   2. It ends the launcher with SIGKILL, which runs none of its traps: TERM or HUP would hang the
-#      box up, and the client's end would close it. Then it ends the client with TERM. The
-#      container runs on: it has no --rm, and Docker does not close a tty container's stdin when
-#      its client goes. Each pid is checked against its start time just before its signal.
+#      box up, and the client's end would close it. Then it ends the client with SIGKILL too:
+#      `docker run` passes a TERM it gets on to the box (its signal proxy), which ended the box's
+#      command on the test VM on 2026-11-21 (exit 143). The container runs on: it has no --rm, and
+#      Docker does not close a tty container's stdin when its client goes. Each pid is checked
+#      against its start time just before its signal.
 #   3. It respawns that pane (`tmux respawn-pane -k`, which keeps the pane's id and place) into
 #      `agentbox adopt --pane <box>` with the old launcher's AGENTBOX_* settings, so with the same
 #      box tree, disks and runtime directory. That launcher names itself in the box's record,
@@ -3744,8 +3746,8 @@ cmd_adopt() {
     kill -KILL "$launcher" || die "could not end $box's launcher (pid $launcher); nothing was done"
     adopt_gone "$launcher" || die "$box's launcher (pid $launcher) did not end after SIGKILL; its client and pane were left as they were"
     if [[ "$(proc_start "$PROC/$client" 2>/dev/null)" == "$cstart" ]]; then
-        kill -TERM "$client" 2>/dev/null || true
-        adopt_gone "$client" || { kill -KILL "$client" 2>/dev/null || true; adopt_gone "$client" || true; }
+        kill -KILL "$client" 2>/dev/null || true
+        adopt_gone "$client" || die "$box's docker client (pid $client) did not end after SIGKILL; its launcher is gone, and the pane was left as it was"
     fi
     "$MOVE_TMUX_BIN" -S "$server" respawn-pane -k -t "$pane" -c "$cwd" bash -i -c "$inner" \
         || die "$box's launcher and client are gone, and pane $pane would not respawn; the box runs on with no launcher. Start one in a pane: $inner"

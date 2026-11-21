@@ -5,9 +5,9 @@ it (scripts/agentbox cmd_adopt, dispatch://INFRA-4893).
 A launcher keeps the copy of scripts/agentbox it started from. One from before box_client takes
 its Docker client's end for the box's end, so a dockerd restart removes the box. `adopt` ends that
 launcher with SIGKILL (none of its traps run, so the box is not hung up), ends its `docker run`
-client with TERM, and respawns the launcher's tmux pane into `agentbox adopt --pane <box>`, which
-attaches to the box and from then on runs it as `new` does, enrolling it again when the broker
-refuses its renew as not live.
+client with SIGKILL too (`docker run` passes a TERM on to the box), and respawns the launcher's
+tmux pane into `agentbox adopt --pane <box>`, which attaches to the box and from then on runs it
+as `new` does, enrolling it again when the broker refuses its renew as not live.
 
 Technique: the processes are real (`sleep`), so the signals are; what `adopt` reads of them
 (cmdline, stat, environ, cwd) comes from a fixture /proc (AGENTBOX_PROC), as test_agentbox_move.py
@@ -134,7 +134,8 @@ class Fixture(unittest.TestCase):
 
 class Adopt(Fixture):
     def test_adopt_ends_the_launcher_and_client_and_respawns_the_pane_and_leaves_the_box_running(self) -> None:
-        """The launcher ends by SIGKILL (none of its traps can run), the client by TERM, the box
+        """The launcher and the client end by SIGKILL (a TERM would run the launcher's trap, and
+        `docker run` passes a TERM on to the box: exit 143 on the test VM, 2026-11-21), the box
         is never hung up, stopped or removed (no `docker kill`, `stop`, `rm`), and the launcher's
         pane is respawned, on its server, in its directory, into `agentbox adopt --pane BOX` with
         the launcher's AGENTBOX_* settings and not its private copy's name."""
@@ -144,7 +145,7 @@ class Adopt(Fixture):
         said = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, said)
         self.assertEqual(self.wait_end(launcher), -9, said)
-        self.assertEqual(self.wait_end(client), -15, said)
+        self.assertEqual(self.wait_end(client), -9, said)
         self.assertIsNone(upper.poll(), said)
         for verb in ("kill", "stop", "rm", "attach"):
             self.assertEqual(self.calls(f"docker {verb}"), [], said)
