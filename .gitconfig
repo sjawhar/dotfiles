@@ -12,6 +12,12 @@
 # Shared boxes have 64 cores, and git grep's default (0) starts one thread per core.
 [grep]
 	threads = 8
+# Paths no repository should ever track, for git and jj alike (jj reads core.excludesFile too).
+# CodeGraph writes .codegraph/.gitignore holding `*` and `!.gitignore`, which leaves that one file
+# visible, so jj's auto-track would snapshot it into the working change. A box sees this file and
+# global.gitignore through its ~/.gitconfig and ~/.dotfiles mounts.
+[core]
+	excludesFile = ~/.dotfiles/global.gitignore
 
 [credential "https://github.com"]
 	helper = 
