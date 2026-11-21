@@ -3662,12 +3662,14 @@ box_run() {
 #   1. It finds the box's Docker client (this user's `docker run … --name <box>`), the client's
 #      parent, which is the box's launcher (`bash <copy> new …`), and the launcher's pane and tmux
 #      server (TMUX_PANE and TMUX in its environment).
-#   2. It ends the launcher with SIGKILL, which runs none of its traps: TERM or HUP would hang the
-#      box up, and the client's end would close it. Then it ends the client with SIGKILL too:
-#      `docker run` passes a TERM it gets on to the box (its signal proxy), which ended the box's
-#      command on the test VM on 2026-11-21 (exit 143). The container runs on: it has no --rm, and
-#      Docker does not close a tty container's stdin when its client goes. Each pid is checked
-#      against its start time just before its signal.
+#   2. It stops the launcher (SIGSTOP), then ends the client with SIGKILL, then the launcher with
+#      SIGKILL. No trap of the launcher runs: TERM or HUP would hang the box up, and a running
+#      launcher would take the client's end for the box's end and close it. The client gets
+#      SIGKILL because `docker run` passes a TERM it gets on to the box (its signal proxy), which
+#      ended the box's command on the test VM on 2026-11-21 (exit 143). The container runs on: it
+#      has no --rm, and Docker does not close a tty container's stdin when its client goes. Each
+#      pid is checked against its start time just before its signal; one adopt of a box runs at a
+#      time; a launcher that is its pane's own command is refused.
 #   3. It respawns that pane (`tmux respawn-pane -k`, which keeps the pane's id and place) into
 #      `agentbox adopt --pane <box>` with the old launcher's AGENTBOX_* settings, so with the same
 #      box tree, disks and runtime directory. That launcher names itself in the box's record,
@@ -3692,6 +3694,14 @@ cmd_adopt() {
     [[ ! -e "$AGENTBOX_IDENTITY_FILE" ]] || die "adopt runs on the host, where the box's launcher runs"
     state="$(box_container_state "$box")"
     [[ "$state" == running ]] || die "Docker says $box is $state, not running; nothing was done"
+    # One adopt of a box at a time, from its first read to its respawn: a second adopt that also
+    # found the old launcher would respawn the pane again, and that respawn's hangup reaches the
+    # first adopt's new launcher, whose HUP trap hangs the box up. The lock is in the box's
+    # runtime directory, which no box reaches; the respawned launcher does not inherit it.
+    local lock_fd
+    [[ -d "$RUN_BASE/$box" ]] || die "$box has no runtime directory $RUN_BASE/$box on this host; nothing was done"
+    exec {lock_fd}>>"$RUN_BASE/$box/adopt.lock" || die "cannot open $RUN_BASE/$box/adopt.lock; nothing was done"
+    flock -n "$lock_fd" || die "another agentbox adopt of $box runs; nothing was done"
     for p in "$PROC"/[0-9]*; do
         [[ -O "$p" ]] || continue
         mapfile -d '' -t args <"$p/cmdline" 2>/dev/null || continue
@@ -3737,6 +3747,12 @@ cmd_adopt() {
     if [[ -n "$rec_pid" ]] && [[ "$rec_pid" != "$launcher" || "$rec_start" != "$lstart" ]]; then
         die "$box's record names launcher pid $rec_pid (start $rec_start), not pid $launcher (start $lstart), the parent of its docker client; nothing was done"
     fi
+    # A launcher that is its pane's own command (the session leader) cannot end without hanging up
+    # the pane's terminal: the pane closes before it can be respawned, and the kernel's SIGHUP to
+    # the foreground job reaches the box's client, which passes it on to the box.
+    local lsid
+    lsid="$(adopt_session "$launcher")" || die "cannot read the session of $box's launcher (pid $launcher); nothing was done"
+    [[ "$lsid" != "$launcher" ]] || die "$box's launcher (pid $launcher) is its pane's own command, so ending it would close the pane and hang the box up; nothing was done. Move the box at a safe point instead (agentbox move --self), which resumes its session in a new box"
     # The new launcher runs this checkout's agentbox, with this checkout as its DOTFILES_DIR (the
     # script reads files beside itself through it), and the old launcher's AGENTBOX_* settings.
     inner="env DOTFILES_DIR=$(printf '%q' "$DOTFILES_DIR")"
@@ -3744,13 +3760,18 @@ cmd_adopt() {
     inner+=" $(printf '%q' "$DOTFILES_DIR/scripts/agentbox") adopt --pane $box"
     inner="$inner; echo; echo 'agentbox: the box has exited; this pane is a shell again'; exec bash -i"
     echo "agentbox: $box: launcher pid $launcher, docker client pid $client, pane $pane; ending both, then respawning the pane into: $inner"
+    # The launcher is stopped first (SIGSTOP, which no trap can catch), so the client's end cannot
+    # wake it into closing the box; then the client ends; then the launcher. While the stopped
+    # launcher lives, its process group (the client's) is not orphaned, so no SIGHUP reaches the
+    # client from the kernel before its SIGKILL.
     [[ "$(proc_start "$PROC/$launcher")" == "$lstart" ]] || die "pid $launcher is no longer $box's launcher; nothing was done"
-    kill -KILL "$launcher" || die "could not end $box's launcher (pid $launcher); nothing was done"
-    adopt_gone "$launcher" || die "$box's launcher (pid $launcher) did not end after SIGKILL; its client and pane were left as they were"
+    kill -STOP "$launcher" || die "could not stop $box's launcher (pid $launcher); nothing was done"
     if [[ "$(proc_start "$PROC/$client" 2>/dev/null)" == "$cstart" ]]; then
         kill -KILL "$client" 2>/dev/null || true
-        adopt_gone "$client" || die "$box's docker client (pid $client) did not end after SIGKILL; its launcher is gone, and the pane was left as it was"
+        adopt_gone "$client" || die "$box's docker client (pid $client) did not end after SIGKILL; its launcher (pid $launcher) is stopped (SIGSTOP). Resume it with: kill -CONT $launcher"
     fi
+    kill -KILL "$launcher" || die "could not end $box's launcher (pid $launcher), which is stopped (SIGSTOP) and whose client is gone; end it with: kill -KILL $launcher"
+    adopt_gone "$launcher" || die "$box's launcher (pid $launcher) did not end after SIGKILL; its client is gone, and the pane was left as it was"
     "$MOVE_TMUX_BIN" -S "$server" respawn-pane -k -t "$pane" -c "$cwd" bash -i -c "$inner" \
         || die "$box's launcher and client are gone, and pane $pane would not respawn; the box runs on with no launcher. Start one in a pane: $inner"
     echo "agentbox: $box now runs under a new launcher in pane $pane; Docker says it is $(box_container_state "$box")"
@@ -3770,6 +3791,16 @@ adopt_names() {
 # adopt_ppid PID: the parent of PID (move_stat reads its stat). Status 1 when PID is gone.
 adopt_ppid() {
     move_stat "$1" && [[ "$MOVE_PPID" =~ ^[0-9]+$ ]] && printf '%s\n' "$MOVE_PPID"
+}
+
+# adopt_session PID: the session id of PID, field 6 of its stat (after the command name, which can
+# hold spaces and parentheses). Status 1 when PID is gone.
+adopt_session() {
+    local s f=()
+    s="$(cat "$PROC/$1/stat" 2>/dev/null)" || return 1
+    read -r -a f <<<"${s##*) }"
+    [[ "${f[3]:-}" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "${f[3]}"
 }
 
 # adopt_gone PID: wait up to ADOPT_GONE_WAIT s for PID to end; status 1 if it has not. A zombie

@@ -91,34 +91,39 @@ class Fixture(unittest.TestCase):
         threading.Thread(target=p.wait, daemon=True).start()
         return p
 
-    def fake(self, pid: int, ppid: int, argv: list[str], start: int, environ: dict[str, str] | None = None) -> None:
-        """What the fixture /proc says of PID: its argv, its parent, its start time (field 22 of
-        stat), and, for a launcher, its environment and working directory."""
+    def fake(self, pid: int, ppid: int, argv: list[str], start: int, environ: dict[str, str] | None = None,
+             session: int = 0) -> None:
+        """What the fixture /proc says of PID: its argv, its parent, its session (field 6 of
+        stat), its start time (field 22), and, for a launcher, its environment and working
+        directory."""
         d = self.proc / str(pid)
         d.mkdir()
         (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
-        fields = ["S", str(ppid)] + ["0"] * 17 + [str(start)] + ["0"] * 30
+        fields = ["S", str(ppid), "0", str(session)] + ["0"] * 15 + [str(start)] + ["0"] * 30
         (d / "stat").write_text(f"{pid} ({os.path.basename(argv[0])}) {' '.join(fields)}\n", encoding="utf-8")
         if environ is not None:
             (d / "environ").write_bytes(b"".join(f"{k}={v}".encode() + b"\0" for k, v in environ.items()))
             os.symlink(self.root, d / "cwd")
 
-    def box_launched(self, upper_argv: list[str] | None = None) -> tuple[subprocess.Popen[bytes], ...]:
+    def box_launched(self, upper_argv: list[str] | None = None, leader: bool = False) -> tuple[subprocess.Popen[bytes], ...]:
         """A box launched as on sami-devbox before box_client: the pane's `bash -i -c` (upper),
-        its launcher `bash <copy> new …`, and the launcher's `docker run … --name BOX` (client)."""
+        its launcher `bash <copy> new …`, and the launcher's `docker run … --name BOX` (client).
+        With `leader`, the launcher is the pane's own command, its session's leader."""
         upper, launcher, client = self.real(), self.real(), self.real()
+        (self.run_base / BOX).mkdir(exist_ok=True)
         launcher_argv = ["bash", "/tmp/agentbox-self-AbCdEf", "new", "--dir", "/x", "--", "omp"]
-        self.fake(upper.pid, 1, upper_argv or ["bash", "-i", "-c", "agentbox new …; exec bash -i"], 100)
+        self.fake(upper.pid, 1, upper_argv or ["bash", "-i", "-c", "agentbox new …; exec bash -i"], 100, session=upper.pid)
         self.fake(launcher.pid, upper.pid, launcher_argv, 200, {
             "TMUX_PANE": "%7", "TMUX": f"{self.sock},4242,0", "AGENTBOX_BOXES": "/boxes/of/that/launcher",
             "AGENTBOX_SELF_COPY": "/tmp/agentbox-self-AbCdEf", "PATH": "/bin",
-        })
-        self.fake(client.pid, launcher.pid, ["docker", "run", "--init", "--name", BOX, "-it", "img", "omp"], 300)
+        }, session=launcher.pid if leader else upper.pid)
+        self.fake(client.pid, launcher.pid, ["docker", "run", "--init", "--name", BOX, "-it", "img", "omp"], 300,
+                  session=launcher.pid if leader else upper.pid)
         return upper, launcher, client
 
-    def adopt(self, **env: str) -> subprocess.CompletedProcess[str]:
+    def adopt(self, prelude: str = "", **env: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["bash", "-c", f'source "{AGENTBOX}"\ncmd_adopt {BOX}'],
+            ["bash", "-c", f'source "{AGENTBOX}"\n{prelude}cmd_adopt {BOX}'],
             capture_output=True, text=True, env={**self.env, **env}, check=False, timeout=120,
         )
 
@@ -133,6 +138,31 @@ class Fixture(unittest.TestCase):
 
 
 class Adopt(Fixture):
+    def test_the_launcher_is_stopped_before_the_client_ends_and_ended_after(self) -> None:
+        """SIGSTOP to the launcher, then SIGKILL to the client, then SIGKILL to the launcher: a
+        launcher still running when its client ends takes that for the box's end and closes it,
+        and while the stopped launcher lives no kernel SIGHUP reaches the client's process group.
+        A `kill` function logs each signal before the builtin sends it."""
+        upper, launcher, client = self.box_launched()
+        prelude = 'kill() { [[ "$1" == -0 ]] || echo "kill $*" >>"$STUB_LOG"; builtin kill "$@"; }\n'
+        result = self.adopt(prelude)
+        said = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, said)
+        self.assertEqual(self.calls("kill "), [f"kill -STOP {launcher.pid}", f"kill -KILL {client.pid}", f"kill -KILL {launcher.pid}"], said)
+
+    def test_a_launcher_that_is_its_panes_own_command_is_refused(self) -> None:
+        """The launcher leads its pane's session: ending it would hang up the pane's terminal,
+        which closes the pane before it can be respawned and sends the client a SIGHUP that
+        docker passes on to the box. Nothing is signalled."""
+        upper, launcher, client = self.box_launched(leader=True)
+        result = self.adopt()
+        said = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, said)
+        self.assertIn("is its pane's own command", said)
+        time.sleep(0.5)
+        self.assertEqual([p.poll() for p in (upper, launcher, client)], [None, None, None], said)
+        self.assertEqual(self.calls("tmux"), [], said)
+
     def test_adopt_ends_the_launcher_and_client_and_respawns_the_pane_and_leaves_the_box_running(self) -> None:
         """The launcher and the client end by SIGKILL (a TERM would run the launcher's trap, and
         `docker run` passes a TERM on to the box: exit 143 on the test VM, 2026-11-21), the box
@@ -190,6 +220,7 @@ class Adopt(Fixture):
         """A `docker run --name BOX` started by hand from a shell: its parent is no launcher, so
         nothing is signalled (a SIGKILL would end the person's shell)."""
         shell, client = self.real(), self.real()
+        (self.run_base / BOX).mkdir()
         self.fake(shell.pid, 1, ["bash"], 100, {"TMUX_PANE": "%7", "TMUX": f"{self.sock},4242,0"})
         self.fake(client.pid, shell.pid, ["docker", "run", "--name", BOX, "img"], 300)
         result = self.adopt()
@@ -198,6 +229,22 @@ class Adopt(Fixture):
         self.assertIn("is not an agentbox launcher", said)
         time.sleep(0.5)
         self.assertEqual([shell.poll(), client.poll()], [None, None], said)
+
+    def test_a_second_adopt_of_the_same_box_is_refused_while_one_runs(self) -> None:
+        """Two adopts of one box at once could both find the old launcher and both respawn its
+        pane; the second respawn's hangup reaches the first one's new launcher, whose HUP trap
+        hangs the box up. While one adopt holds the box's adopt lock, another signals nothing."""
+        import fcntl
+        upper, launcher, client = self.box_launched()
+        with open(self.run_base / BOX / "adopt.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.adopt()
+        said = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, said)
+        self.assertIn(f"another agentbox adopt of {BOX} runs; nothing was done", said)
+        time.sleep(0.5)
+        self.assertEqual([p.poll() for p in (upper, launcher, client)], [None, None, None], said)
+        self.assertEqual(self.calls("tmux"), [], said)
 
     def test_a_box_docker_does_not_say_runs_is_refused(self) -> None:
         upper, launcher, client = self.box_launched()
