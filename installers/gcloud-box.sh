@@ -116,10 +116,14 @@ gc() {
 
 mkdir -p "$GCLOUD_DIR"
 
-# Configuration `box` exists (never activated here; step "active" below does that).
+# Configuration `box` exists (never activated here; step "active" below does that). A new one
+# gets core/disable_file_logging, which installers/gcloud-sdk.sh, run before this, sets only in the
+# configurations that exist when it runs: with it, no gcloud that reads this configuration writes
+# a log file, whatever its installation and environment (dispatch://INFRA-4824).
 ensure_box_configuration() {
     if [[ ! -f "${GCLOUD_DIR}/configurations/config_box" ]]; then
         gc config configurations create box --no-activate >/dev/null 2>&1
+        gc --configuration box config set core/disable_file_logging true >/dev/null 2>&1
         echo "gcloud-box: created configuration box"
     fi
 }
