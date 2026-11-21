@@ -46,9 +46,10 @@ AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGE
 
 FAKE_GH = r"""#!/bin/bash
 # A visibility read (scripts/github-repo-visibility): answered from $VIS_DIR/<owner>_<repo>, or refused.
-if [[ "${1:-}" == api && "${2:-}" == repos/* && "${3:-}" == --jq && "${4:-}" == .visibility ]]; then
-    printf '%s\n' "$2" >> "$VIS_LOG"
-    answer="$VIS_DIR/${2#repos/}"
+if [[ "${1:-}" == api && "${2:-}" == --hostname && "${3:-}" == github.com && "${4:-}" == repos/* && "${5:-}" == --jq \
+    && "${6:-}" == .visibility ]]; then
+    printf '%s\n' "$4" >> "$VIS_LOG"
+    answer="$VIS_DIR/${4#repos/}"
     answer="${answer%/*}_${answer##*/}"
     [[ -f "$answer" ]] || exit 1
     cat -- "$answer"
