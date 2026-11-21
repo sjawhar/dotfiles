@@ -42,7 +42,7 @@ TARGET_DESC = 300
 RULES = 40  # every-rule-obeyed rates collapse between 40 and 80 rules
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 LINK_RE = re.compile(r"\]\(([^)#\s]+)\)|`((?:references|scripts|assets|templates)/[^`\s]+)`")
-LIST_ITEM_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s")
+LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
 FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 # A sentence ends at . ! or ? that whitespace and then a capital, a backtick, a quote or * follow.
 SENTENCE_END_RE = re.compile(r"[.!?]\s+(?=[A-Z`\"'\u201c\u2018*])")

@@ -4,9 +4,9 @@ Rewrite or shorten a skill so that it keeps each rule an agent needs and loses t
 
 **Done when:** steps 1, 2 and 4 pass on each skill you rewrite, step 3 passes on the skills it selects, each step's output is in the commit message or the pull request, and the week of checks after it merges is posted.
 
-Have fresh agents run steps 1 and 2, never you: an author does not see the gaps in their own text.
+- **Have fresh agents run steps 1 and 2, never you:** an author does not see the gaps in their own text.
 
-Put each step's output in the commit message or the pull request, so that the next editor sees why each line went.
+- **Put each step's output in the commit message or the pull request**, so that the next editor sees why each line went.
 
 ## Before you start
 
@@ -72,7 +72,7 @@ Put each step's output in the commit message or the pull request, so that the ne
 
 ## Step 3: Test the behavior of the most-loaded skills
 
-Run this step for the ten most-loaded skills among those you rewrite, by sessions in the last 7 days, and for each skill whose rewrite drops or narrows a required step. This query ranks skills by sessions:
+- **Run this step for the ten most-loaded skills** among those you rewrite, by sessions in the last 7 days, and for each skill whose rewrite drops or narrows a required step. This query ranks skills by sessions:
 
 ```bash
 tq sql "SELECT extract(command, 'skill://([A-Za-z0-9_.-]+)') AS skill,
@@ -85,9 +85,9 @@ tq sql "SELECT extract(command, 'skill://([A-Za-z0-9_.-]+)') AS skill,
 
 It counts explicit `read` calls only.
 
-Treat a skill that the harness injects at session start (such as `dispatch-first`) as most-loaded: it loads in every session.
+- **Treat a skill that the harness injects at session start (such as `dispatch-first`) as most-loaded:** it loads in every session.
 
-Run no control arm: this step compares old and new text, to show that the rewrite lost nothing.
+- **Run no control arm:** this step compares old and new text, to show that the rewrite lost nothing.
 
 1. **Pick three cases** from real sessions that loaded the skill, at least one where the agent got it wrong or the user corrected it (`tq search --human '<the skill's subject>'`).
 2. **Write each case as the raw task** the session got, with no hint of the expected answer.

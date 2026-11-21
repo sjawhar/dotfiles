@@ -28,7 +28,7 @@ Measure whether a skill, an edit or one line changes what an agent does.
 4. **Batch the subagents.** Send all runs of all arms in one batch, in random order, so that they share the same conditions.
 5. **Give each subagent its arm:** "Follow this skill:" and the full text in its context, or no skill for the control.
 6. **Hide the arms from the scorer.** Name each output file by a random ID. Keep the ID-to-arm key away from the scorer.
-7. **Run the sandbox for a real brief:** it reaches only the model API, writes only its own directory, and finds HOME, /tmp and /run empty.
+7. **Run the sandbox for a real brief.** The sandbox reaches only the model API, writes only its own directory, and finds HOME, /tmp and /run empty.
 8. **Do not use omp's `--tools read,grep,glob` in its place:** plugin and MCP tools, Envoy and Slack sends among them, stay callable through `write`.
 9. **Run each arm with the settings of its test** (below), in this command:
 
@@ -61,7 +61,7 @@ Measure whether a skill, an edit or one line changes what an agent does.
 - **Score blind:** give the scorer outputs under random IDs, never the arm.
 - **Use one fresh scorer per output**, with the same brief, so that one scorer's drift cannot favour an arm.
 - **Score against a fixed list:** for a rewrite, the old text's instruction list, extracted once.
-- **Quote the line that decided each score:** a run can pass by luck or fail for a reason unrelated to the skill.
+- **Read each transcript and quote the line that decided its score:** a run can pass by luck or fail for a reason unrelated to the skill.
 - **Count no score for a run that ended in a provider or grader error:** a zero penalizes the wrong arm.
 - **Report `k/n` per arm and per case with its 95% interval**, the number of runs and the model, not only the difference between arms.
 - **Treat a difference of one or two runs in six as noise.**
@@ -74,19 +74,19 @@ Pick the route by what the change changes:
 | The change | Route |
 | --- | --- |
 | Harness behavior you can switch per session (an extension feature, a context line, an advisor) | Measure it on historical sessions, not live ones, with `reflect`'s weekly experiment readout (below). Commit no gate in `~/.dotfiles/omp/extensions/experiments/gates.json` as `random`, which draws the feature on or off in each of Sami's live sessions |
-| Skill or instruction text, to find what it gets wrong | Fix each step the draft gets wrong in your next matching task |
+| Skill or instruction text, every change | Fix each step the draft gets wrong in your next matching task |
 | Skill or instruction text, to show that it changes behavior | Run the three arms of SKILL.md, "Step 3: Test it" |
 | Skill or instruction text, judged on the fleet's records | Compare the rate per 100 records of its failure type in `reflect`'s `counts.json`, before and after the change |
-| A gate or classifier that predicts Sami's decision | Re-run the stored cases with their `score.py` in the private `sjawhar/agent-eval-data` (`experiments/askgate/`, `experiments/forkgate/`, `experiments/sami-proxy/eval/`). Report agreement with an interval, from a score that uses no LLM judge |
+| A gate or classifier that predicts Sami's decision | Re-run the stored cases with their `score.py` in the private `sjawhar/agent-eval-data` (`experiments/askgate/`, `experiments/forkgate/`, `experiments/sami-proxy/eval/`): `uv run python experiments/<experiment>/score.py runs/<run>`. Report agreement with an interval, from a score that uses no LLM judge |
 | A prompt that fresh agents follow, each run scored from what its agent wrote | Use cybermonklabs/legion's runner in `packages/pi-legion/scripts/skill-scenarios/`, which compares two checkouts' versions of a skill. `rig.sh`'s header gives its commands and the number of runs |
 | A cut of a skill's text, to test whether it keeps what agents do with it | Use the runner that the README of `packages/pi-legion/scripts/skill-cuts/` gives, where that directory exists |
 | A prompt that neither runner covers | Build its runner in the repository whose prompt it tests, so that it gates that repository's pull requests. Give it `omp --mode rpc` with the production prompt, tools that record each Dispatch, Envoy and Legion call instead of making it, repeated trials, and a control run on the unchanged prompt |
 
 - **Read either cybermonklabs/legion runner** with `gh api repos/cybermonklabs/legion/contents/<path>`.
 
-The readout (`skill://reflect/references/experiments.md`, which runs `experiments-readout.py`) compares sessions with a feature on against sessions with it off, over a past window in which the feature's committed gate was `random`. It cannot measure a feature that was `on` or `off` for every session of the window. For each outcome (the share of Sami's turns that correct the agent, the share of merged pull requests that the delivery dashboard marks as rework, spend per merged pull request) it gives the difference with a 95% interval.
+The readout (`skill://reflect/references/experiments.md`, which runs `experiments-readout.py`) compares sessions with a feature on against sessions with it off. It reads a past window in which the feature's committed gate was `random`. It cannot measure a feature that was `on` or `off` for every session of the window. For each outcome (the share of Sami's turns that correct the agent, the share of merged pull requests that the delivery dashboard marks as rework, spend per merged pull request) it gives the difference with a 95% interval.
 
 - **Find the window** with `git log -p` on `gates.json`.
 - **Report the readout's interval, never "no effect":** a week of traffic detects only large effects.
 
-To reproduce an archived `agent-evals` comparison, use `sjawhar/agent-eval-data`, which holds the runs, the cases and the comparison code: `uv run --project <clone> agent-evals compare --run-dir <run>`.
+- **Reproduce an archived `agent-evals` comparison** from `sjawhar/agent-eval-data`, which holds the runs, the cases and the comparison code: `uv run --project <clone> agent-evals compare --run-dir <run>`.

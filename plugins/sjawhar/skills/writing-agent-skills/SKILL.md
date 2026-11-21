@@ -11,9 +11,9 @@ Write, test, shorten or delete a skill so that an agent loads it for the right t
 
 ## Step 1: Decide that a rule is needed
 
-Use these steps for an agent guide's rules (AGENTS.md, CLAUDE.md) too.
+- **Use these steps for an agent guide's rules too** (AGENTS.md, CLAUDE.md).
 
-1. **Find it twice.** Find the failure in at least two sessions with `tq search` (`using-transcript-store`): one incident turned into one rule is how instruction files triple in size.
+1. **Find it twice.** Find the failure in at least two sessions with `tq search '<phrase of the failure>' --days 30` (`using-transcript-store`): one incident turned into one rule is how instruction files triple in size.
 2. **Run a control.** Run the task in a fresh session with no guidance.
 3. **Write the rule only if the control fails** in at least 2 of 3 runs: a rule the model follows anyway costs tokens on every load.
 4. **Prefer a program.** Fix the tool, or add a script or a hook, before you write prose: a check a program runs holds where prose does not.
@@ -47,7 +47,7 @@ Choose the form by the failure:
 
 ## Step 3: Test it
 
-**Read `references/testing.md` now**, before you run any test, a control run included: it has the arms, the sandbox command and the scoring rules.
+**Read `references/testing.md` now** for its arms, sandbox command and scoring rules, before you run any test, a control run included.
 
 Read its section "Measuring a harness change" when the change is to the harness (an extension feature, a context line, an advisor prompt) or to a gate or classifier that predicts Sami's decisions, or when you judge text by the fleet's records.
 
@@ -75,12 +75,12 @@ Read its section "Measuring a harness change" when the change is to the harness 
 
 ## Step 5: Check the skill
 
-1. **Run the check:** `uv run --script ~/.dotfiles/plugins/sjawhar/skills/writing-agent-skills/scripts/check_skill.py <skill dir>...`; `--help` lists each check.
+1. **Run the check:** `uv run --script ~/.dotfiles/plugins/sjawhar/skills/writing-agent-skills/scripts/check_skill.py <skill dir>...`. Its `--help` lists each check.
 2. **Fix every FAIL and each warning.**
 
 ## Step 6: Rewrite an existing skill
 
-**Read `references/rewriting-a-skill.md` now**, before you rewrite or shorten an existing skill: it has the instruction map, the slop check, the behavior test and the size checks.
+**Read `references/rewriting-a-skill.md` now** for its instruction map, slop check, behavior test and size checks, before you rewrite or shorten an existing skill.
 
 ## Limits
 
@@ -89,11 +89,10 @@ Read its section "Measuring a harness change" when the change is to the harness 
 | `description` start | "Use when" | Fails it |
 | `description` length | At most 300 characters | Fails it |
 | `description` content | When to load the skill, never its steps: an agent that reads them there follows them and skips the body | |
-| `description` near miss | The case where the agent thinks it can do without the skill ("also when the diff is pasted inline") | |
 | `SKILL.md` and each markdown file outside `assets/` and `templates/` | At most 8,000 bytes, the whole file counted; no line limit | Fails it |
 | Rules in `SKILL.md` (a list item, or a sentence of a paragraph) | At most 40. Over it, split the skill, move blocks into references, or delete rules (step 4): a model obeys fewer of its rules as their number grows | Warns |
 
-- **Put the trigger words first:** omp shows the model a hint of about 12 words made from the description, or its first 99 characters until that hint exists.
+- **Put the trigger words first, with the case where the agent thinks it can do without the skill** ("also when the diff is pasted inline"): omp shows the model a hint of about 12 words made from the description, or its first 99 characters until that hint exists.
 - **Keep in SKILL.md only the routing and the rules the model would not follow by default.**
 - **Put required steps and stop rules first:** a harness that cuts a long file keeps only its start.
 
