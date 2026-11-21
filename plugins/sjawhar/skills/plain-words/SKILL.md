@@ -46,7 +46,7 @@ Look for the first phrase first: it is the commonest.
 
 ## Do not shout
 
-No all-capitals headers, and no all-capitals phrases for emphasis. Bold only a number, a name or a choice that the reader must copy or act on after reading, such as a command to run, a deadline or the option to pick. A shouting header appears when a passage is too long to show its own point, that is, when its first sentence does not state the point: cut the passage until its first sentence does, instead of adding the header. An agent reads it as an instruction shouted twice, and a reader who sees three of them stops seeing any.
+No all-capitals headers, and no all-capitals phrases for emphasis. Bold only a number, a name or a choice that the reader must copy or act on after reading, such as a command to run, a deadline or the option to pick. In a skill, a bold label may also start a rule. A shouting header appears when a passage is too long to show its own point, that is, when its first sentence does not state the point: cut the passage until its first sentence does, instead of adding the header. An agent reads it as an instruction shouted twice, and a reader who sees three of them stops seeing any.
 
 ## What stays
 
