@@ -1360,7 +1360,7 @@ box_wait() {
 BOX_REATTACH_WAIT="${AGENTBOX_REATTACH_WAIT:-300}"
 BOX_CLIENT_RETRY=5
 box_client() {
-    local box="$1" rc=0 state code started=$SECONDS deadline=0 asked stop=0
+    local box="$1" rc=0 state="" started=$SECONDS deadline=0 asked stop=0
     shift
     trap 'stop=1' USR1
     "$@" || rc=$?
@@ -1380,18 +1380,16 @@ box_client() {
         done
         (( ! stop )) || break
         case "$state" in
-            stopped)
-                code="$(timeout "$BOX_DOCKER_READ_TIMEOUT" docker inspect -f '{{.State.ExitCode}}' "$box" 2>/dev/null)" || code=""
-                if [[ "$code" =~ ^[0-9]+$ ]]; then rc="$code"; fi
-                break
-                ;;
+            stopped) break ;;
             running)
+                # An attach that ended at once is not made again at once. A USR1 during the pause
+                # runs its trap once the pause ends, so stop is read after it.
+                (( SECONDS - started >= BOX_CLIENT_RETRY )) || sleep "$BOX_CLIENT_RETRY"
+                (( ! stop )) || break
                 if (( SECONDS >= deadline )); then
                     box_client_say "$box" "the box still runs, but every attach to it ended within ${BOX_REATTACH_WAIT}s; no more attaches"
                     break
                 fi
-                # An attach that ended at once is not made again at once.
-                (( SECONDS - started >= BOX_CLIENT_RETRY )) || sleep "$BOX_CLIENT_RETRY"
                 box_client_say "$box" "its Docker client ended (status $rc), and the box still runs; attaching to it again"
                 started=$SECONDS
                 rc=0
@@ -1403,7 +1401,17 @@ box_client() {
                 ;;
         esac
     done
+    if (( stop )) || [[ "$state" == stopped ]]; then rc="$(box_exit_code "$box" "$rc")"; fi
     return "$rc"
+}
+
+# box_exit_code BOX RC: the exit code Docker recorded for BOX's container when it has exited (or is
+# dead), else RC: for a container that is gone, never started or still running, and when Docker
+# does not answer. A client that lost dockerd ends with 125 whatever the box did.
+box_exit_code() {
+    local out
+    out="$(timeout "$BOX_DOCKER_READ_TIMEOUT" docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$1" 2>/dev/null)" || out=""
+    if [[ "$out" =~ ^(exited|dead)\ ([0-9]+)$ ]]; then echo "${BASH_REMATCH[2]}"; else echo "$2"; fi
 }
 
 # box_container_state BOX: Docker's answer about BOX's container, in one word. running; stopped
@@ -3857,11 +3865,18 @@ cmd_new() {
     # box_client ends once Docker says the container is not running, once it gave up asking, or
     # after a HUP, TERM or INT here. The first and the last close the box. A box that Docker does
     # not say has stopped is left as it is: its container, disk, directory, runtime directory and
-    # relay stay, and the collector keeps a box whose container runs.
-    if (( ! interrupted )) && [[ "$(box_container_state "$box")" != stopped ]]; then
-        trap - EXIT
-        box_client_say "$box" "the box is left as it is, and nothing of it was removed. Attach to it: docker attach $box. End it: docker stop $box (the collector that the next \`agentbox new\` starts then deletes it)"
-        exit "$rc"
+    # relay stay, and the collector keeps a box whose container runs. The state is read before
+    # `interrupted` is tested, so a signal during the read closes the box. Once the box is to be
+    # left the signals are ignored, and one that came just before that closes it.
+    local state
+    state="$(box_container_state "$box")"
+    if (( ! interrupted )) && [[ "$state" != stopped ]]; then
+        trap '' HUP TERM INT
+        if (( ! interrupted )); then
+            trap - EXIT
+            box_client_say "$box" "the box is left as it is, and nothing of it was removed. Attach to it: docker attach $box. End it: docker stop $box (the collector that the next \`agentbox new\` starts then deletes it)"
+            exit "$rc"
+        fi
     fi
     # Record the status before anything else: close_box and the exit below are where it would be
     # lost, and a box that aborted is exactly the one whose cleanup is most likely to go wrong.
