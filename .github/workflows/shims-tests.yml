@@ -1,0 +1,160 @@
+name: shims-tests
+
+# The tests under shims/tests, run as shims/AGENTS.md documents (`uvx pytest shims/tests` from the root), on an
+# ubuntu-24.04 runner given the dev box's tools the tests call, where the dev box keeps them. The shims run what
+# scripts/, mise.toml and the rest of the repository hold, so every change runs them, not only a change under shims/.
+# The push trigger checks main as merged, since a squash merge can land on a main that moved under its pull request.
+# scripts/dotfiles-publish merges without waiting for this job, and no rule makes it required.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shims-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          # The version mise.toml pins for the dev box.
+          version: "0.12.5"
+      # The dev box's tools, as the dev box holds them:
+      #   - git from Ubuntu noble (2.43.0 on sami-devbox), in place of the runner's newer one from git's PPA: the shims
+      #     handle git's own options and hooks as that version does.
+      #   - age, and sops at the version mise.toml pins: leak_terms_fixture.py encrypts the tests' own term list.
+      #   - mise, installed as installers/mise.sh installs it, at its pinned version, into bin/, with MISE_DATA_DIR
+      #     outside HOME as .bashrc sets it, and mise.toml as its global configuration, as on the dev box. Then the
+      #     pins of mise.toml the shims hand their calls to (test_shim_moved_home.py runs each one through its
+      #     shim): jj, knives, gh, tmux, pulumi, the Azure CLI (which mise installs with its pinned uv), omp,
+      #     secrets, ctx, codex (with node) and basedpyright. Each one's directory goes on PATH ahead of the
+      #     system's, as .bashrc's `mise activate` puts it.
+      #   - No gh, az, gcloud, bq or pulumi in the system directories, where the dev box has none: the runner's own
+      #     copies answered there for the pinned ones (the moved-HOME panes search /usr/local/bin:/usr/bin:/bin). The
+      #     runner's Cloud SDK stays, at ~/.gcloud/google-cloud-sdk, where the dev box installs its own.
+      - name: the dev box's tools
+        env:
+          # For mise's release lookups only (the shared anonymous rate limit), passed to mise alone below.
+          MISE_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          # The newest git of Ubuntu's own noble suites (noble-updates, noble-security, noble), as apt-cache lists them,
+          # past any PPA's (git-core's ships noble/main too).
+          noble="$(apt-cache madison git | awk -F ' [|] ' '$3 ~ / noble(-updates|-security)?\/main / && $3 !~ /launchpad/ { print $2; exit }')"
+          [[ -n "$noble" ]] || { echo "apt offers no git from Ubuntu noble" >&2; apt-cache madison git >&2; exit 1; }
+          sudo apt-get install -y -q --allow-downgrades age "git=$noble" "git-man=$noble"
+          git_version="$(git --version)"
+          [[ "$(command -v git)" == /usr/bin/git && "$git_version" == "git version 2.43."* ]] ||
+            { echo "the runner's git is $(command -v git), $git_version, not noble's 2.43" >&2; exit 1; }
+          curl -fsSLo sops https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.linux.amd64
+          echo "e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b  sops" | sha256sum -c -
+          sudo install -m 0755 sops /usr/local/bin/sops
+          export MISE_DATA_DIR="$HOME/.mise"
+          echo "MISE_DATA_DIR=$MISE_DATA_DIR" >> "$GITHUB_ENV"
+          curl -fsSL https://mise.run | MISE_VERSION=v2026.10.11 MISE_INSTALL_PATH="$GITHUB_WORKSPACE/bin/mise" sh
+          echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
+          mkdir -p "$HOME/.config/mise"
+          ln -s "$GITHUB_WORKSPACE/mise.toml" "$HOME/.config/mise/config.toml"
+          mise="$GITHUB_WORKSPACE/bin/mise"
+          cd /
+          GITHUB_TOKEN="$MISE_GITHUB_TOKEN" "$mise" install uv
+          GITHUB_TOKEN="$MISE_GITHUB_TOKEN" "$mise" install github:sjawhar/jj github:sjawhar/knives gh \
+            github:sjawhar/tmux-builds pulumi pipx:azure-cli github:sjawhar/oh-my-pi secrets github:sjawhar/ctx-memory node \
+            npm:@openai/codex npm:basedpyright
+          unset MISE_GITHUB_TOKEN
+          for binary in jj knives gh tmux pulumi az omp secrets ctx node codex basedpyright; do
+            found="$("$mise" which "$binary")"
+            [[ -x "$found" ]] || { echo "mise names no $binary: '$found'" >&2; exit 1; }
+            printf '%s\n' "${found%/*}" >> "$GITHUB_PATH"
+          done
+          sudo apt-get remove -y -q gh
+          sdk="$(readlink -e /usr/bin/gcloud)" || { echo "the runner has no /usr/bin/gcloud" >&2; exit 1; }
+          root="${sdk%/bin/gcloud}"
+          [[ "$sdk" == */bin/gcloud && "$root" != /usr && -f "$root/VERSION" ]] ||
+            { echo "the runner's gcloud is $sdk, in no Cloud SDK root" >&2; exit 1; }
+          mkdir -p "$HOME/.gcloud"
+          ln -s "$root" "$HOME/.gcloud/google-cloud-sdk"
+          sudo rm -f /usr/bin/az /usr/bin/gcloud /usr/bin/bq /usr/bin/gsutil /usr/local/bin/pulumi
+          for binary in gh az gcloud bq pulumi; do
+            if found="$(PATH=/usr/local/bin:/usr/bin:/bin command -v "$binary")"; then
+              echo "the runner still has $found" >&2
+              exit 1
+            fi
+          done
+      # test_leak_terms.py's LeakTestCase.launch, which every shim test that runs a shim, jj or an editor uses, runs it
+      # in a transient scope of the user's systemd manager (`systemd-run --user --scope`) under a task limit.
+      - name: a scope of the user manager
+        run: systemd-run --user --scope --quiet --collect -p TasksMax=64 -- true
+      # Every test runs, or is on the skip list below under its reason. The job fails on a failing test, on a skip the
+      # list does not name, on a listed test that ran, and on a test file that ran no test (it collected none, or
+      # skipped every one): scripts/pytest-expected-skips reads the run's junit report against the list, and
+      # scripts/tests/test_pytest_expected_skips.py tests each failure it reports.
+      - name: pytest shims/tests
+        env:
+          EXPECTED_SKIPS: |
+            # They need the installed public leak check, theorem-labs/agent-infra's leak-check/, which is private: the
+            # public CI of this repository cannot fetch it. Each one's own skip message says what it needs. The ones
+            # named <case>_with_the_installed_check are the installed-check forms of a case that runs here with the
+            # tests' fixture check (also_with_the_installed_check in test_jj_push_leak_gate.py).
+            # The installed check's own behaviour:
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_a_private_push_url_first_does_not_hide_the_commit
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_clean_push_runs_the_check_and_pushes
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_a_visibility_failure_is_not_called_leaked_text
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_other_names_and_url_forms_with_the_installed_check
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_every_other_target_of_a_guarded_checkout_is_decided_by_the_check_with_the_installed_check
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_the_cache_decides_and_an_unreadable_one_refuses_with_the_installed_check
+            # They need the installed public leak check: their installed-check forms caught faults of its releases.
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_a_transport_prefixed_url_is_guarded_with_the_installed_check
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_a_checkouts_own_ssh_command_makes_an_alias_unknown_with_the_installed_check
+            # They need the installed public leak check: sweep-hooks.sh, which its tag installs.
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_guarded_is_the_sweepers_rule
+            # They need the installed public leak check: the pre-push hook its tag installs (install-prepush-hook.sh).
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_the_same_verdict_as_the_git_hook
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_without_the_dispatcher_an_executable_wrapper_checks_alone_with_the_installed_check
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_without_the_dispatcher_a_non_executable_wrapper_is_checked_by_the_shim_with_the_installed_check
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_an_unsearchable_parent_of_the_cache_refuses_with_the_installed_check
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_a_cache_behind_a_symlink_into_an_unsearchable_directory_refuses_with_the_installed_check
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_a_remote_path_with_a_space_is_read_whole_with_the_installed_check
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_an_ssh_alias_with_a_hash_or_question_mark_is_guarded_with_the_installed_check
+            # They need the installed public leak check: the global hooks dispatcher its tag installs (install-global-hooks.sh).
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_with_the_global_dispatcher_a_fresh_clone_is_checked_once
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_with_the_global_dispatcher_a_checkout_holding_the_wrapper_is_checked_once
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_with_the_global_dispatcher_a_husky_hooks_path_is_checked_once
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_a_non_executable_wrapper_in_its_own_hooks_path_is_checked_by_the_shim_with_the_installed_check
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_an_executable_wrapper_in_its_own_hooks_path_still_checks_alone_with_the_installed_check
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_with_the_global_dispatcher_a_non_executable_wrapper_is_checked_once
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_an_empty_local_hooks_path_is_checked_by_the_shim
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_an_empty_worktree_hooks_path_is_checked_by_the_shim
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_with_the_global_dispatcher_the_shim_adds_no_check
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_a_persons_push_through_the_dispatcher_is_checked_once
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_a_persons_push_with_a_husky_hooks_path_is_checked_by_the_shim_with_the_installed_check
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_a_persons_no_verify_push_with_a_husky_hooks_path_is_the_users_choice_with_the_installed_check
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_a_persons_url_push_from_an_unguarded_checkout_is_checked_with_the_installed_check
+            shims/tests/test_jj_push_leak_gate.py::JjPushLeakGateTest::test_an_agents_url_push_from_an_unguarded_checkout_is_checked_with_the_installed_check
+            # They need the global hooks dispatcher of the public leak check's tag (install-global-hooks.sh and its
+            # global-hooks/), from the same private repository.
+            shims/tests/test_git_commit_trailer.py::GitCommitTrailerTest::test_with_the_global_dispatcher_a_merge_carries_one_trailer_and_each_hook_runs_once
+            shims/tests/test_git_commit_trailer.py::GitCommitTrailerTest::test_with_the_global_dispatcher_plain_git_runs_each_repository_hook_once
+            # They run inside InShimEnvironment, in google-user-token's own uv environment, which has the shim's
+            # imports; InShimEnvironment fails when one of them fails there.
+            shims/tests/test_google_user_token.py::ScopeExpansion
+            shims/tests/test_google_user_token.py::ConfigLoading
+            shims/tests/test_google_user_token.py::Delegation
+        run: |
+          rc=0
+          uvx pytest@9.2.0 -p no:cacheprovider -rs -o junit_family=xunit1 --junitxml="$RUNNER_TEMP/shims-tests.xml" \
+            shims/tests || rc=$?
+          scripts/pytest-expected-skips "$RUNNER_TEMP/shims-tests.xml" shims/tests || rc=1
+          exit "$rc"
+      # The report names each test and its result, for reading what a run collected and ran.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shims-tests-junit
+          path: ${{ runner.temp }}/shims-tests.xml
+          if-no-files-found: ignore

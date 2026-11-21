@@ -13,8 +13,9 @@ and again just past this shims dir, for shims/gh, which scripts/github-repo-visi
 call to the first gh past its own PATH entry, never to one above it. So no test can reach GitHub, even when the gate
 wrongly lets a push through, and each sink shows exactly which commit reached which URL. A fake ssh, also first on
 PATH, runs the real one with the test's own config (SSH_CONFIG), so `ssh -G` resolves the same aliases on every
-machine. The check is the installed one, found the way the shim and the pre-push hook find it; HOME is the test's own,
-so the visibility cache is the test's.
+machine. The check is FIXTURE_CHECK, a stand-in that refuses one known text, given to the shims as the installed check
+is (PUBLIC_LEAK_CHECK); a case marked needs_the_installed_check runs the installed check instead, found the way the shim
+and the pre-push hook find it. HOME is the test's own, so the visibility cache is the test's.
 """
 import hashlib
 import os
@@ -92,50 +93,32 @@ def repo_slug(url: str) -> str | None:
     return re.sub(r"\.git$", "", m.group(2).strip("/"), flags=re.I).lower()
 
 
-# leak-check-v8's public_leak_check.py (the sha256 devbox/leak-check-tag.env pins for it). Two of the gate's tests fail
-# against it and pass against v4: v8 regressions, reported to ROCQ 2026-11-05 22:3xZ, to be fixed in the check, not
-# here. Against v8 they are expected failures, so a v8 that passes them is an unexpected success and fails the run;
-# against any other check they run, and must pass, in full.
-V8_CHECK_SHA256 = "4a39983e891646e715abea1784af71c42101e8fb4f7d3f28745ab6552088b2bc"
+def needs_the_installed_check(reason: str):
+    """Marks a case of JjPushLeakGateTest that runs with the installed check, found as leak_check() finds it, and not
+    with FIXTURE_CHECK, because REASON; the case is skipped, with REASON, on a machine with no installed check."""
+    def mark(test):
+        test.needs_the_installed_check = reason
+        return test
+    return mark
 
 
-def installed_check_is_v8() -> bool:
-    try:
-        check = leak_check()
-    except unittest.SkipTest:
-        return False
-    py = check.resolve().parent / "public_leak_check.py"
-    return py.is_file() and hashlib.sha256(py.read_bytes()).hexdigest() == V8_CHECK_SHA256
+def also_with_the_installed_check(reason: str):
+    """Marks a case of JjPushLeakGateTest that tests the gate with FIXTURE_CHECK, and whose installed-check form adds what
+    only the installed check, or its tag's hooks, can show (REASON). It runs as itself with FIXTURE_CHECK, and again as
+    <name>_with_the_installed_check, marked needs_the_installed_check(REASON); the case reads self.with_fixture_check."""
+    def mark(test):
+        test.also_with_the_installed_check = reason
+        return test
+    return mark
 
 
-def v8_regression(test):
-    """Marks TEST an expected failure when the check this run uses is leak-check-v8 (v8 regression, reported to ROCQ
-    2026-11-05 22:3xZ); leaves it as it is for every other check."""
-    return unittest.expectedFailure(test) if installed_check_is_v8() else test
-
-
-# leak-check-v10's public_leak_check.py. It refuses a clean push to a `<helper>::https://github.com/...` URL whenever
-# GIT_SSH_COMMAND, GIT_SSH or core.sshCommand is set (its ssh_alias_override does not strip `<transport>::`): a v10
-# false refusal, dispatch://BET-744 (ROCQ, filed 2026-11-06). Same mechanism as v8_regression: an expected failure
-# against exactly this module, and run in full, so it must pass, against every other check; a fixed check has another
-# sha256, so the test runs normally there again.
-V10_CHECK_SHA256 = "266ea24b69d027270b015d297369ff878b4b55c1fc0b7912ddaa7a95fc0329cb"
-
-
-def installed_check_is_v10() -> bool:
-    try:
-        check = leak_check()
-    except unittest.SkipTest:
-        return False
-    py = check.resolve().parent / "public_leak_check.py"
-    return py.is_file() and hashlib.sha256(py.read_bytes()).hexdigest() == V10_CHECK_SHA256
-
-
-def v10_false_refusal(test):
-    """Marks TEST an expected failure when the check this run uses is leak-check-v10 (v10 false refusal,
-    dispatch://BET-744, ROCQ, filed 2026-11-06); leaves it as it is for every other check."""
-    return unittest.expectedFailure(test) if installed_check_is_v10() else test
-
+# Why a case needs the installed check, for needs_the_installed_check and also_with_the_installed_check.
+OWN_UNREADABLE_REFUSAL = "it asserts the installed check's own refusal of a target whose visibility it cannot read"
+TAGS_PREPUSH_HOOK = "it installs the pre-push hook of the installed check's tag (install-prepush-hook.sh)"
+TAGS_DISPATCHER = "it installs the global hooks dispatcher of the installed check's tag (install-global-hooks.sh)"
+# Its installed-check form caught a fault of a release of the check: v8 called a leak clean (reported to ROCQ
+# 2026-11-05), v10 refused a clean push (dispatch://BET-744).
+CAUGHT_A_CHECK_RELEASE = "its installed-check form caught a fault of a release of the installed check (v8, v10)"
 
 
 # The hooks dispatcher of dispatch://BET-706 R6, from a leak-check tag: `install-global-hooks.sh <dir>` builds
@@ -220,6 +203,60 @@ FAKE_GH = ('#!/bin/bash\nprintf \'%s\\036%s\\n\' "$*" "$(tr \'\\000\' \'\\037\' 
 # the gate's (scripts/github-repo-visibility), the one read the check's gh-guard passes at once. Only the process that
 # ran a read tells the two apart (gate_reads).
 VISIBILITY_READ = "api --hostname github.com repos/{} --jq .visibility"
+# The check most cases here run with: a stand-in for the installed public leak check (dispatch://INFRA-5046). Those
+# cases test the gate: whether the check runs, how often, for which URL and which update lines, and what the push does
+# when the check refuses, fails or is missing. They need a check that refuses one known text and passes the rest, not
+# the installed check's own patterns and visibility rules. So they run on any machine, a CI runner too, where the
+# installed check (theorem-labs/agent-infra's leak-check/, a private repository) is not. A case that needs the
+# installed check's own behaviour, or the hooks its tag installs, is marked needs_the_installed_check.
+# It is called as the installed one is: `<check> <remote> <url>`, in the repository, with git's update lines on stdin;
+# and `<check> gh-guard <gh arguments>` by scripts/public-text-gate, for each call shims/gh makes in an agent session.
+# It passes every gh call. It passes a push to a URL of FIXTURE_PRIVATE_URLS, exactly as written, and prints nothing, as
+# the installed check passes a push to a private repository. Otherwise it prints, first, the two kinds of advisory line
+# the installed check prints ahead of its verdict (its self-test line, and one `reviewed row unused` line), which the
+# gate's hook must pass over when it quotes the verdict in its refusal. It passes, and prints no verdict, when stdin
+# holds no update line. It refuses (exit 3) a push that sends a commit whose message or diff holds FIXTURE_CUSTOMER,
+# and names each such commit, as the installed check names a commit holding a customer's name. Otherwise it passes,
+# with a `LEAK CHECK: clean` line. It reads git with /usr/bin/git, so the recording git of setUp records none of its
+# reads.
+FIXTURE_CUSTOMER = "Fixturecorp"
+FIXTURE_PRIVATE_URLS = (PRIVATE,)
+FIXTURE_CHECK = r"""#!/bin/bash
+[[ "${1-}" != gh-guard ]] || exit 0
+if (($# != 2)); then
+    echo "LEAK CHECK ERROR: fixture check: called as: $*" >&2
+    exit 2
+fi
+url=$2
+while IFS= read -r private; do
+    [[ "$url" != "$private" ]] || exit 0
+done <<< '@PRIVATE@'
+echo "LEAK CHECK: self-test: 1 of 1 fixture canaries found" >&2
+echo "LEAK CHECK: reviewed row unused in this push: fixture/repo fixture.v 000000000000 (fixture)" >&2
+zero=0000000000000000000000000000000000000000
+updates=0
+n=0
+hits=()
+while read -r _ new _ old; do
+    [[ -n "${new-}" ]] || continue
+    updates=$((updates + 1))
+    [[ "$new" != "$zero" ]] || continue
+    range=("$new")
+    if [[ "$old" != "$zero" ]] && /usr/bin/git cat-file -e "$old^{commit}" 2> /dev/null; then range+=("^$old"); fi
+    commits="$(/usr/bin/git rev-list "${range[@]}")" || { echo "LEAK CHECK ERROR: fixture check: cannot list $new" >&2; exit 2; }
+    for c in $commits; do
+        n=$((n + 1))
+        if /usr/bin/git show --format=%B "$c" | grep -qF '@CUSTOMER@'; then hits+=("$c"); fi
+    done
+done
+if ((${#hits[@]})); then
+    echo "LEAK CHECK: refusing to push to $url: ${#hits[@]} of $n commits hold listed text" >&2
+    for c in "${hits[@]}"; do echo "LEAK CHECK:   $c [customer: @CUSTOMER@]" >&2; done
+    exit 3
+fi
+((updates)) || exit 0
+echo "LEAK CHECK: clean: $n commits" >&2
+"""
 
 # ssh for `ssh -G` alias lookups: the real ssh with only the test's config, so the user's and the system's configs
 # play no part. Aliases resolving to github.com: three as the reviewer staged them (lanes/jj-gate-review-xf-2026-11-02.md,
@@ -404,9 +441,24 @@ GUARD_TABLE = [
 
 class JjPushLeakGateTest(unittest.TestCase):
     def setUp(self):
+        reason = getattr(getattr(self, self._testMethodName), "needs_the_installed_check", None)
+        # FIXTURE_CHECK, unless the case is marked needs_the_installed_check.
+        self.with_fixture_check = reason is None
+        if not self.with_fixture_check:
+            try:
+                self.check = leak_check()
+            except unittest.SkipTest:
+                raise unittest.SkipTest(f"no public-leak-check.sh on this machine; this case needs it: {reason}") from None
         self.tmp = Path(tempfile.mkdtemp())
-        self.check = leak_check()
-        self.customer = customer_name(self.check)
+        if self.with_fixture_check:
+            self.check = self.tmp / "fixture-check" / "public-leak-check.sh"
+            self.check.parent.mkdir()
+            self.check.write_text(FIXTURE_CHECK.replace("@PRIVATE@", "\n".join(FIXTURE_PRIVATE_URLS))
+                                  .replace("@CUSTOMER@", FIXTURE_CUSTOMER), encoding="utf-8")
+            self.check.chmod(0o755)
+            self.customer = FIXTURE_CUSTOMER
+        else:
+            self.customer = customer_name(self.check)
         self.leak_text = f"(* measured on {self.customer} *)"
         fake = self.tmp / "fake"
         self.ghdir = self.tmp / "fake-gh"
@@ -621,6 +673,23 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertNotIn("Take out", r.stderr)
         self.assertNotIn(url, self.received(commit))
 
+    def assert_refused_unknown(self, r: subprocess.CompletedProcess[str], commit: str, url: str, slug: str):
+        """Refused, for a target at URL whose visibility (repository SLUG) nobody can read, so the gate guards it. The
+        installed check refuses it unread (assert_refused_unreadable). FIXTURE_CHECK reads no visibility: it refuses
+        the leaked content the gate sent it (assert_refused, with the gate's own visibility reads allowed)."""
+        if self.with_fixture_check:
+            self.assert_refused(r, commit, url, gh=True)
+        else:
+            self.assert_refused_unreadable(r, commit, url, slug)
+
+    def assert_git_refused_unknown(self, g: subprocess.CompletedProcess[str], slug: str):
+        """A plain git push of a leaking commit to a target of repository SLUG, whose visibility nobody can read,
+        refused: unread by the installed check (through its tag's pre-push hook, install_git_hook), or for the content
+        by FIXTURE_CHECK (through the shim's own gate)."""
+        self.assertNotEqual(g.returncode, 0, g.stderr)
+        want = "LEAK CHECK: refusing to push" if self.with_fixture_check else f"LEAK CHECK: cannot read the visibility of {slug}"
+        self.assertIn(want, g.stderr)
+
     def assert_refused_unread(self, r: subprocess.CompletedProcess[str], commit: str, why: str):
         """Refused before any content was read, saying so and that the commits are not the problem, and sent nowhere."""
         self.assertNotEqual(r.returncode, 0, r.stderr)
@@ -667,7 +736,11 @@ class JjPushLeakGateTest(unittest.TestCase):
 
     def install_git_hook(self):
         """Installs the pre-push hook install-prepush-hook.sh installs, so a plain git push gives the verdict to match.
-        The installer is the one beside install-global-hooks.sh (global_hooks_source), where provisioning puts it."""
+        The installer is the one beside the tag's global hooks (global_hooks_source), where provisioning puts it. With
+        FIXTURE_CHECK it installs nothing: in a checkout with no hook, the shim's own gate checks a plain git push
+        (test_a_checkout_with_no_hook_at_all_is_checked_by_the_shim), so the push still gets a verdict to match."""
+        if self.with_fixture_check:
+            return
         installer = global_hooks_source() / "install-prepush-hook.sh"
         if not installer.is_file():
             self.skipTest(f"no install-prepush-hook.sh beside {installer.parent}/install-global-hooks.sh")
@@ -803,6 +876,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assert_refused(self.jj("git", "push", "-b", "b1"), c)
         self.assertEqual(self.received(c), [PRIVATE])
 
+    @needs_the_installed_check("it tests which commits the installed check scans (what the target holds), not the gate")
     def test_a_private_push_url_first_does_not_hide_the_commit(self):
         # After git pushed to the private URL it moves refs/remotes/origin/b1 to the commit. The check once counted
         # every commit reachable from origin/* as already on the target and so scanned 0 commits for the public URL;
@@ -812,6 +886,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         c = self.leak()
         self.assert_refused(self.jj("git", "push", "-b", "b1"), c)
 
+    @also_with_the_installed_check(OWN_UNREADABLE_REFUSAL)
     def test_other_names_and_url_forms(self):
         self.remote("mirror", "git@github.com:Theorem-Labs/Rocq.git")
         self.remote("work", str(self.tmp / "private-mirror.git"))
@@ -829,20 +904,20 @@ class JjPushLeakGateTest(unittest.TestCase):
         for remote, url in urls.items():
             self.ok("bookmark", "track", f"b1@{remote}")
             self.assert_refused(self.jj("git", "push", "--remote", remote, "-b", "b1"), c, url)
-        # The gate guards the percent-encoded path; the check takes theorem-labs/%72ocq for no repository name, so it
-        # cannot read its visibility and refuses before it scans.
+        # The gate guards the percent-encoded path; the installed check takes theorem-labs/%72ocq for no repository name,
+        # so it cannot read its visibility and refuses before it scans.
         pct = "https://github.com/theorem-labs/%72ocq"
         self.ok("bookmark", "track", "b1@pct")
-        self.assert_refused_unreadable(self.jj("git", "push", "--remote", "pct", "-b", "b1"), c, pct, "theorem-labs/%72ocq")
+        self.assert_refused_unknown(self.jj("git", "push", "--remote", "pct", "-b", "b1"), c, pct, "theorem-labs/%72ocq")
         self.assertEqual(self.received(c), [])
 
     def test_ssh_aliases_are_guarded(self):
         # The reviewer's three aliases (lanes/jj-gate-review-xf-2026-11-02.md, B2), each the checkout's only remote:
         # SSH_CONFIG resolves each to github.com (`ssh -G`, with the URL's user, so the Match on the user applies), and
         # theorem-labs/rocq there is public, so the checkout is guarded. setUp sets GIT_SSH_COMMAND, so git's own ssh
-        # command may resolve an alias otherwise: since leak-check-v10 the check refuses such a target unread (README:
-        # "An ssh alias has unreadable visibility whenever ... GIT_SSH_COMMAND ... is set"; FRAC's decision), where v4
-        # to v9 refused the leaked content. Either refusal is accepted; the push must fail and the receiver stay empty.
+        # command may resolve an alias otherwise: the installed check (since leak-check-v10) refuses such a target
+        # unread, and FIXTURE_CHECK, which this case runs with, refuses the leaked content. assert_refused_either takes
+        # either refusal; the gate's part is that the push is checked, fails, and the receiver stays empty.
         c = self.leak()
         for url in ("git@alias-xf:theorem-labs/rocq.git", "git@UPPERALIAS:theorem-labs/rocq.git", "git@useralias:theorem-labs/rocq.git"):
             self.git("remote", "set-url", "origin", url)
@@ -889,19 +964,13 @@ class JjPushLeakGateTest(unittest.TestCase):
         listing = subprocess.run(["/usr/bin/git", "-C", str(co), "remote", "-v"], env=env, check=True, capture_output=True, text=True).stdout
         self.assertIn(f" (fetch) [{spec}]\n", listing, "git prints no partial-clone filter here")
 
-    def test_guarded_is_the_sweepers_rule(self):
-        # dispatch://BET-706, the plan's shared contract: the gate (through scripts/github-repo-visibility) and the hook
-        # sweep (sweep-hooks.sh, in theorem-labs/agent-infra, which cannot call a dotfiles script) each decide by a
-        # checkout's remote URLs and their visibility, with readers of their own. Each GUARD_TABLE row is a real
-        # checkout. The gate's own functions judge its `git remote -v` and must give the table's answer. When
-        # sweep-hooks.sh is beside install-global-hooks.sh (global_hooks_source), its own code, loaded as its three
-        # callers load it (everything above `i=0`), with the same cache, fake gh and fake ssh, must give the same answer
-        # for every row: its `verdict` on the checkout's URLs; its config prefilter (`config_may_guard`) must pass every
-        # checkout the gate guards, since it only narrows; and a whole `sweep` over the checkouts must install the hook
-        # in exactly the guarded ones, and defer none. So a change to either reader fails here until the other follows.
+    def guarded_by_the_gate(self):
+        """Each GUARD_TABLE row as a real checkout, and the gate's own answer for each: the functions of shims/git judge
+        the checkout's `git remote -v`. Returns a judge (a bash script run on the checkouts, its words returned), the
+        checkouts, the gate's answers, the table's rows and the table's answers."""
         self.keep_cache_fresh()
-        # The sweep trusts a cached private for 60 s from the entry's mtime, and one of the bash calls below can take
-        # longer than that on a busy machine: the entries' mtimes are refreshed every 5 s until the test ends.
+        # The gate and the sweep trust a cached private for 60 s from the entry's mtime, and one of the bash calls below
+        # can take longer than that on a busy machine: the entries' mtimes are refreshed every 5 s until the test ends.
         stop = threading.Event()
 
         def refresh():
@@ -932,6 +1001,28 @@ class JjPushLeakGateTest(unittest.TestCase):
                      'for co in "$@"; do _real=/usr/bin/git args=(-C "$co") i=2\n'
                      '  if jj_push_guarded "$(/usr/bin/git -C "$co" remote -v)"; then echo Y; else echo N; fi; done\n',
                      *checkouts)
+        return judge, checkouts, gate, rows, want
+
+    def test_guarded_is_the_tables_rule(self):
+        # dispatch://BET-706, the plan's shared contract: the gate (through scripts/github-repo-visibility) decides by a
+        # checkout's remote URLs and their visibility. Each GUARD_TABLE row is a real checkout, and the gate's own
+        # functions must give the table's answer for it.
+        _, _, gate, rows, want = self.guarded_by_the_gate()
+        self.assertEqual(list(zip(gate, rows)), list(zip(want, rows)))
+
+    @needs_the_installed_check("it compares the gate's rule with sweep-hooks.sh, which the installed check's tag installs")
+    def test_guarded_is_the_sweepers_rule(self):
+        # dispatch://BET-706, the plan's shared contract: the gate (through scripts/github-repo-visibility) and the hook
+        # sweep (sweep-hooks.sh, in theorem-labs/agent-infra, which cannot call a dotfiles script) each decide by a
+        # checkout's remote URLs and their visibility, with readers of their own. On the GUARD_TABLE checkouts the gate
+        # gives the table's answers (test_guarded_is_the_tables_rule). sweep-hooks.sh, from the tag's hooks that
+        # provisioning installs (global_hooks_source), its own code loaded as its three callers load it (everything
+        # above `i=0`), with the same cache, fake gh and fake ssh,
+        # must give the same answer for every row: its `verdict` on the checkout's URLs; its config prefilter
+        # (`config_may_guard`) must pass every checkout the gate guards, since it only narrows; and a whole `sweep` over
+        # the checkouts must install the hook in exactly the guarded ones, and defer none. So a change to either reader
+        # fails here until the other follows.
+        judge, checkouts, gate, rows, want = self.guarded_by_the_gate()
         self.assertEqual(list(zip(gate, rows)), list(zip(want, rows)))
         sweeper = global_hooks_source() / "sweep-hooks.sh"
         if not sweeper.is_file():
@@ -1043,10 +1134,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertIn("LEAK CHECK: clean", r.stderr)
         self.assert_ref_kept(at, "refs/heads/b1", clean)
 
-    # v10 false refusal, dispatch://BET-744 (ROCQ, filed 2026-11-06): leak-check-v10 refuses this test's clean push to
-    # `sink::https://github.com/theorem-labs/rocq`. Expected to fail against v10 only (v10_false_refusal); unchanged,
-    # and run in full, against every other check.
-    @v10_false_refusal
+    @also_with_the_installed_check(CAUGHT_A_CHECK_RELEASE)
     def test_a_transport_prefixed_url_is_guarded(self):
         # dispatch://BET-706 A3: git's <transport>::<address> form names the repository at the address, here a public
         # theorem-labs one; the old helper read the transport as an ssh host and said not-github. GUARD_TABLE holds the
@@ -1136,10 +1224,11 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.refused_then_clean("https://github.com/sjawhar/oh-my-pi.git", gh=True)
         self.assertIn(VISIBILITY_READ.format("sjawhar/oh-my-pi"), self.gate_reads())
 
+    @also_with_the_installed_check(OWN_UNREADABLE_REFUSAL)
     def test_every_other_target_of_a_guarded_checkout_is_decided_by_the_check(self):
         # As for a git push from this checkout: a private target passes, a public or non-GitHub one is scanned, and a
         # theorem-labs one whose visibility cannot be read is refused (one of another owner would be scanned as public).
-        # The check reads the visibility of every remote of the checkout, so the unreadable one is added last.
+        # The installed check reads the visibility of every remote of the checkout, so the unreadable one is added last.
         targets = {"private": PRIVATE, "upstream": "https://github.com/rocq-prover/rocq.git",
                    "fake": "https://notgithub.com/sjawhar/rocq.git", "local": str(self.tmp / "build-box.git")}
         for remote, url in targets.items():
@@ -1155,8 +1244,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.remote("unknown", unknown)
         self.ok("bookmark", "track", "b1@unknown")
         r = self.jj("git", "push", "--remote", "unknown", "-b", "b1")
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("error: LEAK CHECK: cannot read the visibility of theorem-labs/never-looked-up", r.stderr)
+        self.assert_refused_unknown(r, c, unknown, "theorem-labs/never-looked-up")
         self.assertEqual(self.received(c), [PRIVATE])
         self.assertTrue(self.gh_calls(), "the visibility read went to the fake gh")
 
@@ -1197,9 +1285,7 @@ class JjPushLeakGateTest(unittest.TestCase):
             r = subprocess.run(["bash", "-c", script, "judge", listing], env=self.env, capture_output=True, text=True, check=True)
             self.assertEqual((body, r.stdout.strip()), (body, want))
 
-    # v8 regression, reported to ROCQ 2026-11-05 22:3xZ: leak-check-v8 calls this leak clean. Expected to fail
-    # against v8 only (v8_regression); unchanged, and run in full, against every other check.
-    @v8_regression
+    @also_with_the_installed_check(CAUGHT_A_CHECK_RELEASE)
     def test_a_checkouts_own_ssh_command_makes_an_alias_unknown(self):
         # The checkout's only remote is an alias ssh -G resolves to corp.example, which is not GitHub: unguarded, the
         # push goes out as jj asked. With core.sshCommand set in the checkout, git would run that command, which may
@@ -1213,9 +1299,9 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertNotIn("LEAK CHECK", r.stderr)
         self.git("config", "core.sshCommand", "ssh -F /nonexistent")
         c = self.leak(path="guard2.v")
-        # Spec R4: with core.sshCommand set, the check cannot tell where an ssh alias goes and refuses the target before
-        # anything is scanned (whatever its owner), so the check may refuse this target unread or refuse the leaked
-        # content. Either way it must refuse, and nothing may reach the receiver.
+        # Spec R4: with core.sshCommand set, nobody can tell where an ssh alias goes, so the gate guards the checkout.
+        # The installed check refuses such a target unread, and FIXTURE_CHECK, which this case runs with, refuses the
+        # leaked content. Either way the push must be refused, and nothing may reach the receiver.
         self.assert_refused_either(self.jj("git", "push", "-b", "b1"), c, url)
 
     def test_an_unguarded_checkout_is_untouched(self):
@@ -1267,18 +1353,15 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.ok("bookmark", "track", "b1@pub")
         self.assert_refused(self.jj("git", "push", "--remote", "pub", "-b", "b1"), c, ROCQ)
 
-    # v8 regression, reported to ROCQ 2026-11-05 22:3xZ: leak-check-v8 calls the leak clean while the cache says
-    # `public`. Expected to fail against v8 only (v8_regression); unchanged, and run in full, against every other check.
-    @v8_regression
+    @also_with_the_installed_check(OWN_UNREADABLE_REFUSAL)
     def test_the_cache_decides_and_an_unreadable_one_refuses(self):
         # dispatch://BET-706 R4: the gate reads the check's cache entry for the repository, lower-cased and only while
         # fresh (600 s for public, 60 s for private or internal), then gh. `private` or `internal` leaves the checkout
         # alone; `public` guards it, so the check refuses leaking content. Where neither answers (no entry; an entry
         # that is empty, unreadable or holds a word the check never writes; a mixed-case file name, which the
         # lower-cased read does not find; a cache directory that cannot be read: the reviewer's B1, cases 1 and 2) the
-        # visibility is unknown, so the checkout is guarded, and the check, which cannot read the visibility either,
-        # refuses the push without scanning it. Before BET-706 the gate passed a checkout with no entry and refused the
-        # others unread itself.
+        # visibility is unknown, so the checkout is guarded, and the check refuses the push (assert_refused_unknown).
+        # Before BET-706 the gate passed a checkout with no entry and refused the others unread itself.
         url = "https://github.com/theorem-labs/newly-public.git"
         self.git("remote", "set-url", "origin", url)
         entry = self.cache / "theorem-labs_newly-public"
@@ -1290,11 +1373,11 @@ class JjPushLeakGateTest(unittest.TestCase):
             c = self.commit(f"g{n}.v", self.leak_text, f"Leak {n}", "b1")
             return c, self.jj(*(["--quiet"] if quiet else []), "git", "push", "-b", "b1")
 
-        def refused_unreadable(quiet: bool = False):
+        def refused_unknown(quiet: bool = False):
             c, r = attempt(quiet)
-            self.assert_refused_unreadable(r, c, url, "theorem-labs/newly-public")
+            self.assert_refused_unknown(r, c, url, "theorem-labs/newly-public")
 
-        refused_unreadable()  # no entry, and the fake gh gives no answer
+        refused_unknown()  # no entry, and the fake gh gives no answer
         self.assertIn(VISIBILITY_READ.format("theorem-labs/newly-public"), self.gate_reads())
         for word in ("private", "internal"):
             entry.write_text(word, encoding="utf-8")
@@ -1311,18 +1394,18 @@ class JjPushLeakGateTest(unittest.TestCase):
             self.assert_refused(r, c, url)
         entry.unlink()
         (self.cache / "Theorem-Labs_Newly-Public").write_text("public", encoding="utf-8")
-        refused_unreadable()
+        refused_unknown()
         (self.cache / "Theorem-Labs_Newly-Public").unlink()
         for word in ("", "Unknown"):
             entry.write_text(word, encoding="utf-8")
-            refused_unreadable(quiet=True)
+            refused_unknown(quiet=True)
         entry.write_text("public", encoding="utf-8")
         entry.chmod(0)
-        refused_unreadable(quiet=True)
+        refused_unknown(quiet=True)
         entry.chmod(0o644)
         self.cache.chmod(0)
         try:
-            refused_unreadable(quiet=True)
+            refused_unknown(quiet=True)
         finally:
             self.cache.chmod(0o755)
 
@@ -1349,14 +1432,17 @@ class JjPushLeakGateTest(unittest.TestCase):
         read = VISIBILITY_READ.format("theorem-labs/cached-public")
         self.assertEqual((self.gh_calls(), self.gate_reads()), ([read], [read]), "the race did not run as staged")
 
+    @also_with_the_installed_check(TAGS_PREPUSH_HOOK)
     def test_an_unsearchable_parent_of_the_cache_refuses(self):
         # The revision-2 review's R2-1: the cache and its public entry exist, but the directory above them cannot be
         # searched. The gate cannot read the entry, asks gh, which gives no answer, so the checkout is guarded
-        # (dispatch://BET-706 R4), and the check, which cannot read the visibility either, refuses as git's installed
-        # hook does for the same push. Before BET-706 the gate refused a repository outside its fixed list unread.
+        # (dispatch://BET-706 R4), and the check refuses the jj push as it refuses a plain git push of the same commit:
+        # through git's hook (install_git_hook) with the installed check, through the shim's own gate with FIXTURE_CHECK.
+        # Before BET-706 the gate refused a repository outside its fixed list unread.
         self.install_git_hook()
         parent = self.cache.parent
-        self.git("remote", "set-url", "origin", "git@github.com:theorem-labs/rocq.git")
+        first = "git@github.com:theorem-labs/rocq.git"
+        self.git("remote", "set-url", "origin", first)
         c = self.leak()
         parent.chmod(0)
         try:
@@ -1364,11 +1450,8 @@ class JjPushLeakGateTest(unittest.TestCase):
             r = self.jj("--quiet", "git", "push", "-b", "b1")
         finally:
             parent.chmod(0o755)
-        self.assertNotEqual(g.returncode, 0, g.stderr)
-        self.assertIn("LEAK CHECK: cannot read the visibility of theorem-labs/rocq", g.stderr)
-        self.assertNotEqual(r.returncode, 0, r.stderr)
-        self.assertIn("error: LEAK CHECK: cannot read the visibility of theorem-labs/rocq", r.stderr)
-        self.assertIn("error: git shim: the public leak check refused this jj push to git@github.com:theorem-labs/rocq.git", r.stderr)
+        self.assert_git_refused_unknown(g, "theorem-labs/rocq")
+        self.assert_refused_unknown(r, c, first, "theorem-labs/rocq")
         self.assertEqual(self.received(c), [])
         url = "https://github.com/theorem-labs/cached-public.git"
         self.git("remote", "set-url", "origin", url)
@@ -1378,7 +1461,7 @@ class JjPushLeakGateTest(unittest.TestCase):
             r = self.jj("--quiet", "git", "push", "-b", "b1")
         finally:
             parent.chmod(0o755)
-        self.assert_refused_unreadable(r, c, url, "theorem-labs/cached-public")
+        self.assert_refused_unknown(r, c, url, "theorem-labs/cached-public")
         # A cache that is not there at all, or a symlink to nothing, is no answer either: the same.
         self.cache.rename(self.tmp / "cache-away")
         try:
@@ -1388,13 +1471,14 @@ class JjPushLeakGateTest(unittest.TestCase):
         finally:
             self.cache.unlink(missing_ok=True)
             (self.tmp / "cache-away").rename(self.cache)
-        self.assert_refused_unreadable(r, c, url, "theorem-labs/cached-public")
-        self.assert_refused_unreadable(r2, c, url, "theorem-labs/cached-public")
+        self.assert_refused_unknown(r, c, url, "theorem-labs/cached-public")
+        self.assert_refused_unknown(r2, c, url, "theorem-labs/cached-public")
 
     def hidden_push(self, path: Path, remote: str = "origin", commit: str = "") -> tuple[subprocess.CompletedProcess[str], subprocess.CompletedProcess[str]]:
         """As the revision-3 review staged R3-1: PATH moved into $TMP/hidden, a symlink to it left in its place, and
-        search permission taken from hidden; then a plain git push of COMMIT through the installed hook, and the jj push
-        of b1. Everything is put back before returning (git's result, jj's result)."""
+        search permission taken from hidden; then a plain git push of COMMIT (through git's hook, or with FIXTURE_CHECK
+        the shim's own gate: install_git_hook), and the jj push of b1. Everything is put back before returning (git's
+        result, jj's result)."""
         hidden = self.tmp / "hidden"
         hidden.mkdir()
         moved = hidden / path.name
@@ -1409,12 +1493,13 @@ class JjPushLeakGateTest(unittest.TestCase):
             moved.rename(path)
             hidden.rmdir()
 
+    @also_with_the_installed_check(TAGS_PREPUSH_HOOK)
     def test_a_cache_behind_a_symlink_into_an_unsearchable_directory_refuses(self):
         # The revision-3 review's R3-1: `.cache`, `public-leak-check` or the deciding entry is a symlink into a directory
         # that cannot be searched. The entry exists and says public, but cannot be read, so jj once sent the leak while
         # git's installed hook refused it. Now the gate reads no answer, asks gh, which gives none, and guards the
-        # checkout (dispatch://BET-706 R4); the check, which cannot read the visibility either, refuses the jj push as
-        # git's hook refuses the git one.
+        # checkout (dispatch://BET-706 R4); the check refuses the jj push as it refuses the plain git push
+        # (install_git_hook).
         self.install_git_hook()
         url = "https://github.com/theorem-labs/cached-public.git"
         self.git("remote", "set-url", "origin", url)
@@ -1422,9 +1507,8 @@ class JjPushLeakGateTest(unittest.TestCase):
         entry = self.cache / "theorem-labs_cached-public"
         for path in (self.home / ".cache", self.cache, entry):
             g, r = self.hidden_push(path, commit=c)
-            self.assertNotEqual(g.returncode, 0, g.stderr)
-            self.assertIn("LEAK CHECK: cannot read the visibility of theorem-labs/cached-public", g.stderr)
-            self.assert_refused_unreadable(r, c, url, "theorem-labs/cached-public")
+            self.assert_git_refused_unknown(g, "theorem-labs/cached-public")
+            self.assert_refused_unknown(r, c, url, "theorem-labs/cached-public")
         # The review's control over git's own ssh transport: the `.cache` variant with only an ssh alias of github.com
         # as the remote. The gate reads no visibility and guards. use_ssh sets GIT_SSH_COMMAND, so since leak-check-v10
         # the check refuses the alias target unread (README: an ssh alias is unknown while GIT_SSH_COMMAND is set); v4
@@ -1470,6 +1554,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertEqual(self.git("remote", "get-url", "origin"), ROCQ, "the retarget did not run")
         self.assertEqual(self.received(c), [PRIVATE])
 
+    @needs_the_installed_check(TAGS_PREPUSH_HOOK)
     def test_the_same_verdict_as_the_git_hook(self):
         # For each target, the jj push and a plain `git push` of the same commit through the hook
         # install-prepush-hook.sh installs, both sent for real to the sinks: refused alike, sent alike, sjawhar/dotfiles
@@ -1508,18 +1593,19 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertEqual(self.received(c), [PRIVATE])
 
     def assert_git_hook_refused(self, g: subprocess.CompletedProcess[str], gh: bool = False):
-        """A plain git push refused by the installed hook: for the content, or (leak-check-v10 and later, an ssh alias
-        while GIT_SSH_COMMAND is set) unread because the target's visibility is unknown; and, unless GH says a read was
-        due, gh got no unexpected call (unexpected_gh_calls), as assert_refused requires."""
+        """A plain git push refused by git's hook (or, with FIXTURE_CHECK, the shim's own gate): for the content, or
+        (leak-check-v10 and later, an ssh alias while GIT_SSH_COMMAND is set) unread because the target's visibility is
+        unknown; and, unless GH says a read was due, gh got no unexpected call (unexpected_gh_calls), as assert_refused
+        requires."""
         self.assertNotEqual(g.returncode, 0, g.stderr)
         self.assertTrue("LEAK CHECK: refusing to push" in g.stderr or "LEAK CHECK: cannot read the visibility of " in g.stderr, g.stderr)
         if not gh:
             self.assertEqual(self.unexpected_gh_calls(), [])
 
     def assert_same_refusal_over_git_transport(self, url: str, sink: Path):
-        """URL as the checkout's only remote, over git's own transport into SINK: a plain git push through the
-        installed hook and the jj push both refuse a fresh leaking commit (for its content, or unread where the check
-        cannot read the target's visibility), and SINK never holds it."""
+        """URL as the checkout's only remote, over git's own transport into SINK: a plain git push (through git's hook,
+        or with FIXTURE_CHECK the shim's own gate: install_git_hook) and the jj push both refuse a fresh leaking commit
+        (for its content, or unread where the check cannot read the target's visibility), and SINK never holds it."""
         self.git("remote", "set-url", "origin", url)
         subprocess.run(["/usr/bin/git", "config", "--unset-all", "remote.origin.vcs"], cwd=self.repo, env=self.env, capture_output=True)
         c = self.leak(path=f"guard-{hashlib.sha1(url.encode()).hexdigest()[:8]}.v")
@@ -1529,6 +1615,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assert_refused_either(self.jj("git", "push", "-b", "b1"), c, url)
         self.assertFalse(self.holds(sink, c), f"jj sent {c} to {url}")
 
+    @also_with_the_installed_check(TAGS_PREPUSH_HOOK)
     def test_a_remote_path_with_a_space_is_read_whole(self):
         # The revision-2 review's R2-2: `git remote -v` keeps a space inside a URL. Read up to the space, this URL is the
         # private theorem-labs/private-fixture, which the gate leaves alone; read whole, its path is no repository
@@ -1540,6 +1627,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assert_same_refusal_over_git_transport(f"git@alias-xf:{path}", self.ssh_sink("git@alias-xf", path))
         self.assertTrue(self.ssh_sink("git@alias-xf", path).is_dir(), "git did not reach the ssh adapter")
 
+    @also_with_the_installed_check(TAGS_PREPUSH_HOOK)
     def test_an_ssh_alias_with_a_hash_or_question_mark_is_guarded(self):
         # The revision-2 review's R2-5: # and ? are ordinary characters of an ssh host alias, and the gate once cut the
         # alias there before it found the path. SSH_CONFIG resolves both aliases to github.com; git hands the whole
@@ -1609,7 +1697,11 @@ class JjPushLeakGateTest(unittest.TestCase):
                 (self.assertIn if arm == "gate" else self.assertNotIn)("LEAK CHECK: clean", r.stderr, way)
                 seen[arm] = marker.read_text(encoding="utf-8").splitlines()
             self.assertEqual(seen["gate"], seen["no gate"], way)
-            self.assertEqual([ln.split(" ", 2)[:2] for ln in seen["gate"]], [[want, "prepared"], [want, "committed"]], way)
+            # A git newer than Ubuntu's 2.43.0 (2.56.1 from git-core's PPA) also runs the hook for a `preparing` phase,
+            # before `prepared`; the two arms above are compared whole. Every phase ran WANT's hook.
+            ran = [ln.split(" ", 2)[:2] for ln in seen["gate"]]
+            self.assertEqual({hook for hook, _ in ran}, {want}, way)
+            self.assertEqual([phase for _, phase in ran if phase != "preparing"], ["prepared", "committed"], way)
             self.assertNotIn("jj-push-hooks", "\n".join(seen["gate"]), way)
         self.env = env
 
@@ -1663,6 +1755,8 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertEqual([ln for ln in lines if ln.startswith(failed)], [f"{failed}'{PRIVATE}'"])
 
     # What passes.
+    @needs_the_installed_check("its commit holds internal references (issue keys, a dev-box path) that the installed "
+                               "check's own patterns must pass")
     def test_clean_push_runs_the_check_and_pushes(self):
         c = self.commit("guard.v", "(* clean; BET-525, /mnt/nvme/sami/frac-verify, dispatch://BET-64 *)", "Port the guard check (BET-525)", "b1")
         r = self.jj("git", "push", "-b", "b1")
@@ -1711,7 +1805,7 @@ class JjPushLeakGateTest(unittest.TestCase):
     # in it (a fresh clone of a project using husky or the pre-commit framework). In an agent session shims/git runs the
     # check first, through jj-push-hooks/pre-push, which then runs the repository's own pre-push.
     def count_checks(self) -> Path:
-        """PUBLIC_LEAK_CHECK becomes a script that records each call, then runs the installed check; returns its log.
+        """PUBLIC_LEAK_CHECK becomes a script that records each call, then runs this case's check; returns its log.
         It also records the command line of the process that ran it, which check_callers() returns."""
         log = self.tmp / "check-calls.log"
         callers = self.tmp / "check-callers.log"
@@ -1824,12 +1918,12 @@ class JjPushLeakGateTest(unittest.TestCase):
 
     def assert_no_verify_push_is_the_users_choice(self, hooks_path: str, own: Path, dispatcher: bool = False):
         """`git push --no-verify` from a checkout whose core.hooksPath is HOOKS_PATH, the directory OWN, with the global
-        dispatcher installed when DISPATCHER: no public check and no own pre-push, as git does with that flag, and the
-        leak goes out."""
+        dispatcher as dispatcher_under_an_own_hooks_path installs it when DISPATCHER: no public check and no own
+        pre-push, as git does with that flag, and the leak goes out."""
         leaky, _ = self.leak_and_clean()
         self.git("config", "core.hooksPath", hooks_path)
         if dispatcher:
-            self.use_global_dispatcher()
+            self.dispatcher_under_an_own_hooks_path()
         calls, _, _ = self.recording_hook(own / "pre-push", "own")
         checks = self.count_checks()
         self.keep_cache_fresh()
@@ -1873,6 +1967,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         return subprocess.run(["git" if shim else "/usr/bin/git", "push", "origin", f"{commit}:refs/heads/{ref}"],
                               cwd=cwd, env=env, capture_output=True, text=True)
 
+    @needs_the_installed_check(TAGS_DISPATCHER)
     def test_with_the_global_dispatcher_a_fresh_clone_is_checked_once(self):
         # A fresh clone of a public repository: no sweep has hooked it, it has no hooks path, its own plain pre-push
         # runs after the check. Through shims/git and through /usr/bin/git with no shim on PATH alike.
@@ -1897,6 +1992,7 @@ class JjPushLeakGateTest(unittest.TestCase):
             self.assertEqual(len(self.lines(calls)), n + 1, shim)
         self.assertIn(ROCQ, self.received(clean))
 
+    @needs_the_installed_check(TAGS_DISPATCHER)
     def test_with_the_global_dispatcher_a_checkout_holding_the_wrapper_is_checked_once(self):
         # The sweep's wrapper, with the checkout's earlier hook kept as pre-push.local: the dispatcher runs the check,
         # then pre-push.local, and not the wrapper, so the check runs once and the local hook once.
@@ -1922,6 +2018,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertEqual(self.lines(calls), [f"origin {ROCQ}"])
         self.assertRegex(stdin.read_bytes(), rb"\A\S+ " + clean.encode() + rb" refs/heads/y 0{40}\n\Z")
 
+    @needs_the_installed_check(TAGS_DISPATCHER)
     def test_with_the_global_dispatcher_a_husky_hooks_path_is_checked_once(self):
         # The repository's own hooks path wins over the global one, so the dispatcher plays no part; the shim's gate
         # checks once.
@@ -1931,10 +2028,22 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assert_own_hooks_path_is_checked_first(self.repo / ".husky" / "_", commits)
 
     # Round 4 (cross-family review lanes/leakgate/slice3-xf-dotfiles.md): two own-hooks-path states in which neither
-    # the dispatcher nor the shim ran the check. Both with the global dispatcher installed, as on sami-devbox.
+    # the dispatcher nor the shim ran the check. With the installed check, the global dispatcher is installed, as on
+    # sami-devbox; it plays no part where a hooks path of the checkout's own overrides it.
     def installed_wrapper_in(self, hooks: Path) -> tuple[Path, Path]:
-        """The real install-prepush-hook.sh run on this checkout, its earlier hook in HOOKS kept as pre-push.local;
-        returns that hook's call log and the wrapper."""
+        """The pre-push wrapper in HOOKS, its earlier hook kept as pre-push.local; returns that hook's call log and the
+        wrapper. With the installed check, the real install-prepush-hook.sh puts it there. With FIXTURE_CHECK, a
+        stand-in does what the shim reads of the wrapper and what git then runs: it holds the wrapper's marker, runs
+        the check git's hook would run, with git's arguments and update lines, and then pre-push.local."""
+        if self.with_fixture_check:
+            calls, _, _ = self.recording_hook(hooks / "pre-push.local", "local")
+            wrapper = hooks / "pre-push"
+            wrapper.write_text('#!/bin/bash\n# PUBLIC-LEAK-CHECK-WRAPPER stand-in for FIXTURE_CHECK\nin="$(cat)"\n'
+                               'bash "$PUBLIC_LEAK_CHECK" "$@" <<< "$in" || exit $?\n'
+                               '[[ -x "${0%/*}/pre-push.local" ]] || exit 0\nexec "${0%/*}/pre-push.local" "$@" <<< "$in"\n',
+                               encoding="utf-8")
+            wrapper.chmod(0o755)
+            return calls, wrapper
         installer = global_hooks_source() / "install-prepush-hook.sh"
         if not installer.is_file():
             self.skipTest(f"no install-prepush-hook.sh beside {installer.parent}/install-global-hooks.sh")
@@ -1959,6 +2068,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertEqual(len(self.lines(checks)), 2, self.lines(checks))
         return checks
 
+    @also_with_the_installed_check(TAGS_DISPATCHER)
     def test_a_non_executable_wrapper_in_its_own_hooks_path_is_checked_by_the_shim(self):
         # git ignores a hook that is not executable ("hook was ignored because it's not set as executable"), so a
         # wrapper with its execute bits off checks nothing; the shim must not count it as present. pre-push.local does
@@ -1967,22 +2077,24 @@ class JjPushLeakGateTest(unittest.TestCase):
         own = self.tmp / "own-hooks"
         self.git("config", "core.hooksPath", str(own))
         calls, wrapper = self.installed_wrapper_in(own)
-        self.use_global_dispatcher()
+        self.dispatcher_under_an_own_hooks_path()
         wrapper.chmod(0o644)
         self.assert_checked_once_each(leaky, clean)
         self.assertEqual(self.lines(calls), [])
 
+    @also_with_the_installed_check(TAGS_DISPATCHER)
     def test_an_executable_wrapper_in_its_own_hooks_path_still_checks_alone(self):
-        # The control: the same real wrapper, executable, runs the check once and then pre-push.local; the shim adds
+        # The control: the same wrapper, executable, runs the check once and then pre-push.local; the shim adds
         # nothing.
         leaky, clean = self.leak_and_clean()
         own = self.tmp / "own-hooks"
         self.git("config", "core.hooksPath", str(own))
         calls, _ = self.installed_wrapper_in(own)
-        self.use_global_dispatcher()
+        self.dispatcher_under_an_own_hooks_path()
         self.assert_checked_once_each(leaky, clean)
         self.assertEqual(self.lines(calls), [f"origin {ROCQ}"])
 
+    @needs_the_installed_check(TAGS_DISPATCHER)
     def test_with_the_global_dispatcher_a_non_executable_wrapper_is_checked_once(self):
         # The dispatcher's half of the same shape, in a checkout with no hooks path of its own: it runs the check, and
         # skips the wrapper only when it is executable (as git would run it), so a non-executable one changes nothing
@@ -2007,9 +2119,11 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertEqual(self.git("rev-parse", "--git-path", "hooks/pre-push"), "/pre-push")
         self.assert_checked_once_each(leaky, clean)
 
+    @needs_the_installed_check(TAGS_DISPATCHER)
     def test_an_empty_local_hooks_path_is_checked_by_the_shim(self):
         self.assert_empty_hooks_path_is_checked("--local")
 
+    @needs_the_installed_check(TAGS_DISPATCHER)
     def test_an_empty_worktree_hooks_path_is_checked_by_the_shim(self):
         self.git("config", "extensions.worktreeConfig", "true")
         self.assert_empty_hooks_path_is_checked("--worktree")
@@ -2045,6 +2159,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         leaky, clean = self.leak_and_clean()
         self.assert_checked_once_each(leaky, clean)
 
+    @needs_the_installed_check(TAGS_DISPATCHER)
     def test_with_the_global_dispatcher_the_shim_adds_no_check(self):
         # (b) The same fresh clone with the dispatcher installed and included: the dispatcher checks, once per push;
         # the shim sees the dispatcher's entry and adds nothing. The own pre-push runs once, after the clean check.
@@ -2054,14 +2169,16 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assert_checked_once_each(leaky, clean, cwd=clone)
         self.assertEqual(self.lines(calls), [f"origin {ROCQ}"])
 
+    @also_with_the_installed_check(TAGS_PREPUSH_HOOK)
     def test_without_the_dispatcher_an_executable_wrapper_checks_alone(self):
-        # (c) The real wrapper in the common hooks directory, no dispatcher: the wrapper checks once, then its
+        # (c) The wrapper in the common hooks directory, no dispatcher: the wrapper checks once, then its
         # pre-push.local; the shim adds nothing.
         leaky, clean = self.leak_and_clean()
         calls, _ = self.installed_wrapper_in(self.repo / ".git" / "hooks")
         self.assert_checked_once_each(leaky, clean)
         self.assertEqual(self.lines(calls), [f"origin {ROCQ}"])
 
+    @also_with_the_installed_check(TAGS_PREPUSH_HOOK)
     def test_without_the_dispatcher_a_non_executable_wrapper_is_checked_by_the_shim(self):
         # git ignores the wrapper with its execute bits off, so the shim checks; pre-push.local does not run, as git
         # would not run it without the wrapper.
@@ -2287,19 +2404,29 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.env = kept
         return [("PUBLIC_LEAK_CHECK", named), ("pointer", pointed)]
 
+    def dispatcher_under_an_own_hooks_path(self):
+        """For a checkout with a hooks path of its own, which overrides the global dispatcher, so the dispatcher plays no
+        part in its pushes: installed, as on sami-devbox, with the installed check, whose tag holds it; not with
+        FIXTURE_CHECK."""
+        if not self.with_fixture_check:
+            self.use_global_dispatcher()
+
+    @also_with_the_installed_check(TAGS_DISPATCHER)
     def test_a_persons_push_with_a_husky_hooks_path_is_checked_by_the_shim(self):
-        # (1) As on sami-devbox: the dispatcher installed, and a repository whose own hooks path (husky's `.husky/_`)
-        # holds a pre-push without the wrapper. The gate checks each push once, then runs that pre-push after a clean one.
+        # (1) As on sami-devbox: the dispatcher installed (with the installed check: dispatcher_under_an_own_hooks_path),
+        # and a repository whose own hooks path (husky's `.husky/_`) holds a pre-push without the wrapper. The gate
+        # checks each push once, then runs that pre-push after a clean one.
         self.as_person()
         commits = self.leak_and_clean()
         self.git("config", "core.hooksPath", ".husky/_")
-        self.use_global_dispatcher()
+        self.dispatcher_under_an_own_hooks_path()
         self.assert_own_hooks_path_is_checked_first(self.repo / ".husky" / "_", commits)
         callers = self.check_callers()
         self.assertEqual(len(callers), 2, callers)
         for caller in callers:
             self.assertIn("jj-push-hooks/pre-push", caller, "the check did not run from the shim's gate")
 
+    @needs_the_installed_check(TAGS_DISPATCHER)
     def test_a_persons_push_through_the_dispatcher_is_checked_once(self):
         # (2) A fresh clone with no hooks path of its own, so git runs the dispatcher: the dispatcher checks each push
         # once, and the gate runs no check of its own. The clone's own pre-push runs once, after the clean check.
@@ -2314,6 +2441,7 @@ class JjPushLeakGateTest(unittest.TestCase):
             self.assertNotIn("jj-push-hooks", caller, "the shim's gate ran the check that the dispatcher runs")
         self.assertEqual(self.lines(calls), [f"origin {ROCQ}"])
 
+    @also_with_the_installed_check(TAGS_DISPATCHER)
     def test_a_persons_no_verify_push_with_a_husky_hooks_path_is_the_users_choice(self):
         # (3) The checkout of (1), pushed with --no-verify: no public check and no own hook, as git does with that flag.
         self.as_person()
@@ -2370,7 +2498,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.git("remote", "set-url", "origin", PRIVATE)
         leaky, clean = self.leak_and_clean()
         self.git("config", "core.hooksPath", ".husky/_")
-        self.use_global_dispatcher()
+        self.dispatcher_under_an_own_hooks_path()
         calls, _, _ = self.recording_hook(self.repo / ".husky" / "_" / "pre-push", "own")
         checks = self.count_checks()
         public, private = f"sink::{ROCQ}", f"sink::{PRIVATE}"
@@ -2392,10 +2520,12 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertEqual(self.lines(checks), [f"{public} {public}"] * 2)
         self.assertEqual(self.lines(calls), [f"{public} {public}", f"{private} {private}"])
 
+    @also_with_the_installed_check(TAGS_DISPATCHER)
     def test_a_persons_url_push_from_an_unguarded_checkout_is_checked(self):
         self.as_person()
         self.assert_url_push_from_an_unguarded_checkout_is_checked()
 
+    @also_with_the_installed_check(TAGS_DISPATCHER)
     def test_an_agents_url_push_from_an_unguarded_checkout_is_checked(self):
         self.assert_url_push_from_an_unguarded_checkout_is_checked()
 
@@ -2474,6 +2604,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         c = self.leak()
         self.assert_refused_unread(self.jj("--quiet", "git", "push", "-b", "b1"), c, "the leak gate's hook")
 
+    @needs_the_installed_check(OWN_UNREADABLE_REFUSAL)
     def test_a_visibility_failure_is_not_called_leaked_text(self):
         # Neither the gate nor the check finds a cache entry for theorem-labs/rocq, and the fake gh answers neither, so
         # the gate guards the checkout (dispatch://BET-706 R4) and the check refuses for that reason alone, naming the
@@ -2496,6 +2627,22 @@ class JjPushLeakGateTest(unittest.TestCase):
         r = run_bounded([str(copy / "jj"), "--config", f"git.executable-path={w}", "git", "push", "-b", "b1"], self.repo, self.env)
         self.assertFalse((copy / "jj").exists(), "the wrapper did not delete the running jj")
         self.assert_refused(r, c)
+
+
+def _with_the_installed_check(test, reason: str):
+    @needs_the_installed_check(reason)
+    def case(self):
+        test(self)
+    case.__doc__ = test.__doc__
+    case.__wrapped__ = test  # pytest reports the case at TEST's own line
+    return case
+
+
+# The installed-check form of each case marked also_with_the_installed_check.
+for _name, _test in list(vars(JjPushLeakGateTest).items()):
+    if (_reason := getattr(_test, "also_with_the_installed_check", None)) is not None:
+        setattr(JjPushLeakGateTest, f"{_name}_with_the_installed_check", _with_the_installed_check(_test, _reason))
+del _name, _test, _reason
 
 
 class GlobalHooksIncludeTest(unittest.TestCase):
