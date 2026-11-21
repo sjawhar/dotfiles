@@ -142,17 +142,18 @@ class Fixture(unittest.TestCase):
 
 
 class Adopt(Fixture):
-    def test_the_launcher_is_stopped_before_the_client_ends_and_ended_after(self) -> None:
-        """SIGSTOP to the launcher, then SIGKILL to the client, then SIGKILL to the launcher: a
-        launcher still running when its client ends takes that for the box's end and closes it,
-        and while the stopped launcher lives no kernel SIGHUP reaches the client's process group.
-        A `kill` function logs each signal before the builtin sends it."""
+    def test_the_launcher_and_then_the_client_get_sigkill_back_to_back(self) -> None:
+        """SIGKILL to the launcher, then at once SIGKILL to the client, and no SIGSTOP: a stopped
+        job makes the pane's interactive bash go on to `exec bash -i`, which sends SIGTERM to its
+        stopped jobs, and that TERM reached the box through the client on the test VM (exit 143).
+        A dead launcher cannot take the client's end for the box's end. A `kill` function logs
+        each signal (not the `kill -0` probes) before the builtin sends it."""
         upper, launcher, client = self.box_launched()
         prelude = 'kill() { [[ "$1" == -0 ]] || echo "kill $*" >>"$STUB_LOG"; builtin kill "$@"; }\n'
         result = self.adopt(prelude)
         said = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, said)
-        self.assertEqual(self.calls("kill "), [f"kill -STOP {launcher.pid}", f"kill -KILL {client.pid}", f"kill -KILL {launcher.pid}"], said)
+        self.assertEqual(self.calls("kill "), [f"kill -KILL {launcher.pid}", f"kill -KILL {client.pid}"], said)
 
     def test_a_launcher_that_is_its_panes_own_command_is_refused(self) -> None:
         """The launcher leads its pane's session: ending it would hang up the pane's terminal,
