@@ -1,6 +1,6 @@
 # Leaks from tests and processes
 
-Read this when processes a test or harness left behind cause the space or load, or when you write such a test. `S` is set in SKILL.md; `references/finding-space.md` has the instruments (`cpu`, `writers`, `fdwrites`) that find the process and the file it grows.
+Read this when processes a test or harness left behind cause the space or load, or when you write such a test. `S` is set in SKILL.md. Find the leak before you guess at it: `references/finding-space.md` has the instruments (`cpu`, `writers`, `fdwrites`) that find the process and the file it grows.
 
 - A test that forks a detached server must reap it when the parent dies. A tool timeout is a SIGKILL that skips `finally`, so use a watchdog that polls the test's pid.
 - Run each mutation-test mutant under a wall-clock `timeout`, in a process group the harness kills on exit, with output capped (`ulimit -f`): an unguarded mutant can loop forever or fill the disk.

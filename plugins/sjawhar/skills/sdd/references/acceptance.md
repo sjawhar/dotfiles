@@ -9,7 +9,7 @@
 
 ## Running it
 
-- Run the affected end-to-end scenarios before merge and mark each as `opening-a-pr` says, with the source, dependency and image revisions per scenario. Check a blocker another session reports against its record.
+- For a slice that changes what runs, run its affected end-to-end scenarios before merge, under the pre-merge scenario rule in `opening-a-pr` (`skill://opening-a-pr/references/proof.md`, "End-to-end scenarios", which also says which scenarios a change affects). Record the source, dependency and image revisions per scenario, then mark it with one of the markers (`RAN`, `BLOCKED`, `WAIVED-BY-SAMI`) that section defines. Its "Merge-ready" section says what to do when a surface cannot be reached or a blocker remains.
 - Exercise every human entry point the plan's `## Contract change census` lists through the real client and the new check. Each entry not run is `BLOCKED`.
 - Iterate on the repo's fastest loop and keep its slowest surface for the final proof. The repo's testing skill defines what counts as production-like.
 

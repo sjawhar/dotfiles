@@ -4,7 +4,7 @@ Read the current queue decision record first. Nothing here creates holds, merge 
 
 ## Priority and holds
 
-- Equally ready same-file siblings with no stronger priority or dependency: the oldest approved PR goes first. Serialize only the shared boundary. When one owner is already repairing a collision, that owner resolves it.
+- Equally ready same-file siblings with no stronger priority or dependency: of those approved, the PR opened first (the lowest PR number) goes first. Serialize only the shared boundary. When one owner is already repairing a collision, that owner resolves it.
 - A hold that needs a conflict check needs the actual three-way composition, not overlap guessed from filenames.
 - A lifted hold ends at once. On the next wake, re-read the live head, verdicts and mergeability. An old "held" label is not an observation.
 - When you see the same "escalate next time" note a second time, read the decision it refers to and send the escalation now, on the existing Dispatch issue.
@@ -27,7 +27,7 @@ Read the current queue decision record first. Nothing here creates holds, merge 
 
 ## Shared-store safeguards for every rewrite
 
-- Before you recommend a rewrite in a shared store, the owner checks descendants, bookmarks and workspace ownership as `using-jj` says, and repairs a mistake forward. You never clean up their revisions.
+- Before you recommend a rewrite in a shared store, check that the owner follows `using-jj`'s "Protect the shared store" and its `references/shared-store-details.md`: it checks descendants, bookmarks and workspace ownership, gets the agreement of each owner whose commits the rewrite moves, mutates only change IDs it names, and repairs a mistake forward. You never clean up their revisions.
 - Tip-only selection can drop a required unmerged parent; replaying a squash-merged parent is the opposite mistake. Preserve a required unmerged parent, or select the owned unmerged range explicitly, from the actual graph.
 
 ## Native GitHub Stacks

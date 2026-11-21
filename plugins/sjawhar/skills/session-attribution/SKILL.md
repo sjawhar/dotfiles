@@ -1,15 +1,15 @@
 ---
 name: session-attribution
-description: "Use when tracing a commit, PR or comment to the agent session that made it, listing what a session touched, or reaching that session: who made this commit, which session wrote this, the Omp-Session trailer, a Legion footer."
+description: "Use when tracing a commit, PR, comment or other artifact to the agent session that made it, listing what a session touched, reaching or resuming that session, or doing session forensics: who made this commit, which session or agent wrote this, the Omp-Session trailer, a Legion footer."
 ---
 
 # Session attribution
 
 ## Where the id is
 
-- An omp session's commits carry an `Omp-Session: <id>` trailer. `shims/git` adds it to git commits, the session's `JJ_CONFIG` overlay to jj commits, and `PI_COMMIT_TRAILERS` to commits omp writes itself. The header of `scripts/omp-session-trailer` says where it is left off.
+- An omp session's commits carry an `Omp-Session: <id>` trailer. `shims/git` adds it to git commits, the session's `JJ_CONFIG` overlay to jj commits, and `PI_COMMIT_TRAILERS` to commits omp writes itself. `omp/extensions/session-env.ts` writes the overlay for an interactive session, and the Legion extension writes it for a session the Legion daemon starts. The header of `scripts/omp-session-trailer` says where it is left off.
 - Legion role commits carry `Omp-Session` and `Legion-Role: <role>`, each from the role's own session. Legion comments and reviews end with `<!-- legion: {"session":"<id>", ...} -->`.
-- No trailer means "not attributable from the commit", not an error. Commits by a person, older commits, commits made by `git rebase`, `git am`, `git commit-tree` or a shell alias, and commits in a checkout that sets `git config omp.sessionTrailer false` have none. Attribute those by author email and commit time, plus a session that edited the same files then (`tq search --commands`, `using-transcript-store`).
+- No trailer means "not attributable from the commit", not an error. These commits have none: commits by a person; commits made by `git rebase`, `git am`, `git commit-tree` or a shell alias; commits in a checkout that sets `git config omp.sessionTrailer false`; commits an older omp wrote itself, from before it read `PI_COMMIT_TRAILERS`; and `git merge`, `pull`, `cherry-pick` or `revert` commits older than the `shims/git` change that stamps them, whose time `git -C ~/.dotfiles log --reverse -S 'cherry-pick | revert' --format=%cI -- shims/git | head -1` prints. Attribute those by author email and commit time, plus a session that edited the same files between the parent commit's time and the commit's time: `git show -s --format=%cI <sha>^ <sha>` prints both, then `tq search --commands '<file>' --from '<parent time>' --to '<commit time>'` (`using-transcript-store`).
 - Use the `jj` lines only where `jj root` succeeds.
 
 ```bash
@@ -39,7 +39,7 @@ gh api "repos/<owner>/<repo>/issues/comments" --paginate -q '.[] | select(.body 
 gh api "repos/<owner>/<repo>/pulls/comments" --paginate -q '.[] | select(.body | contains("<id>")) | .html_url'
 ```
 
-- The `git log` line matches the whole message, not `%(trailers)`: a merge-queue squash appends a `Co-authored-by` paragraph after the `Omp-Session` lines, and git reads trailers from the last paragraph only. Widen `-n` until it reaches the session's first commit. In a jj checkout, `git log --all` also counts hidden copies (`refs/jj/keep/*`).
+- The `git log` line matches the whole message, not `%(trailers)`: a merge-queue squash appends a `Co-authored-by` paragraph after the `Omp-Session` lines, and git reads trailers from the last paragraph only. Keep the read bounded by `-n`, and add no `--grep` or `--all`, which some repositories forbid. Widen `-n` until the last commit the read prints is older than the session's start: `git log -n <N> --format=%cI <ref> | tail -1` prints that commit's time, and the stamp before `_<id>` in the transcript's file name (the `ls` of step 3 above) is the start. In a jj checkout, `git log --all` also counts hidden copies (`refs/jj/keep/*`).
 - A merge commit from a merge queue that uses the `MERGE` method has an `Omp-Session` line only if the PR body did. The branch's commits keep theirs: use `<merge>^1..<merge>^2` as `<ref>`.
 
 ## Read the evidence

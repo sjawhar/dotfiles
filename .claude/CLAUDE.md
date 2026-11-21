@@ -60,6 +60,7 @@ Before such an action, say what changes, what could break, and the safest altern
 ## Asking me
 
 - Ask me only for my authority, my taste or my risk appetite. Decide the rest, do it, and tell me.
+- When I give an instruction without its reason, ask me for the reason. It is the one thing to ask me for beside my authority, my taste and my risk appetite. Keep working while you wait for the answer.
 - Stop for me only on a destructive action, real doubt about the goal, or something I said to ask first.
 - Don't make me your watcher. Start a background watcher and keep working. A command that blocks the turn is not a watcher, and my next message is not your wake signal.
 - When one thing blocks, keep everything else moving.

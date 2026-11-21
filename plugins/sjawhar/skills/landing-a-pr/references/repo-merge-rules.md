@@ -18,7 +18,7 @@ A GitHub admin action that work Sami already asked for needs (an App permission 
 secret-run --register --reason '<what and why>' GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh "$@"' gh <the call>
 ```
 
-- Sami approves the broker's grant card once per session. `--register` gives a session with no broker identity one, with no restart.
+- Sami approves the broker's grant card once per session. The card is not an ask: request the token without asking him first. `--register` gives a session with no broker identity one, with no restart.
 - The token never skips a check that tests the work.
 
 ## Approvals

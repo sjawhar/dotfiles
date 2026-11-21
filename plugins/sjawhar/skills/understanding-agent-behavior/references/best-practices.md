@@ -5,7 +5,7 @@ Techniques from published guides, for use once you are reading transcripts. Each
 ## Diagnosing
 
 - Reproduce with the simplest case that still fails: if a single-turn version fails too, the cause is retrieval or knowledge, not the conversation. [S6]
-- Annotate and fix the first failure in a trace; later errors usually cascade from it, and a taxonomy of symptoms counts one bug many times. [S6]
+- Annotate only the first failure in a trace, and fix that one; later errors usually cascade from it, and a taxonomy of symptoms counts one bug many times. [S6]
 - To find which hand-off breaks, build a transition-failure matrix: rows are the last successful state, columns where the first failure landed. [S6]
 - Re-run the agent with its exact prompt and tools and watch each step. It shows what a score hides: going on after it had enough results, over-long queries, the wrong tool. [S1]
 - Give the model its own prompt and the observed failure and ask it to diagnose; it can rewrite a flawed tool description for later agents. [S1][S3]
@@ -14,7 +14,7 @@ Techniques from published guides, for use once you are reading transcripts. Each
 - When an agent "ignores" a rule, check the tools before the wording: overlapping tools, cryptic ids and opaque errors cause it. [S3]
 - When an agent skipped a skill's body, read the skill's description: an agent that finds steps there follows them instead of the body (`writing-agent-skills`).
 - Do error analysis bottom up: open notes on real traces, then cluster them into categories, then count. Write the rubric after reading traces, not before. [S6][S7]
-- Record problems that are not the model's fault (a missing feature, a broken tool, bad data), and root-cause them after you prioritize. [S6]
+- Record problems that are not the model's fault (a missing feature, a broken tool, bad data) as notes during review. Find their root cause only after you have clustered and counted all the notes (the bullet above), starting with the category that has the most notes: notes over more traces give a better diagnosis. [S6]
 - Change the model, framework or architecture only after error analysis says the model is the problem. [S6][S7]
 
 ## Evals and graders
@@ -25,7 +25,7 @@ Techniques from published guides, for use once you are reading transcripts. Each
 - Test both directions of a behaviour: when it should fire and when it should not. [S4]
 - Isolate every trial in a clean environment; leftover files, caches and shared state correlate failures. [S4]
 - Start with 20–50 cases from real failures; early effects are large enough to see on a few cases. [S1][S4]
-- A 100% pass rate carries no information: retire the eval or make it harder. [S6][S4]
+- An eval suite at a 100% pass rate carries no information: retire it or make it harder. This applies to a standing suite, not to the rerun that confirms a fix, which keeps its bar (SKILL.md step 5). [S6][S4]
 - Skip generic metrics (helpfulness, coherence); they pull attention from the few failures that matter. [S7]
 - Use a structured rubric with one judge per dimension and an explicit "Unknown" option, so the judge does not invent a verdict. [S4]
 
@@ -35,7 +35,7 @@ For a guide or a skill, the limits are in the `writing-agent-skills` skill.
 
 - Keep instructions short. Every line of an always-loaded file costs attention on every task, and recall falls as the context fills: hold only what the agent cannot work out from the code. [S2][S11][S12]
 - Write at the level a capable new hire can apply: heuristics, not if-else logic and not vague principles. Three to five varied examples beat a growing list of edge cases. [S2][S5]
-- Give a rule one clause of reason where it would otherwise look arbitrary ("a TTS engine reads this aloud, so no ellipses"): the model generalizes from the reason. [S5]
+- Give a reason only where the rule would look arbitrary, in one clause, not just the rule ("a TTS engine reads this aloud, so no ellipses"): the model generalizes from the reason to cases the rule never named. [S5]
 - Do not add force with capitals or "CRITICAL": newer models over-trigger on it, so write "Use this tool when ..." [S5]. A rule that needs force belongs in a hook or a check.
 - At a model upgrade, remove anti-laziness and "verify your work" prompting rather than rewording it. [S5]
 - Do not answer each new failure with another edge case in the prompt: fixing one mode surfaces the next while the prompt grows. [S8][S2]

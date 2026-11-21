@@ -15,7 +15,7 @@ The top PR becomes the consolidated PR: its branch already holds the full diff. 
 
 ## Keep the stack ungrouped while you push
 
-A PR grouped into a native stack (`gh stack link`) gets no `github-actions` check suites on `synchronize` or `labeled`, and a re-run cannot create a suite the event never created. Let the PR bases carry the order, name each base branch in the PR body, and group only at merge time if your merge command refuses an ungrouped stack. If a stack PR has no check suites, check `gh stack view --json` for grouping; `gh stack unstack <n>` brings the checks back with no push.
+A PR grouped into a native stack (`gh stack link`) gets no `github-actions` check suites on `synchronize` or `labeled`, and a re-run cannot create a suite the event never created. Let the PR bases carry the order, name each base branch in the PR body, and group only at merge time if your merge command refuses an ungrouped stack. If a stack PR has no check suites, check `gh stack view --json` for grouping; `gh stack unstack <n>` brings the checks back within about 30 seconds, with no push. If the checks do not come back in that time, grouping was not the cause: look for another cause.
 
 ## Collapse the stack
 
@@ -31,7 +31,7 @@ Work in your own clone or worktree of the stack.
    git commit -m "<one summary of the whole change>"
    git push --force-with-lease
    ```
-   Keep a series of commits only when the layers help review: a reviewer asked, or each stands alone.
+   Keep a series of commits only when the layers help review: a reviewer asked for them, or each layer is one complete change whose commit builds and passes the tests without the layers above it.
 5. `gh pr edit <top-pr>`: a title and body for the whole change, not the last slice: what the stack built, each consolidated PR (number, link, review outcome), and the `## Verification` section from `opening-a-pr`.
 6. Close each base PR and keep its branch, whose commits its review comments point at: `gh pr close <N> --comment "Consolidated into #<top-pr>; the reviewed diff lives there."`
 7. `gh stack unstack`: it removes the local tracking and the GitHub grouping, not the branches or PRs.

@@ -21,15 +21,15 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 - Only a current decision sets a hold or a quiet window: never restore a lifted hold or infer a window from history.
 - Merge only by an ordinary protected squash merge, never under a permission inferred from earlier use. A grant given to this queue session stays live for it. Ask Sami once for a merge window: a span to merge READY PRs without asking per PR.
 - At registration, check the author, the account this session writes as (`gh api user --jq .login`), required reviews and CODEOWNERS. An approval that account cannot give is unmet until `landing-a-pr`'s repo merge rules name who gives it.
-- With no explicit priority, merge first what Sami's stated goal needs, then parents before children, and a large corpus change before the PRs that would integrate with it. Never by READY arrival order.
-- Ask Sami on the existing Dispatch issue.
+- With no explicit priority, merge first what Sami's stated goal needs, then parents before children, then a corpus change (one that adds or rewrites a body of content, such as task data, that other open PRs edit) before those PRs, so they integrate with it. Never by READY arrival order.
+- Ask Sami with `dispatch ask` on the Dispatch issue the PR names, or on the queue record for a question about the whole queue. Dispatch is the issue tracker the `dispatch` skill covers.
 - Read [sequencing](references/sequencing.md) for holds that need a composition test, migration batches, colliding PRs, stacks, or reading a Dispatch answer.
 
 ## 2. Register PRs and act on packets
 
 - Register each PR when it opens: owner, purpose, intended published parent, file scope, required gates, and the end-to-end scenarios the owner will run before merge. Give the owner the gate list then, so the packet arrives complete.
 - Act on packets, and on CI events for PRs that have one. Do not sweep all owners.
-- Every 30 minutes, find orphans: PRs whose owner is gone and that nobody will packet. Close or reassign one only under a current decision from Sami that names it. Until then keep it registered and report it in each queue status.
+- Owners drive their PRs while they are live. Every 30 minutes, find orphans: PRs whose owner is gone (`envoy_sessions` lists its session as neither live nor unresponsive) and that nobody will packet. Close or reassign one only under a current decision from Sami that names it. Until then it stays yours: keep it registered and report it in each queue status.
 - Who sends the packet:
   - a PR for an issue a coordinator (the `sdd` lead) owns: that coordinator's gate packet, naming the head;
   - a PR with an active gate session (the session a coordinator assigned to check its gates): that session's packet, or a verdict on the PR naming the head from any other reviewer who is not the author;
@@ -38,8 +38,8 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 - A self-verdict packet begins `SELF-VERDICT - needs clearance or an independent reader`. Hold it until Sami approves that PR by name, or an independent reviewer posts a verdict on the PR that names the head.
 - For each head, record the registration facts, its gate session and each fact steps 3 to 5 check, each with its read time and source link, plus the disposition and who acts next.
 - GitHub is the live truth, not your record. Re-read held PRs there at each wake before you write "unchanged".
-- Start CI waits as background jobs (for example an async `gh pr checks N --watch`) and keep working.
-- Do not ask for a rebase or push only to pick up main when there is no conflict or real content change: each push restarts CI and review. Read [evidence quality](references/evidence-quality.md) for stale-main reds, empty results or missing logs.
+- Start CI waits as background jobs (for example an async `gh pr checks N --watch --interval 120`) and keep working.
+- Ask for a rebase or push only when main conflicts with the PR or the PR's own diff needs a change, never only to pick up main: each push restarts CI and review. Read [evidence quality](references/evidence-quality.md) for stale-main reds, empty results or missing logs.
 
 ## 3. Check findings
 
@@ -68,7 +68,4 @@ Before you declare READY or merge, read [review evidence](references/review-evid
 
 ## 7. Close the loop
 
-- Use `post-merge`. Name the production check, the log line, metric or output that shows the change working, and who runs it.
-- When the merged PR has stacked children, tell their owners at once, as [sequencing](references/sequencing.md) says.
-- After the production check passes, the owner runs `ce-compound` and puts useful learnings in a new docs-only PR before it starts other work, never in a push to the merged PR, which would restart its gates.
-- After a round with waits, the owner reads its own transcript and lists each wait on a check or reply it could have started earlier, so the next round starts it sooner. Do the same for your own work.
+- After each merge, and after each round with waits, read [close the loop](references/close-the-loop.md) and do each item: the production check, stacked children, the learnings PR and the list of waits.
