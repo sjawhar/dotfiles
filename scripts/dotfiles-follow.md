@@ -256,4 +256,5 @@ listener must receive no request and the report must be in the run's output.
 The install-lock cases run follow's `install_tools`, `dotfiles-sync --tools`, `agent-session`, the
 two mise installers and `shims/knives` with one stand-in `mise` that fails when two installs run at
 once. They check that the installs never overlap, that a knives call under an install does not
-wait on its lock, and that follow's `mise install` gets the `.bashrc`'s `MISE_CACHE_DIR`.
+wait on its lock, and that each of follow's tools commands (mise, Bun, the marketplace step's omp
+calls, the pin check) gets the `.bashrc`'s `MISE_CACHE_DIR`.
