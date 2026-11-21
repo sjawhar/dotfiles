@@ -3951,9 +3951,9 @@ class AgentboxMove(unittest.TestCase):
         # that must stop it is named, not left to be found by hand (sami-rocqperf, 2026-11-03).
         self.make_proc(1105, comm="python3", ppid=1104, cwd=lane, cmdline="python3 serve.py",
                        environ={"OMP_SESSION_ID": "01a19700-0000-7000-8000-0000000f0009"})
-        # A watcher the session started with `setsid`, and what that watcher started: the pane's
-        # hang-up reaches neither, so neither is an orphan. Agents make no systemd units
-        # (Sami, dispatch://INFRA-26/comment/615d0105-4ad1-4a2e-ae1c-01a1d8894b5c).
+        # A watcher the session started with plain `setsid`, and what that watcher started: its
+        # own session leader, but the omp is still its parent, so omp's hang-up teardown reaches
+        # both. One row, with its child counted under it.
         self.make_proc(1106, comm="python3", ppid=1101, cwd=lane, cmdline="python3 watch.py", session_leader=True)
         self.make_proc(1107, comm="python3", ppid=1106, cwd=lane, cmdline="python3 watch-child.py")
         self.set_pids(1101)
@@ -3972,7 +3972,7 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn("sleep 1000 (pid 1102)", refused.stderr)  # no environment of its own, no session named
         self.assertNotIn("__omp_worker", refused.stderr)
         self.assertNotIn("runner-ab12", refused.stderr)
-        self.assertNotIn("watch.py", refused.stderr)
+        self.assertIn("python3 watch.py (pid 1106, 1 under it)", refused.stderr)
         self.assertNotIn("watch-child.py", refused.stderr)
         # The advice must not send the reader back to plain `setsid`: omp's hang-up teardown
         # signals what is reachable from it by parent link, and setsid changes the session and
@@ -3998,6 +3998,54 @@ class AgentboxMove(unittest.TestCase):
         [row] = json.loads(plan.stdout)["sessions"]
         self.assertIn("DIES WITH THE MOVE", row["note"])
         self.assertIn("sleep 1000 (pid 1102)", row["note"])
+
+    def test_a_plain_setsid_child_is_an_orphan_and_a_forked_one_is_not(self) -> None:
+        """omp's hang-up teardown signals what is still reachable from it BY PARENT LINK, and plain
+        `setsid` changes the session but not the parent: 19 of 26 plain-setsid children were killed
+        within about 2 s of the hang-up, and 4 of 4 `setsid --fork` children lived (measured
+        2026-11-05; scripts/agentbox, move_orphans_gate). So a child that leads its own session
+        and still has the omp for parent dies with the move, with what it started; one that
+        `setsid --fork` started has init for parent and lives. The gate counted every session
+        leader as safe, and the notice told the session to start its children with plain
+        `setsid`, so it passed a move that then killed them."""
+        lane = self.root / "lane"
+        lane.mkdir()
+        sid = "01a19700-0000-7000-8000-0000000f0001"
+        self.make_proc(1100, comm="bash", ppid=1, cwd=lane)
+        self.make_proc(1101, ppid=1100, cwd=lane, session=sid)
+        # `setsid python3 watch.py` from a tool call: a session of its own, the omp its parent.
+        self.make_proc(1106, comm="python3", ppid=1101, cwd=lane, cmdline="python3 watch.py", session_leader=True)
+        self.make_proc(1107, comm="python3", ppid=1106, cwd=lane, cmdline="python3 watch-child.py")
+        # `setsid --fork python3 forked.py` from the same session: a session of its own, init its
+        # parent. Its environment and directory are the session's, so only its parent decides.
+        self.make_proc(1108, comm="python3", ppid=1, cwd=lane, cmdline="python3 forked.py", session_leader=True,
+                       environ={"OMP_SESSION_ID": sid})
+        self.make_proc(1109, comm="python3", ppid=1108, cwd=lane, cmdline="python3 forked-child.py")
+        self.set_pids(1101)
+        self.set_panes({1100: ("%90", "agents:9.1")})
+        rows = self.run_bash("move_orphans 1101")
+        self.assertEqual(rows.returncode, 0, rows.stderr)
+        self.assertEqual(rows.stdout, "1106\t1\tpython3 watch.py\t\n")
+        env = 'move_own_omp() { echo 1101; }\nmove_image_bytes() { echo 280000000; }\nmove_hand_off() { echo HANDED-OFF; }\n'
+        refused = self.run_bash(env + "cmd_move_self")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertNotIn("HANDED-OFF", refused.stdout)
+        self.assertIn("python3 watch.py (pid 1106, 1 under it)", refused.stderr)
+        self.assertNotIn("forked", refused.stderr)
+        accepted = self.run_bash(env + "cmd_move_self --accept-orphans")
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertIn("HANDED-OFF", accepted.stdout)
+        self.assertIn("--accept-orphans: the hang-up of the move ends python3 watch.py (pid 1106", accepted.stderr)
+        # The notice a lead sends gives the advice the gate accepts: `setsid --fork`, never plain
+        # `setsid`, and not an omp background job, which is a child of the omp too.
+        notice = self.run_bash(env + f"cmd_move_notify {sid} --dry-run")
+        self.assertEqual(notice.returncode, 0, notice.stderr)
+        self.assertIn("python3 watch.py (pid 1106, 1 under it)", notice.stdout)
+        self.assertIn("`setsid --fork <command>", notice.stdout)
+        self.assertNotIn("`setsid <command>", notice.stdout)
+        self.assertNotIn("or as an omp background job", notice.stdout)
+        usage = self.run_bash('printf "%s\\n" "$MOVE_USAGE"')
+        self.assertIn("setsid --fork", usage.stdout)
 
     def test_a_move_to_another_machine_refuses_what_dies_with_the_hang_up(self) -> None:
         self.moving_session()
