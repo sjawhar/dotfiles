@@ -248,12 +248,16 @@ def refused_owners(profile: str) -> frozenset[str]:
     share the first, and a repository is not the machine.
 
     Not lenient like git_config_optional, for which any failure means "not set": that would serve a
-    refused owner whenever git cannot read the file. Only exit 1 with no output (no such file, or no
-    such key) means no owner is refused. Any other failure, such as a file git cannot parse or a git
-    that cannot run, raises AppTokenError, so every owner is refused."""
+    refused owner whenever git cannot read the file. Only exit 1 with no output at all, on stdout or
+    stderr (no such file, or no such key), means no owner is refused. git also exits 1 for a file it
+    may not read, with only a warning on stderr, so a file that exists and this process cannot read
+    is refused before git runs, and a warning on stderr is a failure too. Any other failure, such as a
+    file git cannot parse or a git that cannot run, raises AppTokenError, so every owner is refused."""
     key = f"gh-app.{profile}.refuse-owner"
     config = Path.home() / ".config" / "git" / "config"
     failure = f"failed to read {key} from {config}, so every owner is refused"
+    if os.path.lexists(config) and not os.access(config, os.R_OK):
+        raise AppTokenError(failure)
     try:
         result = subprocess.run(
             ["git", "config", "--file", str(config), "--get-all", key],
@@ -265,7 +269,7 @@ def refused_owners(profile: str) -> frozenset[str]:
         raise AppTokenError(failure) from error
     if result.returncode == 0:
         return frozenset(value.casefold() for value in result.stdout.splitlines())
-    if result.returncode == 1 and not result.stdout:
+    if result.returncode == 1 and not result.stdout and not result.stderr.strip():
         return frozenset()
     raise AppTokenError(failure)
 
