@@ -817,12 +817,17 @@ class MarketplacePlugins(Harness):
 
     def test_marketplace_budget_stops_launching_commands_and_restores_lock(self) -> None:
         self.take_upstream()
-        os.environ["FAKE_OMP_DELAY"] = "0.5"
-        start = time.monotonic()
-        with unittest.mock.patch.object(FOLLOW, "MARKETPLACE_TIMEOUT", 0.2, create=True):
-            why = FOLLOW.install_tools(self.repo, self.options())
+        # The 2 s budget gives a loaded machine time to start the fake omp and log its call.
+        # The delay is far past the budget, so the step ends early only when the budget stops it.
+        delay = 10
+        os.environ["FAKE_OMP_DELAY"] = str(delay)
+        timeout = self.options().mise_timeout
+        with unittest.mock.patch.object(FOLLOW, "MARKETPLACE_TIMEOUT", 2.0):
+            start = time.monotonic()
+            why = FOLLOW.install_marketplace_plugins(self.repo, timeout)
+            elapsed = time.monotonic() - start
         self.assertIn("budget", why)
-        self.assertLess(time.monotonic() - start, 2)
+        self.assertLess(elapsed, delay)
         self.assertEqual(self.calls(), [["plugin", "marketplace", "update", "verification-skills"]])
         self.assert_clean_lock()
 

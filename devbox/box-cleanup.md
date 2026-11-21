@@ -1,25 +1,30 @@
-# box-cleanup: seven cleaners, one schedule, one log, two alerts
+# box-cleanup: seven cleaners and the hook sweep, one schedule, one log, two alerts
 
 The seven disk cleaners share one timer and one log
 (dispatch://INFRA-993/ask/d44b73ba-3ac6-4307-9dd7-065cb035ec9b). The timer fires every
 15 minutes, with up to a minute of random delay. Costly sweeps remain daily; cheap cache caps
-check their own usage thresholds on every pass.
+check their own usage thresholds on every pass. The leak check's hook sweep runs here too, as two
+steps (`devbox/hook-sweep`): sami-devbox no longer arms `dotfiles-follow.timer`, which ran it
+(dispatch://INFRA-2022, dispatch://INFRA-4953).
 
 **This is one schedule and one log, not a new deletion policy.** Each cleaner runs as it stands,
 with its own caps, ages, refusals and environment. What is new: when they run, that the run is
-recorded, and that something speaks when the cleaning stops working.
+recorded, and that something speaks when the cleaning stops working. The hook sweep deletes
+nothing: it installs the leak check's pre-push hook where a public checkout lacks it.
 
 ## What it runs, in order
 
 | step | minimum interval | reason and kept rules |
 | --- | --- | --- |
+| `hook-sweep` | 0 s (every pass), killed at 420 s | one pass of the installed leak-check tag's `sweep-hooks.sh` over its fast roots, where sessions make checkouts; first, so a long daily walk cannot hold a new checkout back from its pre-push hook; fails when the pass fails a checkout or ends without its summary line |
 | `tmp-empty-prune` | 86400 s (daily) | walks temporary entries; empty `tmp*` entries older than two days in the big disk's TMPDIR |
 | `tmp-stale-reap` | 86400 s (daily) | walks the root-resident `/tmp`, with its own `TMP_REAP_RUN_SECONDS=1680` budget; never an entry a process holds (open file, cwd, exe, root, mapped file, command-line argument, `TMPDIR`), read by `devbox/proc-holds.sh` |
-| `session-scratch-reap` | 86400 s (daily) | session-directory census and liveness checks; only scratch directories whose session is gone |
+| `session-scratch-reap` | 0 s (every pass) | only scratch directories whose session is gone, with its own `SESSION_SCRATCH_RUN_SECONDS=1500` deadline; never one a process of this user holds, nor one holding another user's entry. Every pass because daily it met a whole day of dead sessions at once and ran into the 30-minute limit (2026-11-18 to 11-20), where a pass with little to remove takes 3-15 s |
 | `session-tmp-reap` | 86400 s (daily) | costly TMPDIR census (409-828 s measured); still report only |
-| `gocache-cap` | 0 s (every pass) | cheap size check; Go build cache entries unused for 3 h deleted past 25 GB, unused for 2 h past 50 GB, never one the oldest running `go` command may hold |
+| `gocache-cap` | 0 s (every pass) | every Go build cache at most three directories below `/mnt/scratch/<user>`, `/mnt/nvme/<user>` and `~/.cache` (Go's default included), and any other a running `go` command names in its `GOCACHE`, capped as one: entries unused for 3 h deleted past 25 GB in all, unused for 2 h past 50 GB, never one the oldest running `go` command of any user may hold |
 | `nvme-cache-cap` | 0 s (every pass) | cheap usage checks; uv, cargo, Go module, Hugging Face, Playwright, mise, Puppeteer, pip and bun caches under their own caps; over a cap, a cache goes by a rename to a sibling, and only when no process holds it (`devbox/proc-holds.sh`) and none of its tool's reading commands runs |
-| `docker-cap` | 0 s (every pass) | cheap filesystem check; acts only above `DOCKER_CAP_HIGH_PCT` (default 80%), keeping its own caps, ages and pull-in-flight refusal |
+| `hook-sweep-slow` | 3600 s (hourly), killed at 1000 s | the same over the fast and slow roots (about 20,000 checkouts on sami-devbox), as `dotfiles-follow` ran it |
+| `docker-cap` | 3600 s (hourly), killed at 2 h | cheap filesystem check; acts only above `DOCKER_CAP_HIGH_PCT` (default 80%), keeping its own caps, ages and pull-in-flight refusal |
 
 The existing step order, commands and environments are unchanged. Each step keeps the
 `ConditionPath*` its own unit had. Missing targets and minimum intervals that have not elapsed
@@ -107,8 +112,9 @@ filesystems that are not this machine's.
 A disk that fills by hundreds of GB per hour cannot wait for midnight: the observed image
 growth left only 1 h 37 min before its floor. Fifteen-minute cap checks fit several passes
 inside that window without adding a timer. They do not override a cleaner's decision to do
-nothing. The session and temporary-file walks still run no more often than daily; in
-particular, the 409-828-second TMPDIR census is not repeated every quarter hour.
+nothing. The temporary-file walks still run no more often than daily; in particular, the
+409-828-second TMPDIR census is not repeated every quarter hour. The session-scratch reaper
+runs every pass: it walks only the directories whose session is gone.
 
 The service remains a single sequential run with its existing 4-hour timeout. systemd does
 not start another copy while it is active, so a slow daily pass can delay the next cap check.

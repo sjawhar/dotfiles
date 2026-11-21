@@ -255,19 +255,22 @@ find_leak_check() {
     if [[ -z "$_check" && -s "$_pointer" ]]; then IFS= read -r _check < "$_pointer" || true; fi
 }
 # Who the push gate runs for: `agent` in an agent session; `person` outside one, on a machine with the check
-# installed and DOTFILES_JJ_NO_LEAK_CHECK not 1; empty otherwise. A person's own `jj git push` from a terminal
-# reaches no ordinary git hook (jj runs git with --no-verify) and no other public-check gate: shims/git installs
-# the encrypted term hook but preserves this public-check decision. So where the check is installed this shim checks
-# it (Sami, dispatch://BET-64/ask/0b96691d-1104-4a08-bda7-e544a32215b5: "Add a hook somehow to my devbox for these
-# leaks"). A machine without the check (a laptop) is unchanged, and DOTFILES_JJ_NO_LEAK_CHECK=1 skips it for one
-# command, as `git push --no-verify` does for git. In an agent session that variable is ignored and the rule is as
-# before: without a check only a confirmed-private destination passes.
+# installed and DOTFILES_JJ_NO_LEAK_CHECK not 1; empty otherwise. Installed means some source find_leak_check reads
+# names a check, whether or not the file it names is there: a check that is named and missing is a broken install,
+# and the gate then refuses the push unless its destination is confirmed private, as the leak check's wrapper and
+# dispatcher refuse a git push. shims/git's person gate makes the same test with its copy of find_leak_check. A
+# person's own `jj git push` from a terminal reaches no ordinary git hook (jj runs git with --no-verify) and no other
+# public-check gate: shims/git installs the encrypted term hook but preserves this public-check decision. So where the
+# check is installed this shim checks it (Sami, dispatch://BET-64/ask/0b96691d-1104-4a08-bda7-e544a32215b5: "Add a
+# hook somehow to my devbox for these leaks"). A machine where no source names a check (a laptop) is unchanged, and
+# DOTFILES_JJ_NO_LEAK_CHECK=1 skips it for one command, as `git push --no-verify` does for git. In an agent session
+# that variable is ignored and the rule is as before: without a check only a confirmed-private destination passes.
 _gate=""
 if agent_context; then
     _gate=agent
 elif [[ "${DOTFILES_JJ_NO_LEAK_CHECK:-}" != 1 ]]; then
     find_leak_check
-    if [[ -n "$_check" && -x "$_check" ]]; then _gate=person; fi
+    if [[ -n "$_check" ]]; then _gate=person; fi
 fi
 push_refuse() {
     printf 'error: jj shim: %s\n' "$@" >&2

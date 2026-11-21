@@ -33,12 +33,40 @@
 [user]
 	email = sami@trajectorylabs.net
 	name = Sami Jawhar
-# sjawhar/legion is public and commits as sami@thecybermonk.com: every clone of
-# it, on every machine, is matched by its remote URL (`hasconfig:`, git 2.36+).
-# jj's half of the rule is the repository scope in .jjconfig.toml; the two must
-# agree, for the reason scripts/git-identity gives. A repo's own `git-identity`
-# still wins. The path starts at ~ because git resolves a relative include path
-# against ~/.gitconfig, the symlink, rather than this file.
+# A repository's identity by rule: every clone of it, on every machine, is
+# matched by its remote URL (`hasconfig:`, git 2.36+), and `/**` matches the rest
+# of the URL, `.git` included. jj's half of each rule is a repository scope in
+# .jjconfig.toml; the two must agree, for the reason scripts/git-identity gives.
+# A repo's own `git-identity` still wins. The path starts at ~ because git
+# resolves a relative include path against ~/.gitconfig, the symlink, rather
+# than this file.
+#
+# Every theorem-labs repository commits as sami@theorem.dev.
+[includeIf "hasconfig:remote.*.url:https://github.com/theorem-labs/**"]
+	path = ~/.dotfiles/theorem-identity.gitconfig
+[includeIf "hasconfig:remote.*.url:git@github.com:theorem-labs/**"]
+	path = ~/.dotfiles/theorem-identity.gitconfig
+[includeIf "hasconfig:remote.*.url:ssh://git@github.com/theorem-labs/**"]
+	path = ~/.dotfiles/theorem-identity.gitconfig
+# Every cybermonklabs repository is public and commits as sami@thecybermonk.com,
+# never as sami@theorem.dev, which the leak check refuses there. The bracket
+# classes match the organization name in any case, and the second https rule a
+# URL with a user part (`user@`, `x-access-token:<token>@`). sjawhar/legion is
+# cybermonklabs/legion's old name, which a clone's remote can still have. These
+# come after the theorem-labs rules: where two includes set user.email the later
+# one wins, so a checkout with a remote in both organizations commits as
+# cybermonk. git has no condition on a remote's pushurl, so a checkout that
+# fetches from theorem-labs and pushes to cybermonklabs commits as
+# sami@theorem.dev; the leak check's scan of author and committer lines
+# (dispatch://INFRA-4943) is what refuses its push.
+[includeIf "hasconfig:remote.*.url:https://github.com/[Cc][Yy][Bb][Ee][Rr][Mm][Oo][Nn][Kk][Ll][Aa][Bb][Ss]/**"]
+	path = ~/.dotfiles/cybermonk-identity.gitconfig
+[includeIf "hasconfig:remote.*.url:https://*@github.com/[Cc][Yy][Bb][Ee][Rr][Mm][Oo][Nn][Kk][Ll][Aa][Bb][Ss]/**"]
+	path = ~/.dotfiles/cybermonk-identity.gitconfig
+[includeIf "hasconfig:remote.*.url:git@github.com:[Cc][Yy][Bb][Ee][Rr][Mm][Oo][Nn][Kk][Ll][Aa][Bb][Ss]/**"]
+	path = ~/.dotfiles/cybermonk-identity.gitconfig
+[includeIf "hasconfig:remote.*.url:ssh://git@github.com/[Cc][Yy][Bb][Ee][Rr][Mm][Oo][Nn][Kk][Ll][Aa][Bb][Ss]/**"]
+	path = ~/.dotfiles/cybermonk-identity.gitconfig
 [includeIf "hasconfig:remote.*.url:https://github.com/sjawhar/legion"]
 	path = ~/.dotfiles/cybermonk-identity.gitconfig
 [includeIf "hasconfig:remote.*.url:https://github.com/sjawhar/legion.git"]
@@ -51,14 +79,6 @@
 	path = ~/.dotfiles/cybermonk-identity.gitconfig
 [includeIf "hasconfig:remote.*.url:ssh://git@github.com/sjawhar/legion.git"]
 	path = ~/.dotfiles/cybermonk-identity.gitconfig
-# Every theorem-labs repository commits as sami@theorem.dev, matched the same way
-# across the whole organization: `/**` matches the rest of the URL, `.git` included.
-[includeIf "hasconfig:remote.*.url:https://github.com/theorem-labs/**"]
-	path = ~/.dotfiles/theorem-identity.gitconfig
-[includeIf "hasconfig:remote.*.url:git@github.com:theorem-labs/**"]
-	path = ~/.dotfiles/theorem-identity.gitconfig
-[includeIf "hasconfig:remote.*.url:ssh://git@github.com/theorem-labs/**"]
-	path = ~/.dotfiles/theorem-identity.gitconfig
 [filter "lfs"]
 	smudge = git-lfs smudge -- %f
 	process = git-lfs filter-process
@@ -107,7 +127,8 @@
 # the leak check's install-global-hooks.sh (devbox/sami-devbox-provision, step prepush), sets
 # core.hooksPath to its global hooks dispatcher. That runs the check on a pre-push to any URL with
 # a host, then the repository's own hook of every name. A repository's own core.hooksPath still
-# wins (shims/git checks an agent session's push from one). git ignores a missing include, so a
-# machine without the install is unchanged; `install-global-hooks.sh --remove` turns it off.
+# wins (shims/git checks a push through it from one: an agent's, and a person's where the check is
+# installed). git ignores a missing include, so a machine without the install is unchanged;
+# `install-global-hooks.sh --remove` turns it off.
 [include]
 	path = ~/.local/share/public-leak-check-hooks/global.gitconfig

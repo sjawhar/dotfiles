@@ -1,1 +1,15 @@
-../vendor/compound-engineering/skills/ce-babysit-pr/scripts/pr-snapshot
+#!/bin/bash
+# pr-snapshot: ce-babysit-pr's PR snapshot and watch helper, on PATH by name (landing-a-pr and
+# using-subagents run `pr-snapshot watch`). The script ships in the compound-engineering clone that
+# installers/omp.sh makes in vendor/. vendor/ is gitignored, so this is a script that runs the clone's
+# copy, not a link to it: a link into vendor/ dangles in a fresh clone.
+set -euo pipefail
+
+root="$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")"
+script="${root}/vendor/compound-engineering/skills/ce-babysit-pr/scripts/pr-snapshot"
+if [ ! -e "$script" ]; then
+    echo "pr-snapshot: ${script} does not exist." >&2
+    echo "pr-snapshot: installers/omp.sh clones vendor/compound-engineering at its pinned commit; run: bash ${root}/installers/omp.sh" >&2
+    exit 1
+fi
+exec "$script" "$@"

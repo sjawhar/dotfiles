@@ -118,6 +118,7 @@ class OryxInstall(unittest.TestCase):
             self.assertTrue(unit.is_symlink())
             self.assertEqual(unit.resolve(), self.dotfiles / f"devbox/dotfiles-follow.{suffix}")
         self.assertEqual(self.calls(), [
+            "--user is-active --quiet dotfiles-follow.timer",
             "--user daemon-reload",
             "--user enable --now dotfiles-follow.timer",
             "--user list-timers --all dotfiles-follow.timer",

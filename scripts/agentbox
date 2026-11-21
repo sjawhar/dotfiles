@@ -484,6 +484,17 @@ mounts_of() {
     awk -v m="$1" '$1 == m { print $2 }' "${files[@]}"
 }
 
+# home_dotfiles_link P: when the home path P is a symlink into ~/.dotfiles (installers link
+# ~/.gitconfig so), the path that link names inside a box, where ~/.dotfiles is a directory bind
+# at its own path and the box's home is the host's $HOME path. Status 1 for any other path.
+home_dotfiles_link() {
+    local target dot
+    [[ -L "$HOME/$1" ]] || return 1
+    target="$(readlink -f "$HOME/$1")" && dot="$(readlink -f "$HOME/.dotfiles")" || return 1
+    [[ -n "$dot" && "$target" == "$dot"/* && -e "$target" ]] || return 1
+    printf '%s\n' "$HOME/.dotfiles/${target#"$dot"/}"
+}
+
 # MOVE_SAID: a refusal was printed, so the exit is explained (cmd_move --to checks it).
 MOVE_SAID=""
 die() { MOVE_SAID=1; echo "agentbox: $*" >&2; exit 1; }
@@ -2434,12 +2445,23 @@ mount_args() {
     # from the host home into every box, ~/.omp (every session's transcripts) and ~/.ssh among
     # them. Under --no-host-writes each is read-only, so the box still READS the logins and
     # settings it needs to work and can change none of them.
-    local home_mode=""
+    local home_mode="" link
     $NO_HOST_WRITES && home_mode=":ro"
     while read -r p; do
         if [[ ! -e "$HOME/$p" ]]; then
             case "$p" in .npmrc|.gitconfig) continue ;; esac
             mkdir -p "$HOME/$p"
+        fi
+        # A link into ~/.dotfiles (~/.gitconfig) is the same link in the box's own home, where it
+        # resolves through the ~/.dotfiles directory bind above, so the box reads the live file.
+        # A bind of the file itself holds the inode of the box's start, and every move of the
+        # checkout and every `git config --global` replaces that file with a new one: on
+        # 2026-11-21 every box on sami-devbox read a ~/.gitconfig of 2026-11-15 or older, without
+        # the core.excludesFile of dotfiles#133. Under --no-host-writes it stays a read-only bind.
+        if ! $NO_HOST_WRITES && link="$(home_dotfiles_link "$p")"; then
+            mkdir -p "$(dirname "$BOXES/$box/home/$p")"
+            ln -sfn "$link" "$BOXES/$box/home/$p"
+            continue
         fi
         a+=(-v "$(readlink -f "$HOME/$p"):$HOME/$p$home_mode")
     done < <(mounts_of rw)
@@ -2578,6 +2600,10 @@ session_env() {
     # past shims/gcloud and ~/.gcloud's installation property copies a printed token into a log
     # file (dispatch://INFRA-4824). The launcher's own value wins, as the shim keeps a caller's.
     e+=(-e "CLOUDSDK_CORE_DISABLE_FILE_LOGGING=${CLOUDSDK_CORE_DISABLE_FILE_LOGGING:-true}")
+    # CodeGraph's usage telemetry off, as scripts/agent-session sets it for a host session; a box's
+    # ~/.codegraph is its own, so no `codegraph telemetry off` on the host reaches it. The
+    # launcher's own value wins.
+    e+=(-e "CODEGRAPH_TELEMETRY=${CODEGRAPH_TELEMETRY:-0}")
     # Machine-local session environment (dispatch://BET-765), the same file scripts/agent-session
     # sources for a host session. A box builds its variables from scratch and never runs
     # agent-session, so without this the file is visible in the box (agentbox/mounts has
@@ -3675,10 +3701,14 @@ box_run() {
 #      box tree, disks and runtime directory. That launcher names itself in the box's record,
 #      attaches to the box (box_client with `docker attach`), and from then on waits on the box
 #      and closes it as `new` does.
-# A box whose client's parent is box_client (a subshell of a launcher of this version) needs
-# nothing and is left alone. The old launcher held the box's enrollment only in memory (ENROLLED_*);
-# the new one rebuilds it from what the host recorded (adopt_enrolled), so a box enrolled as its
-# session is enrolled again when the broker refuses its renew as not live (reenroll_if_not_live),
+#   4. It makes each home entry that is a link into ~/.dotfiles on the host (~/.gitconfig) that
+#      same link in the box, as a new box has it (adopt_link_home), so the box reads the live file
+#      and no longer the copy of its start.
+# A box whose client's parent is box_client (a subshell of a launcher of this version) needs no
+# new launcher and is left alone, apart from step 4. The old launcher held the box's enrollment
+# only in memory (ENROLLED_*); the new one rebuilds it from what the host recorded
+# (adopt_enrolled), so a box enrolled as its session is enrolled again when the broker refuses its
+# renew as not live (reenroll_if_not_live),
 # as a box this launcher started is. A box enrolled under its own name has no host record of its
 # key's thumbprint, so it is not enrolled again; the launcher says so when it takes the box.
 ADOPT_GONE_WAIT=10
@@ -3708,6 +3738,7 @@ cmd_adopt() {
     done
     if [[ -z "$client" && -n "$attach" ]]; then
         echo "agentbox: $box already runs under a launcher that attaches to it again (its docker attach is pid $attach); nothing to do"
+        adopt_link_home "$box"
         return 0
     fi
     [[ -n "$client" ]] || die "no launcher's docker run of $box runs on this host, so there is no launcher to replace; attach to it by hand: docker attach $box"
@@ -3718,6 +3749,7 @@ cmd_adopt() {
     upper="$(adopt_ppid "$launcher")" || upper=""
     if [[ -n "$upper" ]] && mapfile -d '' -t uargs <"$PROC/$upper/cmdline" 2>/dev/null && [[ "${uargs[*]}" == "${largs[*]}" ]]; then
         echo "agentbox: $box already runs under a launcher that attaches to it again (pid $upper); nothing to do"
+        adopt_link_home "$box"
         return 0
     fi
     [[ -r "$PROC/$launcher/environ" ]] || die "cannot read the environment of $box's launcher (pid $launcher); nothing was done"
@@ -3797,6 +3829,42 @@ cmd_adopt() {
     "$MOVE_TMUX_BIN" -S "$server" respawn-pane -k -t "$pane" -c "$cwd" bash -i -c "$inner" \
         || die "$box's launcher and client are gone, and pane $pane would not respawn; the box runs on with no launcher. Start a launcher in a pane: $inner"
     echo "agentbox: $box now runs under a new launcher in pane $pane; Docker says it is $(box_container_state "$box")"
+    adopt_link_home "$box"
+}
+
+# adopt_link_home BOX: in the running BOX, make each rw home entry that is a link into ~/.dotfiles
+# on the host (home_dotfiles_link) that same link, as mount_args does for a new box. A box started
+# before that has a bind of the file as it was at the box's start: root in the box unmounts it
+# lazily (Sysbox lets root in a box unmount the binds of its start; tried on sami-devbox on
+# 2026-11-21), so a process that holds the old file open keeps it, and the link takes its place.
+# A read-only bind (--no-host-writes) and a file of the box's own are left as they are. One line
+# per entry it changes or leaves; a failure is said and does not fail the adopt.
+adopt_link_home() {
+    local box="$1" p link out
+    while read -r p; do
+        link="$(home_dotfiles_link "$p")" || continue
+        # shellcheck disable=SC2016  # expanded by the box's sh
+        if out="$(docker exec -u root "$box" sh -c '
+            p="$1" link="$2" user="${AGENTBOX_USER:-ubuntu}"
+            [ "$(readlink "$p" 2>/dev/null)" = "$link" ] && exit 0
+            if mountpoint -q "$p"; then
+                case ",$(findmnt -no OPTIONS -M "$p")," in
+                    *,ro,*) echo "$p is a read-only bind (--no-host-writes); left as it is"; exit 0 ;;
+                esac
+                umount -l "$p" || exit 1
+            elif [ -e "$p" ] || [ -L "$p" ]; then
+                echo "$p is a file of the box'"'"'s own, not a bind of the host'"'"'s; left as it is"
+                exit 0
+            fi
+            ln -sfn "$link" "$p.agentbox-link" && chown -h "$user" "$p.agentbox-link" \
+                && mv -Tf "$p.agentbox-link" "$p" || exit 1
+            echo "$p is now a link to $link, which follows the host file"
+        ' sh "$HOME/$p" "$link" 2>&1)"; then
+            [[ -z "$out" ]] || echo "agentbox: $box: $out"
+        else
+            echo "agentbox: $box: could not make $HOME/$p a link to $link: $out" >&2
+        fi
+    done < <(mounts_of rw)
 }
 
 # adopt_names BOX ARG…: the arguments of a `docker run` name the container BOX.
@@ -6637,9 +6705,11 @@ move_relaunch() {
 # (CALLER, its ancestors and descendants). A server, a watcher or a dashboard started from a tool
 # call is a child of the omp, and a hang-up ends it: KNOTCURVE's dashboard, started by hand from
 # its session, died with the move at 16:21Z on 2026-11-02 and was down about four hours. One row
-# per top process, with how many processes are under it. A process `setsid` detached - its own
-# session leader, so the pane's hang-up does not reach it - is not an orphan, and neither is what
-# it started; nor is a systemd unit, which is not under the omp at all.
+# per top process, with how many processes are under it. Leading a session of its own saves
+# nothing: omp's hang-up teardown signals what is still reachable from it BY PARENT LINK, and
+# plain `setsid` changes the session but not the parent (move_orphans_gate has the measurement),
+# so a plain-setsid child and what it started are listed. What `setsid --fork` started, or a
+# systemd unit, has a parent other than the omp, so this walk down from the omp never reaches it.
 move_orphans() {
     local omp="$1" caller="${2:-}" p q cmd n
     local -A skip=()
@@ -6669,24 +6739,10 @@ move_orphans() {
         case "$cmd" in
             *__omp_worker*|*/omp-python-runner*/runner-*.py*) skip[$p]=helper ;;
         esac
-        # Field 6 of /proc/<pid>/stat is the session id: its own means `setsid`, and SIGHUP of the
-        # pane's session does not reach it.
-        if [[ -z "${skip[$p]:-}" ]]; then
-            local stat_line sess
-            if stat_line="$(<"$PROC/$p/stat")" 2>/dev/null; then
-                stat_line="${stat_line##*) }"
-                set -- $stat_line
-                sess="${4:-}"
-                [[ "$sess" == "$p" ]] && skip[$p]=detached
-            fi
-        fi
         if [[ -n "${skip[$p]:-}" ]]; then
-            # A detached process takes its own children with it: the hang-up reaches none of them.
-            # omp's helpers and the move's own chain do not, so what they started is still listed.
-            if [[ "${skip[$p]}" != detached ]]; then
-                read -r -a q <<<"${MOVE_KIDS[$p]:-}"
-                queue+=(${q[@]+"${q[@]}"})
-            fi
+            # omp's helpers and the move's own chain are not listed, but what they started is.
+            read -r -a q <<<"${MOVE_KIDS[$p]:-}"
+            queue+=(${q[@]+"${q[@]}"})
             continue
         fi
         n="$(move_descendants "$p" | wc -l)"
@@ -7182,7 +7238,7 @@ cmd_move_notify() {
         # What dies with the hang-up, so the session decides before it runs the move.
         local orphans
         orphans="$(move_orphans "$pid")"
-        [[ -z "$orphans" ]] || notice+=" Your move refuses until you deal with these: the hang-up ends them: $(move_orphans_list "$orphans"). Start each one detached (\`setsid <command> </dev/null >>log 2>&1 &\`) or as an omp background job, stop it, or run the move with --accept-orphans."
+        [[ -z "$orphans" ]] || notice+=" Your move refuses until you deal with these: the hang-up ends them: $(move_orphans_list "$orphans"). Start each one with \`setsid --fork <command> </dev/null >>log 2>&1\`, which makes init its parent (plain \`setsid\` does not save it, and an omp background job is a child of your omp too), stop it, or run the move with --accept-orphans."
         if $dry; then
             echo "agentbox: would notify $sid (pane $pane, $at): $notice"
             continue
@@ -10589,9 +10645,10 @@ MOVE_USAGE='usage:
   agentbox move --to <machine> --clear-halt        the box-health lead lets moves to <machine> go
                                                     on after a halt (two failed moves in a row, or
                                                     a session found running on both machines)
-Every move refuses before the hang-up while the session has a process that is not a systemd unit
-and would die with it (a server, a watcher, a dashboard started from a tool call); the plans list
-them. Make each a unit, stop it, or pass --accept-orphans.
+Every move refuses before the hang-up while the session has a process still under its omp by
+parent link, which dies with it (a server, a watcher, a dashboard started from a tool call, even
+one plain `setsid` started); the plans list them. Start each with `setsid --fork`, which makes init
+its parent, make it a unit, stop it, or pass --accept-orphans.
 More than one `move --plan` may run at once: it writes only this host'"'"'s plan files, one per
 session, each renamed into place.'
 
@@ -10761,6 +10818,12 @@ sdk="$HOME/.gcloud/google-cloud-sdk"
 mounted() { awk -v t="$1" "\$5 == t { f = 1 } END { exit !f }" /proc/self/mountinfo; }
 writable() { if [ -d "$1" ]; then touch "$1/.doctor.$$" 2>/dev/null && rm -f "$1/.doctor.$$"; else (: >>"$1") 2>/dev/null; fi; }
 while read -r m p; do
+    # A link into ~/.dotfiles (mount_args makes ~/.gitconfig one) reads the live host file.
+    if [ "$m" = rw ] && [ -L "$HOME/$p" ]; then
+        l="$(readlink "$HOME/$p")"
+        [ -e "$HOME/$p" ] && ! mounted "$HOME/$p" && writable "$HOME/$p" && ok "rw $p: a link to $l, which follows the host file" || fail "rw $p: a link to $l that is not a writable file"
+        continue
+    fi
     case "$p" in .npmrc|.gitconfig) [ -e "$HOME/$p" ] || { echo "note box: optional config $p absent"; continue; } ;; esac
     case "$m" in
         rw) mounted "$HOME/$p" && writable "$HOME/$p" && ok "rw $p" || fail "rw $p: not a writable mount (mounts entry newer than this box: relaunch to pick it up)";;

@@ -91,4 +91,5 @@ installers/omp-root-hang-watch.sh                   # links the units, enables t
 systemctl --user disable --now omp-root-hang-watch.timer
 ```
 
-The installer leaves a timer that is linked but disabled alone.
+The installer leaves a timer someone disabled and stopped alone, and says so
+(`user_unit_stopped_on_purpose` in `installers/lib.sh`).

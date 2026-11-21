@@ -433,6 +433,27 @@ class InstallTools(Harness):
         )
         self.assertFalse(self.fake_log.exists(), "mise install ran without its lock")
 
+    def bashrc_log(self, bashrc: str, timeout: float) -> list[str]:
+        """What bashrc_mise_cache_dir logs for a checkout whose .bashrc is BASHRC."""
+        (self.repo / ".bashrc").write_text(bashrc)
+        with unittest.mock.patch.object(FOLLOW, "log") as logged:
+            self.assertEqual(FOLLOW.bashrc_mise_cache_dir(self.repo, timeout), "")
+        return [call.args[0] for call in logged.call_args_list]
+
+    def test_a_bashrc_that_exits_124_is_not_reported_as_a_timeout(self) -> None:
+        bashrc = FOLLOW.display_path(self.repo / ".bashrc")
+        self.assertEqual(
+            self.bashrc_log("exit 124\n", 30),
+            [f"tools: `bash` sourcing {bashrc} exited 124, so the tools commands get no MISE_CACHE_DIR from it"],
+        )
+
+    def test_a_bashrc_that_takes_longer_than_the_timeout_is_reported_as_one(self) -> None:
+        bashrc = FOLLOW.display_path(self.repo / ".bashrc")
+        self.assertEqual(
+            self.bashrc_log("sleep 30\n", 1),
+            [f"tools: `bash` sourcing {bashrc} took longer than 1 s, so the tools commands get no MISE_CACHE_DIR from it"],
+        )
+
 
 # scripts/omp-link-rules as a stand-in: it records the checkout it runs for (DOTFILES_DIR, which
 # run_step sets to the checkout) and exits FAKE_LINK_RC.
@@ -754,7 +775,8 @@ class PrePushHooks(Harness):
         messages = self.run_follow()
         self.assertEqual(len(messages), 1)
         self.assertIn("sweep-hooks.sh is missing", messages[0])
-        self.assertIn("--only prepush", messages[0])
+        self.assertIn("Install it with devbox/sami-devbox-provision --only prepush.", messages[0])
+        self.assertNotIn("Install it from", messages[0])
 
     def test_a_pass_with_zero_deferred_is_complete(self) -> None:
         os.environ["FAKE_SWEEP"] = "complete"

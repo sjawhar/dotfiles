@@ -122,10 +122,10 @@ export PLAYWRIGHT_SKIP_BROWSER_GC=1
 
 # Language caches on the big disk, where a machine has one (/mnt/nvme/$USER, as on the devboxes):
 # uv's cache (20 GB) and Go's module cache (9 GB) otherwise grow on a root disk shared with every
-# session (dispatch://INFRA-6). Go's build cache is one directory for every session and lane, which
-# devbox/gocache-cap.timer holds under a size cap; a lane that names a GOCACHE of its own makes a
-# cache outside it that nothing caps. A venv on the root disk can no longer hardlink from uv's
-# cache, so uv falls back to copying.
+# session (dispatch://INFRA-6). Go's build cache is one directory for every session and lane;
+# devbox/gocache-cap holds it, any GOCACHE a lane names under /mnt/scratch/$USER or /mnt/nvme/$USER,
+# and Go's default ~/.cache/go-build under one size cap together. A venv on the root disk can no
+# longer hardlink from uv's cache, so uv falls back to copying.
 # Guarded on the directory, so an agent box, which does not mount it, keeps the home defaults;
 # a value the caller already has wins.
 # On sami-devbox the losable part goes to the local-SSD scratch, /mnt/scratch/$USER, made at
@@ -160,7 +160,7 @@ if [ -d "/mnt/nvme/${USER:-$(id -un)}" ]; then
     # tested for writability before anything points at it, and a value the caller already has
     # wins: an agent session's own per-session scratch (scripts/agent-session) and an explicitly
     # exported TMPDIR both keep their value. Empty tmp* dirs left here are pruned daily
-    # (devbox/tmp-empty-prune.timer).
+    # (devbox/tmp-empty-prune, a step of devbox/box-cleanup).
     _nvme_tmp="$_scratch/tmp"
     if [ -z "${TMPDIR:-}" ] && mkdir -p "$_nvme_tmp" 2>/dev/null && [ -w "$_nvme_tmp" ]; then
         export TMPDIR="$_nvme_tmp"

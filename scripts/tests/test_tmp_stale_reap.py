@@ -292,6 +292,36 @@ class BoundedPassTest(unittest.TestCase):
         self.assertIn(f"tmp-stale-reap: keep {self.root}/held (live: pid 17999 via an open file)", out)
         self.assertEqual(self.removed(out), [f"{self.root}/stale"])
 
+    def test_a_mount_inside_an_entry_keeps_it_and_its_files(self):
+        """rm -rf would delete a filesystem mounted inside a stale entry. The entry is kept and
+        named, the mounted file stays, and the pass still removes the stale entry beside it. Run
+        in a user and mount namespace of its own, where this user may mount a tmpfs."""
+        if shutil.which("unshare") is None or subprocess.run(
+                ["unshare", "-rm", "true"], capture_output=True, check=False).returncode != 0:
+            self.skipTest("needs `unshare -rm` to mount a tmpfs without root")
+        (self.root / "mounted" / "mnt").mkdir(parents=True)
+        self.entries("stale")
+        mounted = self.root / "mounted" / "mnt" / "data"
+        # The mounted root and its file are older than the 1.8 s window by the time the pass looks
+        # (touch cannot set a ctime, so the script waits), so no age rule keeps it instead.
+        script = ('mount -t tmpfs none "$1" && echo precious > "$2" && touch -d "1 hour ago" "$2" "$1" && sleep 3 '
+                  '|| exit 9\n"$3" --apply; rc=$?\nif [ -f "$2" ]; then echo "MOUNTED FILE SURVIVED"; fi\nexit $rc\n')
+        done = subprocess.run(
+            ["unshare", "-rm", "sh", "-c", script, "sh", str(self.root / "mounted" / "mnt"), str(mounted), str(SCRIPT)],
+            capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL,
+            env={**os.environ, "TMP_REAP_ROOT": str(self.root), "TMP_REAP_PROC": str(self.proc),
+                 "TMP_REAP_STATE": str(self.state), "TMP_REAP_AGE_HOURS": "0.0005", "TMP_REAP_PROBE_SECONDS": "120",
+                 "TMP_REAP_IO_PRESSURE_MAX": "1000", "TMP_REAP_RUN_SECONDS": "120"},
+        )
+        out = done.stdout + done.stderr
+        self.assertEqual(done.returncode, 0, out)
+        self.assertIn("MOUNTED FILE SURVIVED", done.stdout)
+        self.assertIn(f"tmp-stale-reap: keep {self.root}/mounted (a filesystem is mounted inside it, "
+                      f"at {self.root}/mounted/mnt;", done.stdout)
+        self.assertEqual(self.removed(done.stdout), [f"{self.root}/stale"])
+        self.assertIn("1 holding a mount", done.stdout)
+        self.assertNotIn("FAILED", out)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -99,6 +99,9 @@ rw .config/grade-farm
 # own reads, and a profile's own envoy.json may link to (envoy/AGENTS.md)
 rw .config/legion
 rw .npmrc
+# On a dotfiles machine ~/.gitconfig is a link into ~/.dotfiles: a box gets the same link, which
+# follows the live file, not a bind of the file, which would keep the copy of the box's start
+# (scripts/agentbox mount_args; `agentbox adopt` relinks a running box).
 rw .gitconfig
 # Host SSH identities, pins, configuration, and GnuPG state are not filtered.
 rw .ssh

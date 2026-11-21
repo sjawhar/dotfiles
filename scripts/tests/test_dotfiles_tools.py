@@ -15,8 +15,12 @@ import fcntl
 import importlib.machinery
 import importlib.util
 import os
+import re
+import shlex
+import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -249,9 +253,9 @@ class DotfilesTools(ToolsStep):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         destinations = [line.split("|", 1)[0] for line in self.ssh_record.read_text().splitlines()]
-        self.assertEqual(destinations, ["sami@sami", "sami@sami-leanperf", "sami@sami-rocqperf"])
-        self.assertEqual(len(self.calls("mise")), 3, self.records())
-        self.assertEqual(len(self.calls("bun")), 3, self.records())
+        self.assertEqual(destinations, ["sami@sami"])
+        self.assertEqual(len(self.calls("mise")), 1, self.records())
+        self.assertEqual(len(self.calls("bun")), 1, self.records())
 
     def test_case_05_plain_git_checkout_runs_tools(self) -> None:
         _, env = self.plain_checkout("plain")
@@ -358,6 +362,15 @@ class DotfilesTools(ToolsStep):
         self.assertIn("`bun install --frozen-lockfile`", bun.stderr)
         self.assertIn("exited 124", bun.stderr)
         self.assertIn("past its limit of 2 s", bun.stderr)
+
+    def test_case_10a_a_mise_that_exits_124_at_once_is_not_past_its_limit(self) -> None:
+        # mise can exit 124 itself; the note is only for a run that lasted the limit.
+        result = self.sync("local", env={**self.env, "DOTFILES_TOOLS_TIMEOUT": "2", "FAKE_MISE_RC": "124"})
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("`mise install`", result.stderr)
+        self.assertIn("exited 124", result.stderr)
+        self.assertNotIn("past its limit", result.stderr)
 
     def test_case_11_host_loop_continues_after_a_failure(self) -> None:
         self._install_ssh()
@@ -994,8 +1007,8 @@ RENDER = "knives-registry-render --if-changed"
 
 
 class KnivesRegistry(RegistryCopy, ToolsStep):
-    """sami-rocqperf, sami-leanperf and the laptop run no dotfiles-follow timer and move only
-    through dotfiles-sync and dotfiles-publish, so the tools step starts with the real
+    """The laptop runs no dotfiles-follow timer and moves only through dotfiles-sync and
+    dotfiles-publish, so the tools step starts with the real
     scripts/knives-registry-render --if-changed: the machine's copy of the knives registry,
     ~/.config/knives/repos.toml, follows the committed knives/repos.toml with no person's command
     (dispatch://INFRA-3365, R5). The copy the render must leave is worked out by RegistryCopy
@@ -1232,6 +1245,136 @@ class KnivesRegistry(RegistryCopy, ToolsStep):
             self.assertEqual(len(self.calls("mise")), 1, self.records())
             self.assertEqual(self.calls("bun"), [], self.records())
             self.assert_render_failed(result)
+
+
+def tools_functions() -> str:
+    """tools_error and tools_run as scripts/dotfiles-sync defines them: each from its `NAME() {`
+    line to the first `}` that starts a line."""
+    source = SYNC.read_text(encoding="utf-8")
+    definitions: list[str] = []
+    for name in ("tools_error", "tools_run"):
+        matches = re.findall(rf"^{name}\(\) \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL)
+        if len(matches) != 1:
+            raise AssertionError(f"scripts/dotfiles-sync: {name}: found {len(matches)} definitions")
+        definitions.append(matches[0])
+    return "".join(definitions)
+
+
+class ToolsRunClock(unittest.TestCase):
+    """The clock of tools_run, read through the note of tools_error. The two functions run alone,
+    in a bash that sets what they need as scripts/dotfiles-sync sets it, so a test can choose when
+    the run starts and which locale the bash has."""
+
+    def scratch(self) -> Path:
+        """A directory of the test's own, removed after it."""
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        return Path(temp_dir.name)
+
+    def tools_run(
+        self, root: Path, command: str, before: str = "", after: str = "", env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        """BEFORE, then `tools_run t ROOT 2 bash -c COMMAND` as tools_step calls it, then AFTER. The
+        last line of stdout is `status <its status>`."""
+        script = "\n".join(
+            [
+                "set -euo pipefail",
+                "tools_grace=10",
+                tools_functions(),
+                before,
+                "status=0",
+                f"tools_run t {shlex.quote(str(root))} 2 bash -c {shlex.quote(command)} || status=$?",
+                after,
+                'printf "status %s\\n" "$status"',
+            ]
+        )
+        return subprocess.run(
+            ["bash", "-c", script],
+            env={"PATH": "/usr/bin:/bin", "HOME": str(root), "TMPDIR": str(root), **(env or {})},
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=30,
+        )
+
+    def test_case_10b_a_run_shorter_than_its_limit_is_not_past_it_whatever_second_it_starts_in(self) -> None:
+        # The run starts 0.8 to 0.9 s into a second and lasts 1.3 s, so it ends two seconds later. A
+        # clock of whole seconds reads that as the whole limit of 2 s and prints the note; the clock
+        # in microseconds reads 1.3 s. A run that starts before 0.8 can end in the next second, and
+        # after 0.9 tools_run can read its start in the next second; either way a clock of whole
+        # seconds reads 1 s.
+        # On a loaded machine, the start of timeout, bash and sleep can make a run last the whole
+        # 2 s, and then a correct clock prints the note too. So the test bash times each call of
+        # tools_run from outside, and the test keeps the first run that lasted less than 2 s: the
+        # clock inside tools_run then reads less than 2 s too.
+        wait = (
+            "while :; do\n"
+            "    fraction=$(( 10#${EPOCHREALTIME: -6} ))\n"
+            "    if (( fraction >= 800000 && fraction < 900000 )); then break; fi\n"
+            "    sleep 0.01\n"
+            "done\n"
+            "outer=${EPOCHREALTIME//[!0-9]/}"
+        )
+        outer = 'printf "outer %s\\n" "$(( ${EPOCHREALTIME//[!0-9]/} - outer ))"'
+        root = self.scratch()
+        for _ in range(5):
+            result = self.tools_run(root, "sleep 1.3; exit 124", before=wait, after=outer)
+            lasted = re.search(r"^outer ([0-9]+)$", result.stdout, re.MULTILINE)
+            self.assertIsNotNone(lasted, result.stdout + result.stderr)
+            assert lasted is not None
+            if int(lasted.group(1)) < 2_000_000:
+                break
+        else:
+            self.skipTest(
+                "this machine was too slow: each of 5 runs lasted the whole 2 s limit, so the test did"
+                " not check the note"
+            )
+
+        self.assertEqual(result.stdout.splitlines()[-1:], ["status 124"], result.stdout + result.stderr)
+        self.assertIn(f"tools step: `t` in {root} exited 124", result.stderr)
+        self.assertNotIn("past its limit", result.stderr)
+
+    def test_case_10c_a_locale_whose_decimal_point_is_neither_a_dot_nor_a_comma(self) -> None:
+        # Bash puts the locale's decimal point into EPOCHREALTIME; for ps_AF it puts the first byte
+        # of U+066B. A clock that drops only a `.` or a `,` then holds no number, and its arithmetic
+        # error stops the call of tools_run before it reports the status.
+        localedef = shutil.which("localedef")
+        if localedef is None:
+            self.skipTest("localedef is not installed")
+        source = Path("/usr/share/i18n/locales/ps_AF")
+        if not source.is_file():
+            self.skipTest(f"the locale source {source} is not installed")
+        charmaps = (Path("/usr/share/i18n/charmaps/UTF-8.gz"), Path("/usr/share/i18n/charmaps/UTF-8"))
+        if not any(path.is_file() for path in charmaps):
+            self.skipTest(f"the charmap {charmaps[0]} (or {charmaps[1]}) is not installed")
+        root = self.scratch()
+        locales = root / "locales"
+        locales.mkdir()
+        built = subprocess.run(
+            [localedef, "-i", "ps_AF", "-f", "UTF-8", str(locales / "ps_AF.UTF-8")],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        locale = {"LOCPATH": str(locales), "LC_ALL": "ps_AF.UTF-8"}
+        # Control: under this locale, the separator in bash's EPOCHREALTIME is neither `.` nor `,`.
+        clock = subprocess.run(
+            ["bash", "-c", 'printf %s "$EPOCHREALTIME"'],
+            env={"PATH": "/usr/bin:/bin", **locale},
+            capture_output=True,
+            timeout=30,
+        )
+        separator = re.fullmatch(rb"[0-9]+([^0-9]+)[0-9]{6}", clock.stdout)
+        self.assertIsNotNone(separator, repr(clock))
+        assert separator is not None
+        self.assertNotIn(separator.group(1), (b".", b","), repr(clock))
+
+        result = self.tools_run(root, "exit 124", env=locale)
+
+        self.assertEqual(result.stdout.splitlines()[-1:], ["status 124"], result.stdout + result.stderr)
+        self.assertIn(f"tools step: `t` in {root} exited 124", result.stderr)
+        self.assertNotIn("past its limit", result.stderr)
 
 
 if __name__ == "__main__":

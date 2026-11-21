@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""installers/lib.sh arm_user_timer: link a user timer's units from ~/.dotfiles, start it, prove it.
+"""installers/lib.sh arm_user_timer: link a user timer's units from ~/.dotfiles, start it, prove it,
+and leave alone a timer someone stopped on purpose.
 
 Technique: `systemctl` and `systemd-detect-virt` are stubs first on PATH. The systemctl stub logs
-each call and answers `list-timers` with $STUB_LISTED, so a test can make the timer register or
-not; HOME is a scratch directory holding the ~/.dotfiles units.
+each call, answers `list-timers` with $STUB_LISTED, so a test can make the timer register or not,
+and answers the unit's state from $STUB_ENABLED (an is-enabled word) and $STUB_ACTIVE (an is-active
+word) until an `enable --now` succeeds, then enabled and active. HOME is a scratch directory
+holding the ~/.dotfiles units.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -21,10 +25,17 @@ IN_AGENTBOX = Path("/.dockerenv").exists()
 
 SYSTEMCTL_STUB = r"""
 echo "$*" >>"$STUB_LOG"
+enabled="${STUB_ENABLED:-not-found}" active="${STUB_ACTIVE:-inactive}"
+if [[ -e "$STUB_LOG.armed" ]]; then enabled=enabled active=active; fi
 case "$*" in
-    "--user enable --now "*) exit "${STUB_ENABLE_EXIT:-0}" ;;
+    "--user enable --now "*)
+        [[ "${STUB_ENABLE_EXIT:-0}" != 0 ]] || : >"$STUB_LOG.armed"
+        exit "${STUB_ENABLE_EXIT:-0}" ;;
+    "--user is-enabled "*) [[ "$*" == *--quiet* ]] || echo "$enabled"; [[ "$enabled" == enabled ]] ;;
+    "--user is-active "*) [[ "$*" == *--quiet* ]] || echo "$active"; [[ "$active" == active ]] ;;
     "--user list-timers --all "*) printf '%s' "$STUB_LISTED" ;;
     "--user show -p NextElapseUSecRealtime --value "*) echo "Thu 2026-10-01 00:00:00 UTC" ;;
+    "--user show -p MainPID --value "*) echo 4242 ;;
 esac
 """
 
@@ -77,6 +88,19 @@ class ArmUserTimer(unittest.TestCase):
     def calls(self) -> list[str]:
         return self.log.read_text().splitlines() if self.log.exists() else []
 
+    def link(self, suffix: str) -> None:
+        self.user_units.mkdir(parents=True, exist_ok=True)
+        (self.user_units / f"demo.{suffix}").symlink_to(self.units / f"demo.{suffix}")
+
+    def reset(self) -> None:
+        """Back to a machine with no links and no calls, for the next case."""
+        shutil.rmtree(self.user_units, ignore_errors=True)
+        for path in (self.log, Path(f"{self.log}.armed")):
+            path.unlink(missing_ok=True)
+
+    def links(self) -> list[str]:
+        return sorted(path.name for path in self.user_units.iterdir()) if self.user_units.exists() else []
+
     @unittest.skipIf(IN_AGENTBOX, "inside an agentbox the helper refuses by design")
     def test_links_from_home_dotfiles_enables_and_proves_the_timer(self) -> None:
         self.with_units("service", "timer")
@@ -88,6 +112,8 @@ class ArmUserTimer(unittest.TestCase):
         self.assertEqual(
             self.calls(),
             [
+                "--user is-active --quiet demo.timer",
+                "--user is-enabled demo.timer",
                 "--user daemon-reload",
                 "--user enable --now demo.timer",
                 "--user list-timers --all demo.timer",
@@ -95,6 +121,63 @@ class ArmUserTimer(unittest.TestCase):
             ],
         )
         self.assertEqual(result.stdout, "demo: armed (Thu 2026-10-01 00:00:00 UTC)\n")
+
+    @unittest.skipIf(IN_AGENTBOX, "inside an agentbox the helper refuses by design")
+    def test_a_timer_someone_stopped_is_left_alone(self) -> None:
+        # Measured on systemd 255: `systemctl --user disable --now demo.timer` removes the timer's
+        # own link, since it points outside the unit search path, and keeps the service's link; the
+        # timer then reads not-found, and failed right after the stop. A timer linked but wanted by
+        # nothing reads linked; one whose unit file stands in the search path reads disabled.
+        self.with_units("service", "timer")
+        cases = (
+            ("not-found", "inactive", ("service",)),
+            ("not-found", "failed", ("service",)),
+            ("linked", "inactive", ("service", "timer")),
+            ("disabled", "inactive", ()),
+        )
+        for enabled, active, links in cases:
+            with self.subTest(enabled=enabled, active=active, links=links):
+                self.reset()
+                for suffix in links:
+                    self.link(suffix)
+                result = self.arm(STUB_ENABLED=enabled, STUB_ACTIVE=active)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("demo.timer is", result.stdout)
+                self.assertIn("someone stopped it on purpose", result.stdout)
+                self.assertIn(f"systemctl --user enable --now {self.units}/demo.timer", result.stdout)
+                self.assertNotIn("demo: armed", result.stdout)
+                self.assertEqual(self.calls(), ["--user is-active --quiet demo.timer", "--user is-enabled demo.timer"])
+                self.assertEqual(self.links(), sorted(f"demo.{suffix}" for suffix in links))
+
+    @unittest.skipIf(IN_AGENTBOX, "inside an agentbox the helper refuses by design")
+    def test_an_enabled_or_running_timer_is_armed_again(self) -> None:
+        self.with_units("service", "timer")
+        for enabled, active in (("enabled", "inactive"), ("enabled", "active"), ("linked", "active")):
+            with self.subTest(enabled=enabled, active=active):
+                self.reset()
+                self.link("service")
+                self.link("timer")
+                result = self.arm(STUB_ENABLED=enabled, STUB_ACTIVE=active)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("demo: armed", result.stdout)
+                calls = self.calls()
+                self.assertEqual(calls[0], "--user is-active --quiet demo.timer", "the state is read before acting")
+                self.assertIn("--user enable --now demo.timer", calls)
+
+    @unittest.skipIf(IN_AGENTBOX, "inside an agentbox the helper refuses by design")
+    def test_a_new_timer_beside_a_service_link_of_another_unit_is_armed(self) -> None:
+        # Only a service link that is this repository's unit says the timer was armed here before.
+        self.with_units("service", "timer")
+        other = self.home / "elsewhere"
+        other.mkdir()
+        (other / "demo.service").touch()
+        self.user_units.mkdir(parents=True)
+        (self.user_units / "demo.service").symlink_to(other / "demo.service")
+        result = self.arm()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("someone stopped it on purpose", result.stdout)
+        self.assertIn("demo: armed", result.stdout)
+        self.assertIn("--user is-enabled demo.timer", self.calls())
 
     def test_refuses_inside_an_agentbox(self) -> None:
         self.with_units("service", "timer")

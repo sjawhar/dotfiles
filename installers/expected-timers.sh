@@ -3,7 +3,8 @@
 #
 # A linked .service is not an armed timer. This installer asks systemd to enable and start
 # each timer in the list. It is idempotent: enabling an enabled timer and starting a running
-# one change nothing.
+# one change nothing. A timer someone disabled and stopped stays stopped, and the run names
+# it and counts it as left alone; take its line out of the list to retire it.
 #
 # Standalone installer, not sourced by install.sh. Run it on the host (never inside an
 # agentbox, which has its own ~/.config/systemd that the host manager never reads) after a
@@ -28,7 +29,7 @@ if [[ -f /.dockerenv ]] || [[ "$(systemd-detect-virt 2>/dev/null)" == docker ]];
     exit 1
 fi
 
-armed=0 already=0 failed=0
+armed=0 already=0 left=0 failed=0
 while read -r line; do
     # A line is a timer name, then optional key=value fields, then an optional # comment. Only
     # the name matters here; unit-health-watch reads the fields.
@@ -56,6 +57,10 @@ while read -r line; do
         failed=$((failed + 1))
         continue
     fi
+    if user_unit_stopped_on_purpose "$name" ${dir:+"$HOME/.dotfiles/$dir"}; then
+        left=$((left + 1))
+        continue
+    fi
     if [[ -n "$dir" ]]; then
         # Links both units and proves systemd scheduled the timer.
         if arm_user_timer "$dir" "$base"; then armed=$((armed + 1)); else failed=$((failed + 1)); fi
@@ -75,5 +80,5 @@ while read -r line; do
     fi
 done < "$list"
 
-echo "expected-timers: $already already armed, $armed armed now, $failed could not be armed"
+echo "expected-timers: $already already armed, $armed armed now, $left left alone, $failed could not be armed"
 [[ "$failed" -eq 0 ]]
