@@ -231,18 +231,20 @@ class SecretsShim(unittest.TestCase):
         ).stderr.decode()
         self.assertIn("    omp --resume 01a1-from-file\n", stderr)
 
-    def test_admin_pat_is_sent_to_the_broker_name(self) -> None:
+    def test_no_refusal_sends_an_agent_to_the_admin_pat(self) -> None:
+        # GITHUB_ADMIN_PAT goes in round 6 of dispatch://INFRA-1429, and on theorem-labs an admin
+        # write takes the admin App grant GITHUB_ADMIN_APP instead
+        # (plugins/sjawhar/skills/landing-a-pr/references/repo-merge-rules.md, "Admin actions").
+        # So a refusal of secretsd's GITHUB_ADMIN_PAT_THEOREM names that key itself and no broker
+        # name for it.
         stderr = self.assert_refused(
             "GITHUB_ADMIN_PAT_THEOREM", "--", "gh", "api", "user"
         )
         self.assertIn(
-            'secret-run --reason "<what for>" GITHUB_ADMIN_PAT -- <command>', stderr
+            'secret-run --reason "<what for>" GITHUB_ADMIN_PAT_THEOREM -- <command>', stderr
         )
-        self.assertIn(
-            "The broker holds this same token under the name GITHUB_ADMIN_PAT",
-            stderr,
-        )
-        self.assertNotIn("not confirmed", stderr)
+        self.assertNotIn("GITHUB_ADMIN_PAT ", stderr)
+        self.assertNotIn("under the name", stderr)
 
     def test_a_grant_another_session_holds_does_not_pass(self) -> None:
         # The real `get --no-request` reports "grant":true when ANY session holds the key.

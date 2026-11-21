@@ -32,7 +32,7 @@ Read the current queue decision record first. Nothing here creates holds, merge 
 
 ## Native GitHub Stacks
 
-- The PR's `.stack` field tells a native stack from dependent branches. The per-PR merge endpoint can refuse native members: that is a stack mechanics error, not permission for an admin token.
+- The PR's `.stack` field tells a native stack from dependent branches. The per-PR merge endpoint can refuse native members: that is a stack mechanics error, not permission for an admin credential.
 - Use the supported `gh stack` path under approved identity routing. Its squash merges the selected prefix into trunk, bottom to top. Read its current `--help` and the full selected member set first.
 - Every selected member needs its own head-pinned evidence and protection. Never use a path that loses them.
 - Before merging, get an actual three-way replay against the intended trunk in stack order. A member's green mergeability can describe only its intermediate base, and a refusal that names no file does not prove the stack is conflict-free.
