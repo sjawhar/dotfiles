@@ -35,6 +35,13 @@ jq . /mnt/nvme/$USER/tmp/dotfiles-follow/state.json   # open conditions, last ru
 ls /mnt/nvme/$USER/tmp/dotfiles-follow/killed-sweeps/  # the logs of the last 5 killed sweep passes
 ```
 
+That is `~/.dotfiles`' state file, by any spelling of its path (where `/mnt/nvme/$USER/tmp` is not
+writable, it is under `${XDG_STATE_HOME:-~/.local/state}/dotfiles-follow/`). A run of any other
+checkout with no `--state` keeps a file of its own beside it, `state-<key>.json`, whose key is the
+first 16 hex digits of the sha256 of the checkout's resolved path
+(`printf %s "$(realpath <checkout>)" | sha256sum | cut -c1-16`), so nothing that run judges or
+records reaches `~/.dotfiles`' state. `--state` names any file, for any checkout.
+
 `--no-hook-sweep` skips the hook sweep. It logs that configuration and opens no hook condition.
 The default runs the sweep.
 
@@ -95,14 +102,26 @@ Follow restores the managed marketplace lock before it calls the sync.
    by hand is replaced when the file changes, as an install replaces it, and a symlink at the
    copy's path is replaced by a plain file. A directory there is never replaced: the render
    fails. The first run of this version renders once, since no record of this form exists yet.
-   A failed render is a condition and stops nothing: the tools step still runs. A checkout with
-   no `scripts/knives-registry-render` (a main older than the step) or no `knives/repos.toml`
-   skips it. The render runs only for `~/.dotfiles`: another `--repo` (or `DOTFILES_DIR`) logs
-   `registry: <repo> is not ~/.dotfiles; knives registry copy not written` and writes no copy.
+   A failed render is a condition and stops nothing: the tools step still runs. A `~/.dotfiles`
+   with no `scripts/knives-registry-render` (a main older than the step) or no `knives/repos.toml`
+   skips it, and an open condition clears. The render runs only for `~/.dotfiles`: another
+   `--repo` (or `DOTFILES_DIR`) logs
+   `registry: <repo> is not ~/.dotfiles; knives registry copy not written`, writes no copy and
+   judges nothing, so a `KNIVES REGISTRY NOT WRITTEN` that a `~/.dotfiles` run opened stays open
+   on a state file the two share, which only `--state` makes: by default another checkout has its
+   own.
 7. After a fast-forward or managed-lock recovery, and on later runs until it passes at HEAD:
-   `mise install`, `bun install --frozen-lockfile` in `omp/plugins`, then, for each registered
-   non-Bun marketplace plugin below the lowest version its lock entry requires,
+   `scripts/omp-link-rules`, which links `omp/rules/*.md` into `~/.omp/agent/rules/`, only for
+   `~/.dotfiles`, as `dotfiles-sync`'s tools step does: a link made from another checkout would
+   point every session's rules at it. Another `--repo` logs
+   `rules: <repo> is not ~/.dotfiles; omp rules not linked` and goes on. Then
+   `mise install`, `bun install --frozen-lockfile` in `omp/plugins`, then, only for `~/.dotfiles`,
+   for each registered non-Bun marketplace plugin below the lowest version its lock entry requires,
    `shims/omp plugin marketplace update <source>` and `shims/omp plugin upgrade <name>@<source>`.
+   `installers/omp.sh` links `~/.omp/plugins` to `~/.dotfiles/omp/plugins`, so an upgrade from
+   another checkout would write this machine's plugins. Another `--repo` logs
+   `plugins: <repo> is not ~/.dotfiles; marketplace plugins not upgraded`, runs no omp command
+   and goes on to the pin check.
    `mise install` holds `$MISE_DATA_DIR/.dotfiles-install.lock` (waiting for it at most
    `--mise-timeout`), the lock `dotfiles-sync`'s tools step and `agent-session` hold too, so
    installs on one `MISE_DATA_DIR` never run side by side and a launch waits for a running install.
@@ -125,7 +144,14 @@ Follow restores the managed marketplace lock before it calls the sync.
    `${XDG_CONFIG_HOME:-~/.config}/omp/profile` contains `legion`, follow does not run omp and
    reports the plugin step as failed. Finally, `devbox/sami-devbox-check --pins` checks knives and
    mise pins. A report when any step fails; the next run retries any marketplace plugin still below
-   its entry.
+   its entry. Only a `~/.dotfiles` run judges `TOOLS NOT INSTALLED` and records a pass at HEAD
+   (`tools_ok_head`). In another `--repo`, which links no rules and upgrades no plugins, a failure
+   opens or keeps the condition; a pass clears none and does not stop `~/.dotfiles` retrying its
+   own tools step at that HEAD. The cost: that checkout runs its tools step on every run, unless it
+   shares `~/.dotfiles`' state file (`--state`) and `~/.dotfiles` passed at the same HEAD. Its pass
+   line names only what ran:
+   `tools: mise install, frozen Bun install and sami-devbox-check --pins passed; rules and
+   marketplace plugins skipped: <repo> is not ~/.dotfiles`.
 8. Unless `--no-hook-sweep` is set, every run makes one pass of the leak check's hook sweep,
    `sweep-hooks.sh` of the leak-check tag in `~/.local/share/public-leak-check-hooks`
    (`devbox/sami-devbox-provision --only prepush` installs it; `--hooks-dir`). It installs the
@@ -183,10 +209,12 @@ dotfiles-sync rebases it and abandons commits whose changes main already has. do
 never describes, commits, or pushes. Both modes restore only the follow-managed marketplace lock
 before dirty-file checks and after plugin commands. Other edits are discarded only when origin/main
 already holds their bytes, right before the fast-forward. Apart from managed-lock recovery, a
-refusal leaves HEAD, the index and every file as they were. Outside the checkout, step 6 writes
-`~/.config/knives/repos.toml` and its record only when the copy is missing or not a plain file,
-or `knives/repos.toml`, the workspaces path or the render script changed since the last render. A
-run that writes the copy logs it, and the footer of any report that run writes says so.
+refusal leaves HEAD, the index and every file as they were. Outside the checkout, and only from
+`~/.dotfiles`, step 6 writes `~/.config/knives/repos.toml` and its record only when the copy is
+missing or not a plain file, or `knives/repos.toml`, the workspaces path or the render script
+changed since the last render, and step 7 links rules into `~/.omp/agent/rules/` and upgrades
+marketplace plugins in `~/.omp/plugins`. A run that writes the copy logs it, and the footer of any
+report that run writes says so.
 
 ## The kept files: SECRET_FILES that git tracks
 
@@ -217,8 +245,8 @@ modified here, it refuses with `MAIN CHANGES A KEPT FILE` and names the diff to 
 | HEAD has commits origin/main lacks | `NOT A FAST-FORWARD` | origin/main contains HEAD |
 | the commits to take change a modified kept file | `MAIN CHANGES A KEPT FILE` | they no longer do |
 | managed-lock restoration or `git merge --ff-only` failed | `FAST-FORWARD FAILED` | the managed lock is clean and HEAD is origin/main |
-| mise, Bun, a marketplace upgrade/version check or the pin lines failed | `TOOLS NOT INSTALLED` | all pass at the current HEAD |
-| `scripts/knives-registry-render --if-changed` failed or ran past `--check-timeout`; the report holds its output and says whether the copy kept what it held | `KNIVES REGISTRY NOT WRITTEN` | a later run on main renders, or finds nothing to write |
+| the rule link or a marketplace upgrade/version check (both in `~/.dotfiles` only), mise, Bun or the pin lines failed | `TOOLS NOT INSTALLED` | all pass at the current HEAD in a `~/.dotfiles` run; another `--repo` clears none |
+| `scripts/knives-registry-render --if-changed` failed or ran past `--check-timeout`; the report holds its output and says whether the copy kept what it held | `KNIVES REGISTRY NOT WRITTEN` | a later `~/.dotfiles` run on main renders, or finds nothing to write; another `--repo` clears none |
 | the hook sweep is missing, ran past its bound, exited without its summary line, could not hook a public checkout, or deferred one, or the run had no time left for a pass; the report names the kind of pass | `PRE-PUSH HOOK NOT INSTALLED` | a pass ends with 0 failed and 0 deferred; a condition a slow-root pass found clears only on a slow-root pass |
 | `git fetch`, or `jj git fetch` in a colocated checkout, failed on 3 runs in a row (`--fetch-grace`) | `CANNOT FETCH origin/main` | a fetch passes |
 
@@ -233,12 +261,13 @@ the conditions still open.
 
 The run exits 0 after a refusal: the refusal is a condition it reports, not a failed run.
 
-The run holds an exclusive, non-blocking `flock` on `state.json.lock` beside the state file for
-its whole length; a run that cannot take it skips its period. The state is replaced whole at each
-commit (a temporary file in the same directory, fsynced, `os.replace`d over `state.json`, then the
-directory fsynced), so a reader or a run killed mid-write sees the complete old state or the
-complete new one. The lock is a separate file because the state file's inode changes at every
-commit.
+The run holds an exclusive, non-blocking `flock` on `state.json.lock` (another checkout's:
+`state-<key>.json.lock`) beside the state file for its whole length; a run that cannot take it
+skips its period. A run of another checkout on its own file never holds `~/.dotfiles`' lock. The
+state is replaced whole at each commit (a temporary file in the same directory, fsynced,
+`os.replace`d over the state file, then the directory fsynced), so a reader or a run killed
+mid-write sees the complete old state or the complete new one. The lock is a separate file because
+the state file's inode changes at every commit.
 
 **Cutover to the separate lock.** A version before this one locks `state.json` itself, and this
 one locks `state.json.lock`, so a run of each at the same time would not exclude each other.
@@ -288,9 +317,36 @@ render clears it. A refused jj sync leaves that condition open.
 `test_a_checkout_that_is_not_home_dotfiles_writes_no_copy` follows another clone, by `--repo` and
 by `DOTFILES_DIR`, and leaves the copy as it was, and its control
 `test_home_dotfiles_writes_a_stale_copy_by_any_spelling_of_its_path` writes it from `~/.dotfiles`.
+`test_another_checkout_leaves_an_open_registry_condition_open` opens `KNIVES REGISTRY NOT WRITTEN`
+from `~/.dotfiles`, and a run of another clone on the same state leaves it open, clearing nothing;
+its control, the next `~/.dotfiles` run, clears it.
+`RuleLinks` commits a linker stand-in that records each checkout it runs for.
+`test_only_home_dotfiles_links_the_omp_rules`: a run of another clone does not call it, logs
+`rules: <repo> is not ~/.dotfiles; omp rules not linked` and passes mise and Bun; a run of
+`~/.dotfiles` calls it. `test_another_checkout_leaves_an_open_tools_condition_open`: a failed link
+in `~/.dotfiles` opens `TOOLS NOT INSTALLED`, a run of another clone whose mise and Bun pass leaves
+it open, and the next `~/.dotfiles` run, whose link passes, runs the linker once and clears it; one
+row's clone is at `~/.dotfiles`' HEAD and the other's at a HEAD of its own. In another clone the
+pass line names only what ran and the skipped rules and marketplace plugins.
+`test_only_home_dotfiles_upgrades_marketplace_plugins` (`MarketplacePlugins`): another clone and
+`~/.dotfiles` each hold lock entries above the installed records. The run of the other clone makes
+no `shims/omp` call and logs
+`plugins: <repo> is not ~/.dotfiles; marketplace plugins not upgraded`; its control, the run of
+`~/.dotfiles`, refreshes each catalog and upgrades each plugin as before.
+`test_a_run_of_another_checkout_whose_tools_step_ran_sweeps_fast_roots_only` (`SlowRoots`): a
+run of another clone whose tools step ran makes no slow-root pass, though it judges no tools.
 `test_a_home_dotfiles_symlinked_out_of_home_keeps_secrets_env_moves_and_renders` keeps
 `secrets.env`, fast-forwards and renders with `~/.dotfiles` a symlink out of `$HOME`, named either
 way, and the plain `~/.dotfiles` as before.
+`DefaultStateFile` runs `main()` with no `--state` and `DEFAULT_STATE` at a scratch path.
+`test_another_checkout_leaves_the_home_dotfiles_state_file_byte_identical`: `~/.dotfiles` opens
+`UNCOMMITTED CHANGES` in the default file, and a run of another clone, by `--repo` and by
+`DOTFILES_DIR`, leaves that file's bytes as they were and records its own head in a file of its own
+beside it. Its control, `test_home_dotfiles_writes_the_default_state_file_and_no_other`:
+`~/.dotfiles`, by default, by `--repo ~/.dotfiles` and as `$HOME/./.dotfiles`, writes the default
+file and no other. `test_each_other_checkout_keeps_one_state_file_of_its_own`: one clone, run twice
+and then by another spelling of its path, uses one file, and a second clone at the same HEAD uses
+another.
 `SendsNothing` runs the follower as each unit runs it (`main()` in a child): the dev box's unit with
 a `BOX_HEALTH_OWNER`, and oryx's drop-in as loaded before this change, with `--box-health-role`.
 With `ENVOY_URL` at a local listener and an `ENVOY_TOKEN` set, each opens a condition, and the

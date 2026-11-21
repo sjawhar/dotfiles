@@ -249,6 +249,27 @@ class Harness(unittest.TestCase):
         with unittest.mock.patch.object(FOLLOW.time, "time", lambda: now):
             return FOLLOW.run_once(self.options(**overrides))
 
+    def logged_run(self, now: float, **overrides) -> list[str]:
+        """The log lines of one run_follow that reports nothing."""
+        with unittest.mock.patch.object(FOLLOW, "log", wraps=FOLLOW.log) as logged:
+            self.assertEqual(self.run_follow(now=now, **overrides), [])
+        return [call.args[0] for call in logged.call_args_list]
+
+    def other_checkout(self, **files: str) -> Path:
+        """A clone that is not ~/.dotfiles, at the main of an origin of its own, one commit ahead of
+        ~/.dotfiles' origin: the commit of FILES (named as commit_upstream names them; a new
+        scripts/tool when none). A run in it leaves ~/.dotfiles where it is, and its HEAD is never
+        ~/.dotfiles'."""
+        root = Path(self.tmp.name)
+        origin, other = root / "other-origin.git", root / "other"
+        self.sh("git", "clone", "-q", "--bare", str(self.origin), str(origin))
+        self.sh("git", "clone", "-q", str(origin), str(other))
+        for name, body in (files or {"scripts/tool": "another checkout's tool\n"}).items():
+            (other / name.replace("__", "/")).write_text(body)
+        self.sh("git", "commit", "-q", "-am", "another checkout's commit", cwd=other)
+        self.sh("git", "push", "-q", "origin", "HEAD:main", cwd=other)
+        return other
+
     def state_data(self) -> dict:
         import json
 
@@ -403,6 +424,104 @@ class InstallTools(Harness):
             why,
         )
         self.assertFalse(self.fake_log.exists(), "mise install ran without its lock")
+
+
+# scripts/omp-link-rules as a stand-in: it records the checkout it runs for (DOTFILES_DIR, which
+# run_step sets to the checkout) and exits FAKE_LINK_RC.
+RECORDING_LINKER = """#!/bin/sh
+echo "link $DOTFILES_DIR" >> "$FAKE_LOG"
+[ "${FAKE_LINK_RC:-0}" = 0 ] || echo "omp-link-rules: ~/.omp/agent/rules/new-rule.md is a file that differs" >&2
+exit "${FAKE_LINK_RC:-0}"
+"""
+# What install_tools logs in ~/.dotfiles once mise, Bun, the marketplace pins and the pin check all passed.
+TOOLS_PASSED = "tools: mise install, frozen Bun install, marketplace pins and sami-devbox-check --pins passed"
+
+
+def tools_passed_in(other: Path) -> str:
+    """What install_tools logs in OTHER, a checkout that is not ~/.dotfiles, once mise, Bun and the
+    pin check passed: it names only what ran, and the steps it skipped there."""
+    return (
+        "tools: mise install, frozen Bun install and sami-devbox-check --pins passed;"
+        f" rules and marketplace plugins skipped: {other} is not ~/.dotfiles"
+    )
+
+
+class RuleLinks(Harness):
+    """Only ~/.dotfiles links omp/rules/*.md into ~/.omp/agent/rules/, as dotfiles-sync's tools
+    step does (review 19): git mode follows any --repo, and a link made from another checkout would
+    point every session's rules at it. So only a ~/.dotfiles run judges TOOLS NOT INSTALLED and
+    records a tools pass: the tools step of another checkout, which links nothing, may open or keep
+    the condition, but clears none and stops no ~/.dotfiles retry."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.new = self.commit_upstream("a linker that records its runs", **{"scripts/omp-link-rules": RECORDING_LINKER})
+
+    def links(self) -> list[str]:
+        """The checkouts the linker ran for, in order."""
+        lines = self.fake_log.read_text().splitlines() if self.fake_log.exists() else []
+        return [line.removeprefix("link ") for line in lines if line.startswith("link ")]
+
+    def test_only_home_dotfiles_links_the_omp_rules(self) -> None:
+        # Review 19 (main's code): install_tools ran scripts/omp-link-rules for any --repo. A run of
+        # another clone now logs that it links nothing and goes on to mise, Bun and the rest as
+        # before; a run of ~/.dotfiles links.
+        other = self.other_checkout()
+        with self.subTest(checkout="another clone"):
+            lines = self.logged_run(1_000_000.0, repo=other, provision=other / "devbox/sami-devbox-provision")
+            self.assertEqual(self.links(), [])
+            self.assertIn(f"rules: {other} is not ~/.dotfiles; omp rules not linked", lines)
+            self.assertNotIn("rules: omp/rules/*.md linked into ~/.omp/agent/rules/", lines)
+            self.assertIn(tools_passed_in(other), lines)
+            self.assertNotIn(TOOLS_PASSED, lines)
+        with self.subTest(checkout="~/.dotfiles"):
+            before = len(self.links())
+            lines = self.logged_run(1_000_600.0)
+            self.assertEqual(self.head(), self.new)
+            self.assertEqual(self.links()[before:], [str(self.repo)])
+            self.assertIn("rules: omp/rules/*.md linked into ~/.omp/agent/rules/", lines)
+            self.assertFalse([line for line in lines if "omp rules not linked" in line], lines)
+            self.assertIn(TOOLS_PASSED, lines)
+
+    def test_another_checkout_leaves_an_open_tools_condition_open(self) -> None:
+        # ~/.dotfiles' failed rule link opens TOOLS NOT INSTALLED. A run of another clone on the same
+        # state links no rules, so its pass, with mise and Bun passing, leaves the condition open:
+        # the rules are still not linked. Nor does that pass stop ~/.dotfiles retrying: the next
+        # ~/.dotfiles run, whose link passes, runs its tools step (the linker once) and clears the
+        # condition, the control. One row's clone is at ~/.dotfiles' HEAD, where a pass recorded by
+        # the clone (tools_ok_head) would make that run skip its tools step; the other row's clone is
+        # at a HEAD of its own.
+        def at_home_head() -> Path:
+            clone = Path(self.tmp.name) / "clone"
+            self.sh("git", "clone", "-q", str(self.origin), str(clone))
+            return clone
+
+        rows = (("~/.dotfiles' HEAD", at_home_head, True), ("a HEAD of its own", self.other_checkout, False))
+        for k, (at, make, same_head) in enumerate(rows):
+            with self.subTest(other_checkout_at=at):
+                now = 1_000_000.0 + 1800 * k
+                # Each row starts from the state setUp writes: no tools pass recorded, nothing open.
+                self.state.write_text(json.dumps({"slow_sweep_at": 999_000.0}))
+                os.environ["FAKE_LINK_RC"] = "1"
+                opened = self.run_follow(now=now)
+                self.assertEqual(self.head(), self.new)
+                self.assertEqual(len(opened), 1, opened)
+                self.assertIn("TOOLS NOT INSTALLED: `scripts/omp-link-rules` in ~/.dotfiles exited 1:", opened[0])
+                incident = self.state_data()["incidents"]["tools"]
+                other = make()
+                self.assertEqual(self.sh("git", "rev-parse", "HEAD", cwd=other) == self.new, same_head)
+                lines = self.logged_run(now + 600, repo=other, provision=other / "devbox/sami-devbox-provision")
+                self.assertIn(f"rules: {other} is not ~/.dotfiles; omp rules not linked", lines)
+                self.assertIn(tools_passed_in(other), lines)
+                self.assertEqual(self.state_data()["incidents"].get("tools"), incident)
+                # The control.
+                os.environ["FAKE_LINK_RC"] = "0"
+                before = len(self.links())
+                cleared = self.run_follow(now=now + 1200)
+                self.assertEqual(self.links()[before:], [str(self.repo)])
+                self.assertEqual(len(cleared), 1, cleared)
+                self.assertIn("TOOLS NOT INSTALLED cleared", cleared[0])
+                self.assertNotIn("tools", self.state_data()["incidents"])
 
 
 class Follows(Harness):
@@ -757,6 +876,16 @@ class SlowRoots(Harness):
         self.assertEqual(self.sweeps()[-1], f"sweep /fast /slow here={self.hooks_dir}")
         self.assertEqual(self.state_data()["slow_sweep_at"], 1_000_600.0)
 
+    def test_a_run_of_another_checkout_whose_tools_step_ran_sweeps_fast_roots_only(self) -> None:
+        # The case above in another clone. That run does not judge TOOLS NOT INSTALLED (RuleLinks),
+        # but its tools step ran, so it makes no slow-root pass either.
+        self.state.write_text(json.dumps({"slow_sweep_at": 1_000_000.0 - 3600}))
+        other = self.other_checkout()
+        self.assertEqual(self.run_follow(repo=other, provision=other / "devbox/sami-devbox-provision"), [])
+        self.assertEqual(self.installs(), 1)
+        self.assertEqual(self.sweeps(), [f"sweep /fast here={self.hooks_dir}"])
+        self.assertEqual(self.state_data()["slow_sweep_at"], 1_000_000.0 - 3600)
+
     # Round 2, the review's finding 1: slow_sweep_at is a finite epoch no later than now, or the
     # slow-root pass is due. NaN and Infinity (which Python's JSON reads and writes) and a time
     # ahead of the clock used to make every later run a fast-root pass.
@@ -1080,6 +1209,102 @@ class StateFile(Harness):
             self.assertEqual(third.data["slow_sweep_at"], 1_000_000.0)
         finally:
             third.close()
+
+
+class DefaultStateFile(Harness):
+    """The state file of a run with no --state is per checkout (dispatch://INFRA-3365): ~/.dotfiles
+    keeps DEFAULT_STATE, the timer's file, and any other checkout gets a file of its own beside it.
+    Before, the default did not depend on --repo, and --repo defaults to $DOTFILES_DIR, so a run of
+    another checkout on the default opened and cleared ~/.dotfiles's conditions, overwrote its head,
+    target, last outcome, fetch failures and last run, and held its lock. Each run here is main()
+    with no --state and DEFAULT_STATE at a scratch path."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.default = Path(self.tmp.name) / "default-state" / "dotfiles-follow" / "state.json"
+
+    def main_on_the_default(self, *argv: str, now: float, default: Path | None = None) -> None:
+        """One run of main() at NOW, started with ARGV and no --state, with DEFAULT_STATE at
+        DEFAULT (this case's scratch path when none) and no hook sweep."""
+        args = ["dotfiles-follow", "--hooks-dir", str(self.hooks_dir), "--no-hook-sweep", *argv]
+        with (
+            unittest.mock.patch.object(sys, "argv", args),
+            unittest.mock.patch.object(FOLLOW, "DEFAULT_STATE", default or self.default),
+            unittest.mock.patch.object(FOLLOW.time, "time", lambda: now),
+        ):
+            self.assertEqual(FOLLOW.main(), 0)
+
+    def state_files(self) -> dict[str, bytes]:
+        """Every state file in DEFAULT_STATE's directory, by name, with its bytes (a lock file or a
+        temporary file is not one)."""
+        directory = self.default.parent
+        return {path.name: path.read_bytes() for path in sorted(directory.glob("*.json"))} if directory.is_dir() else {}
+
+    def test_another_checkout_leaves_the_home_dotfiles_state_file_byte_identical(self) -> None:
+        # ~/.dotfiles opens UNCOMMITTED CHANGES on the default. Git mode judges that condition in
+        # every checkout, so a run of another, clean clone on the same file cleared it and wrote its
+        # own head there. Now that run, named by --repo or by DOTFILES_DIR, leaves the default
+        # file's bytes as they were and writes a file of its own beside it.
+        self.commit_upstream("change a tool", scripts__tool="v2\n")
+        (self.repo / "scripts/tool").write_text("edited here\n")
+        self.main_on_the_default(now=1_000_000.0)
+        self.assertIn("dirty", json.loads(self.default.read_text())["incidents"])
+        held = self.default.read_bytes()
+        other = self.other_checkout()
+        other_head = self.sh("git", "rev-parse", "HEAD", cwd=other)
+        rows = (("--repo", ("--repo", str(other)), {}, 1_000_600.0), ("DOTFILES_DIR", (), {"DOTFILES_DIR": str(other)}, 1_001_200.0))
+        for named, argv, environ, now in rows:
+            with self.subTest(named=named):
+                with unittest.mock.patch.dict(os.environ, environ):
+                    self.main_on_the_default(*argv, now=now)
+                self.assertEqual(self.default.read_bytes(), held, "a run of another checkout wrote ~/.dotfiles's state file")
+                own = {name: json.loads(data) for name, data in self.state_files().items() if name != self.default.name}
+                self.assertEqual(len(own), 1, f"another checkout's own state file, beside the default: {sorted(self.state_files())}")
+                data = next(iter(own.values()))
+                self.assertEqual((data["head"], data["last_run"]), (other_head, now))
+
+    def test_home_dotfiles_writes_the_default_state_file_and_no_other(self) -> None:
+        # The control of the case above: ~/.dotfiles, followed by default, as --repo ~/.dotfiles or
+        # as $HOME/./.dotfiles, writes DEFAULT_STATE (and its lock), and no other file.
+        for index, argv in enumerate(((), ("--repo", str(self.repo)), ("--repo", f"{self.home}/./.dotfiles"))):
+            with self.subTest(argv=argv):
+                default = Path(self.tmp.name) / f"default-{index}" / "dotfiles-follow" / "state.json"
+                self.main_on_the_default(*argv, now=1_000_000.0 + 600 * index, default=default)
+                self.assertEqual(sorted(path.name for path in default.parent.iterdir()), ["state.json", "state.json.lock"])
+                data = json.loads(default.read_text())
+                self.assertEqual((data["head"], data["last_run"]), (self.head(), 1_000_000.0 + 600 * index))
+
+    def test_each_other_checkout_keeps_one_state_file_of_its_own(self) -> None:
+        # One checkout, run twice and then by another spelling of its path, uses one file; a second
+        # clone at the same HEAD uses another, and the first keeps its bytes. ~/.dotfiles's file is
+        # never written.
+        other = self.other_checkout()
+        second = Path(self.tmp.name) / "other-2"
+        self.sh("git", "clone", "-q", str(Path(self.tmp.name) / "other-origin.git"), str(second))
+        runs = (
+            ("first run", other, 1_000_000.0),
+            ("second run", other, 1_000_600.0),
+            ("another spelling", Path(f"{other}/../{other.name}"), 1_001_200.0),
+        )
+        names = set()
+        for run, repo, now in runs:
+            with self.subTest(run=run):
+                self.main_on_the_default("--repo", str(repo), now=now)
+                files = self.state_files()
+                self.assertEqual(len(files), 1, sorted(files))
+                names |= files.keys()
+                self.assertEqual(len(names), 1, f"one checkout used more than one state file: {sorted(names)}")
+                self.assertEqual(json.loads(next(iter(files.values())))["last_run"], now)
+        self.assertNotIn(self.default.name, names)
+        first = self.state_files()
+        with self.subTest(run="a second checkout"):
+            self.main_on_the_default("--repo", str(second), now=1_001_800.0)
+            both = self.state_files()
+            self.assertEqual(len(both), 2, sorted(both))
+            self.assertEqual({name: both[name] for name in first}, first)
+            (new,) = both.keys() - first.keys()
+            self.assertEqual(json.loads(both[new])["last_run"], 1_001_800.0)
+        self.assertFalse(self.default.exists(), "a run of another checkout wrote ~/.dotfiles's state file")
 
 
 class TargetBytes(Harness):
@@ -1489,24 +1714,10 @@ class KnivesRegistry(RegistryCopy, Harness):
             messages[0],
         )
 
-    def other_checkout(self) -> Path:
-        """A clone that is not ~/.dotfiles, at the main of an origin of its own whose
-        knives/repos.toml is REGISTRY_V2, while ~/.dotfiles and its origin hold REGISTRY_V1: a copy
-        rendered from it would show, and a run in it leaves ~/.dotfiles where it is."""
-        root = Path(self.tmp.name)
-        origin, other = root / "other-origin.git", root / "other"
-        self.sh("git", "clone", "-q", "--bare", str(self.origin), str(origin))
-        self.sh("git", "clone", "-q", str(origin), str(other))
-        (other / "knives/repos.toml").write_text(REGISTRY_V2)
-        self.sh("git", "commit", "-q", "-am", "knives: another registry", cwd=other)
-        self.sh("git", "push", "-q", "origin", "HEAD:main", cwd=other)
-        return other
-
-    def logged_run(self, now: float, **overrides) -> list[str]:
-        """The log lines of one run_follow that reports nothing."""
-        with unittest.mock.patch.object(FOLLOW, "log", wraps=FOLLOW.log) as logged:
-            self.assertEqual(self.run_follow(now=now, **overrides), [])
-        return [call.args[0] for call in logged.call_args_list]
+    def other_checkout(self, **files: str) -> Path:
+        """Harness.other_checkout, whose knives/repos.toml is REGISTRY_V2 unless FILES names it, while
+        ~/.dotfiles and its origin hold REGISTRY_V1: a copy rendered from it would show."""
+        return super().other_checkout(**{"knives/repos.toml": REGISTRY_V2, **files})
 
     def logged_main(self, *argv: str) -> list[str]:
         """The log lines of one run of main(), started with ARGV as the unit starts it, but on this
@@ -1579,6 +1790,42 @@ class KnivesRegistry(RegistryCopy, Harness):
         for named in (real, self.repo):
             with self.subTest(symlinked_home_dotfiles=str(named)):
                 writes("--repo", str(named))
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes into a read-only directory")
+    def test_another_checkout_leaves_an_open_registry_condition_open(self) -> None:
+        # Review 19: the step judged the registry before it checked the checkout, so a run of
+        # another clone on the state ~/.dotfiles uses cleared KNIVES REGISTRY NOT WRITTEN and said
+        # no action was needed, though it rendered nothing. ~/.dotfiles opens the condition with a
+        # read-only ~/.config/knives, which is writable again before the other clone's run, so only
+        # the checkout keeps the condition open there. The control: the next ~/.dotfiles run clears it.
+        self.first_render()
+        self.pull_registry_v2()
+        knives = self.copy.parent
+        knives.chmod(0o555)
+        try:
+            opened = self.run_follow(now=1_000_600.0)
+        finally:
+            knives.chmod(0o755)
+        self.assertEqual(len(opened), 1)
+        self.assertIn(
+            "KNIVES REGISTRY NOT WRITTEN: `scripts/knives-registry-render --if-changed` in ~/.dotfiles exited 1:",
+            opened[0],
+        )
+        incident = self.state_data()["incidents"]["registry"]
+        held = (self.copy.read_text(), self.identity(self.copy), self.identity(self.render_record))
+        # ~/.dotfiles holds REGISTRY_V2 now, so the other clone's own commit goes back to REGISTRY_V1.
+        other = self.other_checkout(**{"knives/repos.toml": REGISTRY_V1})
+        with self.subTest(run="another checkout"):
+            lines = self.logged_run(1_001_200.0, repo=other, provision=other / "devbox/sami-devbox-provision")
+            self.assertIn(f"registry: {other} is not ~/.dotfiles; knives registry copy not written", lines)
+            self.assertEqual(self.state_data()["incidents"].get("registry"), incident)
+            self.assertEqual((self.copy.read_text(), self.identity(self.copy), self.identity(self.render_record)), held)
+        with self.subTest(run="~/.dotfiles, the control"):
+            cleared = self.run_follow(now=1_001_800.0)
+            self.assertEqual(len(cleared), 1, cleared)
+            self.assertIn("KNIVES REGISTRY NOT WRITTEN cleared", cleared[0])
+            self.assertNotIn("registry", self.state_data()["incidents"])
+            self.assert_copy_renders(REGISTRY_V2)
 
     def test_a_home_dotfiles_symlinked_out_of_home_keeps_secrets_env_moves_and_renders(self) -> None:
         # SECRET_FILES names .dotfiles/secrets.env relative to HOME. With ~/.dotfiles a symlink to a

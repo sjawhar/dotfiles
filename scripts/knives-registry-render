@@ -10,8 +10,10 @@
 # three as this run has them. So a copy rendered while the big local disk's directory was absent
 # is rendered again once it is there, and the other way round, and a pull that changes this
 # script renders again although knives/repos.toml did not change.
-# dotfiles-follow and dotfiles-sync run it only for ~/.dotfiles: the copy is what
-# scripts/leak-terms-check reads, so another checkout's registry must not reach it.
+# The two automatic callers, dotfiles-follow and dotfiles-sync, run it only for ~/.dotfiles: the
+# copy is what scripts/leak-terms-check reads, so a timer's or a sync's run in another checkout
+# must not put that checkout's registry there. installers/knives.sh renders from the checkout a
+# person runs it in.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../installers/lib.sh"
 

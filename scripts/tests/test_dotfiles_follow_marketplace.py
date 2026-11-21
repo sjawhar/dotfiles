@@ -16,7 +16,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from scripts.tests.test_dotfiles_follow import FOLLOW, Harness
+from scripts.tests.test_dotfiles_follow import FOLLOW, TOOLS_PASSED, Harness, tools_passed_in
 from scripts.tests.marketplace_version_cases import CASES, EMPTY_CASES, MISSING, RAW_CASES
 
 
@@ -194,6 +194,43 @@ class MarketplacePlugins(Harness):
         self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
         self.assertEqual(len(self.calls()), 6)
         self.assert_clean_lock()
+
+    def test_only_home_dotfiles_upgrades_marketplace_plugins(self) -> None:
+        # Main's code ran shims/omp plugin marketplace update and plugin upgrade for any --repo, and
+        # ~/.omp/plugins links to ~/.dotfiles/omp/plugins (installers/omp.sh), so an upgrade from
+        # another checkout could write this machine's plugins. Both rows hold the lock entries of
+        # the target commit (2.0.0) above the same installed records (1.0.0). A run of another clone
+        # makes no omp call and logs why; its control, a run of ~/.dotfiles, upgrades as before.
+        other = self.other_checkout()
+        other_installed = other / "omp/plugins/installed_plugins.json"
+        other_installed.write_text(self.installed_path.read_text())
+        upgrades = [
+            ["plugin", "marketplace", "update", "verification-skills"],
+            ["plugin", "upgrade", "dev-infra@verification-skills"],
+            ["plugin", "marketplace", "update", "verification-skills"],
+            ["plugin", "upgrade", "verification-skills@verification-skills"],
+            ["plugin", "marketplace", "update", "core-ops"],
+            ["plugin", "upgrade", "core-ops@core-ops"],
+        ]
+        with self.subTest(checkout="another clone"):
+            self.assertEqual((other / FOLLOW.MARKETPLACE_LOCK).read_text(), self.want_lock)
+            before = other_installed.read_text()
+            lines = self.logged_run(1_000_000.0, repo=other, provision=other / "devbox/sami-devbox-provision")
+            self.assertEqual(self.calls(), [])
+            self.assertIn(f"plugins: {other} is not ~/.dotfiles; marketplace plugins not upgraded", lines)
+            self.assertIn(tools_passed_in(other), lines)
+            self.assertEqual(other_installed.read_text(), before)
+            self.assertEqual(self.sh("git", "status", "--porcelain", cwd=other), "")
+        with self.subTest(checkout="~/.dotfiles"):
+            before = len(self.calls())
+            lines = self.logged_run(1_000_600.0)
+            self.assertEqual(self.head(), self.target)
+            self.assertEqual(self.calls()[before:], upgrades)
+            self.assertFalse([line for line in lines if "marketplace plugins not upgraded" in line], lines)
+            self.assertIn(TOOLS_PASSED, lines)
+            for name in ("dev-infra", "verification-skills", "core-ops"):
+                self.assertEqual(self.version(name), "2.0.0")
+            self.assert_clean_lock()
 
     def test_marketplace_commands_get_the_mise_data_directory(self) -> None:
         self.assertNotIn("MISE_DATA_DIR", os.environ)
