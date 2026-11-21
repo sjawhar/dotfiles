@@ -32,10 +32,13 @@ the secrets-broker secret holding the App's key; a fallback secret is optional:
       refuse-owner    = LOGIN                ; this machine only, one value per owner (below)
 
 A machine refuses an owner for a profile by naming it in refuse-owner, in its own
-`~/.config/git/config`. For a refused owner the helper reads and seeds no cache, mints no
-App token and falls back to no personal token: it prints one line on stderr, logs
-`refused` in decisions.log and exits 1. refuse-owner is multi-valued and matches without
-regard to case. Add each owner with
+`~/.config/git/config`. Only that file counts, whatever XDG_CONFIG_HOME is; ~/.gitconfig and a
+repository's config do not. For a refused owner the helper reads and seeds no cache, mints no
+App token and falls back to no personal token: it prints one line on stderr, prints `quit=1` on
+stdout in credential mode, logs `refused` in decisions.log and exits 1. An owner-wide broker
+release minted for another owner caches no token for a refused owner. A
+`~/.config/git/config` that git cannot read refuses every owner. refuse-owner is multi-valued
+and matches without regard to case. Add each owner with
   git config --file ~/.config/git/config --add gh-app.<profile>.refuse-owner <login>
 oryx refuses trajectory-labs-pbc for the agent profile (HOME-216).
 
@@ -234,22 +237,37 @@ def git_config_optional(key: str) -> str | None:
     return value
 
 
-def git_config_all(key: str) -> list[str]:
-    """Return every value for a git config key; a missing key is an empty list."""
+def refused_owners(profile: str) -> frozenset[str]:
+    """The owners this machine refuses for profile, casefolded: every gh-app.<profile>.refuse-owner
+    in ~/.config/git/config, the machine's own git config, found from HOME at each call.
+
+    git reads that one file, named with --file. A plain `git config` reads
+    $XDG_CONFIG_HOME/git/config in its place whenever XDG_CONFIG_HOME is set, and Legion panes set
+    it to a directory with no git config, so there every refusal was skipped (HOME-216). ~/.gitconfig,
+    GIT_CONFIG_GLOBAL, the system config and a repository's config are never read: other machines
+    share the first, and a repository is not the machine.
+
+    Not lenient like git_config_optional, for which any failure means "not set": that would serve a
+    refused owner whenever git cannot read the file. Only exit 1 with no output (no such file, or no
+    such key) means no owner is refused. Any other failure, such as a file git cannot parse or a git
+    that cannot run, raises AppTokenError, so every owner is refused."""
+    key = f"gh-app.{profile}.refuse-owner"
+    config = Path.home() / ".config" / "git" / "config"
+    failure = f"failed to read {key} from {config}, so every owner is refused"
     try:
         result = subprocess.run(
-            ["git", "config", "--get-all", key],
+            ["git", "config", "--file", str(config), "--get-all", key],
             capture_output=True,
             text=True,
             check=False,
         )
     except (OSError, UnicodeDecodeError) as error:
-        raise AppTokenError(f"failed to read git config: {key}") from error
+        raise AppTokenError(failure) from error
     if result.returncode == 0:
-        return result.stdout.splitlines()
+        return frozenset(value.casefold() for value in result.stdout.splitlines())
     if result.returncode == 1 and not result.stdout:
-        return []
-    raise AppTokenError(f"failed to read git config: {key}")
+        return frozenset()
+    raise AppTokenError(failure)
 
 
 def git_config(key: str) -> str:
@@ -825,10 +843,16 @@ def select_owner(explicit_owner: str | None, request: dict[str, str]) -> str | N
 
 
 def get_token(
-    profile: str, owner: str, min_lifetime: int = TOKEN_REFRESH_MARGIN, scope: dict[str, Any] | None = None
+    profile: str,
+    owner: str,
+    min_lifetime: int = TOKEN_REFRESH_MARGIN,
+    scope: dict[str, Any] | None = None,
+    *,
+    refused: frozenset[str] = frozenset(),
 ) -> str:
     """Return a token for one owner (narrowed by scope when given), never reusing another owner's
-    or another scope's cache, and never a cached one with min_lifetime seconds or less left."""
+    or another scope's cache, and never a cached one with min_lifetime seconds or less left. An
+    owner-wide release caches no token for an owner in refused (refused_owners)."""
     owner = owner.casefold()
     key = scope_key(scope)
     cached_token = get_cached_token(profile, owner, min_lifetime, key)
@@ -849,9 +873,12 @@ def get_token(
         covered = {name: installation["installation_id"] for name, installation in installations.items()}
     remember_covered_owners(app_id, covered)
     if not scope:
-        # An owner-wide release holds every covered owner's token: cache them all. A narrowed
-        # one is cached under its scope alone, never in an owner-wide entry.
+        # An owner-wide release holds every covered owner's token: cache them all but the ones
+        # this machine refuses. A narrowed one is cached under its scope alone, never in an
+        # owner-wide entry.
         for name, installation in installations.items():
+            if name in refused:
+                continue
             write_cache_file(
                 token_cache_file(profile, name),
                 {"token": installation["token"], "expires_at": installation["expires_at"]},
@@ -983,8 +1010,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        refused = git_config_all(f"gh-app.{args.profile}.refuse-owner")
-        if any(owner.casefold() == value.casefold() for value in refused):
+        refused = refused_owners(args.profile)
+        if owner.casefold() in refused:
             raise RefusedOwnerError(
                 f"owner {owner} is refused for profile {args.profile} on this machine "
                 f"(gh-app.{args.profile}.refuse-owner): no token"
@@ -994,7 +1021,7 @@ def main(argv: list[str] | None = None) -> int:
             seed_cache_dir(CACHE_DIR, OLD_CACHE_DIR)
         scope = scope_of(args.repo, args.read_only)
         try:
-            token = get_token(args.profile, owner, required_lifetime(), scope)
+            token = get_token(args.profile, owner, required_lifetime(), scope, refused=refused)
             decision = "app"
         except UninstalledOwnerError:
             if scope:
