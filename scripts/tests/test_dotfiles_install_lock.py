@@ -853,7 +853,7 @@ class InstallLock(unittest.TestCase):
         pid = self.start_pid("shim")
         self.finish(shim, "shims/knives")
         self.assertEqual(shim.returncode, 127, self.describe())
-        self.assertRegex(shim.stderr(), rf"exited \S+ without knives {re.escape(PIN)} in place", self.describe())
+        self.assertRegex(shim.stderr(), rf"exited 137 without knives {re.escape(PIN)} in place", self.describe())
         self.assertLess(shim.elapsed, INSTALL_CAP + KILL_GRACE + KILL_SLACK, self.describe())
         failed = Path(f"{self.lock}.failed")
         self.assertTrue(failed.is_file(), self.describe())
