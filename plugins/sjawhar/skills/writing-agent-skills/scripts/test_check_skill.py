@@ -138,6 +138,27 @@ def test_a_description_with_no_closing_quote_fails(tmp_path: Path) -> None:
     assert code == 1 and fails, out
 
 
+def test_frontmatter_that_is_not_valid_yaml_fails(tmp_path: Path) -> None:
+    # The one FAIL line names the YAML error; the words after it are PyYAML's.
+    skill_md = f'---\nname: {NAME}\ndescription: "Use when a test needs a skill\nargument-hint: "<file>"\n---\n\nx\n'
+    code, fails, out = run(tmp_path, {"SKILL.md": skill_md})
+    assert code == 1 and len(fails) == 1, out
+    assert fails[0].startswith("FAIL SKILL.md frontmatter is not valid YAML"), out
+
+
+def test_frontmatter_that_is_a_yaml_list_fails(tmp_path: Path) -> None:
+    assert_fails(tmp_path, {"SKILL.md": "---\n- a\n---\n\nx\n"}, "SKILL.md frontmatter is not a mapping")
+
+
+def test_a_description_that_yaml_reads_as_a_number_fails(tmp_path: Path) -> None:
+    assert_fails(tmp_path, {"SKILL.md": head("42") + "x\n"}, "description is not a string: YAML reads it as int")
+
+
+def test_a_name_that_yaml_reads_as_a_list_fails(tmp_path: Path) -> None:
+    skill_md = f"---\nname: [x]\ndescription: {DESC}\n---\n\nx\n"
+    assert_fails(tmp_path, {"SKILL.md": skill_md}, "name is not a string: YAML reads it as list")
+
+
 def test_skill_md_of_150_lines_passes(tmp_path: Path) -> None:
     assert_passes(tmp_path, {"SKILL.md": text_of(150, 2_000, head())})
 

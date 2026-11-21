@@ -109,6 +109,44 @@ def size_fails(label: str, lines: int, size: int) -> list[str]:
     return fails
 
 
+def string_field(fields: dict[object, object], key: str) -> tuple[str, str | None]:
+    """The field's text ("" when it is missing or not a string), and its FAIL line when YAML reads another type."""
+    value = fields.get(key)
+    if isinstance(value, str):
+        return value, None
+    if value is None:
+        return "", None
+    return "", f"{key} is not a string: YAML reads it as {type(value).__name__}"
+
+
+def check_frontmatter(
+    fields: dict[object, object], unreadable: str | None, dir_name: str
+) -> tuple[list[str], list[str]]:
+    """The FAIL and warn lines for SKILL.md's frontmatter and its description and name fields."""
+    if unreadable is not None:
+        return [unreadable], []
+    fails: list[str] = []
+    warns: list[str] = []
+    desc, wrong_type = string_field(fields, "description")
+    if wrong_type:
+        fails.append(wrong_type)
+    elif not desc:
+        fails.append("description is empty or missing")
+    else:
+        if not re.match(r"Use when\b", desc):
+            fails.append('description does not start "Use when"')
+        if len(desc) > TARGET_DESC:
+            fails.append(f"description has {len(desc):,} characters, over the {TARGET_DESC}-character limit")
+    name, wrong_type = string_field(fields, "name")
+    if wrong_type:
+        fails.append(wrong_type)
+    elif not NAME_RE.match(name):
+        fails.append(f"name {name!r} is not lowercase words joined by hyphens")
+    elif name != dir_name:
+        warns.append(f"name {name!r} differs from directory {dir_name!r}")
+    return fails, warns
+
+
 def check(path: Path) -> tuple[Stats, list[str], list[str]]:
     path = path.expanduser().resolve()
     skill_md = path if path.name == "SKILL.md" else path / "SKILL.md"
@@ -116,10 +154,7 @@ def check(path: Path) -> tuple[Stats, list[str], list[str]]:
     raw = skill_md.read_bytes()
     text = raw.decode("utf-8")
     fields, body, unreadable = split_frontmatter(text)
-    desc_value = fields.get("description")
-    name_value = fields.get("name")
-    desc = desc_value if isinstance(desc_value, str) else ""
-    name = name_value if isinstance(name_value, str) else ""
+    desc, _ = string_field(fields, "description")
     rule_lines = sum(1 for line in body.splitlines() if re.match(r"^\s*(?:[-*]|\d+\.)\s+\S", line))
     lines = len(text.splitlines())
     stats: Stats = {
@@ -135,25 +170,8 @@ def check(path: Path) -> tuple[Stats, list[str], list[str]]:
         ref_raw = ref.read_bytes()
         ref_lines = len(ref_raw.decode("utf-8", errors="replace").splitlines())
         fails += size_fails(ref.relative_to(skill_dir).as_posix(), ref_lines, len(ref_raw))
-    warns: list[str] = []
-    if unreadable:
-        fails.append(unreadable)
-    elif desc_value is not None and not isinstance(desc_value, str):
-        fails.append(f"description is not a string: YAML reads it as {type(desc_value).__name__}")
-    elif not desc:
-        fails.append("description is empty or missing")
-    else:
-        if not re.match(r"Use when\b", desc):
-            fails.append('description does not start "Use when"')
-        if len(desc) > TARGET_DESC:
-            fails.append(f"description has {len(desc):,} characters, over the {TARGET_DESC}-character limit")
-    if unreadable is None:
-        if name_value is not None and not isinstance(name_value, str):
-            fails.append(f"name is not a string: YAML reads it as {type(name_value).__name__}")
-        elif not NAME_RE.match(name):
-            fails.append(f"name {name!r} is not lowercase words joined by hyphens")
-        elif name != skill_dir.name:
-            warns.append(f"name {name!r} differs from directory {skill_dir.name!r}")
+    frontmatter_fails, warns = check_frontmatter(fields, unreadable, skill_dir.name)
+    fails += frontmatter_fails
     if rule_lines > RULE_LINES:
         warns.append(f"{rule_lines} rule lines, over {RULE_LINES}: split or delete")
     # A skill inside a repository may name a repo-root path (`scripts/deploy/x.sh`) as well as its own files.
