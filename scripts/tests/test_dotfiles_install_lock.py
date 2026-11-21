@@ -75,7 +75,7 @@ WAIT_LINE_PART = "is held by another install; waiting up to"
 # (`tools_step`) and scripts/agent-session. The same search finds the shim's own install
 # (shims/knives `install_pin`) and two installers that ran `mise install` with no lock before
 # this change and now take it, installers/mise.sh and installers/librarian-harness-host.sh; those
-# two are in INSTALLERS and have rows of their own (L11, L12). A new writer of mise's data dir
+# two are in INSTALLERS and have rows of their own (L11, L12, L14). A new writer of mise's data dir
 # goes into this list, or into a row of its own.
 HOLDERS = ("follow", "sync", "session")
 INSTALLERS = ("mise_sh", "librarian")
@@ -226,6 +226,11 @@ fi
 # 8.
 rmdir "$state/installing"
 note "end $role"
+# 9. An install that fails with mise's own status 75, the status flock gives for a wait that ran out.
+if [[ -e "$state/exit-75-$role" ]]; then
+    note "exit 75 $role"
+    exit 75
+fi
 exit 0
 """
 
@@ -676,6 +681,26 @@ class InstallLock(unittest.TestCase):
         self.assertEqual(self.starts(), ["tools"], self.describe())
         self.assertIn("end tools", self.events(), self.describe())
 
+    def row_l14(self, installer: str) -> None:
+        """L14: a `mise install` that itself exits 75 is a failed install, not a wait for the lock
+        that ran out: no line names the lock; installers/mise.sh prints its rate-limit line, tries
+        again and goes on, and the librarian installer ends non-zero."""
+        self.flag("exit-75-tools")
+        party = self.start_holder(installer)
+        self.finish(party, installer)
+        output = party.stdout() + party.stderr()
+        self.assertNotIn("another install held", output.lower(), self.describe())
+        self.assertNotRegex(output, r"held .* for 600 s", self.describe())
+        self.assert_no_overlap()
+        tries = 3 if installer == "mise_sh" else 1
+        self.assertEqual(self.starts(), ["tools"] * tries, self.describe())
+        self.assertEqual([line for line in self.events() if line.startswith("exit ")], ["exit 75 tools"] * tries, self.describe())
+        if installer == "mise_sh":
+            self.assertIn("Some tools failed to install", output, self.describe())
+            self.assert_succeeded(party)
+        else:
+            self.assertNotEqual(party.returncode, 0, self.describe())
+
     # ------------------------------------------------------------------------- rows of one party
 
     def test_l2_a_knives_call_under_the_shims_own_install_ends_at_once(self) -> None:
@@ -872,6 +897,7 @@ each("row_l2", HOLDERS + INSTALLERS, "test_l2_a_knives_call_under_{party}_ends_a
 each("row_l3", HOLDERS, "test_l3_the_shim_runs_the_pin_{party}_placed_while_{party}_holds_the_lock")
 each("row_l4", HOLDERS, "test_l4_the_shim_holds_the_lock_until_its_mise_ends_then_{party}_installs")
 each("row_l9", HOLDERS, "test_l9_the_command_after_{party}s_lock_installs_the_pin_itself")
+each("row_l14", INSTALLERS, "test_l14_a_mise_install_of_{party}_that_exits_75_is_not_reported_as_a_lock_wait")
 
 
 if __name__ == "__main__":

@@ -43,7 +43,11 @@ else
     lock="$MISE_DATA_DIR/.dotfiles-install.lock"
     mkdir -p "$MISE_DATA_DIR"
     rc=0
-    DOTFILES_INSTALL_LOCK_HELD=1 flock -w 600 -E 75 "$lock" mise install "github:sjawhar/oh-my-pi@$HARNESS_OMP" || rc=$?
+    # mise's own 75 becomes 1 under the lock, so 75 means only that the 600 s wait ran out.
+    # shellcheck disable=SC2016  # the inner bash expands $1, $? and $rc; this shell must not
+    DOTFILES_INSTALL_LOCK_HELD=1 flock -w 600 -E 75 "$lock" \
+        bash -c 'rc=0; mise install "$1" || rc=$?; [ "$rc" != 75 ] || rc=1; exit "$rc"' bash \
+        "github:sjawhar/oh-my-pi@$HARNESS_OMP" || rc=$?
     if [ "$rc" = 75 ]; then
         echo "librarian-harness-host: another install held $lock for 600 s; omp $HARNESS_OMP not installed" >&2
     fi

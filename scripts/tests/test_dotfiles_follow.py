@@ -627,7 +627,6 @@ class PrePushHooks(Harness):
         messages = self.run_follow()
         self.assertEqual(len(messages), 1)
         self.assertIn("sweep-hooks.sh is missing", messages[0])
-        self.assertIn("--only prepush", messages[0])
         self.assertIn("Install it with devbox/sami-devbox-provision --only prepush.", messages[0])
         self.assertNotIn("Install it from", messages[0])
 

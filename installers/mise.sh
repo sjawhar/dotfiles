@@ -40,17 +40,21 @@ else
     # wait on it; under a caller that holds the lock and set the marker, without it. Where there is
     # no flock(1) (macOS), the install runs without the lock but with the marker, as shims/knives
     # runs its own: a knives call under it then does not start a second install. A wait of 600 s
-    # for the lock is a failed try: flock exits 75, and the line printed names the lock.
+    # for the lock is a failed try: flock exits 75, and the line printed names the lock. Each branch
+    # runs _mise_install, which makes mise's own 75 a 1, so 75 means only that the wait ran out.
+    # shellcheck disable=SC2016  # the inner bash expands $? and $rc; this shell must not
+    _mise_install='rc=0; mise install || rc=$?; [ "$rc" != 75 ] || rc=1; exit "$rc"'
     for _ in {1..3}; do
         _mise_rc=0
         if [ -n "${DOTFILES_INSTALL_LOCK_HELD:-}" ]; then
-            mise install && break
+            bash -c "$_mise_install" || _mise_rc=$?
         elif ! command -v flock &>/dev/null; then
-            DOTFILES_INSTALL_LOCK_HELD=1 mise install && break
+            DOTFILES_INSTALL_LOCK_HELD=1 bash -c "$_mise_install" || _mise_rc=$?
         else
-            DOTFILES_INSTALL_LOCK_HELD=1 flock -w 600 -E 75 "$MISE_DATA_DIR/.dotfiles-install.lock" mise install || _mise_rc=$?
-            [ "$_mise_rc" != 0 ] || break
+            DOTFILES_INSTALL_LOCK_HELD=1 flock -w 600 -E 75 "$MISE_DATA_DIR/.dotfiles-install.lock" \
+                bash -c "$_mise_install" || _mise_rc=$?
         fi
+        [ "$_mise_rc" != 0 ] || break
         if [ "$_mise_rc" = 75 ]; then
             echo "Another install held $MISE_DATA_DIR/.dotfiles-install.lock for 600 s; mise install did not start." >&2
         else
