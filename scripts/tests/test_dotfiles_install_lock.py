@@ -195,10 +195,10 @@ if [[ -e "$state/gate-$role" ]]; then
 fi
 # 4. A knives call under this install, made before the pin is in place.
 if [[ -e "$state/nested-$role" ]]; then
-    started="${EPOCHREALTIME/[.,]/}"
+    started="${EPOCHREALTIME//[!0-9]/}"
     rc=0
     "$shim" --version < /dev/null > "$state/nested-$role.out" 2>&1 || rc=$?
-    us=$(( ${EPOCHREALTIME/[.,]/} - started ))
+    us=$(( ${EPOCHREALTIME//[!0-9]/} - started ))
     note "nested rc=$rc secs=$(( us / 1000000 )).$(printf '%03d' $(( us / 1000 % 1000 )))"
 fi
 # 5.
@@ -896,6 +896,7 @@ class InstallLock(unittest.TestCase):
         self.assertIn("Some tools failed to install", output, self.describe())
         self.assert_no_overlap()
         self.assertEqual(self.starts(), ["tools"] * 3, self.describe())
+        self.assertEqual([line for line in self.events() if line.startswith("exit ")], ["exit 75 tools"] * 3, self.describe())
         self.assert_succeeded(party)
 
 

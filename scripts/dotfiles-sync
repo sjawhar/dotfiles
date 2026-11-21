@@ -139,8 +139,9 @@ tools_run() {
   else
     exec {output_fd}>&2
   fi
-  # The clock as EPOCHREALTIME gives it (whole seconds where bash has none), so ran is in microseconds.
-  started="${EPOCHREALTIME:-${EPOCHSECONDS:-$(date +%s)}.000000}"
+  # The clock as EPOCHREALTIME gives it (whole seconds where bash has none). Its decimal point
+  # follows the locale, so ran drops every non-digit and is in microseconds.
+  started="${EPOCHREALTIME:-$(date +%s).000000}"
   (
     # shellcheck disable=SC1007
     CDPATH= cd -- "$cwd" && exec timeout -k "$tools_grace" "$limit" "$@"
@@ -152,8 +153,8 @@ tools_run() {
   else
     status=$?
   fi
-  ended="${EPOCHREALTIME:-${EPOCHSECONDS:-$(date +%s)}.000000}"
-  ran=$(( ${ended/[.,]/} - ${started/[.,]/} ))
+  ended="${EPOCHREALTIME:-$(date +%s).000000}"
+  ran=$(( ${ended//[!0-9]/} - ${started//[!0-9]/} ))
   if [[ "$status" = 124 || "$status" = 137 ]]; then
     waits=$((tools_grace * 10))
     while (( waits > 0 )) && kill -0 -- "-$pid" 2>/dev/null; do

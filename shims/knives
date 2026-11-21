@@ -161,23 +161,25 @@ if [[ -z "$_knives" ]]; then
     # (mise_paths), given the configuration and data dir above. A call that fails or outlives
     # the timeout is tried once more (a reinstall's window, a lock).
     _mise="$_mise_bin"
-    # Whole seconds, as the install's wait and cap, so the timeout check below can compare it.
+    # Whole seconds, as the install's wait and cap, so the timeout check below can compare it. At
+    # most 9 digits, so no arithmetic below can wrap it; a longer value, like a non-number, is 20.
     _mise_timeout="${DOTFILES_KNIVES_MISE_TIMEOUT:-20}"
-    [[ "$_mise_timeout" =~ ^[1-9][0-9]*$ ]] || _mise_timeout=20
+    [[ "$_mise_timeout" =~ ^[1-9][0-9]{0,8}$ ]] || _mise_timeout=20
     _why=""
     for _attempt in 1 2; do
         _rc=0
-        # The clock as EPOCHREALTIME gives it (whole seconds where bash has none), so the check
-        # below is in microseconds.
-        _start="${EPOCHREALTIME:-${EPOCHSECONDS:-$(date +%s)}.000000}"
+        # The clock as EPOCHREALTIME gives it (whole seconds where bash has none). Its decimal point
+        # follows the locale, so the check below drops every non-digit.
+        _start="${EPOCHREALTIME:-$(date +%s).000000}"
         _knives="$(MISE_DATA_DIR="$_mise_root" MISE_GLOBAL_CONFIG_FILE="$_config" timeout "$_mise_timeout" "$_mise" which -C / knives --tool github:sjawhar/knives </dev/null)" || _rc=$?
-        _end="${EPOCHREALTIME:-${EPOCHSECONDS:-$(date +%s)}.000000}"
+        _end="${EPOCHREALTIME:-$(date +%s).000000}"
         if (( _rc == 0 )) && [[ -n "$_knives" ]]; then
             break
         fi
         _knives=""
-        # mise can exit 124 itself; only a call that lasted the whole timeout timed out.
-        if (( _rc == 124 && ${_end/[.,]/} - ${_start/[.,]/} >= _mise_timeout * 1000000 )); then
+        # mise can exit 124 itself; only a call that lasted the whole timeout timed out. The check
+        # is in whole seconds: timeout fires only after the whole limit.
+        if (( _rc == 124 && (${_end//[!0-9]/} - ${_start//[!0-9]/}) / 1000000 >= _mise_timeout )); then
             _why+="${_why:+; }attempt $_attempt timed out after ${_mise_timeout}s"
         else
             _why+="${_why:+; }attempt $_attempt exited $_rc"
@@ -213,8 +215,9 @@ if [[ -z "$_knives" ]]; then
         local fd="" rc=0 pid="" deadline announced="" locked="" status="" out_of_time="" detach=()
         # Whole seconds. wait: how long a call waits for the pin, first while another install
         # holds the lock, then while its own install runs. cap: how long its mise may run before
-        # timeout sends TERM, and KILL 10 s later.
-        [[ "$wait" =~ ^(0|[1-9][0-9]*)$ ]] || wait=300
+        # timeout sends TERM, and KILL 10 s later. wait has at most 9 digits, so no arithmetic
+        # below can wrap it; a longer value, like a non-number, is 300.
+        [[ "$wait" =~ ^(0|[1-9][0-9]{0,8})$ ]] || wait=300
         [[ "$cap" =~ ^[1-9][0-9]*$ ]] || cap=600
         _install_log="${_cache%/*}/install-$_pin.log"
         # Every holder of the lock gives the `mise install` it runs under it

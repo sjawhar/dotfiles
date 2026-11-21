@@ -332,9 +332,9 @@ else
             exec {out_fd}>&2
         fi
         rc=0
-        # The clock as EPOCHREALTIME gives it (whole seconds where bash has none), so ran is in
-        # microseconds.
-        started="${EPOCHREALTIME:-${EPOCHSECONDS:-$(date +%s)}.000000}"
+        # The clock as EPOCHREALTIME gives it (whole seconds where bash has none). Its decimal point
+        # follows the locale, so ran drops every non-digit and is in microseconds.
+        started="${EPOCHREALTIME:-$(date +%s).000000}"
         (
             # In this subshell alone, so a knives call under the install does not wait on the lock
             # it holds, and the agent exec'd below never has the marker.
@@ -344,8 +344,8 @@ else
         ) >&"$out_fd" 2>&1 &
         pid=$!
         wait "$pid" || rc=$?
-        ended="${EPOCHREALTIME:-${EPOCHSECONDS:-$(date +%s)}.000000}"
-        ran=$(( ${ended/[.,]/} - ${started/[.,]/} ))
+        ended="${EPOCHREALTIME:-$(date +%s).000000}"
+        ran=$(( ${ended//[!0-9]/} - ${started//[!0-9]/} ))
         if [[ "$rc" = 124 || "$rc" = 137 ]]; then
             waits=$((grace * 10))
             while (( waits > 0 )) && kill -0 -- "-$pid" 2>/dev/null; do
