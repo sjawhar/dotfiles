@@ -54,8 +54,9 @@ upstream = "https://github.com/can1357/oh-my-pi"
 origin = "https://github.com/cybermonklabs/oh-my-pi"
 release_branch = "sami"
 ledger = "sjawhar/.knives-ledger"
-# installers/knives.sh rewrites this line to the machine's big local disk where it has one; this
-# value is what a machine without one gets, since no committed file names a machine's own path.
+# scripts/knives-registry-render rewrites this line to the machine's big local disk where it has
+# one; this value is what a machine without one gets, since no committed file names a machine's
+# own path.
 workspaces = "~/.worktrees/oh-my-pi"
 # Internal names an upstream-bound diff must not add (knives audit scans added lines; a
 # fork-only branch is exempt). "sjawhar" is not listed: it is the required changelog attribution.
@@ -128,8 +129,34 @@ ledger = "sjawhar/.knives-ledger"
 
 [repos.ygo-fork]
 upstream = "https://github.com/reearth/ygo.git"
+# Work branches live on Sami's personal fork, so an upstream pull request's head is never
+# theorem-labs and a maintainer can push to it (Sami,
+# dispatch://INFRA-37/ask/051be055-5831-4020-9a5f-78907660f010). Releases are cut and consumed on
+# theorem-labs/ygo, never on the personal fork (Sami,
+# dispatch://INFRA-179/ask/1e15554d-3abe-486d-81ab-4a10936f0765).
 origin = "https://github.com/sjawhar/ygo.git"
+release = "https://github.com/theorem-labs/ygo.git"
 ledger = "sjawhar/.knives-ledger"
+# The consumer is cybermonklabs/legion: the replace line of its packages/envoy/go.mod pins a
+# release of this fork. It is no `consumers` entry: knives reads no go.mod (src/pins.rs,
+# PIN_FILES), so such an entry would claim a pin knives cannot see.
+# Internal names an upstream-bound diff must not add: knives audit reports each added line that
+# holds one (a fork-only branch is exempt). Not oh-my-pi's list: "notch" is a word of the fork's
+# own tests. scripts/leak-terms-check also refuses these terms in gh text bound for any public
+# repository named ygo. To the public theorem-labs/ygo, a term wholly inside that destination's
+# own name counts for nothing (gh_own_name): `-R theorem-labs/ygo`, its URL and its endpoint go
+# there, and so does `theorem-labs` as a whole word. A `theorem-labs` that begins a longer word is
+# refused, and so is `INFRA-` anywhere in the text.
+forbidden = ["INFRA-", "theorem-labs"]
+
+# The v1.55.1 line. Its base is the fork's branch rc/v1.55.1-sami.10 (42c0196a, which the tag
+# v1.55.1-sami.10 also names), so a cut is that tree plus its members; cuts are
+# release/v1.55.1/YYYY-MM-DD[.N], selected with --series v1.55.1. The base is a branch because
+# knives resolves a base only as <branch>@<remote>, and `base_remote` is origin because upstream
+# has no such branch.
+[repos.ygo-fork.series."v1.55.1"]
+base = "rc/v1.55.1-sami.10"
+base_remote = "origin"
 
 [repos.cosmic-comp]
 upstream = "https://github.com/pop-os/cosmic-comp.git"

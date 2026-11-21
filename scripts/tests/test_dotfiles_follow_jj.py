@@ -19,7 +19,14 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from scripts.tests.test_dotfiles_follow import FOLLOW, Harness
+from scripts.tests.test_dotfiles_follow import (
+    FOLLOW,
+    REGISTRY_V1,
+    REGISTRY_V2,
+    Harness,
+    RegistryCopy,
+    add_registry_render,
+)
 from scripts.tests.test_dotfiles_sync import real_binary
 
 
@@ -413,6 +420,60 @@ class JjSyncFailures(JjHarness):
 
         self.assertEqual(len(messages), 1)
         self.assertIn("another dotfiles-sync holds", messages[0])
+
+
+class JjKnivesRegistry(RegistryCopy, JjHarness):
+    """The registry render runs after the sync's move, as after git mode's fast-forward, and only a
+    run that reaches main judges its condition (dispatch://INFRA-3365, R5)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        add_registry_render(self.upstream)
+        self.target = self.commit_upstream("knives registry", **{"knives/repos.toml": REGISTRY_V1})
+
+    def parent(self) -> str:
+        return self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id")
+
+    def test_the_sync_move_brings_a_registry_change_and_the_copy_is_written(self) -> None:
+        self.assertEqual(self.run_follow(), [])
+        self.assertEqual(self.parent(), self.target)
+        self.assert_copy_renders(REGISTRY_V1)
+        target = self.commit_upstream("knives: a new oh-my-pi release branch", **{"knives/repos.toml": REGISTRY_V2})
+
+        self.assertEqual(self.run_follow(now=1_000_600.0), [])
+
+        self.assertEqual(self.parent(), target)
+        self.assert_copy_renders(REGISTRY_V2)
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes into a read-only directory")
+    def test_a_refused_sync_leaves_an_open_registry_condition_open(self) -> None:
+        knives = self.copy.parent
+        knives.mkdir(parents=True)
+        knives.chmod(0o555)
+        try:
+            first = self.run_follow()
+        finally:
+            knives.chmod(0o755)
+        self.assertEqual(self.parent(), self.target)
+        self.assertEqual(len(first), 1)
+        self.assertIn("is on main, but a post-update step failed", first[0].splitlines()[0])
+        self.assertIn("KNIVES REGISTRY NOT WRITTEN", first[0])
+        self.assertIn("mktemp: failed to create file via template", first[0])
+        # The next run's sync is refused: a local edit conflicts with main's, so it never reaches
+        # the render, and the copy still holds nothing.
+        (self.repo / "shared.txt").write_text("local edit\n")
+        (self.upstream / "shared.txt").write_text("upstream edit\n")
+        self.commit_upstream("conflict")
+
+        messages = self.run_follow(now=1_000_600.0)
+
+        for text in messages:
+            self.assertNotIn("KNIVES REGISTRY NOT WRITTEN cleared", text)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("DOTFILES SYNC REFUSED", messages[0])
+        self.assertEqual(self.parent(), self.target)
+        self.assertFalse(self.copy.exists())
+        self.assertIn("registry", self.state_data()["incidents"])
 
 
 if __name__ == "__main__":

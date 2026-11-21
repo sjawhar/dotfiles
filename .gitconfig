@@ -44,8 +44,9 @@
 	path = ~/.config/git/identity.gitconfig
 # A repository's identity by rule: every clone of it, on every machine, is
 # matched by its remote URL (`hasconfig:`, git 2.36+), and `/**` matches the rest
-# of the URL, `.git` included. jj's half of each rule is a repository scope in
-# .jjconfig.toml; the two must agree, for the reason scripts/git-identity gives.
+# of the URL, `.git` included. jj takes the identity these rules give git:
+# shims/jj passes it on (.jjconfig.toml), and the two must agree, for the
+# reason scripts/git-identity gives.
 # A repo's own `git-identity` still wins. The path starts at ~ because git
 # resolves a relative include path against ~/.gitconfig, the symlink, rather
 # than this file.

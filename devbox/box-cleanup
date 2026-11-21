@@ -67,7 +67,7 @@ step_timeout="${BOX_CLEANUP_STEP_TIMEOUT:-30m}"
 # the job. 2h is what the same prune is given by hand; the service's TimeoutStartSec is 4h, and
 # docker-cap is the last step, so it cannot crowd the others out.
 # The hook sweep's two passes keep the bounds dotfiles-follow gave them (scripts/dotfiles-follow.md,
-# step 7): 420 s for the fast roots, 1000 s for the fast and slow roots.
+# step 8): 420 s for the fast roots, 1000 s for the fast and slow roots.
 declare -A STEP_TIMEOUTS=(
     [docker-cap]="${BOX_CLEANUP_DOCKER_CAP_TIMEOUT:-2h}"
     [hook-sweep]=420s

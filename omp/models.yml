@@ -1,3 +1,6 @@
+# omp never reads this file: it reads ~/.omp/agent/models.yml, which scripts/omp-models-build writes from this file
+# with the machine's gitignored omp/models.local.yml merged over it. A pull does not run the build
+# (scripts/dotfiles-follow does not), so after an edit here or to models.local.yml, run scripts/omp-models-build.
 providers:
   # omp/config.yml sets `providers.cacheRetention: long` for 1-hour Claude cache entries (dispatch://INFRA-1058), and
   # that setting reaches every provider. On api.openai.com it would make GPT-5.6+ Responses requests send
@@ -13,6 +16,10 @@ providers:
     # or credentials — a gateway baseUrl, an `!command` apiKey — is machine-local
     # and belongs in omp/models.local.yml (gitignored); installers/omp.sh merges
     # that file over this one and writes the result to ~/.omp/agent/models.yml.
+    # Never give this built-in provider the gateway's baseUrl there: the Claude fallback chains in
+    # omp/config.yml end on `anthropic/...` models, so a gateway that is down would leave no Claude
+    # at all. Declare a separate gateway provider instead and point roles at it in
+    # omp/config.local.yml.
     modelOverrides:
       # Installed pi-catalog is stale: claude-opus-5 supports xhigh per Anthropic docs
       # (https://platform.claude.com/docs/en/build-with-claude/effort - "Claude Opus 5

@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # mise_paths: mise as this machine runs it, whatever HOME and PATH the caller set
-# (shims/AGENTS.md, "A moved HOME"). A Legion test pane runs a shim with a
+# (shims/tests/test_shim_moved_home.py). A Legion test pane runs a shim with a
 # temporary HOME and the PATH <bin>:/usr/local/bin:/usr/bin:/bin, where every
 # path under HOME names nothing. Sets, once per process:
 #   _mise_bin     mise on PATH, else the dotfiles checkout's bin/mise, else the
@@ -76,7 +76,7 @@ mise_paths() {
 }
 
 # The dotfiles checkout this file is in, through a link to it, not the one under HOME: a caller
-# may give omp a HOME of its own (shims/AGENTS.md, "A moved HOME").
+# may give omp a HOME of its own (shims/tests/test_shim_moved_home.py).
 _omp_self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")"
 DOTFILES_DIR="${DOTFILES_DIR:-${_omp_self%/shims/*}}"
 
