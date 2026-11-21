@@ -18,7 +18,8 @@ Put each step's output in the commit message or the pull request, so that the ne
 
 ## Step 1: Map every instruction
 
-1. **Write the new text and a drop list:** each old instruction you removed, with one reason code and its evidence.
+1. **Write the new text.**
+2. **Write a drop list:** each old instruction you removed, with one reason code and its evidence.
 
    | Code | Evidence |
    | --- | --- |
@@ -30,7 +31,7 @@ Put each step's output in the commit message or the pull request, so that the ne
    | `moved` | The reference file, docs page or script it moved to |
    | `history` | A date, incident, measurement, issue key or decision record, which `updating-docs` keeps out of a doc |
 
-2. **Brief a fresh agent** with the old text, the new text and the drop list, and not your reasoning:
+3. **Brief a fresh agent** with the old text, the new text and the drop list, and not your reasoning:
 
    > List every instruction in OLD: each thing it tells the agent to do, not do, check or know. For each one, give the line in NEW that carries the same meaning and scope, or the drop-list row that covers it. Mark it with one verdict:
    >
@@ -43,8 +44,8 @@ Put each step's output in the commit message or the pull request, so that the ne
    >
    > Output a table: old line, instruction, new line or drop row, verdict.
 
-3. **Fix every LOST, NARROWED and BAD-DROP:** restore the rule, or drop it with a real reason. A narrowed rule fails where the old one held.
-4. **Map the changed rows again**, and only those.
+4. **Fix every LOST, NARROWED and BAD-DROP:** restore the rule, or drop it with a real reason. A narrowed rule fails where the old one held.
+5. **Map the changed rows again**, and only those.
 
 ## Step 2: Check for slop
 

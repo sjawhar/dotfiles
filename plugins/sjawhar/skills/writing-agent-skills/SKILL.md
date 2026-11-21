@@ -9,11 +9,9 @@ Write, test, shorten or delete a skill so that an agent loads it for the right t
 
 **Done when:** step 5's check passes the skill with no warning, step 3's test passes for each change to what an agent does, and each file that names a skill you renamed, moved or deleted is fixed.
 
-For an agent guide (AGENTS.md, CLAUDE.md), take its shape and size from `updating-docs`.
-
-Use steps 1 and 3 for an agent guide's rules too.
-
 ## Step 1: Decide that a rule is needed
+
+Use these steps for an agent guide's rules (AGENTS.md, CLAUDE.md) too.
 
 1. **Find it twice.** Find the failure in at least two sessions with `tq search` (`using-transcript-store`): one incident turned into one rule is how instruction files triple in size.
 2. **Run a control.** Run the task in a fresh session with no guidance.
@@ -25,6 +23,8 @@ Use steps 1 and 3 for an agent guide's rules too.
 ## Step 2: Write the body
 
 **Read `references/style.md` now**, before you write any line of a skill.
+
+For an agent guide, **read `updating-docs` now** for its shape and size.
 
 Choose the form by the failure:
 
@@ -69,7 +69,7 @@ Read its section "Measuring a harness change" when the change is to the harness 
 | --- | --- |
 | Agents disobey a rule | Delete it. Run the same task 3 times with the rest unchanged. Rewrite it only if the failure shows in 2 of the 3 |
 | A rule's reason no longer holds: a duplicate, written for an older model, obeyed in a control run, one incident that never recurred, or now done by the code or the harness | Delete it |
-| A rule never fires, which is no reason by itself to delete it | Run the control first: deleting ignored rules can remove helpful ones |
+| A rule never fires | Do not delete it for that alone. Run the control first: deleting ignored rules can remove helpful ones |
 | You remove a required step | Name what now makes it happen (a script, a hook, another rule). If nothing does, keep the step: a step left to choice gets skipped |
 | A skill is too long | Move or delete whole blocks, not words: squeezing wording drops rules unnoticed |
 
