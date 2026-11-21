@@ -86,7 +86,10 @@ Read its section "Measuring a harness change" when the change is to the harness 
 
 | Part | Limit | `check_skill.py` |
 | --- | --- | --- |
-| `description` | Starts "Use when". At most 300 characters. Says when to load the skill, never its steps: an agent that reads them there follows them and skips the body. Names the case where the agent thinks it can do without the skill ("also when the diff is pasted inline") | Fails a wrong start or length |
+| `description` start | "Use when" | Fails it |
+| `description` length | At most 300 characters | Fails it |
+| `description` content | When to load the skill, never its steps: an agent that reads them there follows them and skips the body | |
+| `description` near miss | The case where the agent thinks it can do without the skill ("also when the diff is pasted inline") | |
 | `SKILL.md` and each markdown file outside `assets/` and `templates/` | At most 8,000 bytes, the whole file counted; no line limit | Fails it |
 | Rules in `SKILL.md` (a list item, or a sentence of a paragraph) | At most 40. Over it, split the skill, move blocks into references, or delete rules (step 4): a model obeys fewer of its rules as their number grows | Warns |
 
