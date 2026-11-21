@@ -183,6 +183,14 @@ def test_an_upper_case_md_extension_is_measured(tmp_path: Path) -> None:
     )
 
 
+def test_a_markdown_extension_reference_is_measured(tmp_path: Path) -> None:
+    assert_fails(
+        tmp_path,
+        {"references/d.markdown": text_of(20, 8_001)},
+        "references/d.markdown has 8,001 bytes, over the 8,000-byte limit",
+    )
+
+
 def test_words_in_a_reference_do_not_make_it_a_template(tmp_path: Path) -> None:
     brief = text_of(20, 8_001, "Copy the brief below into the subagent's task.\n")
     assert_fails(
