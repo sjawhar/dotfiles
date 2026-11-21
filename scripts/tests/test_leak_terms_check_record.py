@@ -4,8 +4,9 @@ each file version (blob) in REV's tree that holds no listed term, in refs/notes/
 reads no content of a blob whose note holds its key, while it reads every other file, every message and every path.
 
 Each case makes a work repository whose `main` holds base.txt, and a bare destination that holds that commit. The
-check runs in push mode as the pre-push hook runs it, with git's update line on stdin, and GIT_TRACE records each git
-call, so the diff producer's calls (`-U0`) show each diff the push read and which paths it read it for.
+check runs in push mode as the pre-push hook runs it, with git's update line on stdin, and GIT_TRACE2_EVENT records the
+arguments of each git call as JSON (a line feed in a path included), so the diff producer's calls (`log … -U0`) show
+each diff the push read and which paths it read it for.
 """
 
 from __future__ import annotations
@@ -14,8 +15,8 @@ import contextlib
 import importlib.machinery
 import importlib.util
 import io
+import json
 import os
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -118,25 +119,25 @@ class Record(unittest.TestCase):
 
     def run_check(self, *arguments: str, stdin: str = "", env: dict[str, str] | None = None
                   ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
-        """Run the check in the work repository; return its result and, for each call of the diff producer GIT_TRACE
-        saw, the pathspecs it was given (none for a commit read whole)."""
+        """Run the check in the work repository; return its result and, for each call of the diff producer that
+        GIT_TRACE2_EVENT saw, the pathspecs it was given (none for a commit read whole)."""
         descriptor, trace = tempfile.mkstemp(prefix="trace-", dir=self.root)
         os.close(descriptor)
         result = subprocess.run(
             [str(CHECK), *arguments],
             input=stdin,
             cwd=self.work,
-            env={**self.env, **leak_check_environment("/usr/bin:/bin"), "GIT_TRACE": trace, **(env or {})},
+            env={**self.env, **leak_check_environment("/usr/bin:/bin"), "GIT_TRACE2_EVENT": trace, **(env or {})},
             capture_output=True,
             text=True,
             timeout=300,
             check=False,
         )
-        traced = Path(trace).read_text(encoding="utf-8").splitlines()
-        # GIT_TRACE saw the push's other git calls, so it would have seen a diff.
-        self.assertTrue(any("built-in: git" in line for line in traced), "GIT_TRACE recorded no git call")
-        diffs = [shlex.split(line.split("trace: built-in: ", 1)[1]) for line in traced
-                 if "built-in: git log" in line and "-U0" in line]
+        events = [json.loads(line) for line in Path(trace).read_text(encoding="utf-8").splitlines()]
+        calls: list[list[str]] = [event["argv"] for event in events if event.get("event") == "start"]
+        # The trace saw the check's other git calls, so it would have seen a diff.
+        self.assertTrue(calls, "GIT_TRACE2_EVENT recorded no git call")
+        diffs = [words for words in calls if "log" in words and "-U0" in words]
         return result, [words[words.index("--") + 1:] if "--" in words else [] for words in diffs]
 
     def record(self, *revisions: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -308,11 +309,12 @@ class Record(unittest.TestCase):
         line = self.key_line()
         commit = self.commit({"kept.txt": f"a forged line with {TERM}\n", "we\nird.txt": f"a line with {OTHER_TERM}\n"})
         self.forge(self.blob("main", "kept.txt"), line)
-        result, _ = self.push(commit)
+        result, diffs = self.push(commit)
         self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
         self.assertIn(f"commit {commit[:12]} we\\nird.txt:1", result.stderr)
         self.assertNotIn("kept.txt", result.stderr)
         self.assert_covered(result, 1, 2)
+        self.assertEqual(diffs, [[":(literal)we\nird.txt"]])
 
     def test_a_commit_whose_files_are_covered_or_deleted_reads_no_diff(self) -> None:
         self.commit({"gone.txt": "to be deleted\n"})
