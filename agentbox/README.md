@@ -177,6 +177,8 @@ It accepts sizes up to 512 GiB and refuses to shrink a filesystem.
   Shared configuration and SSH state are writable. `/mnt/durable/<host-user>` is bound when present;
   other host paths (trees under `/mnt/nvme/<host-user>`) only through a named or inferred `--dir`. The box keeps its own home and `/tmp`.
   Docker state is a complete host snapshot in that private home. A later host Docker login needs a new box.
+  A shared home path that is a link into `~/.dotfiles` (`~/.gitconfig`) is the same link in the box, so the box
+  reads the live file: each move of the checkout and each `git config --global` replaces that file.
   Own-host GitHub and Azure configuration is visible. App/machine defaults and existing login approvals stay unchanged.
 - **The user.** The session runs as `ubuntu` (uid 1000). To host daemons a box process is a subordinate uid,
   not yours, which is why the session bus, tmux and the metadata service reach the box through relays.
