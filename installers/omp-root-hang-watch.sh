@@ -18,11 +18,4 @@ command -v python3 >/dev/null || {
     echo "omp-root-hang-watch: no envoy.json; the watch has no listener to send its alert to" >&2
     exit 1
 }
-# Respect a deliberate stop: a timer someone disabled after it was armed stays off.
-if [[ -L "$HOME/.config/systemd/user/omp-root-hang-watch.timer" ]] \
-    && ! systemctl --user is-enabled --quiet omp-root-hang-watch.timer 2>/dev/null; then
-    echo "omp-root-hang-watch: timer is linked but disabled; leaving it off (enable it by hand to re-arm)"
-    exit 0
-fi
-
 arm_user_timer omp omp-root-hang-watch

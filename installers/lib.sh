@@ -168,12 +168,40 @@ ensure_box_health_owner() {
     echo "$name: alerts go to session $owner"
 }
 
+# user_unit_stopped_on_purpose <name>.<timer|service> [<unit-dir>]: true, after it says so, when
+# someone stopped that systemd user unit on purpose (scripts/AGENTS.md, "Acting on the system"): it
+# is not running, and this user manager has it but not enabled (`disabled`, or `linked` with
+# nothing wanting it). `systemctl --user disable` also removes the link of a unit linked from
+# outside the unit search path, as every unit arm_user_timer and arm_user_service link is (measured
+# on systemd 255): a timer someone disabled then reads `not-found`, and the sign left is its
+# service's link, still to the unit in <unit-dir>. A service someone disabled leaves no sign and
+# reads as one never armed. A unit that is enabled, running or new was not stopped.
+user_unit_stopped_on_purpose() {
+    local unit="$1" units="${2:-}" state
+    local name="${unit%.*}"
+    local service="$HOME/.config/systemd/user/$name.service"
+    systemctl --user is-active --quiet "$unit" && return 1
+    state="$(systemctl --user is-enabled "$unit" 2>/dev/null)" || true
+    case "$state" in
+        disabled) ;;
+        linked) state="linked but not enabled" ;;
+        not-found)
+            [[ "$unit" == *.timer && -n "$units" && -L "$service" && "$service" -ef "$units/$name.service" ]] || return 1
+            state=disabled
+            ;;
+        *) return 1 ;;
+    esac
+    echo "$name: $unit is $state and not running, so someone stopped it on purpose; leaving it alone." \
+        "systemctl --user enable --now ${units:+$units/}$unit arms it again."
+}
+
 # Arm the systemd user timer <name> whose units are <unit-dir>/<name>.service and
 # <unit-dir>/<name>.timer in ~/.dotfiles: link both into ~/.config/systemd/user,
 # enable and start the timer, and prove systemd scheduled it. The links come from
 # ~/.dotfiles, not DOTFILES_DIR, so a unit armed from a workspace checkout does
-# not point into a directory that will be removed. Returns 1 on any refusal or
-# failure; an installer keeps its own preconditions (its script, its tools).
+# not point into a directory that will be removed. A timer someone stopped on purpose
+# stays stopped, and the run says so (user_unit_stopped_on_purpose). Returns 1 on any
+# refusal or failure; an installer keeps its own preconditions (its script, its tools).
 arm_user_timer() {
     local dir="$1" name="$2" suffix listed
     local units="$HOME/.dotfiles/$dir"
@@ -196,6 +224,9 @@ arm_user_timer() {
             return 1
         }
     done
+    if user_unit_stopped_on_purpose "$name.timer" "$units"; then
+        return 0
+    fi
     # Each step returns on its own failure: a caller that writes
     # `arm_user_timer … || exit 1` switches set -e off inside the function.
     mkdir -p "$HOME/.config/systemd/user" || return 1
@@ -221,7 +252,8 @@ arm_user_timer() {
 # link it into ~/.config/systemd/user, enable and start it, and prove it is running. For a
 # watch that follows something (a journal, an inotify stream) rather than waking on a period,
 # where a timer would be the wrong shape: the state it watches for can be unobservable by the
-# time the next period comes round. Same refusals as arm_user_timer, for the same reasons.
+# time the next period comes round. Same refusals as arm_user_timer, for the same reasons, and a
+# service someone stopped on purpose likewise stays stopped.
 arm_user_service() {
     local dir="$1" name="$2" state
     local units="$HOME/.dotfiles/$dir"
@@ -234,6 +266,9 @@ arm_user_service() {
         echo "$name: $units/$name.service is missing; advance ~/.dotfiles to a main that has it" >&2
         return 1
     }
+    if user_unit_stopped_on_purpose "$name.service" "$units"; then
+        return 0
+    fi
     mkdir -p "$HOME/.config/systemd/user" || return 1
     ensure_link "$units/$name.service" "$HOME/.config/systemd/user/$name.service" || return 1
     systemctl --user daemon-reload || return 1

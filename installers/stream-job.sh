@@ -16,11 +16,5 @@ command -v python3 >/dev/null || {
 }
 mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/stream-jobs"
 mkdir -p "${XDG_STATE_HOME:-$HOME/.local/state}/stream-jobs"
-# Respect a deliberate stop: a timer someone disabled after it was armed stays off.
-if [[ -L "$HOME/.config/systemd/user/stream-job.timer" ]] \
-    && ! systemctl --user is-enabled --quiet stream-job.timer 2>/dev/null; then
-    echo "stream-job: timer is linked but disabled; leaving it off (enable it by hand to re-arm)"
-    exit 0
-fi
 
 arm_user_timer devbox stream-job
