@@ -216,6 +216,11 @@ exec @SERVER@ "${prog#git-}" "$sink"
 FAKE_GH = ('#!/bin/bash\nprintf \'%s\\036%s\\n\' "$*" "$(tr \'\\000\' \'\\037\' < /proc/$PPID/cmdline 2> /dev/null)" >> "@GHLOG@"\n'
            'exit 1\n')
 
+# A visibility read as gh gets it, OWNER/NAME filled in: the check's own (public_leak_check.py vis_of), and word for word
+# the gate's (scripts/github-repo-visibility), the one read the check's gh-guard passes at once. Only the process that
+# ran a read tells the two apart (gate_reads).
+VISIBILITY_READ = "api --hostname github.com repos/{} --jq .visibility"
+
 # ssh for `ssh -G` alias lookups: the real ssh with only the test's config, so the user's and the system's configs
 # play no part. Aliases resolving to github.com: three as the reviewer staged them (lanes/jj-gate-review-xf-2026-11-02.md,
 # B2): a plain one, an upper-case Host (ssh matches it as written), a Match on the user; and two holding # and ?
@@ -544,9 +549,8 @@ class JjPushLeakGateTest(unittest.TestCase):
         public remote already holds as not new to the destination. v4 assumed every non-theorem-labs GitHub repository
         was public; v8 reads it (fresh, past the cache, for theorem-labs remotes too, and widens nothing when the read
         fails), so v8 scans more (ROCQ, 2026-11-05 22:29Z; v4 public-leak-check.sh:370-376, scope_of). A read of the
-        destination itself, which its fresh cache entry must answer, every read the gate makes
-        (scripts/github-repo-visibility's `api repos/...`), a call no check run made, and any other call stay
-        unexpected."""
+        destination itself, which its fresh cache entry must answer, every read the gate makes (gate_reads), a call no
+        check run made, and any other call stay unexpected."""
         # Each URL as the gate reads `git remote -v`: a push line without its final ` (push)`, a fetch line up to its
         # first ` (fetch)` (a partial clone's filter follows it).
         urls = [u[: -len(" (push)")] if u.endswith(" (push)") else u.split(" (fetch)", 1)[0]
@@ -563,6 +567,13 @@ class JjPushLeakGateTest(unittest.TestCase):
                 continue
             out.append(call)
         return out
+
+    def gate_reads(self) -> list[str]:
+        """The gh calls made through shims/gh, as the gate makes its read: scripts/github-repo-visibility runs
+        shims/gh by path, which hands the call to the fake gh, while the check runs the gh on PATH, the fake itself.
+        The gate's read and the check's are the same words (VISIBILITY_READ), so the process that ran each decides."""
+        return [call for call, _, parent in (ln.partition("\x1e") for ln in self.gh_log())
+                if any(a.endswith("/shims/gh") for a in parent.rstrip("\x1f").split("\x1f"))]
 
     def assert_refused(self, r: subprocess.CompletedProcess[str], commit: str, url: str = ROCQ, gh: bool = False):
         """Refused by the check, with the commit and the matching text in lines jj shows even under --quiet, and
@@ -673,17 +684,22 @@ class JjPushLeakGateTest(unittest.TestCase):
         # checkout during a push to a destination it does not name.
         self.remote("other", PRIVATE)
         check = "/usr/bin/python3\x1f-I\x1f/x/public_leak_check.py\x1forigin\x1f"
-        read = "api --hostname github.com repos/{} --jq .visibility"
+        read = VISIBILITY_READ
+        # The gate's read as the fake gh logs it: shims/gh execs the fake, whose parent is the gate's `timeout`.
+        gate = "timeout\x1f-s\x1fKILL\x1f5\x1f/x/scripts/../shims/gh\x1f" + read.format("theorem-labs/private-fixture").replace(" ", "\x1f")
         lines = {
             "allowed: another remote": (read.format("theorem-labs/private-fixture"), check + ROCQ),
             "the destination itself": (read.format("theorem-labs/rocq"), check + ROCQ),
             "the destination, mixed case": (read.format("Theorem-Labs/Rocq"), check + ROCQ),
             "a repository no remote names": (read.format("theorem-labs/elsewhere"), check + ROCQ),
-            "the gate's read": ("api repos/theorem-labs/private-fixture --jq .visibility", check + ROCQ),
+            "another spelling": ("api repos/theorem-labs/private-fixture --jq .visibility", check + ROCQ),
+            "the gate's read": (read.format("theorem-labs/private-fixture"), gate),
             "not made by a check": (read.format("theorem-labs/private-fixture"), "bash\x1f/x/shims/gh\x1fapi"),
         }
         self.ghlog.write_text("".join(f"{call}\x1e{parent}\n" for call, parent in lines.values()), encoding="utf-8")
         self.assertEqual(self.unexpected_gh_calls(), [call for k, (call, _) in lines.items() if not k.startswith("allowed")])
+        # gate_reads, on the same log: only the calls that came through shims/gh.
+        self.assertEqual(self.gate_reads(), [lines["the gate's read"][0], lines["not made by a check"][0]])
 
     def test_both_refusal_helpers_reject_an_unexpected_gh_call(self):
         # Round 7 review (Slice3XFDotfiles): the unread branch of assert_refused_either, and assert_git_hook_refused,
@@ -691,7 +707,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         # check's read of another remote), then each helper on an otherwise passing unread refusal.
         url = ROCQ
         c = self.init  # a commit no sink holds
-        self.ghlog.write_text("api repos/theorem-labs/rocq --jq .visibility\x1ebash\x1f/x/scripts/github-repo-visibility\n", encoding="utf-8")
+        self.ghlog.write_text(VISIBILITY_READ.format("theorem-labs/rocq") + "\x1ebash\x1f/x/scripts/github-repo-visibility\n", encoding="utf-8")
         unread = subprocess.CompletedProcess([], 1, "", "error: LEAK CHECK: cannot read the visibility of theorem-labs/rocq\n"
                                                         f"error: git shim: the public leak check refused this jj push to {url}: ...\n")
         with self.assertRaises(AssertionError):
@@ -1108,17 +1124,16 @@ class JjPushLeakGateTest(unittest.TestCase):
 
     def test_a_public_fork_outside_any_list_is_guarded(self):
         # dispatch://BET-706 R1/A3: sjawhar/oh-my-pi was on no list and this test's own cache holds no entry for it;
-        # gh says it is public, so the checkout is guarded.
-        (self.ghdir / "gh").write_text(
-            f'#!/bin/bash\nprintf \'%s\\n\' "$*" >> "{self.ghlog}"\n'
-            '[[ " $* " == *" repos/sjawhar/oh-my-pi "* ]] && { echo public; exit 0; }\nexit 1\n', encoding="utf-8")
+        # gh tells the gate it is public, so the checkout is guarded.
+        (self.ghdir / "gh").write_text(FAKE_GH.replace("@GHLOG@", str(self.ghlog)).replace(
+            "exit 1\n", '[[ " $* " == *" repos/sjawhar/oh-my-pi "* ]] && { echo public; exit 0; }\nexit 1\n'), encoding="utf-8")
         self.refused_then_clean("https://github.com/sjawhar/oh-my-pi.git", gh=True)
-        self.assertIn("api repos/sjawhar/oh-my-pi --jq .visibility", self.gh_calls())
+        self.assertIn(VISIBILITY_READ.format("sjawhar/oh-my-pi"), self.gate_reads())
 
     def test_a_public_fork_with_no_answer_from_gh_is_guarded(self):
         # dispatch://BET-706 R4: when the visibility cannot be read, the repository counts as public.
         self.refused_then_clean("https://github.com/sjawhar/oh-my-pi.git", gh=True)
-        self.assertIn("api repos/sjawhar/oh-my-pi --jq .visibility", self.gh_calls())
+        self.assertIn(VISIBILITY_READ.format("sjawhar/oh-my-pi"), self.gate_reads())
 
     def test_every_other_target_of_a_guarded_checkout_is_decided_by_the_check(self):
         # As for a git push from this checkout: a private target passes, a public or non-GitHub one is scanned, and a
@@ -1279,7 +1294,7 @@ class JjPushLeakGateTest(unittest.TestCase):
             self.assert_refused_unreadable(r, c, url, "theorem-labs/newly-public")
 
         refused_unreadable()  # no entry, and the fake gh gives no answer
-        self.assertIn("api repos/theorem-labs/newly-public --jq .visibility", self.gh_calls())
+        self.assertIn(VISIBILITY_READ.format("theorem-labs/newly-public"), self.gate_reads())
         for word in ("private", "internal"):
             entry.write_text(word, encoding="utf-8")
             c, r = attempt()
@@ -1329,7 +1344,9 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.env["PATH"] = self.path_with(f"{SHIMS}{os.pathsep}{racer}")
         c = self.leak()
         self.assert_refused(self.jj("git", "push", "-b", "b1"), c, url, gh=True)
-        self.assertEqual(self.gh_calls(), ["api repos/theorem-labs/cached-public --jq .visibility"], "the race did not run as staged")
+        # One gh call, and the gate's: the check, reading the rewritten entry, asked gh nothing.
+        read = VISIBILITY_READ.format("theorem-labs/cached-public")
+        self.assertEqual((self.gh_calls(), self.gate_reads()), ([read], [read]), "the race did not run as staged")
 
     def test_an_unsearchable_parent_of_the_cache_refuses(self):
         # The revision-2 review's R2-1: the cache and its public entry exist, but the directory above them cannot be
