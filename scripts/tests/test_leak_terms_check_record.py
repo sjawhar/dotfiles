@@ -366,7 +366,7 @@ class Record(unittest.TestCase):
 
     def test_a_folder_one_commit_names_is_read_in_another(self) -> None:
         # One commit adds the file `d`; another, on a branch of its own, adds the covered file `d/f`. The pathspec of
-        # `d` names `d/f` too, so git shows the second commit as well, and the call expects it.
+        # `d` names `d/f` too, as git reads it, so the second commit's `d/f` is read in the same call: only stricter.
         self.assertEqual(self.record(self.base).returncode, 0)
         first = self.commit({"d": "nothing listed\n", "copy.txt": "the first file\n"})
         self.git("checkout", "-q", "-b", "other", self.base)

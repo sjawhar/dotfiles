@@ -2039,12 +2039,13 @@ def scan_covered_diffs(commits: Sequence[str], matcher: TermMatcher, findings: l
 
     The others are read together, by the same producer and attribute policy, limited to the paths that one of them
     adds or changes and does not cover (pathspec_chunks): a file's diff is the same with or without the other files,
-    since no rename is detected and log.follow is off (scan_diff_arguments). git shows each commit that changes a file
-    those paths name, which is the set each call expects (pathspec_reaches), and reads in it every file they name, a
-    covered one too where another commit names its path: that is only stricter. The path of each covered file read no
-    other way is read alone (name_findings, as scan_diff reads the path of every file it keeps). A deleted file is not
-    read, since scan_diff finds nothing in one, so a commit whose every file is covered or deleted reads no diff, unless
-    another commit names one of its paths.
+    since no rename is detected and log.follow is off (scan_diff_arguments). Each call is given every commit that
+    changes a file its paths name, as git matches a literal pathspec (pathspec_reaches): the file itself, or the files
+    of a folder of that name. git reads in each of them every file those paths name, a covered one too where another
+    commit names its path, which is only stricter. The path of each covered file no call reads is read alone
+    (name_findings, as scan_diff reads the path of every file it keeps). A deleted file is not read, since scan_diff
+    finds nothing in one, so a commit whose every file is covered or deleted reads no diff, unless another commit names
+    one of its paths.
     """
     if not commits:
         return
