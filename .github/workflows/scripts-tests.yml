@@ -48,8 +48,8 @@ jobs:
       #     failing before then; the cut-off run printed no cause.
       #   test_az_reader.py: the runner's own Azure CLI, not the pinned one, starts no telemetry
       #     uploader in the test's control.
-      #   test_chathub_installer.py, test_dotfiles_follow_jj.py, test_hub_send.py: run mise while
-      #     pytest collects them, and the runner has no mise.
+      #   test_chathub_installer.py, test_commit_identity.py, test_dotfiles_follow_jj.py,
+      #   test_hub_send.py: run mise while pytest collects them, and the runner has no mise.
       #   test_dotfiles_sync.py, test_dotfiles_tools.py, test_knives_installer.py: run mise (on PATH
       #     or bin/mise), which the runner does not have.
       #   test_cache_config_installer.py: added after the measurement; its eval-kernel test runs mise
@@ -76,6 +76,7 @@ jobs:
           --ignore=scripts/tests/test_az_reader.py
           --ignore=scripts/tests/test_cache_config_installer.py
           --ignore=scripts/tests/test_chathub_installer.py
+          --ignore=scripts/tests/test_commit_identity.py
           --ignore=scripts/tests/test_dotfiles_follow_jj.py
           --ignore=scripts/tests/test_dotfiles_sync.py
           --ignore=scripts/tests/test_dotfiles_tools.py
