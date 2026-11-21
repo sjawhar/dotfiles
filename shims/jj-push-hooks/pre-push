@@ -69,6 +69,8 @@ if ((url_guarded)); then
         ((term_rc != 3)) || refuse "this push to $url holds a listed leak term. Nothing was pushed."
         refuse "the leak-term check did not pass, so this push to $url is refused. Nothing was pushed."
     fi
+    # A clean check prints only what its record covered, or why it could not use it.
+    [[ -z "$term_out" ]] || printf '%s\n' "$term_out" >&2
 fi
 exec_own_hook() {
     [[ -n "$own" && -x "$own/pre-push" ]] || exit 0

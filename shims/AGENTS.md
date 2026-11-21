@@ -76,5 +76,13 @@ A caller can give a shim its own HOME and a bare PATH: a Legion test pane runs w
 - `scripts/leak-terms-check` is the one matcher; a caller treats any nonzero exit as a refusal.
 - A refusal prints the text that matched, so none may reach a public place (a post, a public
   CI job) until it shows each match's kind (`<term>`) in place of the text.
+- The record (dispatch://INFRA-5140): `leak-terms-check record --url URL REV...` reads each file
+  version (blob) in REV's trees whole, as code and as prose, with no allowed token, and notes each
+  that holds no term in `refs/notes/leak-terms-check`, as `pass <key>`. The key names the script's
+  bytes, Python's version, its Unicode version, the encrypted list's bytes and URL's repository.
+  A push to URL then reads no content of a noted version, and reads every message, path, tag,
+  ref name and other file as before. Exit 0, or 2 with nothing recorded (run it again).
+- Whoever can write `refs/notes/leak-terms-check` in the pushing clone, or where it fetches it
+  from, can make a push skip a file's content: a note is trusted as written.
 - Tests get an isolated list from `shims/tests/leak_terms_fixture.py`; a test that builds its
   environment from nothing uses `leak_check_environment(path)`.
