@@ -131,19 +131,13 @@ def test_a_double_quoted_description_counts_the_characters_yaml_reads(tmp_path: 
     assert_passes(tmp_path, {"SKILL.md": head(desc) + "x\n"})
 
 
-def test_a_description_with_no_closing_quote_fails(tmp_path: Path) -> None:
-    # No YAML reader accepts this frontmatter, so no host reads the skill's description.
-    skill_md = f'---\nname: {NAME}\ndescription: "Use when a test needs a skill\nargument-hint: "<file>"\n---\n\nx\n'
-    code, fails, out = run(tmp_path, {"SKILL.md": skill_md})
-    assert code == 1 and fails, out
-
-
 def test_frontmatter_that_is_not_valid_yaml_fails(tmp_path: Path) -> None:
-    # The one FAIL line names the YAML error; the words after it are PyYAML's.
+    # No YAML reader accepts this frontmatter, so no host reads the skill's description.
+    # check_skill.py names the SKILL.md line; PyYAML writes the text after the line number.
     skill_md = f'---\nname: {NAME}\ndescription: "Use when a test needs a skill\nargument-hint: "<file>"\n---\n\nx\n'
     code, fails, out = run(tmp_path, {"SKILL.md": skill_md})
     assert code == 1 and len(fails) == 1, out
-    assert fails[0].startswith("FAIL SKILL.md frontmatter is not valid YAML"), out
+    assert fails[0].startswith("FAIL SKILL.md frontmatter is not valid YAML at line 4: "), out
 
 
 def test_frontmatter_that_is_a_yaml_list_fails(tmp_path: Path) -> None:

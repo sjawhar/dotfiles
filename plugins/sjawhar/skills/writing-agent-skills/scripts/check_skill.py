@@ -12,7 +12,7 @@ It prints a FAIL line and exits 1 when a skill breaks any of these:
 - The description is empty or missing, or is not a string.
 - The description does not start "Use when".
 - The description has more than 300 characters.
-- The name is not lowercase words joined by hyphens.
+- The name is not a string, or is not lowercase words joined by hyphens.
 - SKILL.md or a reference has more than 150 lines. A last line with no final newline counts.
 - SKILL.md or a reference has more than 8,000 bytes, frontmatter included.
 - A path that SKILL.md links or names does not exist.
