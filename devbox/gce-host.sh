@@ -184,7 +184,11 @@ systemctl show tailscaled.service ssh.service -p Id -p LimitNOFILESoft
 # (dispatch://INFRA-4893). Both scratch-VM proofs of that issue upgraded 29.9.2 to this version
 # with live-restore on. On a machine at another version, installers/docker.sh installs this one,
 # which restarts dockerd: with live-restore on, containers keep running, but connections through
-# their published ports drop for some seconds.
+# their published ports drop until dockerd has restored them (tens of seconds with about 280
+# containers), and a new outgoing connection can take a published host port in that gap, which
+# leaves that container with no published ports. On a busy machine, put the published host ports
+# in net.ipv4.ip_local_reserved_ports for the restart, as the dispatch://INFRA-4893 window script
+# does.
 docker_ce_version=5:29.9.3-1~ubuntu.24.04~noble
 # The version `docker version` reports for it (29.9.3): no epoch, no package revision.
 docker_server_version="${docker_ce_version#*:}"
