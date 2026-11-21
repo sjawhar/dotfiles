@@ -3,33 +3,40 @@
 Keeps a machine's `~/.dotfiles` on origin's main, writes the machine's knives registry copy again
 when `knives/repos.toml`, the workspaces path or the render script changed, then installs mise and
 omp pins. A git checkout moves by fast-forward; a colocated jj checkout moves through
-`scripts/dotfiles-sync`. When it cannot follow, write the copy or install tools, it tells the
-box-health owner over Envoy, once per condition.
+`scripts/dotfiles-sync`. When it cannot follow, write the copy or install tools, it writes a report
+to its own log, once per condition. It sends no alert and no message
+(dispatch://INFRA-2022/comment/0f96263e-1a85-4f29-85b3-ec713e6acf7b).
 
-Armed by `devbox/install.sh` as the `dotfiles-follow` user timer
-(`devbox/dotfiles-follow.{service,timer}`), on a Google VM only (`scripts/on-google-vm`:
-sami-devbox, dispatch://INFRA-993), and by `oryx/install.sh` on oryx. The timer has
-`OnUnitActiveSec=10min`: it starts a run 10 minutes after the previous one started, or at once
-when that run took longer (on 2026-11-06 from 10:35Z to 12:02Z each run took 14 min 32 s and the
-next began the second it ended). Other machines are moved by `scripts/dotfiles-sync`.
+Armed by `oryx/install.sh` on oryx as the `dotfiles-follow` user timer
+(`devbox/dotfiles-follow.{service,timer}`). The timer has `OnUnitActiveSec=10min`: it starts a run
+10 minutes after the previous one started, or at once when that run took longer (on 2026-11-06
+from 10:35Z to 12:02Z each run took 14 min 32 s and the next began the second it ended).
+
+sami-devbox no longer arms it. Sami's test for a timer on his dev box
+(dispatch://INFRA-2022/ask/b5ddab54-8ba0-40e8-b4ba-c2dcb291ca5c, 2026-11-08): "You agents are able
+to freely modify my dot files. So these can be just as unauthorized as anything else. ... We don't
+need custom timer units for it. Just because something was done in response to a request of mine
+doesn't mean I authorized it." On two timers that watched nothing
+(dispatch://INFRA-2022/ask/4badbed6-a78d-4405-adcb-cbe2679e12d3, 2026-11-09): "Both go. Stop the
+tick too, or move its wake and its readings somewhere that is not a timer on my box." No answer of
+his approves this timer. There `~/.dotfiles` moves onto main when `scripts/dotfiles-publish` runs
+from it, or by `scripts/dotfiles-sync local`; other machines are moved by `scripts/dotfiles-sync`.
 
 On oryx, the drop-in `oryx/dotfiles-follow.service.d/oryx.conf` runs
-`dotfiles-follow --no-hook-sweep --box-health-role legion-home-controller` with
-`ENVOY_URL=http://127.0.0.1:9030`, oryx's personal Envoy hub, so its alerts reach the HOME
-controller role. oryx never had the leak check's hook sweep installed, so the sweep is off there.
+`dotfiles-follow --no-hook-sweep`: oryx never had the leak check's hook sweep installed, so the
+sweep is off there. Until oryx's user manager reloads its units (`oryx/install.sh` runs
+`systemctl --user daemon-reload`), it still runs the drop-in's old command line, which also passes
+`--box-health-role legion-home-controller`; the follower accepts that flag and ignores it.
 
 ```sh
-dotfiles-follow                  # one run, as the timer does it; alerts go over Envoy
-dotfiles-follow --print-alert    # the same, and print each message
+dotfiles-follow                  # one run, as the timer does it; its reports go to stdout
 journalctl --user -u dotfiles-follow.service -n 50
 jq . /mnt/nvme/$USER/tmp/dotfiles-follow/state.json   # open conditions, last run, last outcome
+ls /mnt/nvme/$USER/tmp/dotfiles-follow/killed-sweeps/  # the logs of the last 5 killed sweep passes
 ```
 
 `--no-hook-sweep` skips the hook sweep. It logs that configuration and opens no hook condition.
-The default runs the sweep. `--box-health-role ROLE` publishes alerts to
-`notifications.role.ROLE` after `BOX_HEALTH_OWNER`. It does not send to the SRE session when that
-publish fails. Without the flag, follow publishes to `lead-box-health`, then sends to the SRE
-session as before.
+The default runs the sweep.
 
 ## Why
 
@@ -71,7 +78,7 @@ Follow restores the managed marketplace lock before it calls the sync.
    refuse and are not discarded.
 3. **Refuses** when origin/main is not a fast-forward of HEAD (HEAD has commits origin/main lacks).
 4. **Refuses** when the commits to take change a kept file that is modified here.
-5. `git merge --ff-only origin/main`. An alert when git refuses.
+5. `git merge --ff-only origin/main`. A report when git refuses.
 6. On every run that leaves HEAD at origin/main (in git mode, with no uncommitted change), after
    any fast-forward or jj move: `scripts/knives-registry-render --if-changed`, bounded by
    `--check-timeout` (180 s). It renders `knives/repos.toml` into `~/.config/knives/repos.toml`
@@ -116,7 +123,7 @@ Follow restores the managed marketplace lock before it calls the sync.
    `PI_CODING_AGENT_DIR` from its environment. If
    `${XDG_CONFIG_HOME:-~/.config}/omp/profile` contains `legion`, follow does not run omp and
    reports the plugin step as failed. Finally, `devbox/sami-devbox-check --pins` checks knives and
-   mise pins. An alert when any step fails; the next run retries any marketplace plugin still below
+   mise pins. A report when any step fails; the next run retries any marketplace plugin still below
    its entry.
 8. Unless `--no-hook-sweep` is set, every run makes one pass of the leak check's hook sweep,
    `sweep-hooks.sh` of the leak-check tag in `~/.local/share/public-leak-check-hooks`
@@ -126,7 +133,10 @@ Follow restores the managed marketplace lock before it calls the sync.
    a later pass because the pass had spent its GitHub visibility lookups (dispatch://BET-706), is a
    condition; a deferral clears when a pass defers none. The script loops for ever, so its code up to the
    loop is loaded and `sweep` runs once, and its whole process group is killed past the pass's
-   bound. Two kinds of pass:
+   bound. A killed pass's log, and what it printed, are kept in `killed-sweeps/` beside the state
+   file, the newest five only (`KILLED_SWEEP_LOGS`), and the report names the file: the pass's own
+   log is in a temporary directory, and journald may drop the unit's lines (on 2026-11-20 it
+   dropped them for the hour around a killed slow-root pass). Two kinds of pass:
    - **fast-root pass**, every run: the script's `fast_roots` only, bounded by `--sweep-timeout`
      (420 s).
    - **slow-root pass**, at most once per `--slow-sweep-interval` (3600 s): `fast_roots` and
@@ -138,16 +148,14 @@ Follow restores the managed marketplace lock before it calls the sync.
      counts as no slow-root pass: one is due. `slow_sweep_priority_at` (below) is read the same way.
 
    **The run's deadline.** systemd kills the unit at `TimeoutStartSec=1170` (`--run-limit`). The
-   run keeps a monotonic deadline from its start: 1170 s less a reserve for what comes after the
-   sweep, three messages (new, escalated, cleared) each sent to the box-health role and, when that
-   fails, to the SRE session, at `--http-timeout` (8 s) a request, so 3 x 2 x 8 = 48 s, plus 12 s
-   for the state write and the interpreter's start: 60 s. No pass runs past the deadline:
+   run keeps a monotonic deadline from its start: 1170 s less 12 s (`STATE_RESERVE`) for the state
+   write and the interpreter's start. No pass runs past the deadline:
    - a slow-root pass starts only when the time left holds its whole 1000 s, so it is never a
      shortened walk; otherwise the run makes a fast-root pass and the slow-root pass stays due;
    - a fast-root pass is bounded by the smaller of 420 s and the time left;
    - with under 30 s left no pass starts, and `PRE-PUSH HOOK NOT INSTALLED` says no pass ran.
 
-   So a run that spent 119 s on the fetch and 119 s on a refused merge (872 s left) makes a
+   So a run that spent 119 s on the fetch and 119 s on a refused merge (920 s left) makes a
    fast-root pass, and a later run with its time makes the slow-root pass whole.
 
    **The tools step and the slow-root pass.** A run whose tools step (7) ran makes no slow-root
@@ -177,7 +185,7 @@ already holds their bytes, right before the fast-forward. Apart from managed-loc
 refusal leaves HEAD, the index and every file as they were. Outside the checkout, step 6 writes
 `~/.config/knives/repos.toml` and its record only when the copy is missing or not a plain file,
 or `knives/repos.toml`, the workspaces path or the render script changed since the last render. A
-run that writes the copy logs it, and the footer of any message that run sends says so.
+run that writes the copy logs it, and the footer of any report that run writes says so.
 
 ## The kept files: SECRET_FILES that git tracks
 
@@ -196,7 +204,7 @@ added there is kept here too. Today that is `secrets.env` alone.
 touches. The follower checks this first: when the commits to take change a kept file that is
 modified here, it refuses with `MAIN CHANGES A KEPT FILE` and names the diff to merge by hand.
 
-## Conditions and messages
+## Conditions and reports
 
 | Condition | Headline | Clears when |
 | --- | --- | --- |
@@ -206,28 +214,20 @@ modified here, it refuses with `MAIN CHANGES A KEPT FILE` and names the diff to 
 | the commits to take change a modified kept file | `MAIN CHANGES A KEPT FILE` | they no longer do |
 | managed-lock restoration or `git merge --ff-only` failed | `FAST-FORWARD FAILED` | the managed lock is clean and HEAD is origin/main |
 | mise, Bun, a marketplace upgrade/version check or the pin lines failed | `TOOLS NOT INSTALLED` | all pass at the current HEAD |
-| `scripts/knives-registry-render --if-changed` failed or ran past `--check-timeout`; the message holds its output and says whether the copy kept what it held | `KNIVES REGISTRY NOT WRITTEN` | a later run on main renders, or finds nothing to write |
-| the hook sweep is missing, ran past its bound, exited without its summary line, could not hook a public checkout, or deferred one, or the run had no time left for a pass; the message names the kind of pass | `PRE-PUSH HOOK NOT INSTALLED` | a pass ends with 0 failed and 0 deferred; a condition a slow-root pass found clears only on a slow-root pass |
+| `scripts/knives-registry-render --if-changed` failed or ran past `--check-timeout`; the report holds its output and says whether the copy kept what it held | `KNIVES REGISTRY NOT WRITTEN` | a later run on main renders, or finds nothing to write |
+| the hook sweep is missing, ran past its bound, exited without its summary line, could not hook a public checkout, or deferred one, or the run had no time left for a pass; the report names the kind of pass | `PRE-PUSH HOOK NOT INSTALLED` | a pass ends with 0 failed and 0 deferred; a condition a slow-root pass found clears only on a slow-root pass |
 | `git fetch`, or `jj git fetch` in a colocated checkout, failed on 3 runs in a row (`--fetch-grace`) | `CANNOT FETCH origin/main` | a fetch passes |
 
-All of one run's new conditions go in one message. Its headline considers **all open conditions**:
+All of one run's new conditions go in one report. Its headline considers **all open conditions**:
 if only tools, registry or hooks conditions remain open and HEAD is at origin/main, it says
 `<host> is on main, but a post-update step failed`. Any open fetch, dirty-checkout, sync,
 ancestry, kept-file, or merge condition keeps `DOTFILES NOT FOLLOWING MAIN on <host>`. A
-condition that still holds after `--escalate` (2 h) is said once more, with the corresponding
-post-update or `STILL NOT FOLLOWING MAIN` headline; a cleared one is said once
-(`DOTFILES FOLLOWING MAIN AGAIN`).
-Messages go where every box watch here sends them: `BOX_HEALTH_OWNER` (a drop-in that
-`ensure_box_health_owner` writes), else the `lead-box-health` role, else the SRE session. With
-`--box-health-role ROLE`, a run with no `BOX_HEALTH_OWNER` publishes to `notifications.role.ROLE`
-only, and sends nothing to the SRE session even when that publish fails. A role topic with no
-holder keeps the message for the next holder.
+condition that still holds is not reported again; a cleared one is reported once
+(`DOTFILES FOLLOWING MAIN AGAIN`). A report goes to the run's own output, which the unit's journal
+keeps, and nowhere else: the follower sends no Envoy message and no alert. The state file holds
+the conditions still open.
 
-The run exits 0 after a refusal: the alert is the report, so `unit-health-watch` does not say the
-same thing a second time. A2 (`devbox/sami-devbox-check`, `host_follow`) reads the state file and
-passes only when the timer is active, the last run exited 0, and that run, at most 30 minutes ago,
-left HEAD on origin/main with no condition open and the tools installed at HEAD, so an open
-`KNIVES REGISTRY NOT WRITTEN` fails A2 too.
+The run exits 0 after a refusal: the refusal is a condition it reports, not a failed run.
 
 The run holds an exclusive, non-blocking `flock` on `state.json.lock` beside the state file for
 its whole length; a run that cannot take it skips its period. The state is replaced whole at each
@@ -254,8 +254,8 @@ are unchanged, except for follow-managed lock recovery. Marketplace cases use a 
 that records commands, changes installed versions and rewrites the tracked lock. They cover
 upgrades, a plugin above its entry (no omp command), one upgraded above its entry (a pass), one
 still below after its upgrade (a failure), 0.3.10 above 0.3.9, versions that are not dotted
-numbers, Bun/unchanged/unregistered skips, aggregated failures, decoding, ambiguous sources, alert
-classification and escalation, timeout cleanup and recovery from arbitrary dirty-lock contents
+numbers, Bun/unchanged/unregistered skips, aggregated failures, decoding, ambiguous sources, report
+classification, timeout cleanup and recovery from arbitrary dirty-lock contents
 before a fast-forward or a same-HEAD retry, including an interrupted durable checkpoint. The
 installer module runs `install_marketplace_plugin` and its version reads and comparison, taken
 from `installers/omp.sh`, under `set -euo pipefail` with a stub `omp` on `PATH`: the same version
@@ -281,3 +281,7 @@ record and not the copy, whose bytes are the same, and the next run writes nothi
 The first run of this version at HEAD renders once. A read-only `~/.config/knives` opens
 `KNIVES REGISTRY NOT WRITTEN` and stops neither the fast-forward nor the tools step, and the next
 render clears it. A refused jj sync leaves that condition open.
+`SendsNothing` runs the follower as each unit runs it (`main()` in a child): the dev box's unit with
+a `BOX_HEALTH_OWNER`, and oryx's drop-in as loaded before this change, with `--box-health-role`.
+With `ENVOY_URL` at a local listener and an `ENVOY_TOKEN` set, each opens a condition, and the
+listener must receive no request and the report must be in the run's output.

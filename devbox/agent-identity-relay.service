@@ -1,0 +1,14 @@
+[Unit]
+Description=The host's metadata relay: Google's metadata server, as the account ~/.config/agent-identity/account names (installers/agent-identity.sh)
+
+[Service]
+# The same relay the agent boxes use (scripts/agentbox starts that one, agentbox-imds, on the box
+# network's gateway), for the host's own clients: loopback, and a unit of its own, so it runs from
+# boot whether or not a box has started. It reads no GCE_METADATA_* variable, which on the host
+# names it.
+ExecStart=/usr/bin/python3 %h/.dotfiles/scripts/agentbox-gce-metadata-relay 127.0.0.1 8170 127.0.0.1/32
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=default.target

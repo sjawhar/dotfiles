@@ -2,13 +2,12 @@
 """Tests for dotfiles-follow on its colocated jj checkout path.
 
 The fixture has a real jj/git colocated checkout at $HOME/.dotfiles. Its origin is local, and
-mise, Bun, omp, Envoy, and the hook sweep are stand-ins. This keeps every case off the network
+mise, Bun, omp and the hook sweep are stand-ins. This keeps every case off the network
 and checks that follow delegates the working-copy move to dotfiles-sync.
 """
 
 from __future__ import annotations
 
-import argparse
 import fcntl
 import json
 import os
@@ -250,7 +249,7 @@ class JjFollow(JjHarness):
     def test_a_remote_or_branch_other_than_origin_main_is_refused_before_the_checkout_moves(self) -> None:
         # dotfiles-sync moves @ onto main@origin only, so jj mode must not run it for another ref.
         (self.repo / "omp/plugins/omp-plugins.lock.json").write_text("interrupted marketplace lock\n")
-        # The second run's refusal is the same open condition, so it sends no second message.
+        # The second run's refusal is the same open condition, so it makes no second report.
         for overrides, new_messages in (({"branch": "release"}, 1), ({"remote": "upstream"}, 0)):
             with self.subTest(**overrides):
                 parent = self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id")
@@ -338,65 +337,12 @@ class JjFollow(JjHarness):
         self.assertEqual(self.origin_main(), self.target)
 
 
-class RoutingEnvoy:
-    instances: list["RoutingEnvoy"] = []
-    publish_result = False
-
-    def __init__(self, timeout: float = 8.0) -> None:
-        self.published: list[tuple[str, str]] = []
-        self.sent: list[tuple[str, str]] = []
-        type(self).instances.append(self)
-
-    def publish(self, topic: str, message: str) -> bool:
-        self.published.append((topic, message))
-        return type(self).publish_result
-
-    def send(self, session_id: str, message: str) -> bool:
-        self.sent.append((session_id, message))
-        return True
-
-
-class JjAlertRouting(JjHarness):
-    def follow_failure(self, **options: object) -> RoutingEnvoy:
-        RoutingEnvoy.instances = []
-        os.environ["FAKE_MISE_RC"] = "1"
-        with unittest.mock.patch.object(FOLLOW, "Envoy", RoutingEnvoy):
-            with unittest.mock.patch.object(FOLLOW.time, "time", lambda: 1_000_000.0):
-                self.assertEqual(FOLLOW.run_once(self.options(**options)), 0)
-        return RoutingEnvoy.instances[-1]
-
-    def test_box_health_role_has_no_sre_fallback_when_publish_fails(self) -> None:
-        envoy = self.follow_failure(box_health_role="legion-home-controller")
-
-        self.assertEqual([topic for topic, _ in envoy.published], ["notifications.role.legion-home-controller"])
-        self.assertEqual(envoy.sent, [])
-
-    def test_box_health_owner_wins_over_the_configured_role(self) -> None:
-        owner = "01abcdef-1234-5678-9abc-def012345678"
-        os.environ["BOX_HEALTH_OWNER"] = owner
-        envoy = self.follow_failure(box_health_role="legion-home-controller")
-
-        self.assertEqual(envoy.published, [])
-        self.assertEqual([session for session, _ in envoy.sent], [owner])
-
-    def test_default_routing_still_uses_the_lead_role_then_sre(self) -> None:
-        envoy = self.follow_failure()
-
-        self.assertEqual([topic for topic, _ in envoy.published], ["notifications.role.lead-box-health"])
-        self.assertEqual([session for session, _ in envoy.sent], [FOLLOW.SRE])
-
-    def test_box_health_role_validation(self) -> None:
-        self.assertEqual(FOLLOW.health_role("legion-home-controller"), "legion-home-controller")
-        with self.assertRaises(argparse.ArgumentTypeError):
-            FOLLOW.health_role("Legion_home_controller")
-
-
 class JjSyncFailures(JjHarness):
     def test_a_failed_fetch_waits_fetch_grace_runs_as_in_git_mode(self) -> None:
         self.assertEqual(self.run_follow(), [])
         self.origin.rename(self.origin.with_name("unreachable.git"))
 
-        # --fetch-grace is 3 (Harness.options): two failed runs are quiet, the third says it.
+        # --fetch-grace is 3 (Harness.options): two failed runs are quiet, the third reports it.
         self.assertEqual(self.run_follow(now=1_000_600.0), [])
         self.assertEqual(self.run_follow(now=1_001_200.0), [])
         third = self.run_follow(now=1_001_800.0)

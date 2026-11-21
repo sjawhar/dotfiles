@@ -515,6 +515,13 @@ class ScanModes(LeakTestCase):
         self.assertEqual(result.stdout, "")
         return line
 
+    def test_knives_registry_urls_use_the_repository_name_helper(self) -> None:
+        # knives_forbidden resolves each URL-valued upstream, origin and release through repository_name(). A validator
+        # named repository_name would shadow that helper and make every registry-backed gh write fail before it ran.
+        (scope, terms), = scanner_module().knives_forbidden(self.env)
+        self.assertEqual((scope.label, scope.patterns), ("knives oh-my-pi", ("*/oh-my-pi",)))
+        self.assertEqual(terms, list(REGISTRY_TEST_TERMS["oh-my-pi"]))
+
     def test_hidden_term_detector_matches_as_the_scanner_does(self) -> None:
         # B7: an echo of the matched text, in another case, with another run of spaces, or wrapped inside a
         # paragraph, is a leak too. The detector and the scanner must give the same verdict on each sample.
@@ -609,6 +616,52 @@ class ScanModes(LeakTestCase):
         self.assertEqual(result.returncode, 4, result.stderr)
         self.assertIn("cannot decode standard input", result.stderr)
         self.assertEqual(result.stdout, "")
+
+    def test_a_hand_run_check_reads_the_scoped_lists_of_the_repository_it_names(self) -> None:
+        # `diff` and `message` read the global list alone, as a commit's text goes nowhere yet. With --repository they
+        # also read that repository's scoped lists, as a push to it does. Until 2026-11-19 neither mode could, and a
+        # hand-run `diff` of a pull request's text passed a term its repository's scoped list holds, with exit 0.
+        (pattern, (term,)), = SCOPED_TEST_TERMS.items()
+        self.assertEqual(pattern, "cybermonklabs/*")
+        texts = {
+            "diff": ("diff --git a/notes.md b/notes.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes.md\n"
+                     f"@@ -0,0 +1 @@\n+Ask {term} first.\n"),
+            "message": f"Ask {term} first.\n",
+        }
+        places = {"diff": "notes.md:1", "message": "commit message line 1"}
+        for mode, text in texts.items():
+            for repository in ("cybermonklabs/legion", "CyberMonkLabs/Legion"):
+                with self.subTest(mode=mode, repository=repository):
+                    line = self.assert_found(self.check(mode, text, "--repository", repository), places[mode])
+                    self.assertEqual(line, f'leak terms: {places[mode]}: "{term}" (the cybermonklabs/* list), '
+                                           f"in: Ask {term} first.")
+            # Controls: a repository outside the scope reads no scoped list.
+            with self.subTest(mode=mode, repository="sjawhar/legion"):
+                outside = self.check(mode, text, "--repository", "sjawhar/legion")
+                self.assertEqual((outside.returncode, outside.stderr), (0, ""))
+        # No repository reads no scoped list either. `message` says nothing; a hand-run `diff` says, in one line, that it
+        # read no scoped list and how to read them.
+        message = self.check("message", texts["message"])
+        self.assertEqual((message.returncode, message.stderr), (0, ""))
+        unnamed = self.check("diff", texts["diff"])
+        self.assertEqual(unnamed.returncode, 0, unnamed.stderr)
+        self.assertEqual(len(unnamed.stderr.splitlines()), 1, unnamed.stderr)
+        self.assertIn("scoped lists", unnamed.stderr)
+        self.assertIn("--repository OWNER/NAME", unnamed.stderr)
+        self.assert_hidden(unnamed)
+        # shims/jj names a commit's place with --place-prefix, "" for the working copy: a commit has no repository,
+        # so that call stays quiet (JjLeaks.test_jj_commit_reads_no_scoped_list_and_says_nothing_of_them).
+        for prefix in ("", "commit 0123456789ab "):
+            with self.subTest(place_prefix=prefix):
+                quiet = self.check("diff", texts["diff"], "--place-prefix", prefix)
+                self.assertEqual((quiet.returncode, quiet.stderr), (0, ""))
+        # A value that is not OWNER/NAME would match no scope and read as clean, so it is refused.
+        for value in ("legion", "https://github.com/cybermonklabs/legion", "cybermonklabs/*", ""):
+            with self.subTest(repository=value):
+                refused = self.check("diff", texts["diff"], "--repository", value)
+                self.assertEqual(refused.returncode, 2, refused.stderr)
+                self.assertIn("OWNER/NAME", refused.stderr)
+                self.assert_hidden(refused)
 
     def test_scanner_staged_uses_the_outgoing_attribute_policy(self) -> None:
         repository = self.root / "staged"
@@ -2548,6 +2601,22 @@ class JjLeaks(LeakTestCase):
                         continue
                     self.assert_clean(repository, agent, "commit", "-m", "ok")
                     self.assertEqual((self.changed_paths(repository, agent, "@-"), self.description(repository, agent, "@-")), (["run.sh"], "ok\n"))
+
+    def test_jj_commit_reads_no_scoped_list_and_says_nothing_of_them(self) -> None:
+        # A commit goes nowhere yet, so it reads the global list alone; shims/jj's `leak-terms-check diff --place-prefix`
+        # call stays quiet about the scoped lists a hand-run `diff` names (ScanModes, above), for the working copy's
+        # diff (`jj commit`) and for a described revision's (`jj describe REV`).
+        (_, (term,)), = SCOPED_TEST_TERMS.items()
+        for agent in (False, True):
+            with self.subTest(agent=agent):
+                repository = self.repository(agent)
+                self.write(repository, "notes.md", f"Ask {term} first.\n")
+                for arguments in (("commit", "-m", "ok"), ("describe", "@-", "-m", "again")):
+                    result = self.assert_clean(repository, agent, *arguments)
+                    self.assertNotIn("scoped lists", result.stderr)
+                    self.assertNotIn("--repository", result.stderr)
+                self.assertEqual((self.changed_paths(repository, agent, "@-"), self.description(repository, agent, "@-")),
+                                 (["notes.md"], "again\n"))
 
     def test_jj_message_refuses_forms_and_keeps_stored_messages(self) -> None:
         commands = (("describe",), ("commit",), ("new",))

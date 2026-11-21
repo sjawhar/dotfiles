@@ -1,66 +1,311 @@
 #!/usr/bin/env python3
-"""agentbox-gce-metadata-relay BIND_IP PORT SUBNET: the agent boxes' relay to Google's metadata server.
+"""agentbox-gce-metadata-relay BIND_IP PORT SUBNET: the relay to Google's metadata server, for agent
+boxes and for the host's own clients.
 
 scripts/agentbox starts it on a Google VM (dispatch://INFRA-993) in place of the plain TCP relay
 (socat) it uses elsewhere. A byte relay does not work here: a box's client names the relay in its
 Host header (172.25.0.1:8169), and Google's metadata server answers any Host but
 metadata.google.internal, `metadata` or 169.254.169.254 (port 80 only) with 400 Bad Request
 (measured on sami-devbox 2026-11-02). So this relay is HTTP: it sends each request on with
-Host: metadata.google.internal and copies the answer back, streamed, so a `?wait_for_change=true`
-long poll works. It admits only clients in SUBNET, the box network, as the socat relay does.
+Host: metadata.google.internal and copies the answer back, so a `?wait_for_change=true` long poll
+works. It admits only clients in SUBNET, the box network, as the socat relay does, and loopback.
+installers/agent-identity.sh runs a second one for the host's own clients, on 127.0.0.1:8170
+(devbox/agent-identity-relay.service).
+
+The account it serves. While ~/.config/agent-identity/account (read at each request) names a
+service account that is not the VM's own (the real server's
+instance/service-accounts/default/email), the relay answers the service-account paths itself, as
+that account: `service-accounts/` lists `default/` and it; `default/` and `<it>/` list their
+leaves (or, with `?recursive=true`, its email, alias and scopes as JSON); `email`, `aliases` and
+`scopes` (cloud-platform and userinfo.email, so GKE names the caller by email); `token`, an access
+token from IAM Credentials generateAccessToken (those scopes, or the `scopes` a client asks for;
+lifetime 3600s); and `identity?audience=...`, an ID token from generateIdToken with includeEmail
+(`format=full` gives the same token: an impersonated token carries no Compute Engine claims). The
+VM's own account is not served by name (404), so no client acts as it by asking for it. Each
+mint is made with the VM's own token, from the real server, which needs Token Creator on the
+account; a token is kept until 5 minutes before it expires. A refused mint answers 503, and the body
+names the refusal, never a token. Every other path goes to the real server unchanged, and every
+path does while the file is absent or names the VM's own account (after the VM's account changes
+to it). So the switch is off until the file exists (installers/agent-identity.sh writes it).
+An unreadable or invalid switch refuses service-account requests instead of exposing the VM's
+own credentials. Request audiences and upstream error messages are never copied to the journal.
+
+The relay reads no GCE_METADATA_* variable: on the host they name this relay. Tests point it at
+stand-ins with AGENTBOX_GCE_METADATA_UPSTREAM (host:port of the real server) and
+AGENTBOX_IAM_CREDENTIALS_URL.
 """
 
 from __future__ import annotations
 
+import base64
 import http.client
 import ipaddress
+import json
+import os
+import re
 import socketserver
 import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Callable, ClassVar, cast
 
-UPSTREAM = "169.254.169.254"
+UPSTREAM = os.environ.get("AGENTBOX_GCE_METADATA_UPSTREAM", "169.254.169.254:80")
+IAM_CREDENTIALS = os.environ.get("AGENTBOX_IAM_CREDENTIALS_URL", "https://iamcredentials.googleapis.com").rstrip("/")
 HOST = "metadata.google.internal"
 HOP = {"connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host", "te", "trailer"}
+ACCOUNTS = "/computeMetadata/v1/instance/service-accounts/"
+ACCOUNT_FILE = Path.home() / ".config" / "agent-identity" / "account"
+SERVICE_ACCOUNT = re.compile(r"^[^@\s]+@[^@\s]+\.gserviceaccount\.com$")
+SCOPES = ["https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/userinfo.email"]
+LEAVES = ["aliases", "email", "identity", "scopes", "token"]
+LIFETIME = 3600
+MARGIN = 300
+TEXT = "application/text"
+
+
+def log(message: str) -> None:
+    print(f"agentbox-gce-metadata-relay: {message}", file=sys.stderr, flush=True)
+
+
+def upstream_get(path: str) -> str:
+    """One GET of the real metadata server; raises OSError on any answer but 200."""
+    up = http.client.HTTPConnection(*_hostport(UPSTREAM), timeout=10)
+    try:
+        up.request("GET", path, headers={"Host": HOST, "Metadata-Flavor": "Google"})
+        resp = up.getresponse()
+        body = resp.read().decode()
+        if resp.status != 200:
+            raise OSError(f"metadata server answered {resp.status} for {path}")
+        return body
+    finally:
+        up.close()
+
+
+def _hostport(value: str) -> tuple[str, int]:
+    host, _, port = value.rpartition(":")
+    return host, int(port)
+
+
+class Refused(Exception):
+    """A mint that did not give a token; its text names why and never holds a token."""
+
+
+class Identity:
+    """The account this relay serves, and the tokens it minted for it."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._vm_account: str | None = None
+        self._tokens: dict[tuple[str, str, str], tuple[str, float]] = {}
+        self._mint_locks: dict[tuple[str, str, str], threading.Lock] = {}
+
+    def target(self) -> str | None:
+        """The account to serve, or None to pass everything through."""
+        try:
+            wanted = ACCOUNT_FILE.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeError):
+            raise Refused(f"cannot read the account switch {ACCOUNT_FILE}") from None
+        if not SERVICE_ACCOUNT.fullmatch(wanted):
+            raise Refused(f"{ACCOUNT_FILE} holds no service account email")
+        return None if wanted == self.vm_account() else wanted
+
+    def vm_account(self) -> str | None:
+        # The VM's account changes only while the VM is stopped, which stops this process too.
+        if self._vm_account is None:
+            try:
+                self._vm_account = upstream_get(ACCOUNTS + "default/email").strip()
+            except (OSError, http.client.HTTPException, UnicodeError):
+                log("cannot read the VM's own account")
+        return self._vm_account
+
+    def access_token(self, target: str, scopes: list[str]) -> tuple[str, int]:
+        body: dict[str, object] = {"scope": scopes, "lifetime": f"{LIFETIME}s"}
+        return self._mint(("access", target, ",".join(scopes)), target, "generateAccessToken", body, _access_expiry)
+
+    def id_token(self, target: str, audience: str) -> str:
+        body: dict[str, object] = {"audience": audience, "includeEmail": True}
+        return self._mint(("id", target, audience), target, "generateIdToken", body, _id_expiry)[0]
+
+    def _mint(self, key: tuple[str, str, str], target: str, method: str, body: dict[str, object],
+              expiry: Callable[[dict[str, object], str], float]) -> tuple[str, int]:
+        with self._lock:
+            if key not in self._mint_locks:
+                self._mint_locks[key] = threading.Lock()
+            mint_lock = self._mint_locks[key]
+        with mint_lock:
+            now = time.time()
+            held = self._tokens.get(key)
+            if held and held[1] - MARGIN > now:
+                return held[0], int(held[1] - now)
+            try:
+                own = str(json.loads(upstream_get(ACCOUNTS + "default/token"))["access_token"])
+            except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError):
+                raise Refused(f"cannot read the VM's own token to mint {target}'s") from None
+            url = f"{IAM_CREDENTIALS}/v1/projects/-/serviceAccounts/{target}:{method}"
+            request = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST", headers={
+                "Authorization": f"Bearer {own}", "Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(request, timeout=30) as resp:
+                    answer: object = json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                raise Refused(_refusal(method, target, e, own)) from None
+            except (OSError, http.client.HTTPException, ValueError):
+                raise Refused(f"IAM Credentials {method} for {target}: unreadable response") from None
+            if not isinstance(answer, dict):
+                raise Refused(f"IAM Credentials {method} for {target} answered no JSON object")
+            fields = cast(dict[str, object], answer)
+            token = str(fields.get("accessToken") or fields.get("token") or "")
+            if not token:
+                raise Refused(f"IAM Credentials {method} for {target} answered no token")
+            try:
+                until = expiry(fields, token)
+            except (KeyError, ValueError, IndexError, TypeError) as e:
+                raise Refused(f"IAM Credentials {method} for {target}: no expiry read from its answer: {e}"
+                              .replace(token, "<token>").replace(own, "<token>")) from None
+            log(f"minted {method} for {target}, expires {time.strftime('%FT%TZ', time.gmtime(until))}")
+            self._tokens[key] = (token, until)
+            # From a clock read now, not before the two network calls: a slow mint must not
+            # lengthen the lifetime a client is told.
+            return token, int(until - time.time())
+
+
+def _refusal(method: str, target: str, error: urllib.error.HTTPError, own: str) -> str:
+    # IAM errors can echo the request, including an audience URL with credentials. Only the
+    # fixed status vocabulary is safe to copy to an HTTP body or the journal.
+    reason = ""
+    try:
+        status = json.loads(error.read()).get("error", {}).get("status")
+        if status in {"PERMISSION_DENIED", "UNAUTHENTICATED", "RESOURCE_EXHAUSTED", "INVALID_ARGUMENT",
+                      "NOT_FOUND", "UNAVAILABLE", "INTERNAL", "DEADLINE_EXCEEDED", "FAILED_PRECONDITION"}:
+            reason = status
+    except (OSError, http.client.HTTPException, ValueError, AttributeError, TypeError):
+        pass
+    return f"IAM Credentials refused {method} for {target}: HTTP {error.code} {reason}".replace(own, "<token>")
+
+
+def _access_expiry(answer: dict[str, object], _token: str) -> float:
+    stamp = re.sub(r"\.\d+", "", str(answer["expireTime"])).replace("Z", "+00:00")
+    return datetime.fromisoformat(stamp).timestamp()
+
+
+def _id_expiry(_answer: dict[str, object], token: str) -> float:
+    part = token.split(".")[1]
+    return float(json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))["exp"])
 
 
 class Relay(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    subnet: ipaddress.IPv4Network
+    subnet: ClassVar[ipaddress.IPv4Network | ipaddress.IPv6Network]
+    identity: ClassVar[Identity]
 
     def relay(self) -> None:
-        if ipaddress.ip_address(self.client_address[0]) not in self.subnet:
+        client = ipaddress.ip_address(self.client_address[0])
+        if client not in self.subnet and not client.is_loopback:
             self.send_error(403)
             return
+        url = urllib.parse.urlsplit(self.path)
+        if self.command in ("GET", "HEAD") and url.path.startswith(ACCOUNTS):
+            try:
+                target = self.identity.target()
+            except Refused as e:
+                log(str(e))
+                self.answer(503, TEXT, str(e))
+                return
+            if target is not None:
+                self.answer(*self.serve(target, url.path[len(ACCOUNTS):], urllib.parse.parse_qs(url.query)))
+                return
+        self.pass_through()
+
+    def serve(self, target: str, rest: str, query: dict[str, list[str]]) -> tuple[int, str, str]:
+        """(status, content type, body) for a service-account path, answered as `target`."""
+        # The real server also takes the legacy header X-Google-Metadata-Request: True.
+        if self.headers.get("Metadata-Flavor") != "Google" and self.headers.get("X-Google-Metadata-Request", "").lower() != "true":
+            return 403, TEXT, "Missing Metadata-Flavor: Google"
+        info = {"aliases": ["default"], "email": target, "scopes": SCOPES}
+        recursive = query.get("recursive") == ["true"]
+        if rest == "":
+            if recursive:
+                return 200, "application/json", json.dumps({"default": info, target: info})
+            return 200, TEXT, f"default/\n{target}/\n"
+        who, _, leaf = rest.partition("/")
+        if who not in ("default", target) or "/" in leaf:
+            return 404, TEXT, "not found"
+        if leaf == "":
+            return (200, "application/json", json.dumps(info)) if recursive else (200, TEXT, "\n".join(LEAVES) + "\n")
+        if leaf == "aliases":
+            return 200, TEXT, "default\n"
+        if leaf == "email":
+            return 200, TEXT, target
+        if leaf == "scopes":
+            return 200, TEXT, "\n".join(SCOPES) + "\n"
+        try:
+            if leaf == "token":
+                scopes = [s for s in ",".join(query.get("scopes", [])).split(",") if s] or SCOPES
+                token, expires_in = self.identity.access_token(target, scopes)
+                return 200, "application/json", json.dumps(
+                    {"access_token": token, "expires_in": expires_in, "token_type": "Bearer"})
+            if leaf == "identity":
+                audience = (query.get("audience") or [""])[0]
+                if not audience:
+                    return 400, TEXT, "non-empty audience parameter required"
+                return 200, TEXT, self.identity.id_token(target, audience)
+        except Refused as e:
+            log(str(e))
+            return 503, TEXT, f"agentbox-gce-metadata-relay: cannot serve {target}: {e}"
+        return 404, TEXT, "not found"
+
+    def answer(self, status: int, kind: str, body: str) -> None:
+        data = body.encode()
+        self.send_response(status)
+        self.send_header("Metadata-Flavor", "Google")
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(data)
+
+    def pass_through(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else None
         headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP}
         headers["Host"] = HOST
-        up = http.client.HTTPConnection(UPSTREAM, 80, timeout=3700)
+        up = http.client.HTTPConnection(*_hostport(UPSTREAM), timeout=3700)
         try:
             up.request(self.command, self.path, body=body, headers=headers)
             resp = up.getresponse()
+            data = resp.read()
             self.send_response(resp.status, resp.reason)
             for k, v in resp.getheaders():
                 if k.lower() not in HOP and k.lower() != "content-length":
                     self.send_header(k, v)
-            data = resp.read()
-            self.send_header("Content-Length", str(len(data)))
+            length = resp.getheader("Content-Length") if self.command == "HEAD" else str(len(data))
+            if length is not None:
+                self.send_header("Content-Length", length)
             self.end_headers()
             self.wfile.write(data)
-        except OSError as e:
-            self.send_error(502, f"metadata server: {e}")
+        except (OSError, http.client.HTTPException):
+            self.send_error(502, "metadata server unavailable")
         finally:
             up.close()
 
     do_GET = do_POST = do_PUT = do_HEAD = relay
 
-    def log_message(self, *_args) -> None:
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - http.server's name
         pass
 
 
 def main() -> None:
     bind, port, subnet = sys.argv[1], int(sys.argv[2]), sys.argv[3]
     Relay.subnet = ipaddress.ip_network(subnet, strict=False)
+    Relay.identity = Identity()
     socketserver.TCPServer.allow_reuse_address = True
     ThreadingHTTPServer.daemon_threads = True
     ThreadingHTTPServer((bind, port), Relay).serve_forever()

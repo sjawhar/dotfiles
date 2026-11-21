@@ -263,7 +263,8 @@ def load_terms(environment: Mapping[str, str] | None = None, repositories: Seque
     repository. The list's `scoped` map, of repository patterns (`cybermonklabs/*`) to blocks of lines, holds terms for
     the repositories a pattern matches only; with REGISTRY, so do the `forbidden` lists of knives's fork registry
     (knives_forbidden). A scoped list is read when its scope reaches one of REPOSITORIES (Scope.reaches): a commit has
-    no repository, so it reads `terms` alone, and a push or gh text names where it goes."""
+    no repository, so it reads `terms` alone, and a push, gh text, or a `diff` or `message` given --repository names
+    where it goes."""
     environment = dict(os.environ if environment is None else environment)
     source = term_file(environment)
     if not source.is_file():
@@ -2130,7 +2131,7 @@ def scan_push(text: str, remote: str, url: str) -> list[Finding]:
 
 
 # The text a gh call sends to GitHub, read before gh runs. shims/gh hands this check every call that can carry text, as
-# `gh -- ARGV…`, on the pass that runs gh (shims/gh). Until 2026-11-17 nothing read that text, and an agent's
+# `gh -- ARGV…`, on the pass that runs gh (shims/AGENTS.md). Until 2026-11-17 nothing read that text, and an agent's
 # `gh pr edit` put a listed term into a public pull request's body, where GitHub keeps it in the body's edit history,
 # which only an admin can delete (dispatch://INFRA-4102).
 #
@@ -4773,11 +4774,28 @@ def gh_check(arguments: Sequence[str]) -> int:
     return gh_refusal(f"gh {group} {sub}".rstrip(), reached, matcher, findings, unreadable, list_problem, advice)
 
 
+# `diff` and `message` --repository: a GitHub repository as OWNER/NAME. A value of any other shape (a bare name, a URL,
+# a pattern) would reach no scoped list, and the check would read as clean, so it is refused.
+REPOSITORY_NAME = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+")
+REPOSITORY_HELP = ("the repository the text goes to: also read the scoped term lists whose pattern matches it, as push "
+                   "mode reads them for its destination; without it, only the global list is read")
+SCOPED_NOTE = ("leak terms: read the global list only, not the scoped lists; to read the scoped lists of the repository "
+               "this text goes to, pass --repository OWNER/NAME")
+
+
+def repository_argument(value: str) -> str:
+    if not REPOSITORY_NAME.fullmatch(value):
+        raise argparse.ArgumentTypeError(f"{value!r} is not OWNER/NAME")
+    return value
+
+
 def parser() -> argparse.ArgumentParser:
     argument_parser = argparse.ArgumentParser(prog="leak-terms-check")
     modes = argument_parser.add_subparsers(dest="mode", required=True)
     diff = modes.add_parser("diff")
-    diff.add_argument("--place-prefix", default="")
+    # shims/jj names the place of the commit it checks, while a hand-run check names none.
+    diff.add_argument("--place-prefix")
+    diff.add_argument("--repository", type=repository_argument, metavar="OWNER/NAME", help=REPOSITORY_HELP)
     staged = modes.add_parser("staged")
     message = modes.add_parser("message")
     message.add_argument("--cleanup", choices=("verbatim", "whitespace", "strip", "scissors"), default="verbatim")
@@ -4785,6 +4803,7 @@ def parser() -> argparse.ArgumentParser:
     message.add_argument("--cut-at-scissors", action="store_true")
     message.add_argument("--place", default="commit message")
     message.add_argument("--encoding", default="utf-8")
+    message.add_argument("--repository", type=repository_argument, metavar="OWNER/NAME", help=REPOSITORY_HELP)
     comment_char = modes.add_parser("git-comment-char")
     comment_char.add_argument("--editor-ran", choices=("0", "1"), required=True)
     comment_char.add_argument("--status-shown", choices=("0", "1"), required=True)
@@ -4833,9 +4852,13 @@ def main(arguments: Sequence[str] | None = None) -> int:
         elif not text:
             findings = []
         else:
-            matcher = load_terms()
+            matcher = load_terms(repositories=(args.repository,) if args.repository else ())
             if args.mode == "diff":
-                findings = scan_diff(text, matcher, args.place_prefix)
+                if args.repository is None and args.place_prefix is None:
+                    # A commit has no repository, and shims/jj names the place of each one it checks, so only a
+                    # hand-run check of a pull request's text is told that no scoped list was read.
+                    print(SCOPED_NOTE, file=sys.stderr)
+                findings = scan_diff(text, matcher, args.place_prefix or "")
             else:
                 findings = scan_message(text, matcher, args.cleanup, args.comment_char, args.cut_at_scissors, args.place)
     except ListError as error:

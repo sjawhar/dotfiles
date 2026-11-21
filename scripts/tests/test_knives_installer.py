@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """installers/knives.sh stops when the statements it migrated cannot be pushed.
 
-The installer's own comment: "a failure stops the install with knives' message".
-For an existing knives user, `knives ledger migrate` writes the statements and
-hands off a detached sweep; the installer's next `knives ledger sweep` can find
-that sweep holding the lock, answer `busy` and exit 0, so a push that fails is
-seen by nobody. These tests pin the interleaving that hides it: before the
-installer's `knives ledger sweep` starts, the `knives` on its PATH takes the
-ledger lock itself and holds it a moment, as a running sweep does, so that sweep
-always finds the lock held (it happens on its own in about two installs of five).
+The tests also read the message the installer prints when `knives ledger migrate`
+fails: a problem before migrate drops the statements, entries it could not send,
+a problem after the drop, an error before its report, and a migrate that dies.
+
+`knives ledger migrate` sends the ledger entries it wrote before it exits. So when
+that push fails, migrate's own report and exit status say so, and the install stops.
 
 Runs against the knives in KNIVES_BIN, else the pinned one mise resolves (never the
 shims/knives wrapper), and is skipped when that knives has no `knives ledger`. Two more
@@ -24,7 +22,6 @@ import shutil
 import stat
 import subprocess
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
@@ -39,26 +36,17 @@ HOSTNAME = "installer-test"
 # The installer names a machine `<hostname -s>-<first 8 hex of /etc/machine-id>`.
 MACHINE = f"{HOSTNAME}-{Path('/etc/machine-id').read_text(encoding='utf-8')[:8]}"
 
-# Stands in for `knives`. Before `ledger sweep` runs, a background holder takes
-# the ledger lock, as a running sweep does, and keeps it for HOLD_SECONDS; the
-# shim execs the real binary only once the holder signals that it holds the lock,
-# so the sweep always finds it held. If the handed-off sweep still has the lock,
-# the holder waits for it first. With KNIVES_SHIM_SWEEP_DIES set, `ledger sweep`
-# instead exits 101 with nothing on stdout, as a panicking knives does.
-# Everything else runs the real binary at once.
-HOLD_SECONDS = 3
-KNIVES_SHIM = rf"""
-if [ "${{1:-}}" = ledger ] && [ "${{2:-}}" = sweep ] && [ -n "${{KNIVES_SHIM_SWEEP_DIES:-}}" ]; then
+# Stands in for `knives`. With KNIVES_SHIM_SWEEP_DIES set, `ledger sweep` exits 101
+# with nothing on stdout, as a panicking knives does. With KNIVES_SHIM_MIGRATE_DIES
+# set, `ledger migrate` does the same. Everything else runs the real binary.
+KNIVES_SHIM = r"""
+if [ "${1:-}" = ledger ] && [ "${2:-}" = sweep ] && [ -n "${KNIVES_SHIM_SWEEP_DIES:-}" ]; then
     echo "thread 'main' panicked (test shim)" >&2
     exit 101
 fi
-if [ "${{1:-}}" = ledger ] && [ "${{2:-}}" = sweep ]; then
-    lock="$HOME/.config/knives/ledger.lock"
-    ready="$HOME/.knives-shim-holds-lock"
-    rm -f "$ready"
-    ( exec 9>>"$lock"; flock 9; : > "$ready"; sleep {HOLD_SECONDS} ) &
-    for _ in $(seq 1 600); do [ -e "$ready" ] && break; sleep 0.05; done
-    [ -e "$ready" ] || {{ echo "test shim: never got the ledger lock" >&2; exit 97; }}
+if [ "${1:-}" = ledger ] && [ "${2:-}" = migrate ] && [ -n "${KNIVES_SHIM_MIGRATE_DIES:-}" ]; then
+    echo "thread 'main' panicked (test shim)" >&2
+    exit 101
 fi
 exec "$KNIVES_BIN" "$@"
 """
@@ -145,17 +133,10 @@ class KnivesInstallerMigratedPush(RegistryCopy, unittest.TestCase):
         hook.chmod(0o755)
 
     def install(self) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run(
+        return subprocess.run(
             ["bash", str(self.dotfiles / "installers" / "knives.sh")],
             capture_output=True, text=True, env=self.env, check=False,
         )
-        # Let the handed-off sweep finish before anything is counted.
-        lock = self.config / "ledger.lock"
-        for _ in range(600):
-            if subprocess.run(["flock", "-n", str(lock), "true"], check=False).returncode == 0:
-                break
-            time.sleep(0.1)
-        return result
 
     def refs_on_remote(self) -> list[str]:
         out = subprocess.run(
@@ -176,27 +157,43 @@ class KnivesInstallerMigratedPush(RegistryCopy, unittest.TestCase):
         result = self.install()
 
         # Then: the statement left state.json for the ledger but never reached the
-        # remote, and the installer says so rather than succeeding.
-        self.assertEqual(self.statements_left(), 0, result.stdout)
-        self.assertEqual(self.refs_on_remote(), [], result.stdout)
+        # remote, and the installer stops with migrate's status and says what to run.
+        self.assert_migrate_failed(result, "did not reach the ledger")
+        self.assertIn("`knives ledger sweep` sends them", result.stderr, result.stdout + result.stderr)
+        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [], result.stdout + result.stderr)
+
+        # When: the installer runs again, and the remote still refuses every push.
+        result = self.install()
+
+        # Then: the sweep finds the entry that only this machine holds, and the
+        # installer says so rather than succeeding.
         self.assertNotEqual(
             result.returncode, 0,
             "the installer exited 0 though its migrated statement could not be pushed:\n"
             + result.stdout + result.stderr,
         )
+        self.assertIn("unsent: 1", result.stderr, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [], result.stdout + result.stderr)
+
+        # When: the remote accepts pushes again, and the installer runs again.
+        (self.remote / "hooks" / "pre-receive").unlink()
+        result = self.install()
+
+        # Then: it succeeds, and the statement is on the remote, under this machine's ref.
+        self.assert_install_succeeded(result)
 
     def test_control_an_accepted_push_carries_the_migrated_statements(self) -> None:
         # Given: an existing knives user, and a ledger remote that accepts pushes.
-        # When: the installer runs, under the same interleaving.
+        # When: the installer runs.
         result = self.install()
 
         # Then: it succeeds, and the statement is on the remote, under this machine's ref.
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        # The installer's own sweep found the handed-off one holding the lock and
-        # waited for it, rather than leaving at once and hiding a failed push.
-        self.assertIn('"waited":', result.stdout, "the interleaving under test did not happen")
-        self.assertEqual(self.statements_left(), 0, result.stdout)
-        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout)
+        # The installer's own sweep ran, and swept.
+        self.assertIn('"outcome":"swept"', result.stderr, result.stdout + result.stderr)
+        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
 
     def test_a_new_machine_that_cannot_reach_the_ledger_yet_still_installs(self) -> None:
         # Given: a machine with no knives history, whose git cannot reach the
@@ -212,7 +209,7 @@ class KnivesInstallerMigratedPush(RegistryCopy, unittest.TestCase):
         # Then: the sweep fails, but nothing written here is stranded, so the
         # install goes on and says how to sync once git can reach GitHub.
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('"unsent":0', result.stdout.replace(" ", ""), result.stdout)
+        self.assertIn('"unsent":0', result.stderr.replace(" ", ""), result.stdout + result.stderr)
         self.assertIn("gh auth login", result.stderr)
         self.assertTrue((self.config / "ledger-repositories" / "trajectory-labs-pbc--knives-ledger.git").is_dir())
 
@@ -228,6 +225,478 @@ class KnivesInstallerMigratedPush(RegistryCopy, unittest.TestCase):
         # Then: an uncounted backlog is treated as stranded, and the install stops.
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("unsent: -1", result.stderr)
+
+    def assert_migrate_failed(self, result: subprocess.CompletedProcess[str], knives_text: str) -> None:
+        """The installer stopped with migrate's status 3, and its message is the last three lines
+        of stderr. A line that knives printed before the message holds knives_text."""
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        # lib.sh sets DOTFILES_DIR with `cd ... && pwd`, and that keeps each symlink in the path.
+        # So the message names self.dotfiles as it is, not its resolved path. The installer quotes
+        # the command with bash's `printf %q`, so ask the same bash how it quotes this path.
+        rerun = subprocess.run(
+            ["bash", "-c", 'printf "bash %q" "$1"', "_", str(self.dotfiles / "installers" / "knives.sh")],
+            capture_output=True, text=True, env=self.env, check=True,
+        ).stdout
+        lines = result.stderr.splitlines()
+        # A failure prints both lists whole, so it shows the message the installer printed.
+        self.maxDiff = None
+        self.assertEqual(
+            lines[-3:],
+            [
+                "knives: `knives ledger migrate` exited 3.",
+                "knives: the lines it printed above say what went wrong. Fix each problem they name"
+                f" that needs a fix, then run: {rerun}",
+                f"knives: if a line above asks for a change to repos.toml, make it in {self.dotfiles}/knives/repos.toml:"
+                " at each run this installer replaces ~/.config/knives/repos.toml with a render of that file.",
+            ],
+            result.stdout + result.stderr,
+        )
+        self.assertTrue(
+            any(knives_text in line for line in lines[:-3]),
+            f"no line before the installer's message holds {knives_text!r}:\n" + result.stdout + result.stderr,
+        )
+
+    def assert_install_succeeded(self, result: subprocess.CompletedProcess[str]) -> None:
+        """The installer exited 0, state.json holds no statement, and the remote holds this machine's ref."""
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
+
+    def test_a_migrate_that_cannot_pull_the_ledger_keeps_the_statements_and_says_what_to_run(self) -> None:
+        # Given: an existing knives user whose git cannot reach the ledger repository.
+        (self.home / ".gitconfig").write_text(
+            f'[url "{self.root / "unreachable.git"}"]\n\tinsteadOf = {LEDGER_URL}\n', encoding="utf-8"
+        )
+
+        # When: the installer joins the machine and migrates its statements.
+        result = self.install()
+
+        # Then: the statement stays in state.json, and the installer stops with
+        # migrate's status and says what to run.
+        self.assert_migrate_failed(result, "could not be pulled")
+        self.assertEqual(self.statements_left(), 1, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [], result.stdout + result.stderr)
+
+        # When: git can reach the ledger repository again, and the installer runs again.
+        (self.home / ".gitconfig").write_text(f'[url "{self.remote}"]\n\tinsteadOf = {LEDGER_URL}\n', encoding="utf-8")
+        result = self.install()
+
+        # Then: it succeeds, and the statement is on the remote, under this machine's ref.
+        self.assert_install_succeeded(result)
+
+    def test_a_statement_of_a_fork_the_registry_lost_is_fixed_in_the_dotfiles_registry(self) -> None:
+        # Given: an existing knives user with a statement of a fork that repos.toml no longer names.
+        (self.config / "state.json").write_text('{"tracked_pulls": {"gone/feat/x": 7}}', encoding="utf-8")
+
+        # When: the installer joins the machine and migrates its statements.
+        result = self.install()
+
+        # Then: the statement stays in state.json, and the installer stops with
+        # migrate's status and says what to run.
+        self.assert_migrate_failed(result, "no fork in repos.toml is named gone")
+        self.assertEqual(self.statements_left(), 1, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [], result.stdout + result.stderr)
+
+        # When: the registry file that the message names gets the fork again, and the
+        # installer runs again.
+        with (self.dotfiles / "knives" / "repos.toml").open("a", encoding="utf-8") as registry:
+            registry.write(
+                '\n[repos.gone]\nupstream = "https://github.com/sjawhar/legion-smoke-gone"\n'
+                'origin = "https://github.com/sjawhar/legion-smoke-gone-installer-test"\n'
+                f'ledger = "{LEDGER_URL.removeprefix("https://github.com/")}"\n'
+            )
+        result = self.install()
+
+        # Then: it succeeds, and the statement is on the remote, under this machine's ref.
+        self.assert_install_succeeded(result)
+
+    def test_a_sightings_file_migrate_cannot_read_stops_the_install_after_the_drop(self) -> None:
+        # Given: an existing knives user whose seen.json is not a sightings file.
+        (self.config / "seen.json").write_text("not json", encoding="utf-8")
+
+        # When: the installer joins the machine and migrates its statements.
+        result = self.install()
+
+        # Then: the statement left state.json and is on the remote. But migrate stops at
+        # seen.json, and the installer stops with migrate's status and says what to run.
+        self.assert_migrate_failed(result, "workspace sightings not renamed")
+        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
+
+        # When: the user removes seen.json, and the installer runs again.
+        (self.config / "seen.json").unlink()
+        result = self.install()
+
+        # Then: it succeeds, and the statement stays on the remote, under this machine's ref.
+        self.assert_install_succeeded(result)
+
+    def test_a_statement_the_ledger_already_states_otherwise_needs_only_a_second_run(self) -> None:
+        # Given: a first install puts the statement on the ledger, and then state.json
+        # names another pull for the same branch.
+        first = self.install()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (self.config / "state.json").write_text('{"tracked_pulls": {"smoke/feat/x": 545}}', encoding="utf-8")
+
+        # When: the installer runs again and migrates the new statement.
+        result = self.install()
+
+        # Then: the statement left state.json, the ledger keeps its own, and the
+        # installer stops with migrate's status and says what to run.
+        self.assert_migrate_failed(result, "but the ledger already states")
+        self.assertEqual(self.statements_left(), 0, result.stdout + result.stderr)
+        self.assertEqual(self.refs_on_remote(), [f"refs/knives/{MACHINE}"], result.stdout + result.stderr)
+
+        # When: the installer runs again, and no one fixes anything first.
+        result = self.install()
+
+        # Then: it succeeds, and the ledger's statement stays on the remote, under this machine's ref.
+        self.assert_install_succeeded(result)
+
+    def test_a_state_file_migrate_cannot_read_stops_the_install_before_its_report(self) -> None:
+        # Given: an existing knives user whose state.json is not valid state.
+        state = self.config / "state.json"
+        state.write_text("not json", encoding="utf-8")
+        before = state.read_bytes()
+
+        # When: the installer joins the machine and migrates its statements.
+        result = self.install()
+
+        # Then: migrate stops before it changes state.json, and the installer stops
+        # with migrate's status and says what to run.
+        self.assert_migrate_failed(result, "is not valid state")
+        self.assertEqual(state.read_bytes(), before, result.stdout + result.stderr)
+
+        # When: state.json holds the statement again, and the installer runs again.
+        state.write_text('{"tracked_pulls": {"smoke/feat/x": 544}}', encoding="utf-8")
+        result = self.install()
+
+        # Then: it succeeds, and the statement is on the remote, under this machine's ref.
+        self.assert_install_succeeded(result)
+
+    def test_a_migrate_that_dies_without_output_stops_the_install_with_its_status(self) -> None:
+        # Given: an existing knives user, and a migrate that crashes before it prints a report.
+        self.env["KNIVES_SHIM_MIGRATE_DIES"] = "1"
+
+        # When: the installer joins the machine and migrates its statements.
+        result = self.install()
+
+        # Then: the install stops with migrate's own status, and the installer points
+        # to no report, because migrate printed none.
+        self.assertEqual(result.returncode, 101, result.stdout + result.stderr)
+        lines = result.stderr.splitlines()
+        self.assertEqual(lines[-1], "knives: `knives ledger migrate` exited 101.", result.stdout + result.stderr)
+        self.assertEqual(lines[-2], "thread 'main' panicked (test shim)", result.stdout + result.stderr)
+        self.assertNotIn("the lines it printed above", result.stderr, result.stdout + result.stderr)
+        self.assertEqual(self.statements_left(), 1, result.stdout + result.stderr)
+
+    def test_the_command_the_message_names_runs_from_a_dotfiles_path_with_a_space(self) -> None:
+        # Given: an existing knives user whose dotfiles are at a path with a space in it,
+        # and whose git cannot reach the ledger repository.
+        spaced = self.root / "dot files"
+        self.dotfiles.rename(spaced)
+        self.dotfiles = spaced
+        (self.home / ".gitconfig").write_text(
+            f'[url "{self.root / "unreachable.git"}"]\n\tinsteadOf = {LEDGER_URL}\n', encoding="utf-8"
+        )
+
+        # When: the installer joins the machine and migrates its statements.
+        result = self.install()
+
+        # Then: the installer stops with migrate's status, and its message names a command to run.
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        named = [line.split("then run: ", 1)[1] for line in result.stderr.splitlines() if "then run: " in line]
+        self.assertEqual(len(named), 1, result.stdout + result.stderr)
+
+        # When: git can reach the ledger repository again, and the user runs that command as printed.
+        (self.home / ".gitconfig").write_text(f'[url "{self.remote}"]\n\tinsteadOf = {LEDGER_URL}\n', encoding="utf-8")
+        rerun = subprocess.run(["bash", "-c", named[0]], capture_output=True, text=True, env=self.env, check=False)
+
+        # Then: the command is this installer, it succeeds, and the statement is on the
+        # remote, under this machine's ref.
+        self.assert_install_succeeded(rerun)
+
+    def ledger_git_dir(self) -> Path:
+        """The git directory the installer makes for the ledger, `<owner>--<name>.git`."""
+        ledger = LEDGER_URL.removeprefix("https://github.com/")
+        return self.config / "ledger-repositories" / f"{ledger.replace('/', '--')}.git"
+
+    def test_a_git_directory_that_knives_makes_during_the_install_is_kept(self) -> None:
+        real_git = shutil.which("git", path="/usr/local/bin:/usr/bin:/bin")
+        self.assertIsNotNone(real_git, "needs git in /usr/local/bin, /usr/bin or /bin")
+        git_dir = self.ledger_git_dir()
+        joined = f"{HOSTNAME}-0000feed"
+        # A git stub first on PATH stands in for a knives command that joins the ledger. At the
+        # installer's first `git init --quiet --bare`, when the ledger's git directory does not
+        # exist, the stub first makes that directory as the join of knives 5.0.0 does. It makes
+        # the directory in a scratch directory, gives it an origin and a machine name of its own,
+        # and renames it into place. So the directory appears after the installer's `[[ ! -d ]]`
+        # test, and before the installer puts its own git directory in place. Then, and for every
+        # other call, the stub runs the real git.
+        write_executable(
+            self.root / "bin" / "git",
+            'if [ "$#" -eq 4 ] && [ "$1 $2 $3" = "init --quiet --bare" ]'
+            f' && [ ! -e "{git_dir}" ]; then\n'
+            f'    scratch="$(mktemp -d "{self.config}/.knives-joining-XXXXXX")"\n'
+            '    made="$scratch/ledger.git"\n'
+            f'    "{real_git}" init --quiet --bare "$made"\n'
+            f'    "{real_git}" --git-dir="$made" config core.bare false\n'
+            f'    "{real_git}" --git-dir="$made" config core.worktree "{self.config / "ledger"}"\n'
+            f'    "{real_git}" --git-dir="$made" remote add origin "{LEDGER_URL}"\n'
+            f'    "{real_git}" --git-dir="$made" config knives.machine "{joined}"\n'
+            f'    mv "$made" "{git_dir}"\n'
+            '    rmdir "$scratch"\n'
+            'fi\n'
+            f'exec "{real_git}" "$@"',
+        )
+
+        # Given: a new machine, and a knives command that joins the ledger after the
+        # installer finds no git directory for it, and before the installer puts its own in place.
+        (self.config / "state.json").unlink()
+
+        # When: the installer joins the machine.
+        result = self.install()
+
+        # Then: it succeeds, and the git directory keeps the origin and the machine name
+        # that knives gave it, and is not bare. No entry in it holds a HEAD file, as a git
+        # directory does. The installer deleted its scratch directory.
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        def config(*key: str) -> list[str]:
+            return subprocess.run(
+                ["git", "--git-dir", str(git_dir), "config", *key],
+                capture_output=True, text=True, env=self.env, check=False,
+            ).stdout.split()
+
+        self.assertEqual(config("--get-all", "remote.origin.url"), [LEDGER_URL], result.stdout + result.stderr)
+        self.assertEqual(config("knives.machine"), [joined], result.stdout + result.stderr)
+        self.assertEqual(config("core.bare"), ["false"], result.stdout + result.stderr)
+        self.assertEqual(
+            sorted(p.name for p in self.config.glob(".knives-installer-joining-*")), [],
+            result.stdout + result.stderr,
+        )
+        self.assertEqual(
+            [p.name for p in git_dir.iterdir() if (p / "HEAD").is_file()], [],
+            f"the installer moved its git directory into {git_dir}:\n" + result.stdout + result.stderr,
+        )
+
+    def test_a_knives_command_never_finds_the_ledger_git_directory_half_made(self) -> None:
+        real_git = shutil.which("git", path="/usr/local/bin:/usr/bin:/bin")
+        self.assertIsNotNone(real_git, "needs git in /usr/local/bin, /usr/bin or /bin")
+        git_dir = self.ledger_git_dir()
+        log = self.root / "half-made.log"
+        # knives reads every directory in ledger-repositories as a git directory of a ledger.
+        # Found with no origin, it says the directory "is there already, and its origin is not"
+        # the ledger (knives 5.0.0, src/ledger_sweep/join.rs:47-55) and exits 3. A directory
+        # with no origin carries nothing, and one with no machine name refuses every sweep
+        # (join.rs:143-146). The join of knives sets core.bare to false (join.rs:197), and the
+        # installer must make the same git directory. A git stub first on PATH stands in for a
+        # knives command that runs at any moment of the install: before each git call, when
+        # the ledger's git directory exists, it logs the call if the directory has no origin,
+        # no knives.machine, or core.bare other than false.
+        write_executable(
+            self.root / "bin" / "git",
+            f'if [ -e "{git_dir}" ]; then\n'
+            f'    origin="$("{real_git}" --git-dir="{git_dir}" config remote.origin.url || true)"\n'
+            f'    machine="$("{real_git}" --git-dir="{git_dir}" config knives.machine || true)"\n'
+            f'    bare="$("{real_git}" --git-dir="{git_dir}" config core.bare || true)"\n'
+            '    if [ -z "$origin" ] || [ -z "$machine" ] || [ "$bare" != false ]; then\n'
+            f'        echo "before git $*: origin=$origin machine=$machine bare=$bare" >>"{log}"\n'
+            '    fi\n'
+            'fi\n'
+            f'exec "{real_git}" "$@"',
+        )
+
+        # Given: a new machine.
+        (self.config / "state.json").unlink()
+
+        # When: the installer joins the machine to the ledger.
+        result = self.install()
+
+        # Then: it succeeds, and at no git call did the git directory stand there without
+        # an origin, a machine name, or with core.bare other than false.
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        half_made = log.read_text(encoding="utf-8") if log.exists() else ""
+        self.assertEqual(half_made, "", "the ledger's git directory stood there half made:\n" + half_made)
+        origin = subprocess.run(
+            [real_git, "--git-dir", str(git_dir), "config", "remote.origin.url"],
+            capture_output=True, text=True, env=self.env, check=False,
+        )
+        self.assertEqual(origin.stdout.strip(), LEDGER_URL, result.stdout + result.stderr + origin.stderr)
+
+    def ledger_config(self, *key: str) -> list[str]:
+        """What `git config <key...>` prints for the ledger's git directory, one value per line."""
+        return subprocess.run(
+            ["git", "--git-dir", str(self.ledger_git_dir()), "config", *key],
+            capture_output=True, text=True, env=self.env, check=False,
+        ).stdout.splitlines()
+
+    def test_a_git_directory_with_no_origin_is_repaired_in_place(self) -> None:
+        git_dir = self.ledger_git_dir()
+        kept = f"refs/knives/{HOSTNAME}-0000cafe"
+        author = {
+            "GIT_AUTHOR_NAME": HOSTNAME, "GIT_AUTHOR_EMAIL": f"{HOSTNAME}@example.com",
+            "GIT_COMMITTER_NAME": HOSTNAME, "GIT_COMMITTER_EMAIL": f"{HOSTNAME}@example.com",
+        }
+
+        def git(*args: str) -> str:
+            return subprocess.run(
+                ["git", "--git-dir", str(git_dir), *args],
+                input="", capture_output=True, text=True, env={**self.env, **author}, check=True,
+            ).stdout.strip()
+
+        # Given: a new machine whose ledger git directory is as an older installer leaves it when
+        # it stops after `git init --bare` on the final path: core.bare is true, and it has no
+        # work tree, no origin and no machine name. The test also puts a ref with a commit and a
+        # file in it, as a person who made the git directory by hand can. The installer cannot
+        # tell its own leftover from such a git directory, so it must keep what is there.
+        (self.config / "state.json").unlink()
+        git_dir.parent.mkdir(parents=True)
+        subprocess.run(["git", "init", "--quiet", "--bare", str(git_dir)], check=True, env=self.env)
+        commit = git("commit-tree", git("mktree"), "-m", "a commit that a person made by hand")
+        git("update-ref", kept, commit)
+        marker = git_dir / "installer-test-marker"
+        marker.write_text("kept\n", encoding="utf-8")
+
+        # When: the installer joins the machine.
+        result = self.install()
+
+        # Then: it succeeds, and the installer did not replace the git directory: the ref holds
+        # the same commit, and the file is there. The git directory now has the ledger as its
+        # one origin, with the fetch refspec of `git remote add`, core.bare false, the ledger
+        # root as its work tree, and one machine name.
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertEqual(git("rev-parse", kept), commit, output)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "kept\n", output)
+        self.assertEqual(self.ledger_config("--get-all", "remote.origin.url"), [LEDGER_URL], output)
+        self.assertEqual(
+            self.ledger_config("--get-all", "remote.origin.fetch"), ["+refs/heads/*:refs/remotes/origin/*"], output
+        )
+        self.assertEqual(self.ledger_config("core.bare"), ["false"], output)
+        self.assertEqual(self.ledger_config("core.worktree"), [str(self.config / "ledger")], output)
+        self.assertEqual(self.ledger_config("--get-all", "knives.machine"), [MACHINE], output)
+
+    def test_a_git_directory_with_a_push_url_and_no_origin_is_repaired_in_place(self) -> None:
+        git_dir = self.ledger_git_dir()
+        fetch = "+refs/knives/*:refs/knives-remotes/origin/*"
+        # The test HOME's .gitconfig sends LEDGER_URL to the test remote, for a push URL too.
+        push_url = LEDGER_URL
+
+        # Given: a new machine whose ledger git directory has a fetch refspec and a push URL of
+        # origin, but no origin URL, as a person can leave it. `git remote add origin` refuses
+        # such a git directory with "remote origin already exists".
+        (self.config / "state.json").unlink()
+        git_dir.parent.mkdir(parents=True)
+        subprocess.run(["git", "init", "--quiet", "--bare", str(git_dir)], check=True, env=self.env)
+        for key, value in (("remote.origin.fetch", fetch), ("remote.origin.pushurl", push_url)):
+            subprocess.run(["git", "--git-dir", str(git_dir), "config", key, value], check=True, env=self.env)
+
+        # When: the installer joins the machine.
+        result = self.install()
+
+        # Then: it succeeds, and the git directory now has the ledger as its one origin. It keeps
+        # its own fetch refspec and push URL, and it has core.bare false and a machine name.
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertEqual(self.ledger_config("--get-all", "remote.origin.url"), [LEDGER_URL], output)
+        self.assertEqual(self.ledger_config("--get-all", "remote.origin.fetch"), [fetch], output)
+        self.assertEqual(self.ledger_config("--get-all", "remote.origin.pushurl"), [push_url], output)
+        self.assertEqual(self.ledger_config("core.bare"), ["false"], output)
+        self.assertEqual(self.ledger_config("--get-all", "knives.machine"), [MACHINE], output)
+
+    def test_the_repair_of_a_git_directory_with_no_origin_writes_the_origin_last(self) -> None:
+        real_git = shutil.which("git", path="/usr/local/bin:/usr/bin:/bin")
+        self.assertIsNotNone(real_git, "needs git in /usr/local/bin, /usr/bin or /bin")
+        git_dir = self.ledger_git_dir()
+        log = self.root / "origin-first.log"
+
+        # Given: a new machine whose ledger git directory is as an older installer leaves it when
+        # it stops after `git init --bare` on the final path: it has no origin.
+        (self.config / "state.json").unlink()
+        git_dir.parent.mkdir(parents=True)
+        subprocess.run([real_git, "init", "--quiet", "--bare", str(git_dir)], check=True, env=self.env)
+        # A knives command that finds the origin uses the git directory as it is. A git stub first
+        # on PATH stands in for a knives command that runs at any moment of the install. Before
+        # each git call, when the git directory has an origin in its own config, the stub logs the
+        # call if core.bare is not false, or if core.worktree or knives.machine has no value.
+        write_executable(
+            self.root / "bin" / "git",
+            f'origin="$("{real_git}" --git-dir="{git_dir}" config --local remote.origin.url || true)"\n'
+            'if [ -n "$origin" ]; then\n'
+            f'    bare="$("{real_git}" --git-dir="{git_dir}" config --local core.bare || true)"\n'
+            f'    worktree="$("{real_git}" --git-dir="{git_dir}" config --local core.worktree || true)"\n'
+            f'    machine="$("{real_git}" --git-dir="{git_dir}" config --local knives.machine || true)"\n'
+            '    if [ "$bare" != false ] || [ -z "$worktree" ] || [ -z "$machine" ]; then\n'
+            f'        echo "before git $*: bare=$bare worktree=$worktree machine=$machine" >>"{log}"\n'
+            '    fi\n'
+            'fi\n'
+            f'exec "{real_git}" "$@"',
+        )
+
+        # When: the installer joins the machine.
+        result = self.install()
+
+        # Then: it succeeds, and the git directory has the ledger as its origin. At no git call
+        # did it have an origin without core.bare false, core.worktree and knives.machine.
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        origin_first = log.read_text(encoding="utf-8") if log.exists() else ""
+        self.assertEqual(origin_first, "", "the git directory had an origin before its other keys:\n" + origin_first)
+        self.assertEqual(self.ledger_config("--get-all", "remote.origin.url"), [LEDGER_URL], output)
+
+    def test_the_repair_of_a_git_directory_with_no_origin_keeps_its_work_tree(self) -> None:
+        git_dir = self.ledger_git_dir()
+        work_tree = self.root / "another-work-tree"
+
+        # Given: a new machine whose ledger git directory has core.bare false and no origin, and
+        # whose core.worktree names another directory, as a person who made the git directory by
+        # hand can set it.
+        (self.config / "state.json").unlink()
+        git_dir.parent.mkdir(parents=True)
+        work_tree.mkdir()
+        for args in (
+            ["init", "--quiet", "--bare", str(git_dir)],
+            [f"--git-dir={git_dir}", "config", "core.bare", "false"],
+            [f"--git-dir={git_dir}", "config", "core.worktree", str(work_tree)],
+        ):
+            subprocess.run(["git", *args], check=True, env=self.env)
+
+        # When: the installer joins the machine.
+        result = self.install()
+
+        # Then: it succeeds, and the git directory keeps that work tree. It has the ledger as its
+        # one origin.
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertEqual(self.ledger_config("--get-all", "core.worktree"), [str(work_tree)], output)
+        self.assertEqual(self.ledger_config("--get-all", "remote.origin.url"), [LEDGER_URL], output)
+
+    def test_a_git_directory_with_an_origin_and_no_machine_name_gets_one(self) -> None:
+        git_dir = self.ledger_git_dir()
+
+        # Given: a new machine whose ledger git directory has an origin and core.bare false, but
+        # no knives.machine. An older installer leaves it so when it stops after `git remote add`
+        # and before it writes knives.machine.
+        (self.config / "state.json").unlink()
+        git_dir.parent.mkdir(parents=True)
+        for args in (
+            ["init", "--quiet", "--bare", str(git_dir)],
+            [f"--git-dir={git_dir}", "config", "core.bare", "false"],
+            [f"--git-dir={git_dir}", "config", "core.worktree", str(self.config / "ledger")],
+            [f"--git-dir={git_dir}", "remote", "add", "origin", LEDGER_URL],
+        ):
+            subprocess.run(["git", *args], check=True, env=self.env)
+
+        # When: the installer joins the machine.
+        result = self.install()
+
+        # Then: it succeeds, and the git directory names this machine alone. It keeps its one
+        # origin and core.bare false.
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertEqual(self.ledger_config("--get-all", "knives.machine"), [MACHINE], output)
+        self.assertEqual(self.ledger_config("--get-all", "remote.origin.url"), [LEDGER_URL], output)
+        self.assertEqual(self.ledger_config("core.bare"), ["false"], output)
 
     def test_two_spellings_of_one_ledger_make_one_git_directory(self) -> None:
         # Given: two forks naming the same ledger repository in different case,

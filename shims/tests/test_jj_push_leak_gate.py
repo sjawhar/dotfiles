@@ -1100,8 +1100,8 @@ class JjPushLeakGateTest(unittest.TestCase):
                 self.assertEqual((var, url, r.stdout.strip()), (var, url, want))
 
     def test_a_public_fork_outside_any_list_is_guarded(self):
-        # dispatch://BET-706 R1/A3: sjawhar/oh-my-pi was on no list and has no cache entry (the check writes entries
-        # only for theorem-labs); gh says it is public, so the checkout is guarded.
+        # dispatch://BET-706 R1/A3: sjawhar/oh-my-pi was on no list and this test's own cache holds no entry for it;
+        # gh says it is public, so the checkout is guarded.
         (self.ghdir / "gh").write_text(
             f'#!/bin/bash\nprintf \'%s\\n\' "$*" >> "{self.ghlog}"\n'
             '[[ " $* " == *" repos/sjawhar/oh-my-pi "* ]] && { echo public; exit 0; }\nexit 1\n', encoding="utf-8")
@@ -1114,8 +1114,8 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertIn("api repos/sjawhar/oh-my-pi --jq .visibility", self.gh_calls())
 
     def test_every_other_target_of_a_guarded_checkout_is_decided_by_the_check(self):
-        # As for a git push from this checkout: a private target passes, a public or non-GitHub one is scanned, one
-        # whose visibility cannot be read is refused.
+        # As for a git push from this checkout: a private target passes, a public or non-GitHub one is scanned, and a
+        # theorem-labs one whose visibility cannot be read is refused (one of another owner would be scanned as public).
         # The check reads the visibility of every remote of the checkout, so the unreadable one is added last.
         targets = {"private": PRIVATE, "upstream": "https://github.com/rocq-prover/rocq.git",
                    "fake": "https://notgithub.com/sjawhar/rocq.git", "local": str(self.tmp / "build-box.git")}
@@ -1190,9 +1190,9 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertNotIn("LEAK CHECK", r.stderr)
         self.git("config", "core.sshCommand", "ssh -F /nonexistent")
         c = self.leak(path="guard2.v")
-        # Spec R4: a target whose visibility cannot be read is refused before anything is scanned, so the check may
-        # refuse this target unread or refuse the leaked content. Either way it must refuse, and nothing may reach the
-        # receiver.
+        # Spec R4: with core.sshCommand set, the check cannot tell where an ssh alias goes and refuses the target before
+        # anything is scanned (whatever its owner), so the check may refuse this target unread or refuse the leaked
+        # content. Either way it must refuse, and nothing may reach the receiver.
         self.assert_refused_either(self.jj("git", "push", "-b", "b1"), c, url)
 
     def test_an_unguarded_checkout_is_untouched(self):

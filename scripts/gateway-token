@@ -10,10 +10,11 @@
 # credential is the machine's own identity, and there is nothing to keep fresh between calls.
 #
 # Who it prints a token for:
-#   - no ACCOUNT, on a Google VM: this VM's own attached account, from its metadata server, which
-#     issues a token of any audience for its own identity and needs no IAM role. sami-devbox runs as
-#     dev-sjawhar@theorem-agent-infra, which ossv_box_accounts.py serves as team `box` with no pins,
-#     so this box needs no impersonation at all.
+#   - no ACCOUNT, on a Google VM: the account the metadata server serves, which issues a token of
+#     any audience for its own identity and needs no IAM role. On sami-devbox that server is the
+#     host's relay, which serves dev-box@theorem-agent-infra once ~/.config/agent-identity/account
+#     names it (installers/agent-identity.sh) and the VM's attached account before; each is an
+#     account ossv_box_accounts.py serves with no pins, so this script impersonates nobody there.
 #   - ACCOUNT, on a Google VM: that account's token through IAM Credentials generateIdToken, with
 #     this VM's own access token. The caller needs roles/iam.serviceAccountOpenIdTokenCreator on it.
 #   - ACCOUNT, off Google Cloud: the same generateIdToken, with the box's federated access token

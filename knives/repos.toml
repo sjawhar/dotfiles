@@ -209,6 +209,7 @@ release = "https://github.com/theorem-labs/rocq.git"
 base = "v9.3"
 # A consumer whose name names a customer is in the private part, repos.local.toml.
 consumers = ["theorem-labs/grading-tools"]
+ledger = "sjawhar/.knives-ledger"
 
 # The 9.0 line (BET-155: the xv6iris grader runs a pinned Rocq 9.0.1). Its members fork
 # from the V9.0.1 tag (9dad753e3d) on upstream's 9.0 release branch, which is the base
