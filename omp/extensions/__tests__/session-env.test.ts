@@ -137,11 +137,13 @@ describe("the Python eval kernel's environment", () => {
 		expect(await droppedByKernel(exported)).toEqual([]);
 	});
 
-	test("admits the cache directories the session launchers set", async () => {
-		// scripts/agent-session and .bashrc put each tool's cache on the big disk. A name the kernel
-		// drops sends a tool run from an eval cell back to its home default: on 2026-11-21 `go test`
-		// from eval cells filled ~/.cache/go-build to 475 GB.
-		const cacheVariables = [
+	test("admits the cache directories and session paths the session launchers set", async () => {
+		// scripts/agent-session and .bashrc put each tool's cache on the big disk, and give the
+		// session its own scratch. A name the kernel drops sends a tool run from an eval cell back
+		// to its home default: on 2026-11-21 `go test` from eval cells filled ~/.cache/go-build to
+		// 475 GB, and without PLAYWRIGHT_SKIP_BROWSER_GC a `playwright install` from a cell deletes
+		// browsers in the directory agent boxes share.
+		const sessionVariables = [
 			"GOCACHE",
 			"GOMODCACHE",
 			"UV_CACHE_DIR",
@@ -150,8 +152,25 @@ describe("the Python eval kernel's environment", () => {
 			"PIP_CACHE_DIR",
 			"BUN_INSTALL_CACHE_DIR",
 			"HF_HOME",
+			"AGENT_SESSION_SCRATCH",
+			"GOTMPDIR",
+			"MISE_DATA_DIR",
+			"MISE_CACHE_DIR",
+			"PLAYWRIGHT_BROWSERS_PATH",
+			"PLAYWRIGHT_SKIP_BROWSER_GC",
+			"PUPPETEER_CACHE_DIR",
+			"NPM_CONFIG_PREFIX",
 		];
-		expect(await droppedByKernel(cacheVariables)).toEqual([]);
+		expect(await droppedByKernel(sessionVariables)).toEqual([]);
+		// Each one has a value to pass: a launcher exports it.
+		const repo = path.join(import.meta.dir, "..", "..", "..");
+		const launchers = (
+			await Promise.all(
+				[".bashrc", "scripts/agent-session"].map(file => Bun.file(path.join(repo, file)).text()),
+			)
+		).join("\n");
+		const unset = sessionVariables.filter(name => !new RegExp(`\\bexport\\b[^\\n]*\\b${name}=`).test(launchers));
+		expect(unset).toEqual([]);
 	});
 });
 

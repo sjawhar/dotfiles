@@ -616,6 +616,14 @@ codexResets:
 # a cache path, not a secret. UV_LINK_MODE goes with UV_CACHE_DIR (agent-session
 # says why). mise's python3 shim keeps a CARGO_HOME it is given and sets
 # ~/.cargo only when there is none.
+# The rest of the session environment those two set, for the same reason: the
+# session's own TMPDIR root and Go build tree (AGENT_SESSION_SCRATCH, GOTMPDIR,
+# which session-scratch-reap removes with the session), mise's store and cache
+# (MISE_DATA_DIR, MISE_CACHE_DIR), the browser downloads (PLAYWRIGHT_BROWSERS_PATH,
+# PUPPETEER_CACHE_DIR) and npm's global prefix (NPM_CONFIG_PREFIX). Without
+# PLAYWRIGHT_SKIP_BROWSER_GC a `playwright install` from an eval cell deletes
+# every browser whose links it cannot read in the browsers directory agent boxes
+# share (.bashrc says why); on 2026-11-21 a fresh kernel had none of the eight.
 eval:
   envPassthrough:
     names:
@@ -631,6 +639,14 @@ eval:
       - PIP_CACHE_DIR
       - BUN_INSTALL_CACHE_DIR
       - HF_HOME
+      - AGENT_SESSION_SCRATCH
+      - GOTMPDIR
+      - MISE_DATA_DIR
+      - MISE_CACHE_DIR
+      - PLAYWRIGHT_BROWSERS_PATH
+      - PLAYWRIGHT_SKIP_BROWSER_GC
+      - PUPPETEER_CACHE_DIR
+      - NPM_CONFIG_PREFIX
     prefixes:
       - DISPATCH_
       - ENVOY_
