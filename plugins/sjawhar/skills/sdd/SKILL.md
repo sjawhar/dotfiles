@@ -61,8 +61,8 @@ Each slice has one class (platform or application, infrastructure, task authorin
 - Then have a `reviewer` check what the repair of a reused spec, plan or review affects.
 - The plan lives in the issue (its Dispatch document or GitHub issue body), not in a repo file or a PR.
 - Plan the full request.
-- Split parallel work into units no two workers edit.
-- Name the shared contracts before dispatch: two workers who meet an interface mid-flight both rewrite it.
+- Split parallel work into units no two workers edit: two workers who meet an interface mid-flight both rewrite it.
+- Name the shared contracts before dispatch, for the same reason.
 - Check every claim about existing code against what it names. A number read in a skill is a claim too.
 - Cite file:line for every claim about existing code.
 - **Read `references/slices.md` now:** what a slice is, what it merges as and ends in, how to cut, order and run slices, and a slice's tasks, contracts and scaffolding.
@@ -80,7 +80,7 @@ Each slice has one class (platform or application, infrastructure, task authorin
 - Dispatch independent work at once.
 - Keep unblocked work moving.
 - Take results as events, never by polling: they arrive as messages.
-- Do not sit in `wait` while other work is open.
+- Do not sit in `wait` while other work is open, for the same reason.
 
 ## 6. Acceptance after each slice
 
