@@ -37,7 +37,7 @@ Do every step now, until nothing is left over: a step left as a suggestion gets 
    - Do not key it to a run that completes (a run can finish with the apply skipped), to a manual `workflow_dispatch` run of the same workflow, or to the PR's head sha, which a squash merge replaces.
    - **Concurrency group:** a deploy workflow with a concurrency group holds one running and one pending run. A newer merge replaces the pending one.
    - Re-resolve by ancestry when a pending run is cancelled: a cancelled pending run deployed nothing, and its merges ride the newest run.
-   - Do not report a cancelled pending run, block on it, or call it the reason the change is not live.
+   - Do not report a cancelled pending run, block on it, or call it the reason the change is not live, for the same reason.
    - Read a coalescing queue's own semantics before you blame a cancellation.
    - Do not carry one workflow's semantics to another.
    - Report only a failed deploy run that carries your merge.
