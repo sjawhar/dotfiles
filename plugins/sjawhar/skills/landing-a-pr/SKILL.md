@@ -23,7 +23,9 @@ You make the PR ready; auto-merge (`gh pr merge --auto`) merges it.
 - Before you enable auto-merge, tell every session that can push to the branch, including a subagent that handed you the PR, to stop pushing, amending or editing the body.
 - Do not use `--admin` or any bypass that skips a check that tests the work.
 - When the person who owns the work approves the PR, or says to merge or consolidate PRs, do it yourself; do not hand it back to them to click.
-- **Legion's PRs (branch `legion/<KEY>`):** the session that asked Legion for the issue watches and does not merge. Legion, the daemon that runs Dispatch issues labelled `legion` through phase sessions, merges the PRs it produces: its merger session merges the head it read.
+- **Legion's PRs (branch `legion/<KEY>`):** the session that asked Legion for the issue watches and does not merge.
+  - Legion, the daemon that runs Dispatch issues labelled `legion` through phase sessions, merges the PRs it produces.
+  - Legion's merger session merges the head it read.
 - After the required checks and review pass:
   - Merge instead of pushing more: each push restarts every check.
   - Push first only a fix for a defect that would do harm once merged (wrong behavior, a security hole, bad data), with the other fixes folded in.
