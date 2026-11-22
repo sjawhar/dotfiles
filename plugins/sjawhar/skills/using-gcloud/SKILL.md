@@ -7,7 +7,7 @@ description: Use when gcloud, az, a registry or a Google client is refused (PERM
 
 ## Which identity runs
 
-- gcloud runs as the machine's own identity, configuration `box` (project `autoformalization`), which needs no sign-in and does not expire. On an Azure VM that is the service account `dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com`; the header of `installers/gcloud-box.sh` says what it is on a Google VM and on an Azure VM.
+- gcloud runs as the machine's own identity, configuration `box` (project `autoformalization`), which needs no sign-in and does not expire. On an Azure VM that is the service account `dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com`. The header of `installers/gcloud-box.sh` says what that identity is on a Google VM and on an Azure VM.
 - In an agent session, Google client libraries and Pulumi act as that identity too:
   - On an Azure VM the session points `GOOGLE_APPLICATION_CREDENTIALS` at the keyless configuration `~/.config/gcloud/box_credential_config.json`.
   - On a Google VM they take that identity from the metadata server.
@@ -19,7 +19,7 @@ description: Use when gcloud, az, a registry or a Google client is refused (PERM
 
 ## A permission error
 
-- Never move a person's credential to where a machine keeps it: a token minted from a person's login and given to `docker login`, a git credential helper or a kubectl context lands in a file every process on the host can read, and logs each later act as that person.
+- Never move a person's credential to where a machine keeps it: a token minted from a person's login and given to `docker login`, a git credential helper or a kubectl context lands in a file every process on the host can read. That token logs each later act as that person.
 - Run as the account meant to hold the access, or impersonate it (`--impersonate-service-account`).
 
 Take the first route that fits:
