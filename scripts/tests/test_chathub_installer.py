@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -141,6 +142,17 @@ echo "$*" >> "$SYSTEMCTL_LOG"
 if [ "${FAIL_RESTART:-}" = 1 ] && [ "${2:-}" = restart ]; then exit 1; fi
 """
 
+# Stands in for `touch` when the restart marker cannot be made, as on a full disk: it fails
+# for the marker and passes every other path to the real touch at REAL_TOUCH.
+TOUCH_STUB = r"""
+for arg in "$@"; do
+    case "$arg" in
+        *tuwunel-restart-pending) echo "touch: cannot touch '$arg': No space left on device" >&2; exit 1 ;;
+    esac
+done
+exec "$REAL_TOUCH" "$@"
+"""
+
 RELAY_URL = "http://127.0.0.1:29342"
 TOKEN_RE = r"\A[0-9a-f]{64}\Z"
 
@@ -250,6 +262,16 @@ class ChathubInstaller(unittest.TestCase):
 
     def tuwunel_restarts(self) -> int:
         return self.systemctl_log.read_text(encoding="utf-8").splitlines().count("--user restart tuwunel")
+
+    def marker_fails(self) -> dict[str, str]:
+        """The environment of one run whose `touch` cannot make the restart marker."""
+        real_touch = shutil.which("touch")
+        if real_touch is None:
+            self.fail("no touch on PATH")
+        failing = self.root / "failing-touch"
+        failing.mkdir(exist_ok=True)
+        write_executable(failing / "touch", TOUCH_STUB)
+        return {"PATH": f"{failing}:{self.env['PATH']}", "REAL_TOUCH": real_touch}
 
     def relay_tokens(self) -> tuple[str, str]:
         """The relay registration's tokens, each 64 lower-case hex, and not equal."""
@@ -511,7 +533,7 @@ class ChathubInstaller(unittest.TestCase):
         self.assertFalse(self.marker.exists())
 
     def test_registration_made_before_a_failed_run_is_restarted_by_the_next_run(self) -> None:
-        """The marker is made with the registration, so a run that stops later still leaves
+        """The marker is made before the registration, so a run that stops later still leaves
         the restart to the next run. Discord renders after whatsapp and fetches its example
         config with curl only when that config is missing."""
         self.install()
@@ -530,6 +552,64 @@ class ChathubInstaller(unittest.TestCase):
 
         self.assertEqual(self.tuwunel_restarts(), 1)
         self.assertFalse(self.marker.exists())
+
+    def test_switch_change_whose_marker_fails_is_restarted_by_the_next_run(self) -> None:
+        """The marker is made before the relay registration is replaced, so a run that cannot
+        make it leaves the registration as it was and no temporary file behind, and the next
+        run writes it and restarts."""
+        self.install()
+        self.clear_logs()
+        self.switch.touch()
+
+        result = self.run_installer(**self.marker_fails())
+
+        self.assertNotEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIsNone(self.yaml(self.relay_reg)["url"])
+        self.assertEqual(self.tuwunel_restarts(), 0)
+        self.assertEqual(list(self.state.glob(".envoy-relay.*")), [])
+
+        self.install()
+
+        self.assertEqual(self.tuwunel_restarts(), 1)
+        self.assertEqual(self.yaml(self.relay_reg)["url"], RELAY_URL)
+        self.assertFalse(self.marker.exists())
+
+        self.clear_logs()
+        self.switch.unlink()
+
+        result = self.run_installer("relay-registration", **self.marker_fails())
+
+        self.assertNotEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(self.yaml(self.relay_reg)["url"], RELAY_URL)
+        self.assertEqual(list(self.state.glob(".envoy-relay.*")), [])
+
+        self.install()
+
+        self.assertEqual(self.tuwunel_restarts(), 1)
+        self.assertIsNone(self.yaml(self.relay_reg)["url"])
+        self.assertFalse(self.marker.exists())
+
+    def test_new_registration_whose_marker_fails_is_restarted_by_the_next_run(self) -> None:
+        """The marker is made before a bridge or double-puppet registration is written, so a
+        run that cannot make it writes no registration, and the next run writes it and restarts."""
+        self.install()
+        for name in ("whatsapp.yaml", "doublepuppet.yaml"):
+            with self.subTest(registration=name):
+                reg = self.state / "registrations" / name
+                self.clear_logs()
+                reg.unlink()
+
+                result = self.run_installer(**self.marker_fails())
+
+                self.assertNotEqual(result.returncode, 0, result.stderr + result.stdout)
+                self.assertFalse(reg.exists())
+                self.assertEqual(self.tuwunel_restarts(), 0)
+
+                self.install()
+
+                self.assertEqual(self.tuwunel_restarts(), 1)
+                self.assertTrue(reg.is_file())
+                self.assertFalse(self.marker.exists())
 
     def test_unusable_token_is_replaced(self) -> None:
         """Tuwunel stops loading registrations/ at a file it cannot parse, so an empty token

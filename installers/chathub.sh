@@ -5,8 +5,9 @@
 # every bridge config on the values below and keeps each bridge's tokens.
 # It also registers the chat relay of dojo's Compose file (registrations/envoy-relay.yaml);
 # its url is null, so Tuwunel sends it nothing, until envoy-relay.on exists in the state
-# folder. `chathub.sh relay-registration` writes only that file and, when it changed, the
-# marker that makes the next full run restart Tuwunel; it runs neither mise nor systemctl.
+# folder. This call writes only that file and, when it changed, the marker that makes the
+# next full run restart Tuwunel; it runs neither mise nor systemctl:
+#   env -u XDG_DATA_HOME ~/.dotfiles/installers/chathub.sh relay-registration
 # Switch the relay on, or off:
 #   touch ~/.local/share/chathub/envoy-relay.on && env -u XDG_DATA_HOME ~/.dotfiles/installers/chathub.sh
 #   rm -f ~/.local/share/chathub/envoy-relay.on && env -u XDG_DATA_HOME ~/.dotfiles/installers/chathub.sh
@@ -25,7 +26,8 @@ RESTART_PENDING="$STATE/tuwunel-restart-pending"
 # a namespace unanchored), so Tuwunel sends it each event of his rooms. Tokens are read back
 # as plain text, without mise, and a missing or unusable one is made new; both are checked
 # before anything is written, since Tuwunel stops loading registrations/ at a file it cannot
-# parse. The file is replaced only when its text changes, and the marker asks for a restart.
+# parse. The file is replaced only when its text changes. The marker that asks for a restart
+# is made before the file is replaced, so a run that stops partway never loses the restart.
 write_relay_registration() {
     local as_token="" hs_token="" url=null tmp
     local token_re='^[0-9a-f]{64}$'
@@ -57,8 +59,8 @@ write_relay_registration() {
         rm -f "$tmp"
         return
     fi
+    touch "$RESTART_PENDING" || { rm -f "$tmp"; exit 1; }
     mv -f "$tmp" "$RELAY_REG"
-    touch "$RESTART_PENDING"
 }
 
 case "$#:${1:-}" in
@@ -95,9 +97,11 @@ changed=()
 
 # Double puppeting: one registration whose user namespace covers the hub, so every
 # bridge can act as @sami, joining new chat rooms for him and posting what he sends
-# from his phone as him. It has no url, so Tuwunel sends it no events.
+# from his phone as him. It has no url, so Tuwunel sends it no events. The restart marker is
+# made before the file, so a run that stops partway never loses the restart.
 dp_reg="$STATE/registrations/doublepuppet.yaml"
 if [ ! -f "$dp_reg" ]; then
+    touch "$RESTART_PENDING"
     (
         umask 077
         cat >"$dp_reg" <<EOF
@@ -113,7 +117,6 @@ namespaces:
       exclusive: false
 EOF
     )
-    touch "$RESTART_PENDING"
 fi
 dp_secret="as_token:$("$YQ" '.as_token' "$dp_reg")"
 
@@ -184,9 +187,11 @@ render_bridge() {
         changed+=("$name")
     fi
 
+    # The restart marker comes before the registration, so a run that stops partway never
+    # loses the restart.
     if [ ! -f "$reg" ]; then
-        "$MISE" exec -- "mautrix-$name" -g -c "$cfg" -r "$reg" >/dev/null
         touch "$RESTART_PENDING"
+        "$MISE" exec -- "mautrix-$name" -g -c "$cfg" -r "$reg" >/dev/null
     fi
 }
 
