@@ -58,7 +58,7 @@ gh api repos/<owner>/<repo>/issues/comments/<id> -q .body | grep -o '<!-- legion
 
 ## List what a session touched
 
-- Run both `gh search` lines: `issues` skips PR comments.
+- Run the `gh search` line with `issues` and again with `prs`: `issues` skips PR comments.
 
 | `gh api` endpoint, for one repository | Sweeps |
 | --- | --- |
@@ -70,10 +70,8 @@ gh api repos/<owner>/<repo>/issues/comments/<id> -q .body | grep -o '<!-- legion
 ```bash
 git log -n <N> --format='@@@%h %s%n%B' <ref> | awk -v id='<id>' '/^@@@/{h=substr($0,4); next} $0 ~ ("^Omp-Session: " id) {print h}' | sort -u
 jj log --no-graph -r 'description(glob:"*Omp-Session: <id>*")' -T 'commit_id.short() ++ " " ++ description.first_line() ++ "\n"'
-gh search issues "<id> in:comments" --owner <owner>
-gh search prs    "<id> in:comments" --owner <owner>
-gh api "repos/<owner>/<repo>/issues/comments" --paginate -q '.[] | select(.body | contains("<id>")) | .html_url'
-gh api "repos/<owner>/<repo>/pulls/comments" --paginate -q '.[] | select(.body | contains("<id>")) | .html_url'
+gh search issues "<id> in:comments" --owner <owner>   # again with prs
+gh api "repos/<owner>/<repo>/issues/comments" --paginate -q '.[] | select(.body | contains("<id>")) | .html_url'   # again with pulls/comments
 ```
 
 - The `git log` line matches the whole message, not `%(trailers)`: a merge-queue squash appends a `Co-authored-by` paragraph after the `Omp-Session` lines, and git reads trailers from the last paragraph only.
