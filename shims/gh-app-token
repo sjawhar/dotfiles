@@ -29,6 +29,20 @@ the secrets-broker secret holding the App's key; a fallback secret is optional:
       broker-secret   = GITHUB_APP_<PERSON>  ; a github-app secret of the secrets broker
       fallback-secret = NAME_OF_SECRET       ; a personal access token, from `secrets get`
       key-secret      = NAME_OF_SECRET       ; this machine only: mint from secretsd (below)
+      refuse-owner    = LOGIN                ; this machine only, one value per owner (below)
+
+A machine refuses an owner for a profile by naming it in refuse-owner, in its own
+`~/.config/git/config`. Only that file counts, whatever XDG_CONFIG_HOME is; ~/.gitconfig and a
+repository's config do not. For a refused owner the helper reads and seeds no cache, mints no
+App token and falls back to no personal token: it prints one line on stderr, prints `quit=1` on
+stdout in credential mode, logs `refused` in decisions.log and exits 1. An owner-wide broker
+release minted for another owner caches no token for a refused owner. With no
+`~/.config/git/config`, no owner is refused. A dangling link at that path, a file this process
+may not read, an unsearchable ~/.config or ~/.config/git, and a file git cannot parse each
+refuse every owner. git's stderr is not read: GIT_TRACE and a git wrapper on PATH write there.
+refuse-owner is multi-valued and matches without regard to case. Add each owner with
+  git config --file ~/.config/git/config --add gh-app.<profile>.refuse-owner <login>
+oryx refuses trajectory-labs-pbc for the agent profile (HOME-216).
 
 A machine with no agent-secrets helper has no broker identity, so the broker refuses every
 session there (installers/agent-secrets.sh says where the helper runs). Such a machine opts in
@@ -202,6 +216,10 @@ class UninstalledOwnerError(AppTokenError):
     """The broker released no token for the requested GitHub owner."""
 
 
+class RefusedOwnerError(AppTokenError):
+    """This machine must not issue a token for the requested owner."""
+
+
 class BrokerInstallation(TypedDict):
     installation_id: int
     token: str
@@ -219,6 +237,56 @@ def git_config_optional(key: str) -> str | None:
     if result.returncode != 0 or not value:
         return None
     return value
+
+
+def refused_owners(profile: str) -> frozenset[str]:
+    """The owners this machine refuses for profile, casefolded: every gh-app.<profile>.refuse-owner
+    in ~/.config/git/config, the machine's own git config, found from HOME at each call.
+
+    git reads that one file, named with --file, and runs in / so that it finds no repository. A plain
+    `git config` reads $XDG_CONFIG_HOME/git/config in its place whenever XDG_CONFIG_HOME is set, and
+    Legion panes set it to a directory with no git config, so there every refusal was skipped
+    (HOME-216). ~/.gitconfig, GIT_CONFIG_GLOBAL, the system config and a repository's config are never
+    read: other machines share the first, and a repository is not the machine.
+
+    Not lenient like git_config_optional, for which any failure means "not set": that would serve a
+    refused owner whenever git cannot read the file. git exits 1 for a missing file and for a file it
+    may not open alike, so the file system decides "missing" against "cannot see" before git runs:
+    - No file at the path: no owner is refused.
+    - A dangling link at the path, a file this process may not read, or a path it cannot look up
+      (an unsearchable ~/.config or ~/.config/git): every owner is refused.
+    Then git's exit 0 gives the owners, and exit 1 with nothing on stdout means the key is not set, so
+    no owner is refused. git's stderr is not read: GIT_TRACE and a git wrapper on PATH write there on
+    every call. Any other exit, such as 128 for a file git cannot parse, or a git that cannot run,
+    raises AppTokenError, so every owner is refused."""
+    key = f"gh-app.{profile}.refuse-owner"
+    config = Path.home() / ".config" / "git" / "config"
+    failure = f"failed to read {key} from {config}, so every owner is refused"
+    try:
+        os.stat(config)
+    except (FileNotFoundError, NotADirectoryError) as error:
+        if os.path.islink(config):
+            raise AppTokenError(failure) from error
+        return frozenset()
+    except OSError as error:
+        raise AppTokenError(failure) from error
+    if not os.access(config, os.R_OK):
+        raise AppTokenError(failure)
+    try:
+        result = subprocess.run(
+            ["git", "config", "--file", str(config), "--get-all", key],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd="/",
+        )
+    except (OSError, UnicodeDecodeError) as error:
+        raise AppTokenError(failure) from error
+    if result.returncode == 0:
+        return frozenset(value.casefold() for value in result.stdout.splitlines())
+    if result.returncode == 1 and not result.stdout:
+        return frozenset()
+    raise AppTokenError(failure)
 
 
 def git_config(key: str) -> str:
@@ -794,10 +862,16 @@ def select_owner(explicit_owner: str | None, request: dict[str, str]) -> str | N
 
 
 def get_token(
-    profile: str, owner: str, min_lifetime: int = TOKEN_REFRESH_MARGIN, scope: dict[str, Any] | None = None
+    profile: str,
+    owner: str,
+    min_lifetime: int = TOKEN_REFRESH_MARGIN,
+    scope: dict[str, Any] | None = None,
+    *,
+    refused: frozenset[str],
 ) -> str:
     """Return a token for one owner (narrowed by scope when given), never reusing another owner's
-    or another scope's cache, and never a cached one with min_lifetime seconds or less left."""
+    or another scope's cache, and never a cached one with min_lifetime seconds or less left. An
+    owner-wide release caches no token for an owner in refused (refused_owners)."""
     owner = owner.casefold()
     key = scope_key(scope)
     cached_token = get_cached_token(profile, owner, min_lifetime, key)
@@ -818,9 +892,12 @@ def get_token(
         covered = {name: installation["installation_id"] for name, installation in installations.items()}
     remember_covered_owners(app_id, covered)
     if not scope:
-        # An owner-wide release holds every covered owner's token: cache them all. A narrowed
-        # one is cached under its scope alone, never in an owner-wide entry.
+        # An owner-wide release holds every covered owner's token: cache them all but the ones
+        # this machine refuses. A narrowed one is cached under its scope alone, never in an
+        # owner-wide entry.
         for name, installation in installations.items():
+            if name in refused:
+                continue
             write_cache_file(
                 token_cache_file(profile, name),
                 {"token": installation["token"], "expires_at": installation["expires_at"]},
@@ -951,12 +1028,19 @@ def main(argv: list[str] | None = None) -> int:
         print("gh-app-token: target owner required: pass --owner or set GH_APP_OWNER", file=sys.stderr)
         return 1
 
-    if CACHE_DIR == DEFAULT_CACHE_DIR:
-        seed_cache_dir(CACHE_DIR, OLD_CACHE_DIR)
-    scope = scope_of(args.repo, args.read_only)
     try:
+        refused = refused_owners(args.profile)
+        if owner.casefold() in refused:
+            raise RefusedOwnerError(
+                f"owner {owner} is refused for profile {args.profile} on this machine "
+                f"(gh-app.{args.profile}.refuse-owner): no token"
+            )
+
+        if CACHE_DIR == DEFAULT_CACHE_DIR:
+            seed_cache_dir(CACHE_DIR, OLD_CACHE_DIR)
+        scope = scope_of(args.repo, args.read_only)
         try:
-            token = get_token(args.profile, owner, required_lifetime(), scope)
+            token = get_token(args.profile, owner, required_lifetime(), scope, refused=refused)
             decision = "app"
         except UninstalledOwnerError:
             if scope:
@@ -988,13 +1072,20 @@ def main(argv: list[str] | None = None) -> int:
                 ) from None
             decision = "fallback-personal-token"
     except AppTokenError as error:
-        print(f"gh-app-token: {error}", file=sys.stderr)
+        message = f"gh-app-token: {error}"
+        print(message, file=sys.stderr)
         if credential_mode:
             # Stop git's helper chain: a broker failure, or an uncovered owner
             # with no usable fallback, must fail loudly, never silently fall
             # back to the user's own credentials.
             print("quit=1")
-        log_decision_after_answer(args.profile, owner, request, "refused", str(error))
+        log_decision_after_answer(
+            args.profile,
+            owner,
+            request,
+            "refused",
+            message if isinstance(error, RefusedOwnerError) else str(error),
+        )
         return 1
 
     if credential_mode:
