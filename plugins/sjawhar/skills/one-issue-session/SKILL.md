@@ -44,7 +44,7 @@ You own one issue, and you end when it is done. Filing part of your work as a ne
 - Do every part of your outcome in this issue: review findings, follow-ups, fixes to your own pull requests, the parts you found late.
 - Create no child issue for any of it, unless you run `sdd`: it files each piece of work you own as a child issue of its root, as `sdd` says.
 - Do not start work outside your outcome (another stream's bug, a separate feature): it is not yours.
-- For such work, search Dispatch, then file it unclaimed for its owner.
+- For the same reason, search Dispatch, then file such work unclaimed for its owner.
 - When your issue's spec, a file or a command's output does not settle a choice of scope or of owner (whether a piece of work is part of your outcome, or whose it is), ask your issue's Dispatch project's Legion controller.
   - That is the session that holds the Envoy role `legion-<project>-controller`, with the project key in lower case (`legion-infra-controller`).
   - An Envoy role is a named duty that one session holds at a time.
@@ -60,8 +60,9 @@ You own one issue, and you end when it is done. Filing part of your work as a ne
 | Otherwise | Stay alive, and write in your issue why you stay and what you wait for |
 | The record's header names no heartbeat file, or that file does not exist | Stay alive too |
 
+**Why** you stay alive in the last two cases: a row alone, or a scheduler that has stopped, restarts nothing.
+
 - A running job restarts the work only when your issue has a row in the stream record's order of work and the scheduler's heartbeat file (its path is in the record's header) is under 15 minutes old. The scheduler then starts a session on a row whose blocker is done.
-- A row alone, or a scheduler that has stopped, restarts nothing.
 
 To end:
 
