@@ -265,12 +265,12 @@ platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.ta
 # 3.8.2 daemon (`secrets grants`, `secrets get <human key> --no-request`). The daemon is restarted
 # after the merge, at a time its owner allows.
 # 3.8.4 (2026-11-21) finds the caller's omp process by the name in its /proc/<pid>/stat, not by its
-# exe link, which the daemon cannot read from the hardened unit's own user namespace, so it grants
-# a Legion pane's browser access (sjawhar/forward#79). Its wire protocol is still 4, the same as
-# 3.8.3 (`git diff v3.8.3 v3.8.4 -- crates/proto` is empty), so this client was proven read-only
-# against the running 3.8.3 daemon (`secrets grants`, `secrets get <human key> --no-request`). The
-# daemon and `forward serve` are restarted after the merge, at a time no grant is live and no OAuth
-# callback is armed.
+# exe link, which the daemon cannot read from the hardened unit's own user namespace: under that
+# unit a 3.8.3 daemon refused every pane grant (NO_SCOPE), and 3.8.4 grants a Legion pane browser
+# access (sjawhar/forward#79). Its wire protocol is still 4, the same as 3.8.3 (`git diff v3.8.3
+# v3.8.4 -- crates/proto` is empty), so this client was proven read-only against the running 3.8.3
+# daemon (`secrets grants`, `secrets get <human key> --no-request`). The daemon and `forward serve`
+# are restarted after the merge, at a time no grant is live and no OAuth callback is armed.
 version = "3.8.4"
 platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz" }
 
