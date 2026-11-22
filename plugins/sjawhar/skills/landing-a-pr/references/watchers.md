@@ -11,7 +11,6 @@ Give `ce-babysit-pr` these instructions before its first tick:
    - For a real conflict, or a base change the PR needs to build or pass:
      - Message the person who owns the work.
      - Integrate only when they decide to.
-   - On a published or reviewed head use only a forward jj merge; do not rebase, amend, squash or force-push it, because that voids the reviews of that head.
 2. Wake on Envoy `notifications.github.<owner>.<repo>.pr.<N>.>`.
    - Run `pr-snapshot watch` in the background.
    - Do not block on `gh pr checks --watch`, `gh run watch` or a sleep loop: the turn misses review events.
@@ -24,7 +23,7 @@ Give `ce-babysit-pr` these instructions before its first tick:
    - Zero checks is not "all passed".
 4. Skip your checkout step.
    - Edit the PR title, body and `## Verification` directly (`ce-commit-push-pr` is disabled here).
-   - Your sub-skills do not rebase, force-push, approve gated runs or merge.
+   - Your sub-skills do not approve gated runs or merge.
 5. `MERGEABLE`, `CLEAN`, no open review items and settled checks do not make the PR ready.
    - Proof and a review of the current head decide.
 6. Keep your dedup, stale-sha cancellation, trajectory triggers, settle window and three-day backstop, so one event does not start two fix rounds.

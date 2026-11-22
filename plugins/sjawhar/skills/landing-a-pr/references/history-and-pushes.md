@@ -5,8 +5,6 @@ Read before you resolve a conflict, integrate a base, change a stack, or push af
 ## When to integrate the base
 
 - Integrate for a real conflict, a required dependency, or a decision by the person who owns the work (or the stack's owner); not only to be up to date.
-- On a published or reviewed head, merge forward: a rewrite deletes the commit its verdict names.
-  - Do not rebase, amend, describe over or squash into a commit the remote or a reviewer holds.
 - Unpublished work follows `using-jj`, with its ownership and descendant checks.
   - That never permits rewriting another session's stack or bypassing immutability.
 - When another session rewrites the parent PR, ask it for one parent sha it will not change before your next push.
