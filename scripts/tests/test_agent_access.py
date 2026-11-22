@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -74,6 +75,14 @@ SECRET_MARKERS = [
     "ghs_should_never_print",
     "sk-ant-should-never-print",
 ]
+
+# `secrets grants` as the secrets v3.8.4 pin answers it: one table, headed KEY SCOPE AGE.
+SECRETS_GRANTS_V384 = "KEY\tSCOPE\tAGE\nTEST_KEY\tsession\t10s\n"
+# The notice `shims/secrets` writes to stderr before it runs the real client for an agent's call.
+SECRETS_SHIM_NOTICE = (
+    "secrets shim: non-interactive SSH, so an agent's call: agent-tier only, through the broker"
+    " (set AGENT_SHIM_PERSON=1 for your own)\n"
+)
 
 
 class RealBinary(unittest.TestCase):
@@ -374,9 +383,9 @@ fi
         write_stub(
             self.stub_dir,
             "secrets",
-            r"""
+            f"""
 if [[ "$1" == grants ]]; then
-    printf 'KEY\tSCOPE\tAGE\nTEST_KEY\tsession\t10s\n'
+    printf %s {shlex.quote(SECRETS_GRANTS_V384)}
     exit 0
 fi
 """,
@@ -414,6 +423,108 @@ fi
         self.assertEqual(rows["agent_secrets_broker"]["status"], "live")
 
         self.assert_no_secrets(result.stdout)
+
+    def secretsd_row(self, stdout: str, stderr: str = "", code: int = 0) -> dict[str, str]:
+        """Return the secretsd_grants row when `secrets grants` writes STDERR, then STDOUT, and exits CODE.
+
+        Any other `secrets` subcommand exits 2.
+        """
+        stdout_file = self.root / "secrets-grants.stdout"
+        stderr_file = self.root / "secrets-grants.stderr"
+        stdout_file.write_text(stdout, encoding="utf-8")
+        stderr_file.write_text(stderr, encoding="utf-8")
+        write_stub(
+            self.stub_dir,
+            "secrets",
+            f"""
+[[ "$1" == grants ]] || exit 2
+cat {shlex.quote(str(stderr_file))} >&2
+cat {shlex.quote(str(stdout_file))}
+exit {code}
+""",
+        )
+        result = self.run_access("--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows: list[dict[str, str]] = json.loads(result.stdout)
+        return next(row for row in rows if row["name"] == "secretsd_grants")
+
+    def test_secretsd_v384_answer(self) -> None:
+        row = self.secretsd_row(SECRETS_GRANTS_V384)
+        self.assertEqual((row["status"], row["identity"]), ("live", "TEST_KEY"))
+
+    def test_secretsd_no_active_grants(self) -> None:
+        row = self.secretsd_row("no active grants\n")
+        self.assertEqual((row["status"], row["identity"]), ("live", "none"))
+
+    def test_secretsd_both_tables(self) -> None:
+        """The secret-grant table, an empty line, then the KIND table: only the first holds keys."""
+        row = self.secretsd_row(
+            "SECRET GRANT\tSCOPE\tEXPIRES\n"
+            "TEST_KEY\tsession\t3412s\n"
+            "\n"
+            "KIND\tNAME\tSCOPE\tSTATE\tEXPIRES\n"
+            "request\tCAP_BROWSER\tomp 4242\tpending, id 7\t72s\n"
+            "capability\tbrowser\t-\tactive\t41012s\n"
+        )
+        self.assertEqual((row["status"], row["identity"]), ("live", "TEST_KEY"))
+
+    def test_secretsd_second_table_only(self) -> None:
+        row = self.secretsd_row(
+            "KIND\tNAME\tSCOPE\tSTATE\tEXPIRES\n"
+            "request\tCAP_BROWSER\tomp 4242\tpending, id 7\t72s\n"
+            "capability\tbrowser\t-\tactive\t41012s\n"
+        )
+        self.assertEqual((row["status"], row["identity"]), ("live", "none"))
+
+    def test_secretsd_two_keys(self) -> None:
+        row = self.secretsd_row("SECRET GRANT\tSCOPE\tEXPIRES\nA\tsession\t5s\nB\ttty /dev/pts/3\t9s\n")
+        self.assertEqual((row["status"], row["identity"]), ("live", "A,B"))
+
+    def test_secretsd_kind_line_with_no_empty_line(self) -> None:
+        row = self.secretsd_row(
+            "SECRET GRANT\tSCOPE\tEXPIRES\n"
+            "TEST_KEY\tsession\t3412s\n"
+            "KIND\tNAME\tSCOPE\tSTATE\tEXPIRES\n"
+            "request\tCAP_BROWSER\tomp 4242\tpending, id 7\t72s\n"
+        )
+        self.assertEqual((row["status"], row["identity"]), ("live", "TEST_KEY"))
+
+    def test_secretsd_stderr_before_the_table(self) -> None:
+        """A shim's notice on stderr, written before the table, is not a key."""
+        row = self.secretsd_row(SECRETS_GRANTS_V384, stderr=SECRETS_SHIM_NOTICE)
+        self.assertEqual((row["status"], row["identity"]), ("live", "TEST_KEY"))
+
+    def test_secretsd_failure(self) -> None:
+        row = self.secretsd_row("", stderr="secrets: cannot reach secretsd\n", code=1)
+        self.assertEqual((row["status"], row["identity"]), ("missing", "-"))
+        self.assertEqual(row["detail"], "secrets: cannot reach secretsd")
+
+    def test_secretsd_failure_after_a_shim_notice(self) -> None:
+        """The client's own error, written after the shim's notice, is the detail."""
+        row = self.secretsd_row("", stderr=SECRETS_SHIM_NOTICE + "secrets: cannot reach secretsd\n", code=1)
+        self.assertEqual((row["status"], row["identity"]), ("missing", "-"))
+        self.assertEqual(row["detail"], "secrets: cannot reach secretsd")
+
+    def test_secretsd_failure_with_only_stdout(self) -> None:
+        """With no stderr the detail is stdout's first line, its tabs made spaces so the row keeps its fields."""
+        row = self.secretsd_row("KEY\tSCOPE\n", code=1)
+        self.assertEqual((row["status"], row["identity"]), ("missing", "-"))
+        self.assertEqual(row["detail"], "KEY SCOPE")
+
+    def test_secretsd_unrecognised_answer(self) -> None:
+        row = self.secretsd_row("NEW HEADER\tX\nA\tsession\t5s\n")
+        self.assertEqual((row["status"], row["identity"]), ("unknown", "-"))
+        self.assertEqual(row["detail"], "unrecognised answer: NEW HEADER X")
+
+    def test_secretsd_empty_stdout(self) -> None:
+        row = self.secretsd_row("")
+        self.assertEqual((row["status"], row["identity"]), ("unknown", "-"))
+        self.assertTrue(row["detail"].startswith("unrecognised answer:"), row["detail"])
+
+    def test_secretsd_row_text(self) -> None:
+        row = self.secretsd_row(SECRETS_GRANTS_V384)
+        self.assertEqual(row["expiry"], "see `secrets grants`")
+        self.assertEqual(row["detail"], "keys of every session and scope; names only, never values")
 
     def test_private_checks_beside_the_dotfiles_are_sourced_and_ordered(self) -> None:
         # A check whose name would name a customer lives in <dotfiles>/.secrets/dotfiles/

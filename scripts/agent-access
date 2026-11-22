@@ -233,18 +233,44 @@ check_kubectl() {
     fi
 }
 
-# Session-scope secrets this process already holds via secretsd (names only,
-# never values - `secrets grants` reports keys and ages, not secret contents).
+# The secret keys secretsd grants to every session and scope (names only, never
+# values). `secrets grants` heads its secret-grant table `KEY` (v3.8.4 and
+# earlier) or `SECRET GRANT` (after); the table ends at an empty line or at a
+# `KIND` line, which starts a second table, of requests, receipts and
+# capabilities, that is not read. Only stdout is parsed, and a failure reports
+# stderr's last line, because the secrets shim writes a notice to stderr before
+# the client runs. A lone `no active grants` line means no keys; an answer of no
+# known shape reports `unknown`.
 check_secretsd() {
-    local out rc keys
-    out="$(timeout "$TIMEOUT_S" secrets grants 2>&1)"
+    local out rc err detail line first key keys=""
+    err="$tmp/secretsd.stderr"
+    out="$(timeout "$TIMEOUT_S" secrets grants 2>"$err")"
     rc=$?
-    if ((rc == 0)); then
-        keys="$(tail -n +2 <<<"$out" | awk '{print $1}' | paste -sd, -)"
-        row secretsd_grants live "${keys:-none}" "see \`secrets grants\` for per-key age" "secrets grants" "key names only, never values"
-    else
-        row secretsd_grants missing - - "secrets grants" "$(first_line "$out")"
+    if ((rc != 0)); then
+        detail="$(tail -n1 "$err")"
+        detail="$(first_line "${detail:-$out}")"
+        row secretsd_grants missing - - "secrets grants" "${detail//$'\t'/ }"
+        return
     fi
+    {
+        IFS= read -r line
+        IFS=$'\t' read -r first _ <<<"$line"
+        case "$first" in
+            KEY | "SECRET GRANT")
+                while IFS=$'\t' read -r key _ && [[ -n "$key" && "$key" != KIND ]]; do
+                    keys+="${keys:+,}$key"
+                done
+                ;;
+            KIND) ;;
+            *)
+                if [[ "$line" != "no active grants" ]]; then
+                    row secretsd_grants unknown - - "secrets grants" "unrecognised answer: ${line//$'\t'/ }"
+                    return
+                fi
+                ;;
+        esac
+    } <<<"$out"
+    row secretsd_grants live "${keys:-none}" "see \`secrets grants\`" "secrets grants" "keys of every session and scope; names only, never values"
 }
 
 check_agent_secrets_broker() {
