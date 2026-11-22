@@ -26,17 +26,19 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 - Read the record again at each wake and before each merge.
 - Only a current decision sets a hold or a quiet window: never restore a lifted hold or infer a window from history.
 - Merge only by an ordinary protected squash merge.
-- Never merge under a permission inferred from earlier use. A grant to this queue session stays live for it.
+- Never merge under a permission inferred from earlier use: a grant given to this queue session stays live for it.
 - Ask Sami once for a merge window: a span to merge READY PRs without asking per PR.
 - At registration, check the author, the account this session writes as (`gh api user --jq .login`), required reviews and CODEOWNERS.
 - An approval that account cannot give is unmet until `landing-a-pr`'s repo merge rules name who gives it.
-- **Read `references/sequencing.md` now** before you decide the merge order: the order with no explicit priority (Sami's goal, parents, corpus changes), never by READY arrival order.
+- **Read `references/sequencing.md` now** before you decide the merge order:
+  - the order with no explicit priority (Sami's goal, parents, corpus changes);
+  - never by READY arrival order.
 - Ask Sami with `dispatch ask` on the Dispatch issue the PR names, or on the queue record for a question about the whole queue. Dispatch is the issue tracker the `dispatch` skill covers.
-- Read `references/sequencing.md` for holds that need a composition test, migration batches, colliding PRs, stacks, or reading a Dispatch answer.
+- Read `references/sequencing.md` for holds that need a composition test, migration batches, colliding PRs, stacks or reading a Dispatch answer.
 
 ## 2. Register PRs and act on packets
 
-- Register each PR when it opens: owner, purpose, intended published parent, file scope, required gates, and the end-to-end scenarios the owner runs before merge.
+- Register each PR when it opens: owner, purpose, intended published parent, file scope, required gates and the end-to-end scenarios the owner runs before merge.
 - Give the owner the gate list at registration, so the packet arrives complete.
 - Act on packets and on CI events for PRs that have one.
 - Do not sweep all owners.
@@ -83,7 +85,7 @@ Before you declare READY or merge, read `references/review-evidence.md`: the sur
 - Runtime code, CI configuration, scripts, Dockerfiles and infrastructure:
   - After the ordinary review rounds, the owner (under `sdd`, the coordinator) runs `ce-simplify-code` once.
   - Then the owner (under `sdd`, the coordinator) runs the thermonuclear pair (`thermonuclear-deep-review`, `thermonuclear-code-quality`) once at the final code head.
-  - Simplify and the pair are never waived.
+  - Neither run is ever waived.
   - Order and exceptions: `references/review-evidence.md`.
 - Acceptance: every change to what runs needs its changed end-to-end scenarios run at the intended head before merge.
 - A `.md` or `.yaml` suffix does not make an operative change prose-only: the scenario runs through the program that reads that file.
