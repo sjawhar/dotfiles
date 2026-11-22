@@ -81,8 +81,9 @@ metadata_account_check() {
 
 # What the plain dev box may not do and may do: mint no token of infra-applier@ (the box's token,
 # on curl's stdin, to testIamPermissions, which answers the permissions the caller holds), read no
-# Envoy Secret, exec into no Envoy pod, and list the agent sessions. An answer that is an error
-# says nothing about a grant, so it fails the line.
+# Envoy Secret, exec into no Envoy pod, and list every agent session (`list --all`: a bare
+# `theorem-session list` shows only the caller's own agents). An answer that is an error says
+# nothing about a grant, so it fails the line.
 identity_limits_check() {
     local where="$1" tok out got
     if tok="$(gcloud auth print-access-token 2>&1)"; then
@@ -104,11 +105,11 @@ identity_limits_check() {
     [[ "$got" == no ]] && ok "no envoy exec $where: kubectl -n envoy auth can-i create pods/exec: no" \
         || fail "no envoy exec $where: kubectl -n envoy auth can-i create pods/exec: $(tail -1 <<<"$got")"
     if ! command -v theorem-session >/dev/null; then
-        fail "sessions $where: theorem-session is not on PATH (agent-infra sessions/README.md builds it)"
-    elif out="$(timeout 120 theorem-session list 2>&1)"; then
-        ok "sessions $where: theorem-session list exits 0 ($(wc -l <<<"$out") lines)"
+        fail "sessions $where: theorem-session is not on PATH (installers/theorem-session.sh installs it)"
+    elif out="$(timeout 120 theorem-session list --all 2>&1)"; then
+        ok "sessions $where: theorem-session list --all exits 0 ($(wc -l <<<"$out") lines)"
     else
-        fail "sessions $where: theorem-session list: $(tail -1 <<<"$out")"
+        fail "sessions $where: theorem-session list --all: $(tail -1 <<<"$out")"
     fi
 }
 
