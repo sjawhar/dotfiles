@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 DOTFILES = Path(__file__).resolve().parents[2]
 INSTALLER = DOTFILES / "installers" / "chathub.sh"
@@ -82,7 +83,9 @@ bridge:
 # writes the bridge's example config, and `-g -c F -r R` writes a registration and
 # fresh tokens the way the bridges do, counting each generation. mautrix-discord
 # predates `-e` and rejects it, like the real 0.7.7 binary; `current` reports the pin.
+# Every call is logged to MISE_LOG.
 MISE_STUB = r"""
+echo "$*" >> "$MISE_LOG"
 case "${1:-}" in
     which) if [ "${2:-}" = yq ]; then echo "$REAL_YQ"; fi; exit 0 ;;
     current) echo "0.7.7"; exit 0 ;;
@@ -129,6 +132,15 @@ else
     echo "curl: (22) The requested URL returned error: 404" >&2; exit 22
 fi
 """
+
+# Stands in for `systemctl`, logging each call; `restart` fails when FAIL_RESTART=1.
+SYSTEMCTL_STUB = r"""
+echo "$*" >> "$SYSTEMCTL_LOG"
+if [ "${FAIL_RESTART:-}" = 1 ] && [ "${2:-}" = restart ]; then exit 1; fi
+"""
+
+RELAY_URL = "http://127.0.0.1:29342"
+TOKEN = r"\A[0-9a-f]{64}\Z"
 
 STATUS_EVENT_PATHS: tuple[tuple[str, str], ...] = (
     ("gmessages", "matrix"),
@@ -192,16 +204,22 @@ class ChathubInstaller(unittest.TestCase):
         (self.root / "bridgev2.yaml").write_text(BRIDGEV2_EXAMPLE, encoding="utf-8")
         (self.root / "legacy.yaml").write_text(LEGACY_EXAMPLE, encoding="utf-8")
         write_executable(self.dotfiles / "bin" / "mise", MISE_STUB)
-        write_executable(stubs / "systemctl", 'echo "$*" >> "$SYSTEMCTL_LOG"')
+        write_executable(stubs / "systemctl", SYSTEMCTL_STUB)
         write_executable(stubs / "curl", CURL_STUB)
         self.generate_log = self.root / "generate.log"
+        self.mise_log = self.root / "mise.log"
+        self.systemctl_log = self.root / "systemctl.log"
+        self.relay_reg = self.state / "registrations" / "envoy-relay.yaml"
+        self.switch = self.state / "envoy-relay.on"
+        self.marker = self.state / "tuwunel-restart-pending"
         self.env = {
             **os.environ,
             "DOTFILES_DIR": str(self.dotfiles),
             "HOME": str(self.home),
             "XDG_DATA_HOME": str(self.root / "data"),
             "PATH": f"{stubs}:{os.environ['PATH']}",
-            "SYSTEMCTL_LOG": str(self.root / "systemctl.log"),
+            "SYSTEMCTL_LOG": str(self.systemctl_log),
+            "MISE_LOG": str(self.mise_log),
             "GENERATE_LOG": str(self.generate_log),
             "REAL_YQ": REAL_YQ,
             "BRIDGEV2_EXAMPLE": str(self.root / "bridgev2.yaml"),
@@ -211,14 +229,42 @@ class ChathubInstaller(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def install(self) -> None:
-        result = subprocess.run(["bash", str(INSTALLER)], capture_output=True, text=True, env=self.env, check=False)
+    def install(self, **env: str) -> None:
+        result = subprocess.run(
+            ["bash", str(INSTALLER)], capture_output=True, text=True, env={**self.env, **env}, check=False
+        )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
-    def config(self, bridge: str) -> dict:
+    def relay_registration(self) -> None:
+        result = subprocess.run(
+            ["bash", str(INSTALLER), "relay-registration"], capture_output=True, text=True, env=self.env, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+    def stub_calls(self) -> str:
+        """What the mise and systemctl stubs logged; empty when neither ran."""
+        return "".join(log.read_text(encoding="utf-8") for log in (self.mise_log, self.systemctl_log) if log.exists())
+
+    def clear_logs(self) -> None:
+        for log in (self.mise_log, self.systemctl_log):
+            log.write_text("", encoding="utf-8")
+
+    def tuwunel_restarts(self) -> int:
+        return self.systemctl_log.read_text(encoding="utf-8").splitlines().count("--user restart tuwunel")
+
+    def relay_tokens(self) -> tuple[str, str]:
+        """The relay registration's tokens, each 64 lower-case hex, and not equal."""
+        reg = self.yaml(self.relay_reg)
+        tokens = (reg["as_token"], reg["hs_token"])
+        for token in tokens:
+            self.assertRegex(token, TOKEN)
+        self.assertNotEqual(tokens[0], tokens[1])
+        return tokens
+
+    def config(self, bridge: str) -> dict[str, Any]:
         return self.yaml(self.state / bridge / "config.yaml")
 
-    def yaml(self, path: Path) -> dict:
+    def yaml(self, path: Path) -> dict[str, Any]:
         out = subprocess.run([REAL_YQ, "-o=json", ".", str(path)], capture_output=True, text=True, check=True).stdout
         return json.loads(out)
 
@@ -362,6 +408,111 @@ class ChathubInstaller(unittest.TestCase):
         self.install()
 
         self.assertEqual(stat.S_IMODE(self.state.stat().st_mode), 0o700)
+
+    def test_relay_registration_alone_writes_only_the_relay_file(self) -> None:
+        """The registration-only call needs neither mise nor systemctl, and keeps its tokens."""
+        self.relay_registration()
+
+        reg = self.yaml(self.relay_reg)
+        self.assertEqual(
+            list(reg), ["id", "url", "as_token", "hs_token", "sender_localpart", "rate_limited", "namespaces"]
+        )
+        self.assertEqual(reg["id"], "envoy-relay")
+        self.assertIsNone(reg["url"])  # Tuwunel sends no events to a registration without a url
+        self.assertEqual(reg["sender_localpart"], "envoy-relay")
+        self.assertIs(reg["rate_limited"], False)
+        # Anchored: Tuwunel matches a namespace unanchored, and this one is Sami alone.
+        self.assertEqual(reg["namespaces"], {"users": [{"regex": "^@sami:chathub$", "exclusive": False}]})
+        tokens = self.relay_tokens()
+        self.assertEqual(stat.S_IMODE(self.relay_reg.stat().st_mode), 0o600)
+        self.assertEqual([p.name for p in (self.state / "registrations").iterdir()], ["envoy-relay.yaml"])
+        self.assertEqual(list(self.state.glob(".envoy-relay.*")), [])
+        self.assertEqual(self.stub_calls(), "")
+
+        self.switch.touch()
+        self.relay_registration()
+
+        self.assertEqual(self.yaml(self.relay_reg)["url"], RELAY_URL)
+        self.assertEqual(self.relay_tokens(), tokens)
+        self.assertEqual(self.stub_calls(), "")
+
+    def test_unknown_argument_changes_nothing(self) -> None:
+        result = subprocess.run(
+            ["bash", str(INSTALLER), "relay-registraton"], capture_output=True, text=True, env=self.env, check=False
+        )
+
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertFalse(self.state.exists())
+        self.assertEqual(self.stub_calls(), "")
+
+    def test_switch_change_restarts_tuwunel_once(self) -> None:
+        """Tuwunel reads registrations only at startup, so each switch restarts it once, and
+        a rerun with the switch unchanged restarts nothing."""
+        self.install()
+        tokens = self.relay_tokens()
+        double_puppet = self.yaml(self.state / "registrations" / "doublepuppet.yaml")
+        self.assertTrue(set(tokens).isdisjoint({double_puppet["as_token"], double_puppet["hs_token"]}))
+
+        self.clear_logs()
+        self.switch.touch()
+        self.install()
+        self.assertEqual(self.tuwunel_restarts(), 1)
+        self.assertEqual(self.yaml(self.relay_reg)["url"], RELAY_URL)
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(self.relay_tokens(), tokens)
+
+        self.clear_logs()
+        self.install()
+        self.assertEqual(self.tuwunel_restarts(), 0)
+        self.assertEqual(self.relay_tokens(), tokens)
+
+        self.clear_logs()
+        self.switch.unlink()
+        self.install()
+        self.assertEqual(self.tuwunel_restarts(), 1)
+        self.assertIsNone(self.yaml(self.relay_reg)["url"])
+        self.assertEqual(self.relay_tokens(), tokens)
+
+    def test_switch_written_alone_is_restarted_by_the_next_full_run(self) -> None:
+        self.install()
+        self.clear_logs()
+        self.switch.touch()
+
+        self.relay_registration()
+        self.assertEqual(self.stub_calls(), "")
+
+        self.install()
+        self.assertEqual(self.tuwunel_restarts(), 1)
+
+    def test_failed_restart_is_retried(self) -> None:
+        self.install()
+        self.switch.touch()
+
+        self.clear_logs()
+        self.install(FAIL_RESTART="1")
+        self.assertEqual(self.tuwunel_restarts(), 1)
+        self.assertTrue(self.marker.exists())
+
+        self.clear_logs()
+        self.install()
+        self.assertEqual(self.tuwunel_restarts(), 1)
+        self.assertFalse(self.marker.exists())
+
+    def test_first_install_restarts_tuwunel_once(self) -> None:
+        """Every registration is new on the first run, and together they need one restart."""
+        self.install()
+
+        self.assertEqual(self.tuwunel_restarts(), 1)
+
+    def test_unusable_token_is_replaced(self) -> None:
+        """Tuwunel stops loading registrations/ at a file it cannot parse, so an empty token
+        is made new, never written back."""
+        self.relay_reg.parent.mkdir(parents=True)
+        self.relay_reg.write_text(f"id: envoy-relay\nurl: null\nas_token:\nhs_token: {'ab' * 32}\n", encoding="utf-8")
+
+        self.relay_registration()
+
+        self.relay_tokens()
 
 
 if __name__ == "__main__":
