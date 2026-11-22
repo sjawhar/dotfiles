@@ -7,7 +7,7 @@ description: "Use when text goes to someone outside Theorem: a GitHub issue or p
 
 Sami approves every outside message by default.
 
-**Done when:** the text he approves, or that goes out, is the text the reviewer cut, byte for byte.
+**Done when:** for a message that takes the two steps below, the text he approves, or that goes out, is the text the reviewer cut, byte for byte.
 
 A kind of message stops needing his approval once a skill or template guides it and he has seen how the reader's project reacts. What decides is whether the message is a vetted routine or novel contact, not who the reader is.
 
