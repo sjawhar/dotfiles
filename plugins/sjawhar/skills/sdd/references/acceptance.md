@@ -11,7 +11,8 @@
 - When a dataset, fixture or table the scenario names does not exist, or a probe matches zero records, mark the scenario `BLOCKED`.
 - When a dataset, fixture or table the scenario names does not exist, or a probe matches zero records, repair the plan against existing data.
 - When a dataset, fixture or table the scenario names does not exist, or a probe matches zero records, do not drop or narrow the scenario.
-- Verification describes an outcome a user can observe. The reviewer rejects missing, proxy-only or internal-only verification.
+- Verification describes an outcome a user can observe.
+- The reviewer rejects missing, proxy-only or internal-only verification.
 - Track implemented, integrated and acceptance-verified separately: an unresolved dependency does not make a slice complete.
 
 ## Running it
@@ -20,9 +21,12 @@
 - For a slice that changes what runs, record the source, dependency and image revisions per scenario.
 - For a slice that changes what runs, mark each scenario, after you record its revisions, with one of the markers (`RAN`, `BLOCKED`, `WAIVED-BY-SAMI`) that "End-to-end scenarios" defines.
 - The "Merge-ready" section of `skill://opening-a-pr/references/proof.md` says what to do when a surface cannot be reached or a blocker remains.
-- Exercise every human entry point the plan's `## Contract change census` lists through the real client and the new check. Each entry not run is `BLOCKED`.
-- Iterate on the repo's fastest loop and keep its slowest surface for the final proof. The repo's testing skill defines what counts as production-like.
+- Exercise every human entry point the plan's `## Contract change census` lists through the real client and the new check.
+- Each human entry point the census lists that is not run is `BLOCKED`.
+- Iterate on the repo's fastest loop.
+- Keep the repo's slowest surface for the final proof.
+- The repo's testing skill defines what counts as production-like.
 
 ## A slice with a browser page
 
-Before handing over, the implementer runs ce-dogfood (read `~/.dotfiles/vendor/compound-engineering/skills/ce-dogfood/SKILL.md`) on its branch, with the real data the user sees and the user as the persona. It fixes clipped text, empty states and dead clicks. Its report goes on the slice's issue, and each decision it leaves for a person becomes a decision block in the spec.
+Before handing over, the implementer runs ce-dogfood (read `~/.dotfiles/vendor/compound-engineering/skills/ce-dogfood/SKILL.md`) on its branch, with the real data the user sees and the user as the persona. It fixes clipped text, empty states and dead clicks. Its report goes on the slice's issue. Each decision it leaves for a person becomes a decision block in the spec.
