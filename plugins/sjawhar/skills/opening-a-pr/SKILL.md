@@ -5,9 +5,9 @@ description: "Use when about to open a pull request or change an open one's head
 
 # Opening a PR
 
-Open or update a complete, proven and reviewed PR, and hand it to `landing-a-pr`.
+Open or update a complete, proven, reviewed PR; hand it to `landing-a-pr`.
 
-**Done when:** before you say done or merge-ready, you restated the original goal and pointed to the step 4 evidence for it.
+**Done when:** before you say done or merge-ready, you restated the original goal and pointed to its step 4 evidence.
 
 - Do every step, in order, on every change.
 - A skill named in a step (`analyze`, `updating-docs`, `pr-preflight`, `landing-a-pr`) supplies that step's mechanics and never replaces the step.
@@ -22,7 +22,7 @@ Steps 2, 4 and 6 each use a fresh, strong agent: it did not write the change, it
 3. **Run `analyze`.** Fix every critical and high finding, then run it again. When one finding survives three rounds, write tried / failed / learned into the ledger, then change approach or bring Sami options with your recommendation.
 4. **Have a fresh, strong implementation agent prove it works.** Read [references/proof.md](references/proof.md) now and dispatch with its mandate. Fix every defect and re-dispatch until clean. Only a named blocker that Sami explicitly waived exempts this step. While the proof is blocked, report not merge-ready and do not open the PR for review.
 5. **Sweep the docs.** Grep READMEs, `docs/`, skills and AGENTS.md files for what the diff made wrong (commands, flags, paths, config keys, behavior) and fix them in this change with `updating-docs`.
-6. **Get a review from a fresh, strong reviewer** of the final diff and the proof report, and fix its findings. An urgent fix still gets this review, scoped to the diff. Dispatch it before you push. Let its verdict gate the merge.
+6. **Get a review from a fresh, strong reviewer** of the final diff and the proof report, and fix its findings. An urgent fix still gets this review, scoped to the diff. Dispatch that review before you push. Let its verdict gate that fix's merge.
 7. **Capture the learning.** A gotcha that cost more than half an hour or contradicted the docs: run `ce-compound mode:non-interactive`. Otherwise say so in one line.
 8. **Structure the commits and draft the body before you open or update the PR.** Read [references/commits-and-body.md](references/commits-and-body.md). Choose commits by reviewability (one commit suits a change of one concern: a single behavior change with its tests and docs) and decide this yourself. Before a history-only rewrite, take the tree fingerprint described there, and compare it after.
 9. **Check where the branch may go before you push.** Run `gh api repos/OWNER/REPO --jq .visibility`. Public, and any file, example or history in the branch came from a private repository: push nothing and ask Sami. Never open a PR into our own fork, and open one upstream only when the change belongs there (`pr-preflight` decides). Read [references/fork-and-upstream.md](references/fork-and-upstream.md) when `knives repos` lists the repository, when the change touches a fork pin (a dependency pinned to a release of our fork, such as `rev = "release/…"`), before you ship a fork member (a commit on our fork's release base, which a knives release ships), and before you open, push to or post on an upstream PR.
