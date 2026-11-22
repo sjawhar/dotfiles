@@ -29,6 +29,8 @@ fetch_part() {
 
 ## While the workers run
 
-- When a worker looks silent, follow `using-subagents`' `references/waiting.md` ("A lane that looks stalled"). Ask it one direct question; a re-dispatch sends the same brief.
-- A `deep` worker has no eval tool: when its bash breaks, give it a shell tool from your kernel (`using-subagents`).
-- While a PR waits for merge or deploy, continue from its branch or a dependency's branch, unless you are revising it. Post-merge production proof runs beside the next work, not instead of it.
+- When a worker looks silent, follow `using-subagents`' `references/waiting.md` ("A lane that looks stalled").
+- When a worker looks silent, ask it one direct question: a re-dispatch sends the same brief.
+- When a `deep` worker's bash breaks, give it a shell tool from your kernel (`using-subagents`): a `deep` worker has no eval tool.
+- While a PR waits for merge or deploy, continue from its branch or a dependency's branch, unless you are revising it.
+- While a PR waits for merge or deploy, post-merge production proof runs beside the next work, not instead of it.
