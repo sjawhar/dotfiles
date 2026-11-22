@@ -89,7 +89,7 @@ class Record(unittest.TestCase):
 
     def git(self, *arguments: str, cwd: Path | None = None, stdin: str | None = None) -> str:
         completed = subprocess.run([GIT, *arguments], cwd=cwd or self.work, env=self.env, input=stdin,
-                                   capture_output=True, text=True, timeout=60, check=False)
+                                   capture_output=True, encoding="utf-8", timeout=60, check=False)
         self.assertEqual(completed.returncode, 0, f"git {' '.join(arguments)}: {completed.stderr}")
         return completed.stdout
 
@@ -117,14 +117,15 @@ class Record(unittest.TestCase):
             cwd=cwd or self.work,
             env={**self.env, **leak_check_environment("/usr/bin:/bin"), "GIT_TRACE2_EVENT": trace, **(env or {})},
             capture_output=True,
-            text=True,
+            encoding="utf-8",
             timeout=300,
             check=False,
         )
         events = [json.loads(line) for line in Path(trace).read_text(encoding="utf-8").splitlines()]
         self.calls: list[list[str]] = [event["argv"] for event in events if event.get("event") == "start"]
         # The trace saw the check's other git calls, so it would have seen a diff.
-        self.assertTrue(self.calls, "GIT_TRACE2_EVENT recorded no git call")
+        self.assertTrue(self.calls, f"GIT_TRACE2_EVENT recorded no git call; the check exited {result.returncode}: "
+                                    f"{result.stderr}")
         diffs = [words for words in self.calls if "log" in words and "-U0" in words]
         return result, [words[words.index("--") + 1:] if "--" in words else [] for words in diffs]
 
@@ -166,6 +167,25 @@ class Record(unittest.TestCase):
         (by default every one it did not cover)."""
         self.assertIn(f"the record {REF} covered {covered} of the {seen} file versions the outgoing commits add or "
                       f"change; the push read {seen - covered if read is None else read} of them", result.stderr)
+
+    def test_a_tag_whose_name_holds_a_no_break_space_or_a_line_separator_is_read(self) -> None:
+        # git writes each pre-push update as four fields joined by one space; a ref name holds no ASCII space, but
+        # check-ref-format takes a no-break space and a line separator, which str.split() split at, so until 2026-11-22
+        # such a push was refused as "malformed pre-push update" (exit 4).
+        commit = self.commit({"code.py": "print('nothing listed')\n"})
+        for name, character, shown in (("no-break space", "\u00a0", "\\u00a0"),
+                                       ("line separator", "\u2028", "\\u2028")):
+            with self.subTest(character=name):
+                clean = f"refs/tags/v1{character}clean"
+                self.git("check-ref-format", clean)
+                result, _ = self.run_check("push", "--remote", "origin", "--url", self.url,
+                                           stdin=f"{clean} {commit} {clean} {'0' * 40}\n")
+                self.assertEqual((result.returncode, result.stderr), (0, ""))
+                listed = f"refs/tags/v1{character}{TERM}"
+                result, _ = self.run_check("push", "--remote", "origin", "--url", self.url,
+                                           stdin=f"{listed} {commit} {listed} {'0' * 40}\n")
+                self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
+                self.assertIn(f'leak terms: ref v1{shown}{TERM}: "{TERM}" (the global list)', result.stderr)
 
     def test_no_record_reads_every_file_and_says_nothing_of_it(self) -> None:
         commit = self.commit({"code.py": "print('nothing listed')\n"})
@@ -462,18 +482,26 @@ class Record(unittest.TestCase):
                 self.assertEqual(diffs, [[]])
 
     def test_a_symbolic_record_ref_covers_nothing_and_says_why(self) -> None:
+        # The line names the ref it points to, escaped: a ref name may hold U+009B, which a terminal takes as the start
+        # of a command, and until 2026-11-22 it went to the terminal raw.
         line = self.key_line()
         commit = self.commit({"kept.txt": f"a forged line with {TERM}\n"})
         self.forge(self.blob("main", "kept.txt"), line)
-        self.git("update-ref", "refs/notes/other", self.rev(REF))
+        notes = self.rev(REF)
         self.git("update-ref", "-d", REF)
-        self.git("symbolic-ref", REF, "refs/notes/other")
-        result, diffs = self.push(commit)
-        self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
-        self.assertIn(f"leak terms: cannot use the record {REF}, so every file version is read: it is a symbolic ref "
-                      "to refs/notes/other", result.stderr)
-        self.assertIn("kept.txt:1", result.stderr)
-        self.assertEqual(diffs, [[]])
+        for target, shown in (("refs/notes/other", "refs/notes/other"),
+                              ("refs/notes/x\u009by", "refs/notes/x\\u009by")):
+            with self.subTest(target=shown):
+                self.git("update-ref", target, notes)
+                self.git("symbolic-ref", REF, target)
+                result, diffs = self.push(commit)
+                self.git("symbolic-ref", "--delete", REF)
+                self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
+                self.assertIn(f"leak terms: cannot use the record {REF}, so every file version is read: it is a "
+                              f"symbolic ref to {shown}, not a ref of its own", result.stderr)
+                self.assertNotIn("\u009b", result.stderr)
+                self.assertIn("kept.txt:1", result.stderr)
+                self.assertEqual(diffs, [[]])
 
     def test_a_symbolic_record_ref_to_no_ref_covers_nothing_and_says_why(self) -> None:
         # for-each-ref lists no symbolic ref whose target is missing; show-ref --exists finds it.

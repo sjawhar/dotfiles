@@ -1495,11 +1495,14 @@ def git_chunks(arguments: Sequence[str], standard_input: bytes) -> Iterator[byte
 
 
 def push_updates(text: str) -> tuple[list[tuple[str, str]], list[str]]:
-    """Read Git's pre-push updates: each sent object with the remote ref it goes to, and the remote's prior objects."""
+    """Read Git's pre-push updates: each sent object with the remote ref it goes to, and the remote's prior objects.
+    git writes each update as four fields joined by one space. A ref name holds no ASCII space, but it can hold a
+    no-break space or a line separator, which str.split() also splits at, so a push of such a ref was refused as
+    "malformed pre-push update" (exit 4); the line is split at spaces alone."""
     local: list[tuple[str, str]] = []
     remote: list[str] = []
     for line in newline_lines(text):
-        fields = line.split()
+        fields = line.split(" ")
         if len(fields) != 4 or not OBJECT_ID.fullmatch(fields[1]) or not OBJECT_ID.fullmatch(fields[3]):
             raise TextError("malformed pre-push update")
         if set(fields[1]) != {"0"}:
@@ -2683,7 +2686,7 @@ def read_record() -> Record | None:
             raise RecordError("git gave a malformed list of refs")
         _, symref, named, kind = (field.decode("utf-8", errors="replace") for field in found[0])
         if symref:
-            raise RecordError(f"it is a symbolic ref to {symref}, not a ref of its own")
+            raise RecordError(f"it is a symbolic ref to {c_escape(symref)}, not a ref of its own")
         if kind != "commit":
             raise RecordError(f"it names a {kind}, not a commit")
         if OBJECT_ID.fullmatch(named) is None:
