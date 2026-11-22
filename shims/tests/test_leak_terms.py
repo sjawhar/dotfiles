@@ -5347,7 +5347,8 @@ class OutgoingLeaks(SinkRepositoryCase):
 
 
     def test_push_reads_a_new_tag_and_its_commit_with_three_cat_file_calls(self) -> None:
-        # Two calls read the tag, its type and then its object, and one reads the new commit's header (INFRA-4943).
+        # Two calls read the tag, its type (with its size: one batch-check helper answers both) and then its object, and
+        # one reads the new commit's header (INFRA-4943).
         calls = self.root / "cat-file-calls"
         write_executable(
             self.fake / "git",
@@ -5366,7 +5367,7 @@ class OutgoingLeaks(SinkRepositoryCase):
         cat_file_calls = [line for line in calls.read_text(encoding="utf-8").splitlines() if " cat-file " in f" {line} "]
         self.assertEqual(
             cat_file_calls,
-            ["cat-file --batch-check=%(objectname) %(objecttype)", "cat-file --batch", "cat-file --batch"],
+            ["cat-file --batch-check=%(objectname) %(objecttype) %(objectsize)", "cat-file --batch", "cat-file --batch"],
             calls.read_text(encoding="utf-8"),
         )
 
