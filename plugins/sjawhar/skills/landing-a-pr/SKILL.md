@@ -15,21 +15,6 @@ You make the PR ready; auto-merge (`gh pr merge --auto`) merges it.
 
 `ce-babysit-pr` runs the watch loop. Where it differs from this skill, this skill wins. `ce-babysit-pr`'s "looks ready" means check now, not merge.
 
-## Merging
-
-- **Readiness.** The PR is ready when `opening-a-pr`'s step 4 proof ran at the current head, every finding has a disposition (fixed at a commit, or rejected with evidence), and the required checks and reviews pass or still run at that head with no failure.
-- When ready, run `gh pr merge <N> -R <owner>/<repo> --auto --squash --match-head-commit <sha>`, with `--subject`/`--body` for the merge message.
-- Push only ready work to a PR with auto-merge on, or first run `gh pr merge <N> --disable-auto`: auto-merge stays on across a push, so a push can merge unreviewed work.
-- Before you enable auto-merge, tell every session that can push to the branch, including a subagent that handed you the PR, to stop pushing, amending or editing the body.
-- Do not use `--admin` or any bypass that skips a check that tests the work.
-- When the person who owns the work approves the PR, or says to merge or consolidate PRs, do it yourself; do not hand it back to them to click.
-- **Legion's PRs (branch `legion/<KEY>`):** the session that asked Legion for the issue watches and does not merge.
-  - Legion, the daemon that runs Dispatch issues labelled `legion` through phase sessions, merges the PRs it produces: its merger session merges the head it read.
-- After the required checks and review pass:
-  - Merge instead of pushing more: each push restarts every check.
-  - Push first only a fix for a defect that would do harm once merged (wrong behavior, a security hole, bad data), with the other fixes folded in.
-  - With no such fix, put the other fixes in one follow-up PR.
-
 Read `references/repo-merge-rules.md` before you change an enabled auto-merge, merge in `trajectory-labs-pbc/agent-c`, `cybermonklabs/legion`, `theorem-labs/*` or a repo another person maintains, when GitHub refuses an admin action or an approval, and for a PR that adds or changes a database migration.
 In other repos, their own required checks and reviews decide.
 
@@ -110,6 +95,18 @@ A push ends readiness. Read `references/proof-and-claims.md` before you certify 
    - Finish each item that does not wait on that blocker.
 4. **Report.** Write the report as `references/readiness-report.md` says.
 5. **Merge.** Once ready, enable auto-merge (or merge a migration by hand).
+   - The PR is ready when `opening-a-pr`'s step 4 proof ran at the current head, every finding has a disposition (fixed at a commit, or rejected with evidence), and the required checks and reviews pass or still run at that head with no failure.
+   - When ready, run `gh pr merge <N> -R <owner>/<repo> --auto --squash --match-head-commit <sha>`, with `--subject`/`--body` for the merge message.
+   - Push only ready work to a PR with auto-merge on, or first run `gh pr merge <N> --disable-auto`: auto-merge stays on across a push, so a push can merge unreviewed work.
+   - Before you enable auto-merge, tell every session that can push to the branch, including a subagent that handed you the PR, to stop pushing, amending or editing the body.
+   - Do not use `--admin` or any bypass that skips a check that tests the work.
+   - When the person who owns the work approves the PR, or says to merge or consolidate PRs, do it yourself; do not hand it back to them to click.
+   - **Legion's PRs (branch `legion/<KEY>`):** the session that asked Legion for the issue watches and does not merge.
+     - Legion, the daemon that runs Dispatch issues labelled `legion` through phase sessions, merges the PRs it produces: its merger session merges the head it read.
+   - After the required checks and review pass:
+     - Merge instead of pushing more: each push restarts every check.
+     - Push first only a fix for a defect that would do harm once merged (wrong behavior, a security hole, bad data), with the other fixes folded in.
+     - With no such fix, put the other fixes in one follow-up PR.
    - Then change the head only for a failed check or review.
 
 ## 6. After the merge
