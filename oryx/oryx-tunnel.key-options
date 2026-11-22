@@ -9,4 +9,4 @@
 # socket path on oryx (OpenSSH 9.6, scratch sshd, 2026-11-13), so sshd on oryx
 # must also set AllowStreamLocalForwarding no; the tunnel reaches sshd on port
 # 22, so it applies to every session there.
-restrict,port-forwarding,permitlisten="127.0.0.1:12800",permitlisten="127.0.0.1:12803",permitlisten="127.0.0.1:12804",permitlisten="127.0.0.1:12806",permitopen="127.0.0.1:12801",permitopen="127.0.0.1:12802",permitopen="127.0.0.1:12805",command="echo oryx-tunnel: forwarding-only key"
+restrict,port-forwarding,permitlisten="127.0.0.1:12800",permitlisten="127.0.0.1:12803",permitlisten="127.0.0.1:12804",permitlisten="127.0.0.1:12806",permitopen="127.0.0.1:12801",permitopen="127.0.0.1:12802",permitopen="127.0.0.1:12805",permitopen="127.0.0.1:8776",permitopen="127.0.0.1:9030",permitopen="127.0.0.1:4223",command="echo oryx-tunnel: forwarding-only key"
