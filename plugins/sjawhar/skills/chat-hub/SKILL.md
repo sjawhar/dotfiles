@@ -5,7 +5,7 @@ description: Use when Sami mentions a chat, text, direct message or "did X reply
 
 # Chat hub
 
-A private Matrix server on oryx bridges Sami's chat networks. Each conversation is a room of `@sami:chathub`. The [design](../../../../docs/plans/2026-10-03-chat-hub-design.md) has its parts, state and secrets.
+A private Matrix server on oryx bridges Sami's chat networks. Each conversation is a room of `@sami:chathub`. Read the [design](../../../../docs/plans/2026-10-03-chat-hub-design.md) when you need the hub's parts, state or secrets.
 
 - Use the hub only in an omp session on oryx: the hub listens only on oryx loopback, and its `MATRIX_HUB_*` secrets are in oryx's `secrets.local.env`. Only an omp session started in the dotfiles repository loads the `chathub` MCP, from `~/.dotfiles/.omp/mcp.json`.
 - Send messages and files to people with `hub-send` (Sending to a person): the `chathub` MCP does not send them. It reads chats and sends commands to bridge bots.
@@ -70,21 +70,21 @@ A private Matrix server on oryx bridges Sami's chat networks. Each conversation 
 - Send a bot command with `matrix_send_message` in the bot's control room, or with `secrets MATRIX_HUB_URL MATRIX_HUB_TOKEN -- ~/.dotfiles/chathub/login <network> <command>`.
   - Commands: `start-chat <ID or phone number>`, `list-logins`, `help`, Discord `guilds …`, `create-portal`. `help` lists the bot's commands. The Discord bot's commands differ.
 - **No room yet:**
-  1. Send `start-chat <ID or phone number>` to that network's bot.
-  2. Send the first message with `hub-send` in the new room.
+  1. **Send `start-chat <ID or phone number>`** to that network's bot.
+  2. **Send the first message** with `hub-send` in the new room.
 - **SMS:**
-  1. Send `list-logins` to `@gmessagesbot:chathub`.
-  2. Send `start-chat <login ID> <phone number>` with the login of the number to send from. The bridge uses Sami's login with no login ID, or with one it does not know.
+  1. **Send `list-logins`** to `@gmessagesbot:chathub`.
+  2. **Send `start-chat <login ID> <phone number>`** with the login of the number to send from. The bridge uses Sami's login with no login ID, or with one it does not know.
 - Read the room's login before the first send in any SMS room (new or existing, from `start-chat` or found), and compare it with the login ID you chose. `hub-send` refuses a room whose login is down. It does not compare logins. The login is `content.channel["fi.mau.receiver"]` of the room's `m.bridge` state event:
   ```sh
   secrets MATRIX_HUB_URL MATRIX_HUB_TOKEN -- sh -c 'printf "Authorization: Bearer %s\n" "$MATRIX_HUB_TOKEN" | curl -fsS -H @- "$MATRIX_HUB_URL/_matrix/client/v3/rooms/$1/state"' _ '<room ID>' | jq -r '.[] | select(.type == "m.bridge") | .content.channel["fi.mau.receiver"]'
   ```
 - Send nothing in an SMS room whose login differs from the login ID you chose.
 - **A Discord server channel:**
-  1. Find the channel ID in `~/.local/share/chathub/discord/discord.db` on oryx: the `portal` rows with that server's `dc_guild_id`.
-  2. Send `guilds bridging-mode <server id> if-portal-exists` in the Discord bot's control room.
-  3. Send `create-portal <channel id>` in the Discord bot's control room. Only that channel joins the hub.
-  4. Send to people in the new room with `hub-send`.
+  1. **Find the channel ID** in `~/.local/share/chathub/discord/discord.db` on oryx: the `portal` rows with that server's `dc_guild_id`.
+  2. **Send `guilds bridging-mode <server id> if-portal-exists`** in the Discord bot's control room.
+  3. **Send `create-portal <channel id>`** in the Discord bot's control room. Only that channel joins the hub.
+  4. **Send to people in the new room** with `hub-send`.
 
 ## Logins
 
