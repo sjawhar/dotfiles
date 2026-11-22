@@ -43,8 +43,8 @@ You own one issue, and you end when it is done. Filing part of your work as a ne
 
 - Do every part of your outcome in this issue: review findings, follow-ups, fixes to your own pull requests, the parts you found late.
 - Create no child issue for any of it, unless you run `sdd`: it files each piece of work you own as a child issue of its root, as `sdd` says.
-- Do not start work outside your outcome (another stream's bug, a separate feature): it is not yours.
-- For the same reason, search Dispatch, then file such work unclaimed for its owner.
+- Do not start work outside your outcome (another stream's bug, a separate feature).
+- Search Dispatch, then file such work unclaimed for its owner.
 - When your issue's spec, a file or a command's output does not settle a choice of scope or of owner (whether a piece of work is part of your outcome, or whose it is), ask your issue's Dispatch project's Legion controller.
   - That is the session that holds the Envoy role `legion-<project>-controller`, with the project key in lower case (`legion-infra-controller`).
   - An Envoy role is a named duty that one session holds at a time.
