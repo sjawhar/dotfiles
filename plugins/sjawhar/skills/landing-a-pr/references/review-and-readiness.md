@@ -7,7 +7,10 @@ Read when you find and close findings, or request a head-bound review. The repo'
 - Read every surface: threads, review bodies, issue comments, bot summaries, "Suggestions" and findings with no line anchor. Resolved threads do not prove nothing is open. Use the babysitter snapshot as the index, fetch bodies by node ID with one GraphQL `nodes(ids: [...])` request per 100 IDs (GitHub refuses more in one request), and reconcile pagination.
 - Four separate questions: Is the finding valid at the head? Does it have a durable disposition? Did the right actor resolve its thread? Did the required reviewer judge the resulting head?
 - Keep the reviewer's finding IDs and numbering. Record each disposition as a GitHub reply (in its thread, or a PR comment for a summary finding): a disposition kept only in a local file or a message counts as none.
-- Under review, push only a blocking fix (one for a defect that would do harm once merged: wrong behavior, a security hole, bad data, or a false claim in shipped prose), with the other valid fixes folded into that push, and never while a reviewer that must approve the current head judges it (SKILL.md step 3); otherwise put them in one follow-up PR after the merge, cited as their disposition.
+- Under review, push only a blocking fix (one for a defect that would do harm once merged: wrong behavior, a security hole, bad data, or a false claim in shipped prose).
+- Under review, fold the other valid fixes into that push.
+- Under review, never push while a reviewer that must approve the current head judges it (SKILL.md step 3).
+- Under review, otherwise put the other valid fixes in one follow-up PR after the merge, cited as their disposition.
 - Converging reviewers locate a defect; they do not prove the remedy. Run a remedy the reviewer did not run against the contract before you adopt it. An executed counterexample justifies rejecting it.
 - Before you call a finding stale, check its definition, imports and live call sites at the head.
 - A follow-up PR schedules non-blocking fixes, with `fixed in <PR>` as their disposition. It never closes a finding that has no disposition.
