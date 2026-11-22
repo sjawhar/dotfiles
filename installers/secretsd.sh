@@ -203,7 +203,7 @@ fi
 
 # --- 2. Systemd user units: the repo checkout wins (edits are live on a dev
 #        machine); otherwise the copy bundled in the release tarball. ----------
-if [ -d "${SECRETSD_SRC}/systemd" ]; then
+if [ -n "$SECRETSD_SRC" ] && [ -d "${SECRETSD_SRC}/systemd" ]; then
     UNIT_SRC="${SECRETSD_SRC}/systemd"
 elif [ -n "$SECRETSD_MISE_DIR" ] && [ -d "${SECRETSD_MISE_DIR}/systemd" ]; then
     UNIT_SRC="${SECRETSD_MISE_DIR}/systemd"
@@ -325,15 +325,17 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
     # change already done. The lock lives as long as the open descriptor: the
     # end of the block closes it, and so does the exit 1 of a refused restart.
     # Commands the block runs inherit the descriptor, so none may go on in the
-    # background past the block. A failing open or flock ends the install here
-    # (set -e), as a failing write of config.toml.new would. Systemd user units
-    # mean Linux, where util-linux ships flock; without flock on PATH the block
-    # runs unlocked, as it did before the lock.
+    # background past the block. The open appends, so a run that changes
+    # nothing leaves install.lock and its mtime as they were. A failing open or
+    # flock ends the install here (set -e), as a failing write of
+    # config.toml.new would. Systemd user units mean Linux, where util-linux
+    # ships flock; without flock on PATH the block runs unlocked, as it did
+    # before the lock.
     secretsd_lock_file="${HOME}/.config/secretsd/install.lock"
     secretsd_lock_fd=""
     mkdir -p "${secretsd_lock_file%/*}"
     if command -v flock >/dev/null 2>&1; then
-        exec {secretsd_lock_fd}>"$secretsd_lock_file"
+        exec {secretsd_lock_fd}>>"$secretsd_lock_file"
         if ! flock -n "$secretsd_lock_fd"; then
             echo "secretsd: another install holds ${secretsd_lock_file}; waiting for it" >&2
             flock "$secretsd_lock_fd"
@@ -379,13 +381,15 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
         sudo apt-get install -y -qq libpcsclite1 >/dev/null
     fi
     if secretsd_tool_dir="$(mise -C "$DOTFILES_DIR" where sops 2>/dev/null)" \
-        && [ -n "$secretsd_tool_dir" ] && [ -x "${secretsd_tool_dir}/sops" ]; then
+        && [ -n "$secretsd_tool_dir" ] && [ -f "${secretsd_tool_dir}/sops" ] \
+        && [ -x "${secretsd_tool_dir}/sops" ]; then
         SOPS_ABS="${secretsd_tool_dir}/sops"
     else
         SOPS_ABS="$(command -v sops || true)"
     fi
     if secretsd_tool_dir="$(mise -C "$DOTFILES_DIR" where github:str4d/age-plugin-yubikey 2>/dev/null)" \
-        && [ -n "$secretsd_tool_dir" ] && [ -x "${secretsd_tool_dir}/age-plugin-yubikey" ]; then
+        && [ -n "$secretsd_tool_dir" ] && [ -f "${secretsd_tool_dir}/age-plugin-yubikey" ] \
+        && [ -x "${secretsd_tool_dir}/age-plugin-yubikey" ]; then
         AGE_DIR="$secretsd_tool_dir"
     else
         AGE_DIR="$(dirname "$(command -v age-plugin-yubikey || echo /nonexistent/x)")"

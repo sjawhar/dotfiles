@@ -263,6 +263,8 @@ def real_age_keygen() -> str:
 
 
 class SecretsdInstallerConfig(unittest.TestCase):
+    maxDiff = None  # a snapshot failure names the file whose bytes or mtime changed
+
     age_keygen: ClassVar[str]
     temp_dir: tempfile.TemporaryDirectory[str]
     root: Path
@@ -275,6 +277,7 @@ class SecretsdInstallerConfig(unittest.TestCase):
     log: Path
     client_log: Path
     config: Path
+    lock: Path
     dropin: Path
     service_link: Path
     socket_link: Path
@@ -308,6 +311,7 @@ class SecretsdInstallerConfig(unittest.TestCase):
         self.log = self.root / "installer.log"
         self.client_log = self.root / "client.log"
         self.config = self.home / ".config" / "secretsd" / "config.toml"
+        self.lock = self.config.parent / "install.lock"
         units = self.home / ".config" / "systemd" / "user"
         self.dropin = units / "secretsd.service.d" / "local.conf"
         self.service_link = units / "secretsd.service"
@@ -477,10 +481,10 @@ class SecretsdInstallerConfig(unittest.TestCase):
         return self.client_log.read_text(encoding="utf-8").splitlines()
 
     def snapshot(self) -> dict[str, tuple[object, ...]]:
-        """The bytes and mtime of config.toml and the drop-in, and the lstat and target of the
-        unit links. st_atime is left out: reading a link can change it."""
+        """The bytes and mtime of config.toml, the drop-in and install.lock, and the lstat and
+        target of the unit links. st_atime is left out: reading a link can change it."""
         state: dict[str, tuple[object, ...]] = {}
-        for path in (self.config, self.dropin):
+        for path in (self.config, self.dropin, self.lock):
             state[str(path)] = (
                 (path.read_bytes(), path.stat().st_mtime_ns) if path.exists() else ("absent",)
             )
