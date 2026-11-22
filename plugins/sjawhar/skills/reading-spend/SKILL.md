@@ -89,4 +89,4 @@ GROUP BY 1, 2, 3, 4 ORDER BY usd DESC LIMIT 20
 - Never name a machine that is not ours, as the "Ours" line above defines it: a machine in `People's machines` (a colleague's own) or `No owner found`.
 - Never run a command that logs in to a machine that is not ours, or that changes it (stop, resize, delete, relabel).
 - **Do not read names from the tables `cloud_cost_estimated`, `cloud_cost_today` and `billed_usage_caller`:** they name colleagues. The views show colleagues only as `People's machines` and `colleague`.
-- Treat colleagues' rows as out of scope.
+  - Treat colleagues' rows as out of scope.
