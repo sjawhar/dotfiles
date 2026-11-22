@@ -318,8 +318,10 @@ class OmpScopes(unittest.TestCase):
         self.omp()
         self.assertEqual(links.link_target(link), str(self.rules()))
 
-    def test_without_yq_a_launch_starts_unscoped_and_says_so(self) -> None:
-        (self.scratch.stubs / "yq").unlink()
+    def test_without_a_working_yq_a_launch_starts_unscoped_and_says_so(self) -> None:
+        # A failing stub, not a missing one: a runner image can carry its own yq further down PATH
+        # (GitHub's ubuntu-24.04 has /usr/bin/yq), which a removed stub would let the shim find.
+        links.write_stub(self.scratch.stubs, "yq", "exit 1")
         self.context_file("personal\n")
         for profile in (None, "theorem"):
             with self.subTest(profile=profile):
