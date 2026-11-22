@@ -280,6 +280,18 @@ class AgentAccess(unittest.TestCase):
         self.assertEqual(rows["google_workspace_work"]["status"], "live")
         self.assertEqual(rows["google_workspace_work"]["identity"], "work@example.com")
 
+    def test_gws_timeout_reports_the_timeout_not_the_advisory(self) -> None:
+        """`timeout` exits 124 when it stops gws; the detail says so, not gws's keyring advisory on stderr."""
+        write_stub(self.stub_dir, "gws", 'echo "Using keyring backend: keyring" >&2\nexit 124')
+        gws_dir = self.home / ".config" / "gws"
+        gws_dir.mkdir(parents=True)
+        (gws_dir / "accounts.json").write_text(json.dumps({"work": {}}), encoding="utf-8")
+        result = self.run_access("--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = {row["name"]: row for row in json.loads(result.stdout)}
+        work = rows["google_workspace_work"]
+        self.assertEqual((work["status"], work["detail"]), ("missing", "timed out after 6s"))
+
     def test_gws_unusable_registry_reports_one_missing_row(self) -> None:
         """A registry jq cannot read as a non-empty object gives one missing google_workspace row."""
         write_stub(
@@ -519,12 +531,26 @@ exit {code}
     def test_secretsd_empty_stdout(self) -> None:
         row = self.secretsd_row("")
         self.assertEqual((row["status"], row["identity"]), ("unknown", "-"))
-        self.assertTrue(row["detail"].startswith("unrecognised answer:"), row["detail"])
+        self.assertEqual(row["detail"], "unrecognised answer: ")
+
+    def test_secretsd_timeout(self) -> None:
+        """`timeout` exits 124 when it stops the command; the detail says so, not the shim's notice."""
+        row = self.secretsd_row("", stderr=SECRETS_SHIM_NOTICE, code=124)
+        self.assertEqual((row["status"], row["identity"]), ("missing", "-"))
+        self.assertEqual(row["detail"], "timed out after 6s")
 
     def test_secretsd_row_text(self) -> None:
         row = self.secretsd_row(SECRETS_GRANTS_V384)
         self.assertEqual(row["expiry"], "see `secrets grants`")
         self.assertEqual(row["detail"], "keys of every session and scope; names only, never values")
+
+    def test_row_makes_a_tab_in_a_detail_a_space(self) -> None:
+        """check_fleetctl's detail is a raw output line; row() makes its tab a space so the row keeps its fields."""
+        write_stub(self.stub_dir, "fleetctl", 'printf "denied\\tby policy\\n"\nexit 1')
+        result = self.run_access("--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = {row["name"]: row for row in json.loads(result.stdout)}
+        self.assertEqual((rows["fleetctl"]["status"], rows["fleetctl"]["detail"]), ("missing", "denied by policy"))
 
     def test_private_checks_beside_the_dotfiles_are_sourced_and_ordered(self) -> None:
         # A check whose name would name a customer lives in <dotfiles>/.secrets/dotfiles/

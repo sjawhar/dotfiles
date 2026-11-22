@@ -29,12 +29,13 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 # row NAME STATUS IDENTITY EXPIRY COMMAND [DETAIL]: write one tab-separated
-# result row. Fields must not contain tabs or newlines; callers collapse them.
+# result row. row makes each tab and newline in IDENTITY, EXPIRY, COMMAND and
+# DETAIL a space (NAME and STATUS are the caller's fixed words).
 row() {
     local name=$1 status=$2 identity=$3 expiry=$4 command=$5 detail=${6:-}
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$name" "$status" "${identity//$'\t'/ }" "${expiry//$'\t'/ }" \
-        "${command//$'\t'/ }" "${detail//$'\n'/ }" >"$tmp/$name"
+        "$name" "$status" "${identity//[$'\t\n']/ }" "${expiry//[$'\t\n']/ }" \
+        "${command//[$'\t\n']/ }" "${detail//[$'\t\n']/ }" >"$tmp/$name"
 }
 
 first_line() { head -n1 <<<"$1" | tr -d '\r'; }
@@ -161,7 +162,7 @@ check_gws() {
     # is the Gmail profile: every account's read tier holds Gmail read-only, and
     # some (wren) hold nothing else. gws writes advisories ("Using keyring
     # backend: ...") to stderr, so stdout alone is parsed and a failure reports
-    # stderr's last line.
+    # stderr's last line, or a timeout that it timed out.
     local accounts_file="$HOME/.config/gws/accounts.json" accounts account out rc email err
     if [[ ! -f "$accounts_file" ]]; then
         row google_workspace missing - - "jq keys $accounts_file" "no $accounts_file"
@@ -183,6 +184,8 @@ check_gws() {
             if ((rc == 0)); then
                 email="$(jq -r '.emailAddress // empty' <<<"$out" 2>/dev/null)"
                 row "google_workspace_${account}" live "${email:-unknown}" "n/a" "GWS_ACCOUNT=${account} gws gmail users getProfile"
+            elif ((rc == 124)); then
+                row "google_workspace_${account}" missing - - "GWS_ACCOUNT=${account} gws gmail users getProfile" "timed out after ${TIMEOUT_S}s"
             else
                 row "google_workspace_${account}" missing - - "GWS_ACCOUNT=${account} gws gmail users getProfile" "$(tail -n1 "$err")"
             fi
@@ -237,19 +240,24 @@ check_kubectl() {
 # values). `secrets grants` heads its secret-grant table `KEY` (v3.8.4 and
 # earlier) or `SECRET GRANT` (after); the table ends at an empty line or at a
 # `KIND` line, which starts a second table, of requests, receipts and
-# capabilities, that is not read. Only stdout is parsed, and a failure reports
-# stderr's last line, because the secrets shim writes a notice to stderr before
-# the client runs. A lone `no active grants` line means no keys; an answer of no
-# known shape reports `unknown`.
+# capabilities, that is not read. Only stdout is parsed. A failure reports
+# stderr's last line (the secrets shim writes a notice to stderr before the
+# client runs), or stdout's first line when stderr is empty, and a timeout
+# reports that it timed out. A lone `no active grants` line means no keys; an
+# answer of no known shape reports `unknown`.
 check_secretsd() {
     local out rc err detail line first key keys=""
     err="$tmp/secretsd.stderr"
     out="$(timeout "$TIMEOUT_S" secrets grants 2>"$err")"
     rc=$?
     if ((rc != 0)); then
-        detail="$(tail -n1 "$err")"
-        detail="$(first_line "${detail:-$out}")"
-        row secretsd_grants missing - - "secrets grants" "${detail//$'\t'/ }"
+        if ((rc == 124)); then
+            detail="timed out after ${TIMEOUT_S}s"
+        else
+            detail="$(tail -n1 "$err")"
+            detail="$(first_line "${detail:-$out}")"
+        fi
+        row secretsd_grants missing - - "secrets grants" "$detail"
         return
     fi
     {
@@ -264,7 +272,7 @@ check_secretsd() {
             KIND) ;;
             *)
                 if [[ "$line" != "no active grants" ]]; then
-                    row secretsd_grants unknown - - "secrets grants" "unrecognised answer: ${line//$'\t'/ }"
+                    row secretsd_grants unknown - - "secrets grants" "unrecognised answer: $line"
                     return
                 fi
                 ;;
