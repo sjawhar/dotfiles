@@ -490,6 +490,10 @@ ask:
   notify: "off"
 error:
   notify: "off"
+# Sami's rules (~/.omp/agent/SAMI-RULES.md, installers/omp.sh) must reach task subagents: AGENTS.md is dropped for them, CLAUDE.md refused here.
+contextFiles:
+  extra:
+    - SAMI-RULES.md
 skills:
   ignoredSkills:
     - ce-commit-push-pr
