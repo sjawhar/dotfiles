@@ -7,7 +7,7 @@ Read this when the question is a design, architecture or cleanup call.
   - Simplicity never cuts requested scope.
 - Simplify the structure, not only the diff.
   - Delete duplicate paths: a shared helper is not unification while two mechanisms remain.
-  - Fix the dependency mess instead of wrapping it: a shared helper is not unification while two mechanisms remain.
+  - Fix the dependency mess instead of wrapping it, for the same reason.
   - Two distinct concerns may both stay: "one product" does not require banning a useful native tool or replacing its storage.
 - Research existing config, APIs, packaging, release tooling, identities and primitives before you write a workaround.
 - "Add this feature" does not mean "advance everything else".
