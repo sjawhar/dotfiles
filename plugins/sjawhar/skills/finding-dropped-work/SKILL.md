@@ -11,9 +11,9 @@ A session's own memory of its work is the thing that fails, so a fresh agent rea
 
 ## When
 
-- **Any session:** before it tells a person that an issue or a request is done, before it moves an issue to `done`, and
-  before it ends. Audit its own transcript since its last audit or its start.
-- **A lead, once a day:** each agent of its stream, and its own.
+- **Any session:** before you tell a person that an issue or a request is done, before you move an issue to `done`, and
+  before you end, audit your own transcript since your last audit or your start.
+- **A lead, once a day:** audit each agent of your stream, and yourself.
   - A stream is a line of work with its own Dispatch issue labelled `stream`.
   - The stream's lead is the session that the issue's `scoreboard.json` artifact names as `lead`, else the session
     that holds the claim on that issue.
@@ -21,8 +21,8 @@ A session's own memory of its work is the thing that fails, so a fresh agent rea
   - If the stream has its own daily audit program (a script that audits the stream's sessions, such as the Rocq speed
     stream's `audit.py`), run it with its roots set to the stream's sessions.
   - If the stream has no such program, follow How below, one subagent per agent.
-- **The chief of staff, every 4 hours:** every session with a message since the last audit, each read from that audit
-  to now, one subagent per session.
+- **The chief of staff, every 4 hours:** audit every session with a message since the last audit, each read from that
+  audit to now, one subagent per session.
 
 ## How
 
