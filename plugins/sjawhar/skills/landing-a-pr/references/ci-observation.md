@@ -6,12 +6,17 @@ Read for red, missing or misleading checks, incomplete API responses, choosing t
 
 - Name the head and the check under judgment, and read the latest attempt per check name. Zero results before the expected checks exist is not success.
 - GitHub lists are capped. Paginate, reconcile with the reported total, and say "unknown" when they differ:
-  - `gh pr view --json files` returns at most 100 files: when the PR's `changed_files` is over 100, use the paginated PR files endpoint (`gh api --paginate repos/<owner>/<repo>/pulls/<N>/files`), reconciled with `changed_files`.
-  - The compare endpoint caps files at 300, even paginated: do not use it for scope.
-  - PR files stop at 3,000 and PR commits at 250: at a ceiling, diff locally.
-  - REST lists default to 30 rows: reconcile check-runs with `total_count`.
-  - `gh api --paginate --jq` runs the filter per page: use `--slurp` and aggregate once with `jq`.
-  - `runs/<id>/jobs?filter=all` mixes attempts: use `runs/<id>/attempts/<n>/jobs?per_page=100`, or group by `run_attempt`. Say whether you counted jobs, legs or checks.
+
+  | List | Limit | Do |
+  | --- | --- | --- |
+  | `gh pr view --json files` | Returns at most 100 files | When the PR's `changed_files` is over 100, use the paginated PR files endpoint (`gh api --paginate repos/<owner>/<repo>/pulls/<N>/files`), reconciled with `changed_files` |
+  | The compare endpoint | Caps files at 300, even paginated | Do not use it for scope |
+  | PR files | Stop at 3,000 | At a ceiling, diff locally |
+  | PR commits | Stop at 250 | At a ceiling, diff locally |
+  | REST lists | Default to 30 rows | Reconcile check-runs with `total_count` |
+  | `gh api --paginate --jq` | Runs the filter per page | Use `--slurp` and aggregate once with `jq` |
+  | `runs/<id>/jobs?filter=all` | Mixes attempts | Use `runs/<id>/attempts/<n>/jobs?per_page=100`, or group by `run_attempt`. Say whether you counted jobs, legs or checks |
+
 - A commit's file list: `jj diff --name-only --from <parent-sha> --to <sha>`. To show which files differ between two lists, compare the sets (`comm -3 <(sort a) <(sort b)`), not their counts: equal counts can hide different members.
 - A failed API call can print an error object to stdout. Check the status and content before you count, keep stderr, and run a known-content control through the same path.
 

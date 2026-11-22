@@ -11,14 +11,14 @@ Read before you resolve a conflict, integrate a base, change a stack, or push af
 
 ## Forward fix of a published head
 
-1. Read the remote head, base and ownership. Fetch through jj. Check which commit `@` is.
-2. `jj new <published-head> <base>`. Use `jj new @ <base>` only when `@` is exactly that head.
-3. Resolve each conflict by what both sides meant to change, not by picking one side's text. Recount any count the text states ("12 checks") in the merged tree. For a positional list, check its consumer (length, maximum index, unread slots): two clean appends can break it with no conflict marker.
-4. Find the intended merge base from the graph, not by a blind pick in a criss-cross. Read `jj diff --git --from <merge-base> --to <head>` with concrete revisions, merge-resolution content included; a patch-id list misses that content.
-5. Record what each side gave, what you kept, and the delta. Run the affected behavior at the new head, including earlier fixes a diff selector no longer picks.
-6. Check that the old head is still an ancestor: `jj log -r '<published-head> & ::<candidate-head>'`; empty means lost. Read `jj git push --dry-run --bookmark <name>` in its own call, and stop on sideways, backwards or deletion.
-7. Push only that bookmark, and run `jj new` in the same `&&` chain. Check that `jj log -r '<name>@origin'` names the intended commit.
-8. Request a verdict at the new sha over the real delta and all open findings. Ancestry permits a delta review; it does not certify behavior.
+1. **Read the state.** Read the remote head, base and ownership. Fetch through jj. Check which commit `@` is.
+2. **Merge forward.** Run `jj new <published-head> <base>`. Use `jj new @ <base>` only when `@` is exactly that head.
+3. **Resolve conflicts.** Resolve each conflict by what both sides meant to change, not by picking one side's text. Recount any count the text states ("12 checks") in the merged tree. For a positional list, check its consumer (length, maximum index, unread slots): two clean appends can break it with no conflict marker.
+4. **Find the merge base.** Find the intended merge base from the graph, not by a blind pick in a criss-cross. Read `jj diff --git --from <merge-base> --to <head>` with concrete revisions, merge-resolution content included; a patch-id list misses that content.
+5. **Record and rerun.** Record what each side gave, what you kept, and the delta. Run the affected behavior at the new head, including earlier fixes a diff selector no longer picks.
+6. **Check before the push.** Check that the old head is still an ancestor: `jj log -r '<published-head> & ::<candidate-head>'`; empty means lost. Read `jj git push --dry-run --bookmark <name>` in its own call, and stop on sideways, backwards or deletion.
+7. **Push.** Push only that bookmark, and run `jj new` in the same `&&` chain. Check that `jj log -r '<name>@origin'` names the intended commit.
+8. **Request a verdict.** Request a verdict at the new sha over the real delta and all open findings. Ancestry permits a delta review; it does not certify behavior.
 
 Chain dependent mutations with `&&`. Run the check that decides whether you may push in its own tool call, and read its output before the push; do not gate a push on a paged pipeline's status.
 
