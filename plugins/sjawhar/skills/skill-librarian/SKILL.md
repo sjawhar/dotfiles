@@ -29,24 +29,24 @@ Your record is the ledger: `dispatch doc-read --project INFRA --artifact librari
 | Other work on the HDO accounts | Yes |
 
 - Run readers as `task` agents, not `scout`, which has no bash and so no `omp-session-render`.
-- Interview a session only through omp's read-only seance consult (`task` with `agent: "seance"`).
-- Never resume, fork or copy a session to interview it: a resumed copy keeps the live session's id, which takes over its Envoy role and its secretsd token.
-- Interview only top-level sessions on this machine; the reader covers their subagents.
-- Interview no session over ssh: other machines send lessons over Envoy.
+- Interview a session only through omp's read-only seance consult (`task` with `agent: "seance"`): a resumed copy keeps the live session's id, which takes over its Envoy role and its secretsd token.
+- Never resume, fork or copy a session to interview it, for the same reason.
+- Interview only top-level sessions on this machine: other machines send lessons over Envoy. The reader covers their subagents.
+- Interview no session over ssh, for the same reason.
 - Never signal or stop a process, yourself or through a reader, even in a reproduction: other sessions share this machine and user. No kill, pkill, killall, docker kill, docker stop or docker rm.
   - Check a claim about signals in the code or the man page.
 - Keep dollar figures out of text Sami reads.
 - Remove dollar figures from a reader report before you route or show it.
 - Never report what an agent did wrong, to anyone.
 - Make what an agent did wrong a lesson for the home that would have prevented it.
-- **Ledger first.** Before a write into a lesson's home, put its Sessions row and Lesson row (evidence, verdict, provisional home) in the ledger and read them back.
-  - If an edit or read-back fails, make no external write: a write the ledger does not record is lost or repeated after a resume.
+- **Ledger first.** Before a write into a lesson's home, put its Sessions row and Lesson row (evidence, verdict, provisional home) in the ledger and read them back: a write the ledger does not record is lost or repeated after a resume.
+  - If an edit or read-back fails, make no external write, for the same reason.
   - An Envoy reply about a covered blocker needs only its Leads row.
 - Write into a lesson's home only after Sami says yes, whatever kind of home `references/homes.md` gives it: a repository PR, a skill, CLAUDE.md and memory alike. A skill or CLAUDE.md edit, for one, reaches every agent on the machine at once.
 - Bring Sami all the edits one wake proposes together, at the end of that wake, not one at a time.
 - Give every due session both the seance consult and the reader.
   - Give each its file in `references/` verbatim: those files carry the read-only, signal and dollar rules your own prompt would drop.
-  - Do not replace either with reading the transcript yourself or writing your own prompt, however large the transcript.
+  - Do not replace either with reading the transcript yourself or writing your own prompt, however large the transcript, for the same reason.
 
 ## Startup (again after every resume)
 
