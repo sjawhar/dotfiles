@@ -16,11 +16,7 @@ description: "Use when you create, move or wire a file or directory in ~/.dotfil
 4. **Binaries.** A tool's binary comes from its `mise.toml` pin, never one placed in `bin/` by hand.
 5. **Skills.** When you change a skill in `plugins/sjawhar/skills/`, read `plugins/AGENTS.md` too.
    - A skill there loads in every repository Sami works in, so it names no repository, no single-repository path, and no project's workflow or task names.
-6. **Symlinks.**
-   - A committed symlink is relative.
-   - A committed symlink stays in the repository.
-   - A committed symlink never points into `vendor/` or `plugins/` from elsewhere in the repository.
-   - Instead of a committed symlink into `vendor/` or `plugins/` from elsewhere in the repository, copy the file, or point the consumer at the source directory.
+6. **Symlinks.** A committed symlink is relative, stays in the repository, and never points into `vendor/` or `plugins/` from elsewhere in it: copy the file, or point the consumer at the source directory.
 7. **Values that differ per machine.** Commit no value that differs per machine (a checkout path, a machine's own model routing) and no manifest of such values: an installer makes the value on each machine, or a gitignored local file holds it.
 8. **Launchers.** When you change a launcher (`shims/omp`, `scripts/cld`, `scripts/agentbox` or `scripts/agent-session`), give each session the same environment from every launcher, as the root guide's "Conventions" says.
    - A launcher sets no Dispatch or Envoy connection setting or credential: each profile's `envoy.json` holds them. `scripts/envoy`'s header gives the order in which a client finds that file.
@@ -41,7 +37,7 @@ description: "Use when you create, move or wire a file or directory in ~/.dotfil
 
 10. **Publishing.**
     - Commit only your own paths, by name: `jj commit <your paths>` in `~/.dotfiles`, `git commit -- <your paths>` in a git clone.
-    - Never run `git commit -a` or make a commit with no paths: that publishes another session's edit under your message.
+      - Never run `git commit -a` or make a commit with no paths: that publishes another session's edit under your message.
     - Before you publish, squash your work into one commit per topic, each saying what changed and why, never one per step or file.
     - A topic is one change with one reason: a message that needs two reasons covers two topics.
     - Then publish as the root guide's "Publishing a change" says.
