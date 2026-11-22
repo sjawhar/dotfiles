@@ -21,7 +21,10 @@ Do every step now, until nothing is left over: a step left as a suggestion gets 
    - Remove each clone, worktree or jj workspace you created for this work, by name.
    - Do not run a bare `git worktree prune` on a shared store: it deletes other sessions' worktrees (`disk-hygiene` has the shared-store rules).
 3. **Deploy and verify live.** If the repo's `AGENTS.md`, `CLAUDE.md` or `README.md`, or a deploy doc one of them names, gives a deployment step, run it.
-   - The proof must postdate the deploy, because live means observed on the new version. Such proof is a scheduled run started after the deploy's `completedAt` (one in flight during the apply can finish on the old definition), a node or pod created after the apply began, or the service reporting the deployed image digest or squash sha.
+   - The proof must postdate the deploy, because live means observed on the new version. Such proof is one of:
+     - a scheduled run started after the deploy's `completedAt`: one in flight during the apply can finish on the old definition;
+     - a node or pod created after the apply began;
+     - the service reporting the deployed image digest or squash sha.
    - For installed software, check the version the consumer runs by a head-specific artifact or behavior, not a guessed string in a minified bundle.
    - For installed software, an install the change needs is part of the work.
    - Then run the changed path in production the way a user reaches it (same URL, CLI or API, same credentials).
@@ -43,7 +46,7 @@ Do every step now, until nothing is left over: a step left as a suggestion gets 
 
      | Checkout | Do |
      | --- | --- |
-     | `~/.dotfiles` | Run `scripts/dotfiles-sync local`, not a bare `jj rebase`: a rebase that conflicts writes conflict markers into the tree every session reads, and `dotfiles-sync` refuses a conflict before any file on disk changes |
+     | `~/.dotfiles` | Run `scripts/dotfiles-sync local`, not a bare `jj rebase`. A rebase that conflicts writes conflict markers into the tree every session reads. `dotfiles-sync` refuses a conflict before any file on disk changes. |
      | Another jj checkout | Run `jj git fetch && jj rebase -r @ -d main@origin` and stop on a conflict |
      | A plain git checkout | Run `git pull --rebase` |
 
