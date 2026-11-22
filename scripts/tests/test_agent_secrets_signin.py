@@ -134,6 +134,16 @@ class AgentSecretsSigninTest(unittest.TestCase):
         self.assertEqual({p: (p.read_bytes(), p.stat().st_mtime_ns) for p in before}, before)
         self.assertNotIn("wrote", result.stdout)
 
+    def test_a_second_run_holds_both_files_to_0600(self) -> None:
+        self.assertEqual(self.install().returncode, 0)
+        for path in (self.config, self.secret_file):
+            path.chmod(0o644)
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.mode(self.secret_file), 0o600)
+        self.assertEqual(self.mode(self.config), 0o600)
+        self.assertEqual(self.secret_file.read_text(), SECRET)
+
     def test_a_refused_read_changes_nothing(self) -> None:
         self.conf.mkdir(parents=True)
         self.config.write_text("AGENT_SECRETS_URL=https://broker.example\n")

@@ -62,6 +62,9 @@ if ! cmp -s "$secret" "$SECRET_FILE"; then
     chmod 600 "$secret"
     mv -f "$secret" "$SECRET_FILE"
     echo "agent-secrets-signin: wrote the sign-in client's secret to $SECRET_FILE (0600)"
+elif [[ "$(stat -c %a "$SECRET_FILE")" != 600 ]]; then
+    chmod 600 "$SECRET_FILE"
+    echo "agent-secrets-signin: set $SECRET_FILE to mode 0600"
 fi
 
 # Every line of the settings file but the two this sets, which the client reads as KEY=value with
@@ -77,5 +80,8 @@ if ! cmp -s "$config" "$CONFIG"; then
     chmod 600 "$config"
     mv -f "$config" "$CONFIG"
     echo "agent-secrets-signin: wrote the sign-in client to $CONFIG"
+elif [[ "$(stat -c %a "$CONFIG")" != 600 ]]; then
+    chmod 600 "$CONFIG"
+    echo "agent-secrets-signin: set $CONFIG to mode 0600"
 fi
 echo "agent-secrets-signin: $CONFIG names the sign-in client $SIGNIN_CLIENT_ID and its secret in $SECRET_FILE"
