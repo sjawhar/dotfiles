@@ -25,7 +25,8 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 - Record each decision's source, time and scope: standing approvals (kept through handoffs until superseded), holds, release conditions, priorities, merge windows.
 - Read the record again at each wake and before each merge.
 - Only a current decision sets a hold or a quiet window: never restore a lifted hold or infer a window from history.
-- Merge only by an ordinary protected squash merge, never under a permission inferred from earlier use. A grant to this queue session stays live for it.
+- Merge only by an ordinary protected squash merge.
+- Never merge under a permission inferred from earlier use. A grant to this queue session stays live for it.
 - Ask Sami once for a merge window: a span to merge READY PRs without asking per PR.
 - At registration, check the author, the account this session writes as (`gh api user --jq .login`), required reviews and CODEOWNERS.
 - An approval that account cannot give is unmet until `landing-a-pr`'s repo merge rules name who gives it.
@@ -37,14 +38,14 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 
 - Register each PR when it opens: owner, purpose, intended published parent, file scope, required gates, and the end-to-end scenarios the owner runs before merge.
 - Give the owner the gate list at registration, so the packet arrives complete.
-- Act on packets, and on CI events for PRs that have one.
+- Act on packets and on CI events for PRs that have one.
 - Do not sweep all owners.
 - Every 30 minutes, find orphans: PRs whose owner is gone (`envoy_sessions` lists its session as neither live nor unresponsive) and that nobody will packet. Owners drive their PRs while they are live.
 - Close or reassign an orphan only under a current decision from Sami that names it.
 - Until such a decision, an orphan stays yours: keep it registered and report it in each queue status.
 
 | PR | Who sends the packet |
-| --- | --- |
+|---|---|
 | For an issue a coordinator (the `sdd` lead) owns | That coordinator's gate packet, naming the head |
 | With an active gate session (the session a coordinator assigned to check its gates) | That session's packet, or a verdict on the PR naming the head from any other reviewer who is not the author |
 | From an uncoordinated session | The session itself, with an independent reviewer's verdict |
@@ -53,7 +54,7 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 - Hold a self-verdict packet until Sami approves that PR by name, or an independent reviewer posts a verdict on the PR that names the head. A self-verdict packet begins `SELF-VERDICT - needs clearance or an independent reader`.
 - For each head, record the registration facts, its gate session and each fact steps 3 to 5 check, each with its read time and source link, plus the disposition and who acts next.
 - Re-read held PRs on GitHub at each wake before you write "unchanged": GitHub is the live truth, not your record.
-- Start CI waits as background jobs (such as an async `gh pr checks N --watch --interval 120`).
+- Start CI waits as background jobs (like an async `gh pr checks N --watch --interval 120`).
 - Keep working while a CI wait runs.
 - Ask for a rebase or push only when main conflicts with the PR or the PR's own diff needs a change, never only to pick up main: each push restarts CI and review.
 - Read `references/evidence-quality.md` for stale-main reds, empty results or missing logs.
