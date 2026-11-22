@@ -13,7 +13,7 @@ Turn papers into a faithful, critical, long-form two-host MP3.
 - Record in `out/ground-truth.json`, the real product, because the user also quizzes themselves from it with a voice AI:
   - every claim, number and limitation the script speaks;
   - each claim's `source`.
-- State no claim in the audio that is not in `out/ground-truth.json`.
+- State no claim in the audio that is not in `out/ground-truth.json`: it is the real product.
 - **Deliver locally.** Do not write to the user's Google Drive or any cloud account.
 - Upload only when the user asks.
 - Ask the user where before you upload.
@@ -49,7 +49,7 @@ It writes `out/manifest.json`, `out/pdfs/<id>.pdf` and full text in `out/text/<i
 ## Phase 2: the user picks the lineup
 
 - List every candidate in `out/manifest.json`, numbered: title, arXiv ID, primary category, one-line relevance note.
-- Flag tangential candidates.
+- Flag tangential ones.
 - Do not pre-filter.
 - Ask which papers to keep or drop, and wait.
 - Extract and write nothing until the user answers.
@@ -113,7 +113,8 @@ Write `out/script.txt`: one `Speaker: text` turn per line. Use exactly two label
 | Alex | A calm, precise skeptic who tests claims against `grounding` and asks for the real delta ("Y's own paper reports Z under setting W, so the gap is narrower") |
 | Jordan | Explains each mechanism and setup, and gives results mostly in qualitative terms |
 
-- Not two co-equal experts: the listener needs one host who asks and one who explains.
+Not two co-equal experts: the listener needs one host who asks and one who explains.
+
 - Per paper, give each part of claim → mechanism → significance → grounding → limitations → open questions at least 100 spoken words.
   - Lead with what happened and why it matters.
 - Speak a number only when the claim depends on its size; say the rest as "better than X" or "about the same as X".
@@ -135,7 +136,7 @@ PYTHONUNBUFFERED=1 uv run "$SKILL/scripts/tts.py" --script ./out/script.txt --ou
 `tts.py`'s docstring covers auth and billing. A long episode takes several minutes:
 
 - Run it in the background.
-- Keep working while it runs.
+- Keep working.
 - Check its progress in the `chunk i/n` line it prints per TTS call. `PYTHONUNBUFFERED=1` makes each line appear when printed, not at the end.
 
 ## Phase 7: deliver locally
