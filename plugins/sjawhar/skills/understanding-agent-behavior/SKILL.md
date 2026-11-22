@@ -7,7 +7,7 @@ description: "Use when agents ignore instructions or fail skill evals, even afte
 
 When agents did not do X, read their transcripts before you call X impossible, lower the bar, or replace the approach. A failed run shows what happened, not why.
 
-**Done when:** after the fix, you re-ran the failed case with the same bar, then the other affected cases.
+**Done when:** after the fix, you re-ran the failed case with the same bar, then the other affected cases. Another failure is another transcript to read.
 
 ## Find the cause
 
@@ -30,7 +30,6 @@ When agents did not do X, read their transcripts before you call X impossible, l
 
 5. **Re-run the failed case** as the Done when line says.
    - For a skill change, the `writing-agent-skills` skill has the behaviour tests.
-   - Another failure is another transcript to read.
 
 ## Report
 
