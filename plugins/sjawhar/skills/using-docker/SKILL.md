@@ -10,7 +10,8 @@ description: Use when running docker, docker compose, buildx or depot, or when o
 Every agent on the machine shares one Docker daemon, its build cache, and depot's remote cache.
 
 - Stop or remove only containers this session started.
-- Give each container this session starts a `--name` (`<task>-$$`) and remove it when you finish: `docker stop` returns before `--rm` removal finishes, so a reused `--name` can collide.
+- Give each container this session starts a `--name` (`<task>-$$`): `docker stop` returns before `--rm` removal finishes, so a reused `--name` can collide.
+- Remove each container this session starts when you finish.
 - Never sweep (`docker ps -q | xargs docker rm`).
 - Never pass `--no-cache`: it rebuilds every stage from scratch, which can take hours on a daemon and disk every session shares.
 - Force one stage with `--no-cache-filter=<stage>`.
@@ -44,8 +45,12 @@ Docker, depot and registry access work on this machine. Before you say one is un
 
 ## Builds
 
-- Run the build before you call an image change done. Run it again after every source edit that goes into the image. Tests do not replace the build.
-- Find a full build's usual time (CI logs, the repo's docs): a full build can take hours. Run it in the background. Keep working.
+- Run the build before you call an image change done.
+- Run the build again after every source edit that goes into the image.
+- Tests do not replace the build.
+- Find a full build's usual time (CI logs, the repo's docs): a full build can take hours.
+- Run a full build in the background.
+- Keep working while a full build runs.
 - If a full build still runs after 30 minutes, tell the user its last log line and keep working.
 - After a push, refer to the image as `<repo>@sha256:<digest>` (the digest `docker push` prints). Modal and compose cache an image by its tag, so a re-pushed `:main` is not pulled again.
 - Run the project the way the repo does (its make target, compose service or CI step). Hand-roll `docker run` only when the repo defines none.
@@ -54,8 +59,7 @@ Docker, depot and registry access work on this machine. Before you say one is un
 
 - Never pair `-d` with `--rm`: a crash takes the logs with it. Use `-d`, read `docker logs`, then `docker rm`.
 - Start a `docker run` you may interrupt with `--init`: killing the client (`timeout`, Ctrl-C) leaves the container running when PID 1 has no signal handler.
-- To stop the container of a `docker run` you may interrupt, use `docker rm -f <name>`.
-- Port unreachable: the app must bind `0.0.0.0` inside the container; then compare `docker port <c>` with your `-p`.
+- Stop your containers with `docker rm -f <name>`.
 - Publish to `127.0.0.1:8080:8080`. `-p 8080:8080` publishes on every host address, the public one included. Docker's rules run before the host firewall, so `ufw deny` does not close it.
 - Serve our own people and machines over the VPN (`tailscale serve`).
 - Publish publicly only for a named outside caller that cannot join the VPN.
@@ -67,6 +71,7 @@ Docker, depot and registry access work on this machine. Before you say one is un
 
 | Situation | Check |
 | --- | --- |
+| Port unreachable | The app must bind `0.0.0.0` inside the container; then compare `docker port <c>` with your `-p` |
 | A container fails or answers wrongly | Read `docker logs <c>`, then `docker exec <c> sh -c 'ps; curl -s localhost:<port>'` (no `-it`: an agent session has no TTY) before you propose a cause |
 | A container exits at once | Read `docker logs <c>` and `docker inspect --format '{{.Config.Cmd}} {{.Config.Entrypoint}}' <img>`. An entrypoint script needs the exec bit, a correct shebang and LF line endings |
 | A file is missing in the container | `.dockerignore` excluded it, or the image is stale. Check `.dockerignore`, then rebuild |
@@ -89,4 +94,7 @@ done
 - Do not retry the removal: each try blocks another daemon thread.
 - Do not restart the daemon: it stops every session's containers.
 - `docker ps` can still say "healthy": `grep -l <container-id> /proc/[0-9]*/cgroup` printing nothing means its init is gone.
-- It clears when the unmount finishes, or at a reboot. Send the user the container id and the thread line. Leave the container. Go on with the rest of your task.
+- It clears when the unmount finishes, or at a reboot.
+- Send the user the container id and the thread line.
+- Leave the container.
+- Go on with the rest of your task.
