@@ -77,7 +77,7 @@ Leave out what the viewer already knows: their priorities and targets, which str
   - Put the tag `[very fast, rapid-fire delivery]` before each line: `eleven_v4` has no speed setting, and the tag gives Max about 183 words a minute.
   - Then speed the audio with ffmpeg `atempo` to about 210 words a minute.
   - Measure each line's words a minute from the audio.
-  - `.strip()` the API key (`secrets ELEVENLABS_API_KEY -- ...`).
+  - `.strip()` the API key (`secrets ELEVENLABS_API_KEY -- ...`): a trailing newline in the key breaks the request's header.
   - Do not print request headers.
 
 ## Order of work
