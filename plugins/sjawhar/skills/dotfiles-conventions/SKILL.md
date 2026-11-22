@@ -48,4 +48,6 @@ description: "Use when you create, move or wire a file or directory in ~/.dotfil
 11. **Tools Sami operates.** When you change a tool Sami operates himself (his skills, dotfiles, omp, dispatch, knives), tell him what each change will do, then what it did: he uses it while you change it.
 12. **Upgrades.** Upgrade a tool that `mise.toml` pins or `install.sh` installs without asking, then say what changed and how to roll it back.
     - Ask first when running sessions must restart for such an upgrade (bun, node, omp).
-    - A fork release is a release of one of Sami's GitHub forks that build from a `sami` branch (his `jj` and `oh-my-pi`). Leave its tag, `v<upstream>-sami.<YYYYMMDD>-<HHMMSS>`, and its title, `sami build <tag>`, to the fork's `.github/workflows/sami-build.yml`, not to a person. Pin one such release's exact version in `mise.toml`, as `mise.toml` pins every tool.
+    - A fork release is a release of one of Sami's GitHub forks that build from a `sami` branch (his `jj` and `oh-my-pi`).
+    - The fork's `.github/workflows/sami-build.yml`, not a person, tags a fork release `v<upstream>-sami.<YYYYMMDD>-<HHMMSS>` and titles it `sami build <tag>`.
+    - `mise.toml` pins one fork release's exact version, as it pins every tool.
