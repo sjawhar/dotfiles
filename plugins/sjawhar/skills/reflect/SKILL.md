@@ -52,7 +52,7 @@ python3 $S/assign-readers.py records --max-records 12
 
 ## 4. Check what was read
 
-- A fresh agent that read no records runs `references/checker.md`, pasted whole: a reader that skipped a record also skips reporting it.
+- Have a fresh agent that read no records run `references/checker.md`, pasted whole: a reader that skipped a record also skips reporting it.
 - When `check-findings.py` flags more than 20 items, split them across fresh checkers, each returning a fix or a rejection per item.
 - Merge those checkers' answers into one `verdict.json`.
 - Re-run only the batches the checker names, with fresh readers, at most three rounds.
@@ -65,7 +65,7 @@ python3 $S/count-types.py export records rows/*.jsonl --out findings.jsonl
 python3 $S/count-types.py count records findings.jsonl types.jsonl --prior <last run>/counts.json --out counts.json
 ```
 
-- Between the two commands, a fresh agent with `references/coder.md` pasted whole writes `types.jsonl`.
+- Between the two commands, have a fresh agent with `references/coder.md` pasted whole write `types.jsonl`.
 - That agent starts with no category list: a fixed codebook finds only the failures it already names.
 - Report a pattern type only when it is `enough`. `count` marks each failure type `recurs` or `once` and each of Sami's pattern types `enough` or `few` (`count-types.py --help`).
 - Before you name a type's cause:
