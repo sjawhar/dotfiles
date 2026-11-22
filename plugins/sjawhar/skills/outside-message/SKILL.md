@@ -18,11 +18,13 @@ An outside message is one a person outside Theorem reads, not one that is only p
 | A pull request Theorem authors | No outside person | No |
 | A contributor's pull request | That contributor | Yes |
 
-A narrower decision of his, where one exists, is recorded in the project's AGENTS.md or goals document with the ask that made it; do not assume one without that record. `opening-a-pr` covers upstream pull requests.
+A narrower decision of his, where one exists, is recorded in the project's AGENTS.md or goals document with the ask that made it. Do not assume one without that record. `opening-a-pr` covers upstream pull requests.
 
 ## Oh My Pi
 
 Messages to Oh My Pi (`can1357/oh-my-pi`), on our pull requests and on contributors', need neither his approval nor the two steps below. The public leak check still runs, since these comments are public. A fresh cut by a session that did not write the text is recommended, not a gate.
+
+The pi-envoy plugin's own `outside-message` skill states this exception only generically ("a project the operator has excluded by name"); the project name lives here on purpose.
 
 ## Goes without his approval
 
@@ -56,7 +58,7 @@ Any one of these, except for Oh My Pi:
   - Send such a project one pull request, and no second one until Sami has seen how its maintainers reacted to the first. Put that reaction, or that they have not reacted yet, in the ask for the second.
 - No skill or template yet, or a send that departs from its template.
 - It commits him or represents his position: a promise, a deadline, a disclosure, a claim he would have to stand behind.
-- A program that will post to people outside the company (a CI review comment, a merge reply, a bot answer): he reviews what it can post before it posts (to Oh My Pi too), its fixed text and the prompt behind any text a model writes.
+- A program that will post to people outside the company (a CI review comment, a merge reply, a bot answer). He reviews what it can post before it posts (to Oh My Pi too). He reviews its fixed text and the prompt behind any text a model writes.
   - Check both first for a promise nobody decided to make, such as a promise to publish proofs.
 - A case between the two lists waits, and the ask says which way it leaned and why.
 
@@ -65,8 +67,12 @@ A project we do not run that has not enrolled starts at "approve each". It moves
 ## The two steps
 
 1. Research the reader, then write in their conventions.
-   - On a repository, read its contributing guide, issue and pull-request templates and code of conduct; its last ten issues or pull requests and how the maintainers write there; and what was already discussed about your subject. Use their pull-request template for a pull request and their issue template for an issue, and match the thread for a reply.
-   - Off a repository (an email, a Slack message to another company, a release note, a disclosure), read every earlier message between Theorem and this reader; the page where they say how to contact them (a security policy, `SECURITY.md`, a contact page, disclosure rules); and how they write (release notes, blog, their messages in the thread). An email answers the email it replies to; a first contact says in one line who is writing and why.
+
+   | Where | Read | Write |
+   | --- | --- | --- |
+   | On a repository | Its contributing guide, issue and pull-request templates and code of conduct; its last ten issues or pull requests and how the maintainers write there; and what was already discussed about your subject | Use their pull-request template for a pull request and their issue template for an issue. Match the thread for a reply. |
+   | Off a repository (an email, a Slack message to another company, a release note, a disclosure) | Every earlier message between Theorem and this reader; the page where they say how to contact them (a security policy, `SECURITY.md`, a contact page, disclosure rules); and how they write (release notes, blog, their messages in the thread) | An email answers the email it replies to. A first contact says in one line who is writing and why. |
+
    - Where the stream that owns the relationship keeps form rules (in its project's `AGENTS.md`, `.claude/skills/` or brief), those rules decide how the message reads, over the writing skills below. Send a change to the form there, not into this skill.
    - Run `asd-ste100`, `ce-noslop` and `plain-words` over the text.
    - Avoid "we" (Sami's preference): name Theorem or the tool, or write the sentence with no actor.
