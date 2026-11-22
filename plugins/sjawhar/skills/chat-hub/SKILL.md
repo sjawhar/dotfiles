@@ -5,7 +5,7 @@ description: Use when Sami mentions a chat, text, direct message or "did X reply
 
 # Chat hub
 
-A private Matrix server on oryx bridges Sami's chat networks. Each conversation is a room of `@sami:chathub`. Read the [design](../../../../docs/plans/2026-10-03-chat-hub-design.md) when you need the hub's parts, state or secrets.
+A private Matrix server on oryx bridges Sami's chat networks. Each conversation is a room of `@sami:chathub`. The [design](../../../../docs/plans/2026-10-03-chat-hub-design.md) has its parts, state and secrets.
 
 - Use the hub only in an omp session on oryx: the hub listens only on oryx loopback, and its `MATRIX_HUB_*` secrets are in oryx's `secrets.local.env`. Only an omp session started in the dotfiles repository loads the `chathub` MCP, from `~/.dotfiles/.omp/mcp.json`.
 - Send messages and files to people with `hub-send` (Sending to a person): the `chathub` MCP does not send them. It reads chats and sends commands to bridge bots.
