@@ -24,7 +24,8 @@ Read `references/commands.md` for a command or revset you do not know, bookmark 
 2. **Check `@`.** Before you edit, and after an interruption, a rebase or a workspace update, run `jj log -r '@ | @- | main@origin' --no-graph` and `jj status` (use the repository's trunk name). A clean status does not show that `@` is on current main or that it is published.
 3. **Ask its owner before you move or revert work you do not recognize:** it is usually another session's. `jj log -r <change>`, `jj op log`, `jj workspace list` and the `session-attribution` skill name its owner.
 4. **Work in your own workspace.** Subagents on disjoint files of one feature can share it; their edits then land in one change.
-5. **Do not check your own edits with `--ignore-working-copy`:** it reads the last snapshot. The flag reads a store without snapshotting another session's working copy.
+5. **Do not check your own edits with `--ignore-working-copy`:** it reads the last snapshot.
+   - The flag reads a store without snapshotting another session's working copy.
 6. **Run `jj describe -m '<what you did>'` before you leave the workspace:** a file in a workspace directory is not saved until a jj command there snapshots it.
 7. **Read `references/workspaces.md`** before you create, recover, forget or advance a workspace, or touch a worktree registration.
 8. **Never run `git worktree prune`:** it deletes other workspaces' registrations.
