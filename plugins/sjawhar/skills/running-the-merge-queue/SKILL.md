@@ -14,8 +14,8 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 - Do not run another owner's end-to-end scenarios, rebase or push their branch, or change CI, validators or models to get a PR through: a gate you changed no longer tests their work.
 - The one review you commission is a read-only `oracle` task that red-teams the end-to-end plan and evidence (step 5).
 - Give no reviewer you commission write access to a workspace another session uses.
-- When a gate or packet falls short, send the owner the exact gap.
-- After you send the gap, go on with other ready work.
+- Send the owner the exact gap.
+- Then go on with other ready work.
 
 ## 1. Read current authority and priorities
 
