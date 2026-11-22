@@ -41,7 +41,7 @@ Leave out what the viewer already knows: their priorities and targets, which str
   - Check it against their own words at the source.
     - The sources are the session transcript, Slack, and Dispatch.
     - Dispatch is the issue tracker that holds each stream's issues, asks and comments.
-    - Dispatch's commands are `dispatch search --query '<words>'`, then `dispatch read --issue <KEY>`.
+    - Dispatch's commands are `dispatch search --query '<words>'`, then `dispatch read`.
   - Quote it.
   - Do not restate it more strictly.
 
