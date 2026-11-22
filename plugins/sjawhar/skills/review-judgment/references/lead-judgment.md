@@ -14,9 +14,9 @@ Put every finding in one bucket. Give the reviewers who raised it and one line o
 ## Dismiss a finding when
 
 - All of a reviewer's findings are nits or style: say the code is probably fine. Reviewers inflate nits when they find nothing serious.
-- It is hypothetical ("what if someone passes null here?"): trace the call sites. If upstream validation or the type system prevents the input, dismiss it. The reviewer could not see the call chain; you can.
+- It is hypothetical ("what if someone passes null here?"): trace the call sites. If upstream validation or the type system prevents the input, dismiss it.
 - It asks for an abstraction (extract a function, add an interface) and the code has no second way it needs to change: dismiss it as premature.
-- It says only "I would do it differently" and shows no concrete problem with the current approach. This is the most common false positive.
+- It says only "I would do it differently" and shows no concrete problem with the current approach.
 - It shows the reviewer lacked context: it asks to change code the author did not write or modify, flags a pattern the rest of the codebase uses, or conflicts with a constraint you know about.
 
 ## Act on a finding when
