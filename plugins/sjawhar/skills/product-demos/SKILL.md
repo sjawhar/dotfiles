@@ -20,8 +20,8 @@ Read [references/pipeline.md](references/pipeline.md) when you install the tools
 5. Reshoot a section that shows an error on screen. Do not trim around the error: frame and duration checks cannot read error text, so missed error frames ship.
    - Fix the root cause (usually stale state from an earlier take).
    - Re-record against a clean destination.
-6. Effect comes after cause: a spliced clip that reads a path comes after the clip that creates it.
-7. Narration claims only what the screen shows.
+6. Put effect after cause: splice a clip that reads a path after the clip that creates it.
+7. Claim in the narration only what the screen shows.
    - Cut an overclaim; do not soften it.
 8. **A silence of 2s or more:** over a frozen frame, cut the video; over live typing, it is fine.
 9. When several demo sessions share a host, boot local Docker sandboxes one at a time: concurrent boots overload it.
@@ -37,16 +37,16 @@ Read [references/pipeline.md](references/pipeline.md) when you install the tools
 - **GUI or editor:**
   - After an input you cannot see land, measure its effect (a panel's bounding box, clip duration against wall clock, a counter, terminal DOM text) instead of trusting the keypress.
   - When a take fails, measure the artefact before the next try.
-- Apply the workaround in pipeline.md's "Input and readiness traps" when one of these hits: Playwright, CDP and keyboard chords can deliver input to the wrong place and fail silently, and a readiness wait on text can never match.
+- Apply the workaround in pipeline.md's "Input and readiness traps" when one of these hits. Playwright, CDP and keyboard chords can deliver input to the wrong place and fail silently. A readiness wait on text can never match.
 - When one of these traps hits, do not tear down the live sandbox.
 - Set the layout before you record: panes that collapse, scroll or resize between takes clip beats and break crops.
   - Check it in the recorded frame, for the same reason.
-- A cleanup path must not authenticate through the credential store of the thing it cleans up: it fails exactly when you need it.
+- Do not authenticate a cleanup path through the credential store of the thing it cleans up: it fails exactly when you need it.
   - Give it a credential that still works when that environment is broken, or run it from a separate job with its own credential.
 
 ## 2. Cut, narrate, assemble
 
-1. Convert each cast to MP4 (`references/pipeline.md`, "Record, convert, trim").
+1. Convert each cast to MP4.
    - Find trim points from thumbnails, not from cast timestamps: agg compresses idle time.
 2. Cut each clip hard to its real action, at constant fps.
    - Measure its duration.
@@ -73,18 +73,18 @@ Read [references/pipeline.md](references/pipeline.md) when you install the tools
    - Record both results (lint and teach-back) in `<video>.src/README.md`.
 5. If narration cannot fit, shorten the words.
    - Cut footage only where reality is unwatchably slow (a sandbox boot).
-6. Choose the voice first: give the user one labeled A/B video of several voice samples (`references/pipeline.md`, "Narration").
+6. Choose the voice first: give the user one labeled A/B video of several voice samples.
    - Take the candidates from the current Artificial Analysis TTS leaderboard (https://artificialanalysis.ai/text-to-speech/leaderboard, read on the day): go down it from the top.
    - Skip each model whose provider you have no key for.
    - Stop at three models.
    - Add the voices each provider recommends for narration.
-7. Generate with the model the user picked, at `mp3_44100_192` or better, at the pace the user wants (`references/pipeline.md`, "Narration").
+7. Generate with the model the user picked, at `mp3_44100_192` or better, at the pace the user wants.
    - Reach the pace with the model's speed setting and fewer words.
    - Drop a voice that stops sounding natural at that pace.
 8. `.strip()` the API key.
    - Catch transport errors without printing headers: httpx otherwise prints the raw key in a traceback.
 9. After the recordings are final and before the final render, audit every narration line against the screen: command output, numbers, feature names, workflow.
-10. Normalize all clips (resolution, fps, pixel format, stereo 44100 Hz AAC) before concat (`references/pipeline.md`, "Normalize, title cards, concat").
+10. Normalize all clips (resolution, fps, pixel format, stereo 44100 Hz AAC) before concat.
 
 ## 3. Review before it ships
 
