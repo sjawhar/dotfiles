@@ -23,6 +23,7 @@ The keys below are agent tier: `secrets <KEY> -- <command>` gives them to an age
 - SF: a Home Assistant Green at `10.0.0.254` on the apartment LAN. That address is static, set on the Green, and outside the gateway's assumed DHCP pool; the gateway reserves nothing for it (`skills/majordomo/references/sites/wiz.md` in sjawhar/dojo). `HA_MCP_URL_BUSH` is its webhook URL `http://10.0.0.254:8123/api/webhook/<id>`; the id is a secret. It works only from that LAN (oryx is on it). Its webhook is in auth mode (below), so each call also sends `HA_TOKEN_BUSH`, the Wren user's long-lived token; without it the webhook answers 401. There is no `HA_MCP_TOKEN_BUSH` secret; the `bash -c` maps the names:
   - Call: `secrets HA_MCP_URL_BUSH HA_TOKEN_BUSH -- bash -c 'export HA_MCP_URL="$HA_MCP_URL_BUSH" HA_MCP_TOKEN="$HA_TOKEN_BUSH"; exec ~/.dotfiles/plugins/sjawhar/skills/home-assistant/ha-mcp-call.sh "$@"' _ <tool> '<json>'`
   - MCP client: `secrets HA_MCP_URL_BUSH HA_TOKEN_BUSH -- bash -c 'export HA_MCP_TOKEN_BUSH="$HA_TOKEN_BUSH"; unset HA_TOKEN_BUSH; exec npx -y -p mcp-remote@0.14.3 mcp-remote-from-env HA_MCP_URL_BUSH --allow-http'`
+  - Read [references/sf-green-lockout.md](references/sf-green-lockout.md) when the Green answers 403 to every request from an address, or before you change its ban threshold.
 - The stopped container `homeassistant-sf` on oryx is a rollback copy, not the SF instance. Do not start it.
 
 ## Credentials and auth mode
@@ -32,16 +33,6 @@ The keys below are agent tier: `secrets <KEY> -- <command>` gives them to an age
 - Auth mode: a webhook whose HA-MCP Server option `webhook_auth` is `ha_auth` ("Sign in with Home Assistant") answers 401 without a long-lived HA token. Salt Lake's token is `HA_TOKEN`. Read [references/auth-mode.md](references/auth-mode.md) when a call answers 401, or before you call or launch a client for an auth-mode webhook other than with the SF commands above.
 - ha-mcp runs inside HA: HACS component "HA-MCP Custom Component", entry "HA-MCP Server". The admin-only HA-MCP panel in the HA sidebar turns tools on and off and sets Read Only Mode, feature flags and edit backups.
 - File and YAML tools (`ha_read_file`, `ha_config_set_yaml`, ...) are beta and off. They need the "HA-MCP File & YAML Tools" entry and its feature flags.
-
-## The SF Green's lockout
-
-- Since 2026-11-20 the Green bans an address after 5 requests with invalid authentication (a wrong, expired or revoked token, or a failed login): Home Assistant then answers 403 to every request from that address on port 8123, ha-mcp included, until the address leaves `ip_bans.yaml` and Home Assistant restarts. SSH and the apps on their own ports still answer. The count is per address, and a request with a valid token never resets it; only a login through the login page, a websocket login from that address, or a restart does. Send the Green only a token you have seen work, and test refusals against a stub. Remote UI requests count against the client's public address.
-- The threshold is in the http settings (Settings → System → Network), not YAML: websocket `http/config/configure` restarts Home Assistant on new settings, and `http/config/promote` within 5 minutes keeps them, else it restarts on the old ones. Remove a ban, then restart (automations pause about two minutes):
-
-  ```sh
-  ssh -i ~/.ssh/ha-dojo root@10.0.0.254 'a=<address>; f=/homeassistant/ip_bans.yaml; cp -p "$f" "$f.bak" && sed -i "/^${a//./\\.}:\$/,+1d" "$f" && cat "$f"'
-  ssh -i ~/.ssh/ha-dojo root@10.0.0.254 'ha core restart'
-  ```
 
 ## Work
 
