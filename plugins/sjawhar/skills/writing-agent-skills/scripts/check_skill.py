@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["pyyaml>=6"]
+# dependencies = ["markdown-it-py>=3", "pyyaml>=6"]
 # ///
 """Size, description, name and link checks for agent skills (writing-agent-skills: "Limits").
 
@@ -22,12 +22,12 @@ never the words in the file. Templates, scripts and other files that are not mar
 measured.
 
 It prints a warn line and still passes when the body has more than 40 rules, or when the name
-differs from the directory. A list item counts 1 rule with every line inside it: each indented
-line up to the next item or the end of its list, blank lines between them allowed, and each
-unindented line that continues its text (a lazy continuation); a nested list item counts 1 more.
-A paragraph counts 1 rule for each sentence. Headings, tables, fenced code, blockquotes, thematic
-breaks and blank lines count 0. Run it with `uv run --script`, which installs PyYAML from the
-block above; the frontmatter is read with yaml.safe_load, as a YAML reader of a host reads it.
+differs from the directory. The body is read as CommonMark (markdown-it-py, with tables). A list
+item counts 1 rule with everything inside it, and a nested item 1 more; a paragraph outside list
+items and blockquotes counts 1 per sentence, where a sentence ends at a . ! or ? that whitespace
+and then a capital, a backtick, a quote or * follow; everything else counts 0. Run it with
+`uv run --script`, which installs PyYAML and markdown-it-py from the block above; the
+frontmatter is read with yaml.safe_load, as a YAML reader of a host reads it.
 """
 
 import argparse
@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import TypedDict, cast
 
 import yaml
+from markdown_it import MarkdownIt
 
 # Limits: SKILL.md or a reference over TARGET_BYTES, or a description over TARGET_DESC, fails.
 TARGET_BYTES = 8_000  # Codex injects only the first 8,000 bytes
@@ -45,10 +46,7 @@ TARGET_DESC = 300
 RULES = 40  # every-rule-obeyed rates collapse between 40 and 80 rules
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 LINK_RE = re.compile(r"\]\(([^)#\s]+)\)|`((?:references|scripts|assets|templates)/[^`\s]+)`")
-LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
-# A thematic break: a line of three or more -, * or _, all the same, with spaces between them allowed.
-THEMATIC_BREAK_RE = re.compile(r"^\s*([-*_])(?:[ \t]*\1){2,}\s*$")
-FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+MARKDOWN = MarkdownIt("commonmark").enable("table")
 # A sentence ends at . ! or ? that whitespace and then a capital, a backtick, a quote or * follow.
 SENTENCE_END_RE = re.compile(r"[.!?]\s+(?=[A-Z`\"'\u201c\u2018*])")
 TEMPLATE_DIRS = frozenset({"assets", "templates"})
@@ -105,54 +103,21 @@ def references(skill_dir: Path) -> list[Path]:
 
 
 def count_rules(body: str) -> int:
-    """The rules of a SKILL.md body: a list item counts 1, and a paragraph counts its sentences.
-
-    Every line inside a list item adds nothing. That is each indented line while its list is open,
-    blank lines between them allowed, and each lazy continuation: an unindented line right after a
-    line of the item outside its fenced code, that is not a list item, heading, table row, fence,
-    blockquote or thematic break. A nested list item counts 1, and an unindented line that is
-    neither a list item nor a lazy continuation ends the list. Headings, tables, fenced code,
-    blockquotes with their lazy continuation lines, thematic breaks and blank lines count 0.
-    """
-    items = 0
-    paragraphs: list[list[str]] = []
-    fence = ""  # the open code fence's marker; "" outside a fence
-    in_list = False  # a list item is above, and no line since has ended its list
-    block = ""  # the block the next line can continue: "item", "quote", "paragraph", or "" for none
-    for line in body.splitlines():
-        stripped = line.strip()
-        if fence:
-            if stripped.startswith(fence) and not stripped.strip(fence[0]):
-                fence = ""
-            continue
-        opener = FENCE_RE.match(line)
-        if not stripped:
-            block = ""  # a blank line ends a paragraph or a blockquote, but not a list
-        elif in_list and line[0].isspace():
-            # An indented line in an open list is inside its last item; only a nested list item counts.
-            if opener:
-                fence, block = opener.group(1), ""
-            else:
-                block = "item"
-                if LIST_ITEM_RE.match(line) and not THEMATIC_BREAK_RE.match(line):
-                    items += 1
-        elif opener:
-            fence, in_list, block = opener.group(1), False, ""
-        elif THEMATIC_BREAK_RE.match(line) or stripped.startswith(("#", "|")):
-            in_list, block = False, ""
-        elif stripped.startswith(">"):
-            in_list, block = False, "quote"
-        elif LIST_ITEM_RE.match(line):
-            items += 1
-            in_list, block = True, "item"
-        elif block in ("item", "quote"):
-            pass  # a lazy continuation line stays in its list item or blockquote and adds nothing
-        elif block == "paragraph":
-            paragraphs[-1].append(stripped)
-        else:
-            paragraphs.append([stripped])
-            in_list, block = False, "paragraph"
-    return items + sum(1 + len(SENTENCE_END_RE.findall(" ".join(lines))) for lines in paragraphs)
+    """The number of rules in a SKILL.md body, counted as the module docstring says."""
+    rules = 0
+    containers = 0  # the list items and blockquotes open around the token
+    tokens = MARKDOWN.parse(body)
+    for i, token in enumerate(tokens):
+        if token.type == "list_item_open":
+            rules += 1
+        if token.type in ("list_item_open", "blockquote_open"):
+            containers += 1
+        elif token.type in ("list_item_close", "blockquote_close"):
+            containers -= 1
+        elif token.type == "paragraph_open" and not containers:
+            # The inline token after a paragraph's open token holds the paragraph's text.
+            rules += 1 + len(SENTENCE_END_RE.findall(" ".join(tokens[i + 1].content.splitlines())))
+    return rules
 
 
 def size_fails(label: str, size: int) -> list[str]:

@@ -3,8 +3,8 @@
 Run: uvx pytest plugins/sjawhar/skills/writing-agent-skills/scripts
 Each test builds a skill under tmp_path that passes every check but the one under test, runs the
 script on it, and reads its exit status and its FAIL or warn lines. The script runs with the
-interpreter uv builds from its own `# /// script` block (it needs PyYAML), never the one running
-the tests.
+interpreter uv builds from its own `# /// script` block (it needs PyYAML and markdown-it-py),
+never the one running the tests.
 """
 
 import functools
@@ -353,6 +353,32 @@ def test_a_table_and_a_fenced_block_are_not_rules(tmp_path: Path) -> None:
     table = "| Rule | Text |\n| --- | --- |\n" + rows
     fenced = "```text\n" + "".join(f"- Rule {i} is one sentence.\n" for i in range(1, 46)) + "```\n"
     assert warns(tmp_path, table + "\n" + fenced) == []
+
+
+def test_a_paragraph_indented_less_than_its_item_after_a_blank_line_is_a_rule(tmp_path: Path) -> None:
+    # After a blank line an item holds only lines indented to its text; this one ends the list.
+    assert warns(tmp_path, forty_items_and("\n A paragraph after the list.\n")) == [WARN_41]
+
+
+def test_a_paragraph_after_a_list_is_a_rule(tmp_path: Path) -> None:
+    assert warns(tmp_path, forty_items_and("\nA paragraph after the list.\n")) == [WARN_41]
+
+
+def test_a_paragraph_after_a_blockquote_is_a_rule(tmp_path: Path) -> None:
+    assert warns(tmp_path, forty_items_and("\n> A quote.\n\nA paragraph after the quote.\n")) == [WARN_41]
+
+
+def test_a_setext_heading_is_not_a_rule(tmp_path: Path) -> None:
+    assert warns(tmp_path, forty_items_and("\nA setext heading. It has two sentences.\n---\n")) == []
+
+
+def test_indented_code_is_not_a_rule(tmp_path: Path) -> None:
+    # Above the list: below it, an indented line is the last item's text.
+    assert warns(tmp_path, "    Indented code. It has two sentences.\n\n" + as_items(40)) == []
+
+
+def test_an_html_block_is_not_a_rule(tmp_path: Path) -> None:
+    assert warns(tmp_path, forty_items_and("\n<!-- An HTML comment. It has two sentences. -->\n")) == []
 
 
 def test_old_is_not_an_option(tmp_path: Path) -> None:

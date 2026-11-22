@@ -66,9 +66,9 @@ else's, does not make your issue done.
 ## Handing work on
 
 Hand on part of your outcome only when you cannot do it (it needs another stream's authority or machine). Name the
-session that accepted it, link its reply on both issues, and post `LEDGER handoff <ISSUE> <what> to <session>
-<link to the acceptance>`. Without an accepting session the work stays yours. An accepted handoff is not done: your
-issue stays open and waits on that work as above.
+session that accepted it, link its reply on both issues, and post
+`LEDGER handoff <ISSUE> <what> to <session> <link to the acceptance>`. Without an accepting session the work stays
+yours. An accepted handoff is not done: your issue stays open and waits on that work as above.
 
 ## Standing roles and periodic work
 
