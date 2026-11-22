@@ -26,7 +26,7 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 - Read the record again at each wake and before each merge.
 - Only a current decision sets a hold or a quiet window: never restore a lifted hold or infer a window from history.
 - Merge only by an ordinary protected squash merge, never under a permission inferred from earlier use.
-- Ask Sami once for a merge window: a span to merge READY PRs without asking per PR. A grant given to this queue session stays live for it.
+- Ask Sami once for a merge window: a span to merge READY PRs without asking per PR. A grant to this queue session stays live for it.
 - At registration, check the author, the account this session writes as (`gh api user --jq .login`), required reviews and CODEOWNERS.
 - An approval that account cannot give is unmet until `landing-a-pr`'s repo merge rules name who gives it.
 - **Read `references/sequencing.md` now** before you decide the merge order: the order with no explicit priority (Sami's goal, parents, corpus changes), never by READY arrival order.
@@ -35,7 +35,7 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 
 ## 2. Register PRs and act on packets
 
-- Register each PR when it opens: owner, purpose, intended published parent, file scope, required gates, and the end-to-end scenarios the owner will run before merge.
+- Register each PR when it opens: owner, purpose, intended published parent, file scope, required gates, and the end-to-end scenarios the owner runs before merge.
 - Give the owner the gate list at registration, so the packet arrives complete.
 - Act on packets, and on CI events for PRs that have one.
 - Do not sweep all owners.
@@ -53,7 +53,7 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 - Hold a self-verdict packet until Sami approves that PR by name, or an independent reviewer posts a verdict on the PR that names the head. A self-verdict packet begins `SELF-VERDICT - needs clearance or an independent reader`.
 - For each head, record the registration facts, its gate session and each fact steps 3 to 5 check, each with its read time and source link, plus the disposition and who acts next.
 - Re-read held PRs on GitHub at each wake before you write "unchanged": GitHub is the live truth, not your record.
-- Start CI waits as background jobs (for example an async `gh pr checks N --watch --interval 120`).
+- Start CI waits as background jobs (such as an async `gh pr checks N --watch --interval 120`).
 - Keep working while a CI wait runs.
 - Ask for a rebase or push only when main conflicts with the PR or the PR's own diff needs a change, never only to pick up main: each push restarts CI and review.
 - Read `references/evidence-quality.md` for stale-main reds, empty results or missing logs.
@@ -62,7 +62,7 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 
 Before you declare READY or merge, read `references/review-evidence.md`: the surfaces to read, each finding's disposition, the smaller gates for prose-only and test-only PRs, and review seats.
 
-- You check the enumeration and the dispositions, not code or severity: the owner dispositions findings and the independent reviewer states that nothing blocking remains.
+- You check the enumeration and dispositions, not code or severity: the owner dispositions findings and the independent reviewer states that nothing blocking remains.
 - On disagreement, return the exact list of undispositioned findings.
 
 ## 4. Bind evidence to the head
@@ -79,7 +79,11 @@ Before you declare READY or merge, read `references/review-evidence.md`: the sur
 - Read `pr-gate`'s reasons, not only its exit code.
 - CI, mergeability, holds, the base, the file and commit scope and the Dispatch key at the head: check each as `references/merge-mechanics.md` lists them.
 - Review: an independent review artifact on the PR names the head, with every blocking finding closed and every other one dispositioned. Your approval is not one.
-- Runtime code, CI configuration, scripts, Dockerfiles and infrastructure: after the ordinary review rounds, the owner (under `sdd`, the coordinator) runs `ce-simplify-code` once, then the thermonuclear pair (`thermonuclear-deep-review` and `thermonuclear-code-quality`) once at the final code head. Never waived. Order and exceptions: `references/review-evidence.md`.
+- Runtime code, CI configuration, scripts, Dockerfiles and infrastructure:
+  - After the ordinary review rounds, the owner (under `sdd`, the coordinator) runs `ce-simplify-code` once.
+  - Then the owner (under `sdd`, the coordinator) runs the thermonuclear pair (`thermonuclear-deep-review`, `thermonuclear-code-quality`) once at the final code head.
+  - Simplify and the pair are never waived.
+  - Order and exceptions: `references/review-evidence.md`.
 - Acceptance: every change to what runs needs its changed end-to-end scenarios run at the intended head before merge.
 - A `.md` or `.yaml` suffix does not make an operative change prose-only: the scenario runs through the program that reads that file.
 - Prose that changes nothing that runs needs no scenario and no oracle.
@@ -96,4 +100,4 @@ Before you declare READY or merge, read `references/review-evidence.md`: the sur
 
 ## 7. Close the loop
 
-- After each merge, and after each round with waits, read `references/close-the-loop.md` and do each item: the production check, stacked children, the learnings PR and the list of waits.
+- After each merge and each round with waits, read `references/close-the-loop.md` and do each item: the production check, stacked children, the learnings PR and the list of waits.
