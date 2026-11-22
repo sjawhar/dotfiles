@@ -39,7 +39,7 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 ## 2. Register PRs and act on packets
 
 - Register each PR when it opens: owner, purpose, intended published parent, file scope, required gates and the end-to-end scenarios the owner runs before merge.
-- Give the owner the gate list at registration, so the packet arrives complete.
+- Give the owner the gate list at registration so the packet arrives complete.
 - Act on packets and on CI events for PRs that have one.
 - Do not sweep all owners.
 - Owners drive their PRs while they are live.
@@ -49,12 +49,13 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 
 | PR | Who sends the packet |
 |---|---|
-| For an issue a coordinator (the `sdd` lead) owns | That coordinator's gate packet, naming the head |
+| For an issue a coordinator (the `sdd` lead) owns | That coordinator's gate packet naming the head |
 | With an active gate session (the session a coordinator assigned to check its gates) | That session's packet or a verdict on the PR naming the head from any other reviewer who is not the author |
-| From an uncoordinated session | The session itself, with an independent reviewer's verdict |
+| From an uncoordinated session | The session itself with an independent reviewer's verdict |
 
 - A packet from anyone but the work owner: also ask the owner whether a round is in flight before you merge, since green CI cannot tell "finished" from "between pushes".
-- Hold a self-verdict packet until Sami approves that PR by name or an independent reviewer posts a verdict on the PR that names the head. A self-verdict packet begins `SELF-VERDICT - needs clearance or an independent reader`.
+- Hold a self-verdict packet until Sami approves that PR by name or an independent reviewer posts a verdict on the PR that names the head.
+  - A self-verdict packet begins `SELF-VERDICT - needs clearance or an independent reader`.
 - For each head, record the registration facts, its gate session and each fact steps 3 to 5 check, each with its read time and source link, plus the disposition and who acts next.
 - Re-read held PRs on GitHub at each wake before you write "unchanged": GitHub is the live truth, not your record.
 - Start CI waits as background jobs (like an async `gh pr checks N --watch --interval 120`).
@@ -84,7 +85,7 @@ Before you declare READY or merge, read `references/review-evidence.md`: the sur
 - CI, mergeability, holds, the base, the file and commit scope and the Dispatch key at the head: check each as `references/merge-mechanics.md` lists them.
 - Review: an independent review artifact on the PR names the head, with every blocking finding closed and every other one dispositioned. Your approval is not one.
 - Runtime code, CI configuration, scripts, Dockerfiles and infrastructure:
-  - After the ordinary review rounds, the owner (under `sdd`, the coordinator) runs `ce-simplify-code` once.
+  - After the ordinary review rounds the owner (under `sdd`, the coordinator) runs `ce-simplify-code` once.
   - Then the owner (under `sdd`, the coordinator) runs the thermonuclear pair (`thermonuclear-deep-review`, `thermonuclear-code-quality`) once at the final code head.
   - Neither run is ever waived.
   - Order and exceptions: `references/review-evidence.md`.
