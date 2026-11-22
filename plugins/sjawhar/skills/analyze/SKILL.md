@@ -8,8 +8,8 @@ description: Use when you are about to commit or open a PR on code you wrote, at
 Fix every Critical and High finding (`opening-a-pr` requires it).
 
 1. **Find changes.** Find the working-copy changes with `git status --porcelain --untracked-files=all` (staged,
-   unstaged and untracked files) and `git diff HEAD` (staged and unstaged changes), and your unpushed commits with
-   `git log @{upstream}..HEAD` and `git diff @{upstream}...HEAD` (with no upstream, diff against the base branch).
+   unstaged and untracked files) and `git diff HEAD` (staged and unstaged changes). Find your unpushed commits with
+   `git log @{upstream}..HEAD` and `git diff @{upstream}...HEAD`. With no upstream, diff against the base branch.
    If there are none, report that and ask what to analyze.
 2. **Run agents.** Run these agents in parallel in one `task` call:
    - `type-checker`, `bug-finder` and `code-simplifier` have edit tools. Tell each: "Find issues and fix them
