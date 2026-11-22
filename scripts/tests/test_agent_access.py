@@ -224,6 +224,29 @@ class AgentAccess(unittest.TestCase):
         self.elapsed = time.monotonic() - start
         return result
 
+    def access_rows(self, script: Path = AGENT_ACCESS) -> dict[str, dict[str, str]]:
+        """Run `agent-access --json` and return its rows by name."""
+        result = self.run_access("--json", script=script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return {row["name"]: row for row in json.loads(result.stdout)}
+
+    def write_gws_registry(self, *accounts: str) -> None:
+        """Write gws-accounts' registry under HOME, with one key per account."""
+        gws_dir = self.home / ".config" / "gws"
+        gws_dir.mkdir(parents=True, exist_ok=True)
+        (gws_dir / "accounts.json").write_text(json.dumps({account: {} for account in accounts}), encoding="utf-8")
+
+    def private_check_script(self, checks: str) -> Path:
+        """Return a copy of agent-access in a dotfiles tree whose private agent-access.d/demo.sh holds CHECKS."""
+        dotfiles = self.root / "dotfiles"
+        (dotfiles / "scripts").mkdir(parents=True)
+        script = dotfiles / "scripts" / "agent-access"
+        shutil.copy(AGENT_ACCESS, script)
+        private = dotfiles / ".secrets" / "dotfiles" / "agent-access.d"
+        private.mkdir(parents=True)
+        (private / "demo.sh").write_text(checks, encoding="utf-8")
+        return script
+
     def test_core_tools_are_their_binaries_not_mise_shims(self) -> None:
         write_stub(self.root, "probe", 'for tool in "$@"; do command -v "$tool" || exit 1; done')
         result = self.run_access(*CORE_TOOLS, script=self.root / "probe")
@@ -461,12 +484,8 @@ fi
         """Return the rows when each command in OUTPUTS runs its stub body, then exits 124 as `timeout` does."""
         for command, body in outputs.items():
             write_stub(self.stub_dir, command, f"{body}\nexit 124")
-        gws_dir = self.home / ".config" / "gws"
-        gws_dir.mkdir(parents=True)
-        (gws_dir / "accounts.json").write_text(json.dumps({"work": {}}), encoding="utf-8")
-        result = self.run_access("--json")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        return {row["name"]: row for row in json.loads(result.stdout)}
+        self.write_gws_registry("work")
+        return self.access_rows()
 
     def assert_timed_out(self, rows: dict[str, dict[str, str]], details: dict[str, str]) -> None:
         """Each check in TIMED_CHECKS is missing, its detail the one DETAILS names or `timed out after 6s`."""
@@ -506,6 +525,195 @@ fi
         for name, detail in details.items():
             with self.subTest(check=name):
                 self.assertEqual((rows[name]["status"], rows[name]["detail"]), ("missing", detail))
+
+    def test_failure_with_no_output_names_its_exit_code(self) -> None:
+        """A command that fails and prints nothing gives the detail `exit <code>, no output`, never an empty one."""
+        for command in TIMED_CHECKS.values():
+            write_stub(self.stub_dir, command, "exit 3")
+        self.write_gws_registry("work")
+        rows = self.access_rows()
+        details = {name: "exit 3, no output" for name in TIMED_CHECKS}
+        # The broker check's own text for an empty answer stays.
+        details["agent_secrets_broker"] = "no broker identity; secret-run falls back to secretsd"
+        for name, detail in details.items():
+            with self.subTest(check=name):
+                self.assertEqual((rows[name]["status"], rows[name]["detail"]), ("missing", detail))
+        write_stub(
+            self.stub_dir, "kubectl", '[[ "$1 $2" == "config current-context" ]] && { echo production; exit 0; }\nexit 3'
+        )
+        with self.subTest(check="kubectl auth whoami"):
+            kubectl = self.access_rows()["kubectl"]
+            self.assertEqual(
+                (kubectl["status"], kubectl["detail"]), ("missing", "context: production; exit 3, no output")
+            )
+
+    def test_datadog_answer_without_a_status_reports_its_first_line(self) -> None:
+        """pup's answer with no `.status` gives its first line as the detail, not an empty one."""
+        cases = {
+            ('{"authenticated":false}', 0): '{"authenticated":false}',
+            ('{"authenticated":false,"status":"token expired"}', 0): "token expired",
+            ("Not authenticated", 0): "Not authenticated",
+            ("", 1): "exit 1, no output",
+        }
+        for (stdout, code), detail in cases.items():
+            with self.subTest(stdout=stdout, code=code):
+                write_stub(self.stub_dir, "pup", f"printf %s {shlex.quote(stdout)}\nexit {code}")
+                row = self.access_rows()["datadog_pup"]
+                self.assertEqual((row["status"], row["detail"]), ("missing", detail))
+
+    def test_gcloud_parses_only_stdout_and_reports_an_unparseable_answer(self) -> None:
+        """A stderr warning does not hide the ACTIVE account; an answer that is not a JSON list is `unknown`.
+
+        Only a parsed list with no ACTIVE account is `no ACTIVE account`, and a failure reports stderr's first line.
+        """
+        active = '[{"account":"sami@example.com","status":"ACTIVE"}]'
+        cases = {
+            "a warning on stderr before the answer": (
+                f"echo 'WARNING: update available' >&2\necho {shlex.quote(active)}",
+                ("live", "sami@example.com", ""),
+            ),
+            "text on stdout": (
+                "echo 'You are not logged in'",
+                ("unknown", "-", "unparseable answer: You are not logged in"),
+            ),
+            "empty stdout": ("exit 0", ("unknown", "-", "unparseable answer: ")),
+            "a list with no ACTIVE account": ("echo '[]'", ("missing", "-", "no ACTIVE account")),
+            "a failure with its error on stderr after stdout": (
+                "echo '[]'\necho 'ERROR: (gcloud.auth.list) boom' >&2\nexit 1",
+                ("missing", "-", "ERROR: (gcloud.auth.list) boom"),
+            ),
+        }
+        for case, (body, expected) in cases.items():
+            with self.subTest(case=case):
+                write_stub(self.stub_dir, "gcloud", body)
+                row = self.access_rows()["gcloud"]
+                self.assertEqual((row["status"], row["identity"], row["detail"]), expected)
+
+    def test_vercel_identity_is_stdout_and_a_failure_reports_stderr(self) -> None:
+        """vercel's notice on stderr is not the identity; a failure reports stderr's last line, else stdout's."""
+        cases = {
+            "an update notice on stderr after the identity": (
+                "echo sami-2219\necho 'Run npm i -g vercel@latest to update.' >&2",
+                ("live", "sami-2219", ""),
+            ),
+            "a failure with its error on stderr before stdout": (
+                "echo 'Error: No existing credentials found.' >&2\necho 'Vercel CLI 39.1.0'\nexit 1",
+                ("missing", "-", "Error: No existing credentials found."),
+            ),
+            "a failure with its error on stdout only": (
+                "echo 'Error: not logged in'\nexit 1",
+                ("missing", "-", "Error: not logged in"),
+            ),
+        }
+        for case, (body, expected) in cases.items():
+            with self.subTest(case=case):
+                write_stub(self.stub_dir, "vercel", body)
+                row = self.access_rows()["vercel"]
+                self.assertEqual((row["status"], row["identity"], row["detail"]), expected)
+
+    def test_last_line_readers_skip_empty_lines_and_carriage_returns(self) -> None:
+        """Where a check reads the last line on purpose, it reads the last non-empty one, CR removed."""
+        write_stub(
+            self.stub_dir, "gws", "printf 'Using keyring backend: keyring\\nerror: 401 Unauthorized\\n\\n' >&2\nexit 1"
+        )
+        self.write_gws_registry("work")
+        write_stub(self.stub_dir, "secrets", "printf 'secrets: cannot reach secretsd\\n\\n' >&2\nexit 1")
+        write_stub(self.stub_dir, "fleetctl", "printf 'denied\\r\\n\\r\\n'\nexit 1")
+        write_stub(self.stub_dir, "vercel", "printf 'Error: no credentials\\r\\n \\r\\n' >&2\nexit 1")
+        rows = self.access_rows()
+        details = {
+            "google_workspace_work": "error: 401 Unauthorized",
+            "secretsd_grants": "secrets: cannot reach secretsd",
+            "fleetctl": "denied",
+            "vercel": "Error: no credentials",
+        }
+        for name, detail in details.items():
+            with self.subTest(check=name):
+                self.assertEqual((rows[name]["status"], rows[name]["detail"]), ("missing", detail))
+        write_stub(self.stub_dir, "vercel", "printf 'sami-2219\\r\\n\\r\\n'")
+        with self.subTest(check="vercel identity"):
+            vercel = self.access_rows()["vercel"]
+            self.assertEqual((vercel["status"], vercel["identity"]), ("live", "sami-2219"))
+
+    def test_aws_parses_only_stdout_and_a_failure_reports_stderr(self) -> None:
+        """A stderr warning does not hide a valid ARN; a failure reports stderr's first non-empty line."""
+        arn = "arn:aws:sts::123:assumed-role/test/i-abc"
+        expired = "An error occurred (ExpiredToken) when calling the GetCallerIdentity operation: token expired"
+        cases = {
+            "a warning on stderr before the answer": (
+                f"echo 'WARNING: Python 3.8 is deprecated' >&2\necho {shlex.quote(json.dumps({'Arn': arn}))}",
+                ("live", arn, ""),
+            ),
+            "a failure with its error on stderr after an empty line": (
+                f"echo >&2\necho {shlex.quote(expired)} >&2\nexit 254",
+                ("missing", "-", expired),
+            ),
+        }
+        for case, (body, expected) in cases.items():
+            with self.subTest(case=case):
+                write_stub(self.stub_dir, "aws", body)
+                row = self.access_rows()["aws"]
+                self.assertEqual((row["status"], row["identity"], row["detail"]), expected)
+
+    def test_github_app_unreadable_cache_is_unknown(self) -> None:
+        """A covered-owner cache that is not a JSON object gives `unknown` and names the file, not `live`."""
+        cache = self.home / ".cache" / "gh-app-token"
+        cache.mkdir(parents=True)
+        covered = cache / "covered-123.json"
+        for content in ("{not json", '["stub-owner"]', ""):
+            with self.subTest(content=content):
+                covered.write_text(content, encoding="utf-8")
+                row = self.access_rows()["github_app"]
+                self.assertEqual(
+                    (row["status"], row["identity"], row["detail"]),
+                    ("unknown", "-", f"unreadable covered-owner cache: {covered}"),
+                )
+
+    def test_sentry_answer_without_a_user_line_says_so(self) -> None:
+        """sentry-cli info that exits 0 with no `User:` line (an org auth token) is missing for that reason."""
+        cases = {
+            "Sentry Server: https://sentry.io\nDefault Organization: example\n": (
+                0,
+                "no User: line in sentry-cli info",
+            ),
+            "error: API request failed\n  caused by: 401\n": (1, "error: API request failed"),
+        }
+        for stdout, (code, detail) in cases.items():
+            with self.subTest(code=code):
+                write_stub(self.stub_dir, "sentry-cli", f"printf %s {shlex.quote(stdout)}\nexit {code}")
+                row = self.access_rows()["sentry"]
+                self.assertEqual((row["status"], row["detail"]), ("missing", detail))
+
+    def test_live_answer_with_no_identity_line_reports_unknown(self) -> None:
+        """vercel and dispatch exiting 0 with no non-empty line report the identity `unknown`, as other checks do."""
+        cases = {
+            "no output": "exit 0",
+            "only blank lines": "printf '\\n \\r\\n'",
+        }
+        for case, body in cases.items():
+            write_stub(self.stub_dir, "vercel", body)
+            write_stub(self.stub_dir, "dispatch", body)
+            rows = self.access_rows()
+            for name in ("vercel", "dispatch"):
+                with self.subTest(case=case, check=name):
+                    self.assertEqual((rows[name]["status"], rows[name]["identity"]), ("live", "unknown"))
+
+    def test_broker_failure_with_only_blank_output_gives_the_fallback_text(self) -> None:
+        """`agent-secrets identity` failing with only blanks and CRs gives the fallback detail, not a blank one.
+
+        A timeout still reports the timeout.
+        """
+        fallback = "no broker identity; secret-run falls back to secretsd"
+        cases = {
+            "spaces, a tab and CRLF": ("printf ' \\r\\n\\t\\n'", 1, fallback),
+            "a lone CRLF": ("printf '\\r\\n'", 1, fallback),
+            "blank output, then a timeout": ("printf ' \\r\\n'", 124, "timed out after 6s"),
+        }
+        for case, (body, code, detail) in cases.items():
+            with self.subTest(case=case):
+                write_stub(self.stub_dir, "agent-secrets", f"{body}\nexit {code}")
+                row = self.access_rows()["agent_secrets_broker"]
+                self.assertEqual((row["status"], row["detail"]), ("missing", detail))
 
     def secretsd_row(self, stdout: str, stderr: str = "", code: int = 0) -> dict[str, str]:
         """Return the secretsd_grants row when `secrets grants` writes STDERR, then STDOUT, and exits CODE.
@@ -674,19 +882,12 @@ exit 1
 
     def test_row_makes_tabs_and_newlines_spaces_in_every_field(self) -> None:
         """row() makes each tab and newline in the identity, expiry, command and detail a space."""
-        dotfiles = self.root / "dotfiles"
-        (dotfiles / "scripts").mkdir(parents=True)
-        script = dotfiles / "scripts" / "agent-access"
-        shutil.copy(AGENT_ACCESS, script)
-        private = dotfiles / ".secrets" / "dotfiles" / "agent-access.d"
-        private.mkdir(parents=True)
-        (private / "demo.sh").write_text(
+        script = self.private_check_script(
             "check_demo() {\n"
             "    row demo_platform live $'id\\tone\\ntwo' $'exp\\tone\\ntwo' $'cmd\\tone\\ntwo' $'det\\tone\\ntwo'\n"
             "}\n"
             "extra_checks+=(check_demo)\n"
-            "extra_rows+=(demo_platform)\n",
-            encoding="utf-8",
+            "extra_rows+=(demo_platform)\n"
         )
         result = self.run_access("--json", script=script)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -696,21 +897,69 @@ exit 1
             ("live", "id one two", "exp one two", "cmd one two", "det one two"),
         )
 
+    def test_row_removes_carriage_returns_from_every_field(self) -> None:
+        """A CRLF kubectl context, a CRLF broker error and a CR in each field of a private row reach no row."""
+        write_stub(
+            self.stub_dir,
+            "kubectl",
+            r"""
+if [[ "$1 $2" == "config current-context" ]]; then printf 'production\r\n'; exit 0; fi
+if [[ "$1 $2" == "auth whoami" ]]; then
+    echo "Username   arn:aws:sts::123:assumed-role/test/i-abc"
+    exit 0
+fi
+exit 2
+""",
+        )
+        write_stub(
+            self.stub_dir,
+            "agent-secrets",
+            "printf 'agent-secrets: no broker session\\r\\nhint: run under secret-run\\r\\n'\nexit 1",
+        )
+        script = self.private_check_script(
+            "check_demo() { row demo_platform live $'id\\r\\none' $'exp\\r\\none' $'cmd\\r\\none' $'det\\r\\none'; }\n"
+            "extra_checks+=(check_demo)\n"
+            "extra_rows+=(demo_platform)\n"
+        )
+        rows = self.access_rows(script)
+        checks = {
+            "kubectl": ("live", "arn:aws:sts::123:assumed-role/test/i-abc (context: production)", ""),
+            "agent_secrets_broker": ("missing", "-", "agent-secrets: no broker session hint: run under secret-run"),
+        }
+        for name, expected in checks.items():
+            with self.subTest(check=name):
+                self.assertEqual((rows[name]["status"], rows[name]["identity"], rows[name]["detail"]), expected)
+        with self.subTest(check="demo_platform"):
+            demo = rows["demo_platform"]
+            self.assertEqual(
+                (demo["status"], demo["identity"], demo["expiry"], demo["command"], demo["detail"]),
+                ("live", "id one", "exp one", "cmd one", "det one"),
+            )
+
+    def test_json_keeps_every_field_in_its_place_after_an_empty_field(self) -> None:
+        """`--json` keeps each of a row's six fields in place when the identity and expiry are empty.
+
+        `IFS=$'\\t' read` makes a run of tabs one separator, so each field after an empty one moved one place left.
+        """
+        script = self.private_check_script(
+            'check_demo() { row demo_platform live "" "" "demo login" "from the private part"; }\n'
+            "extra_checks+=(check_demo)\n"
+            "extra_rows+=(demo_platform)\n"
+        )
+        demo = self.access_rows(script)["demo_platform"]
+        self.assertEqual(
+            (demo["status"], demo["identity"], demo["expiry"], demo["command"], demo["detail"]),
+            ("live", "", "", "demo login", "from the private part"),
+        )
+
     def test_private_checks_beside_the_dotfiles_are_sourced_and_ordered(self) -> None:
         # A check whose name would name a customer lives in <dotfiles>/.secrets/dotfiles/
         # agent-access.d/*.sh (a private repository); the script finds that directory from its
         # own path, runs each check it adds and prints the rows it names after `anthropic_ant`.
-        dotfiles = self.root / "dotfiles"
-        (dotfiles / "scripts").mkdir(parents=True)
-        script = dotfiles / "scripts" / "agent-access"
-        shutil.copy(AGENT_ACCESS, script)
-        private = dotfiles / ".secrets" / "dotfiles" / "agent-access.d"
-        private.mkdir(parents=True)
-        (private / "demo.sh").write_text(
+        script = self.private_check_script(
             'check_demo() { row demo_platform live demo-identity - "demo login" "from the private part"; }\n'
             "extra_checks+=(check_demo)\n"
-            "extra_rows+=(demo_platform)\n",
-            encoding="utf-8",
+            "extra_rows+=(demo_platform)\n"
         )
         result = self.run_access("--json", script=script)
         self.assertEqual(result.returncode, 0, result.stderr)
