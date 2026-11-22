@@ -34,7 +34,7 @@ This section is for our own repositories. An upstream PR body follows "The upstr
 - Each claim about a suite, gate or library cites the `path:line` of the executing source you read, not a comment or another PR.
 - Never invent a report, baseline, measurement, screenshot, run or risk.
 - Show material risks, migration order, rollout and test coverage. Leave out internal gate checklists, except the checklist evidence and affirmation line that `checklist_routing.py` asks for (above), and any caveat that is not a material risk. Link docs only to make intent clear.
-- Name each downstream surface of a producer change, as the census rule in SKILL.md says.
+- Name each downstream surface of a producer change, as the census rule in [plan-and-pr-sections.md](plan-and-pr-sections.md) says.
 - A unify or dedupe PR shows a net loss of source lines in the unified files, or says why not.
 - A review verdict links the review comment posted at the current head SHA by a GitHub App, whose author login ends in `[bot]`, not by a human account: the repository's review App where it has one (`landing-a-pr`'s `repo-merge-rules.md`), else the App identity your `gh` posts as.
 - A repository someone else maintains:
