@@ -15,7 +15,7 @@ Every agent on the machine shares one Docker daemon, its build cache, and depot'
 - Never pass `--no-cache`: it rebuilds every stage from scratch, which can take hours on a daemon and disk every session shares.
 - Force one stage with `--no-cache-filter=<stage>`.
 - Do not quote a cold-cache time as the build time.
-- Check which builder you are on with `docker buildx ls`: `docker build`, `docker buildx build` and `depot build` can use different builders and caches.
+- `docker build`, `docker buildx build` and `depot build` can use different builders and caches: `docker buildx ls` shows which one you are on.
 - Never write `~/.docker/config.json`: every session pulls with it. `docker login`, `crane auth login` and `docker-credential-*` helpers write it unless you point them elsewhere:
 
   ```bash
@@ -45,7 +45,7 @@ Docker, depot and registry access work on this machine. Before you say one is un
 ## Builds
 
 - Run the build before you call an image change done. Run it again after every source edit that goes into the image. Tests do not replace the build.
-- Find a full build's usual time (CI logs, the repo's docs), run it in the background and keep working: a full build can take hours.
+- Find a full build's usual time (CI logs, the repo's docs): a full build can take hours. Run it in the background. Keep working.
 - If a full build still runs after 30 minutes, tell the user its last log line and keep working.
 - After a push, refer to the image as `<repo>@sha256:<digest>` (the digest `docker push` prints). Modal and compose cache an image by its tag, so a re-pushed `:main` is not pulled again.
 - Run the project the way the repo does (its make target, compose service or CI step). Hand-roll `docker run` only when the repo defines none.
@@ -78,7 +78,7 @@ Read `references/dockerfile.md` when you write or review a Dockerfile.
 
 ## A `docker rm -f` or `docker inspect` that never returns
 
-If `docker ps -a` still answers, the daemon is alive and is stuck in the kernel unmounting that container's filesystem. Seccomp is not the cause: a dropped seccomp listener returns ENOSYS at once, while a stuck unmount waits. Confirm the stuck unmount (expect `wchan=sync_inodes_sb`, `syscall=166`, which is `umount2`):
+If `docker ps -a` still answers, the daemon is alive. It is stuck in the kernel unmounting that container's filesystem. Seccomp is not the cause: a dropped seccomp listener returns ENOSYS at once, while a stuck unmount waits. Confirm the stuck unmount (expect `wchan=sync_inodes_sb`, `syscall=166`, which is `umount2`):
 
 ```bash
 for t in /proc/$(pgrep -x dockerd)/task/*; do
