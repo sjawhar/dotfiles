@@ -10,7 +10,7 @@ moves a session (step 5).
 | --- | --- | --- |
 | `devbox/gce-disks`, `gce-disks.service`, `gce-disks-ready.conf` | sami-devbox, root, every boot | local-SSD RAID 0 at `/mnt/scratch` with a 256 GiB swap file; state disk at `/mnt/nvme`; cold disk at `/mnt/durable`; `/home`, `/theorem`, `/theorem-ext4` and `/theorem-xfs` bound from `/mnt/nvme/<name>`; Docker, containerd and Sysbox data on the state disk; `/tmp` and `/var/tmp` bound from the scratch at boot only ("The boot disk holds the OS only"). Ordered before `user@1000`, ssh, Docker. |
 | `devbox/gce-host.sh` | sami-devbox, sudo, once | packages, the disk units, journald's cap (`devbox/journald-cap.conf`), the per-user pipe buffer soft limit at 262144 pages (`devbox/sysctl-pipes.conf`, as `/etc/sysctl.d/90-pipe-user-pages.conf`), Docker (`installers/docker.sh`: docker-ce and docker-ce-cli pinned at 29.9.3, dockerd's live-restore on, conntrack's TCP TIME_WAIT at 15 s from `devbox/sysctl-conntrack.conf`), Sysbox (`installers/sysbox.sh`), Tailscale (`installers/tailscale.sh`), linger, sysstat |
-| `devbox/sami-devbox-provision` | sami-rocqperf, or sami-devbox itself for every step but vm, host and speed (there it runs each step locally, with no SSH) | the whole provisioning run, step by step (its header lists the steps) |
+| `devbox/sami-devbox-provision` | sami-rocqperf, or sami-devbox itself for every step but vm and host (there it runs each step locally, with no SSH, copies no secret file and skips speed) | the whole provisioning run, step by step (its header lists the steps) |
 | `devbox/sami-devbox-model-routes` | sami-devbox, by `sami-devbox-provision` step install | declares the gateway's GPT-6.1 Sol (and Flex) as `model-gateway-openai/openai/<id>` and `model-gateway/openai/<id>`; points the cross-family astra, astra-api and gpt-api agents at `model-gateway-openai/openai/gpt-6.1-sol`; leaves slow, deep and sami-proxy to `omp/config.yml`'s Codex models (its header says why); edits only its own `omp/models.local.yml` and `omp/config.local.yml` |
 | `devbox/sami-devbox-check` | sami-devbox | A2, and the disks half of A5; `--mark-ready` writes `/mnt/nvme/sami/cutover/target-ready`, which `agentbox move --to sami-devbox` requires |
 | `devbox/sami-devbox-drill` | sami-rocqperf | A5 and A6: `restart`, then `silence` |
@@ -31,7 +31,7 @@ moves a session (step 5).
 ## The run
 
 ```sh
-~/.dotfiles/devbox/sami-devbox-provision   # on sami-rocqperf; a later --only STEP also on sami-devbox
+~/.dotfiles/devbox/sami-devbox-provision   # on sami-rocqperf; --from or --only a later step also on sami-devbox
 ~/.dotfiles/devbox/sami-devbox-drill restart
 ~/.dotfiles/devbox/sami-devbox-drill silence
 ```
@@ -83,10 +83,11 @@ that file the relay passes everything through, so nothing changes until the swit
 
 ## The secret files (step 2's copy)
 
-`sami-devbox-provision`'s `SECRET_FILES` lists them, each with why. They go over Tailscale SSH,
-never into a repository. No person's login is among them: the Google, Azure and GitHub sign-ins
-of the spec's exclusion list stay on sami-rocqperf, and so does `~/.config/gcloud` as a whole
-(its `credentials.db` holds Sami's refresh token).
+`sami-devbox-provision`'s `SECRET_FILES` lists them, each with why. From sami-rocqperf they go
+over Tailscale SSH, never into a repository; run on sami-devbox itself, step secrets copies
+nothing, since they are already there. No person's login is among them: the Google, Azure and
+GitHub sign-ins of the spec's exclusion list stay on sami-rocqperf, and so does `~/.config/gcloud`
+as a whole (its `credentials.db` holds Sami's refresh token).
 
 omp's `~/.omp/agent/agent.db` here holds one person's login on purpose: Sami's own login, added by
 him 22:40Z while fixing the stall (2026-11-03, provider `anthropic`, sami@theorem.dev). A2's login

@@ -6,8 +6,9 @@
 # devbox/sami-devbox-drill.
 #
 # The steps also run on sami-devbox itself. There (`hostname -s` is $VM) `remote` runs its command
-# in a local login shell started in $HOME, and each copy to the machine writes the local path: no
-# SSH. Steps vm, host and speed reach the machine from outside, so they refuse there.
+# in a local login shell started in $HOME, with the caller's environment, and each copy to the
+# machine writes the local path: no SSH. Steps vm and host reach the machine from outside, so they
+# refuse there; step secrets copies nothing there, and step speed is skipped there.
 #
 #   sami-devbox-provision [--from STEP] [--only STEP]
 #
@@ -24,7 +25,8 @@
 #              the login URL `tailscale up` gives and waits until Sami signs in there
 #              (dispatch://INFRA-1099), linger. From here every step goes over Tailscale SSH.
 #   dotfiles   ~/.dotfiles cloned from GitHub (public, no login) onto the state disk, colocated jj.
-#   secrets    the secret files that are in no repository (SECRET_FILES below), over Tailscale SSH.
+#   secrets    the secret files that are in no repository (SECRET_FILES below), over Tailscale SSH;
+#              on the machine itself they are already there, so nothing is copied.
 #   leakcheck  the public-text leak check shims/gh requires, in ~/.local/share/public-leak-check
 #              (agentbox/mounts gives boxes that directory) with its pointer: the agent-infra tag
 #              devbox/leak-check-tag.env names, installed as the tag's leak-check/INSTALL.md says.
@@ -150,12 +152,9 @@ here() { [[ "$(hostname -s)" == "$VM" ]]; }
 remote() {
     if here; then (cd "$HOME" && bash -lc "$*"); else "${SSH[@]}" "bash -lc $(printf '%q' "$*")"; fi
 }
-# rsync's destination for PATH on $VM: sami@$VM:PATH (a relative PATH is under sami's home), or on
-# $VM itself the local path.
+# rsync's destination for the absolute PATH on $VM: sami@$VM:PATH, or on $VM itself PATH.
 on_vm() {
-    if ! here; then printf 'sami@%s:%s\n' "$VM" "$1"
-    elif [[ "$1" == /* ]]; then printf '%s\n' "$1"
-    else printf '%s/%s\n' "$HOME" "$1"; fi
+    if here; then printf '%s\n' "$1"; else printf 'sami@%s:%s\n' "$VM" "$1"; fi
 }
 
 step_vm() {
@@ -210,8 +209,12 @@ step_secrets() {
     local f missing=()
     for f in "${SECRET_FILES[@]}"; do [[ -e "$HOME/$f" ]] || missing+=("$f"); done
     (( ${#missing[@]} == 0 )) || die "not on this machine: ${missing[*]}"
-    # --relative keeps each path under $HOME; -a keeps the 0600 modes; nothing is deleted there.
-    (cd "$HOME" && rsync -a --relative -e "ssh -o BatchMode=yes" "${SECRET_FILES[@]}" "$(on_vm '')")
+    if here; then
+        say "step secrets: on $VM the secret files are already here; nothing copied"
+    else
+        # --relative keeps each path under $HOME; -a keeps the 0600 modes; nothing is deleted there.
+        (cd "$HOME" && rsync -a --relative -e "ssh -o BatchMode=yes" "${SECRET_FILES[@]}" "sami@$VM:")
+    fi
     remote 'ls -l ~/.config/sops/age/keys.txt ~/.config/legion/envoy.json ~/.ssh/jj-signing ~/.dotfiles/secrets.env ~/.dotfiles/omp/models.local.yml && du -sh ~/.dotfiles/.secrets'
     # This machine's copy of sami-rocqperf's overlay names that machine's credential, so rewrite
     # the gateway providers to mint this box's own identity token per call: dev-sjawhar@ is a
@@ -397,7 +400,7 @@ step_responder() {
 # real file's do; one stream and four at once, as rsync runs one per tree.
 step_speed() {
     local size_mib=4096 t0 t1 n
-    here && die "step speed measures SSH to $VM from the machine that copies to it; run it from another machine"
+    here && { say "step speed measures SSH to $VM from another machine; skipped on $VM"; return; }
     for n in 1 4; do
         t0=$(date +%s.%N)
         for _ in $(seq "$n"); do
