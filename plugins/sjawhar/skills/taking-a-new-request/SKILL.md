@@ -26,7 +26,10 @@ Nothing uncovered stays only in this session's head: a request folded into runni
 - Do steps 1 to 3 anyway.
 - Then name what this session cannot cover.
 - Offer a fresh agent for it with the command that starts it.
-- This session cannot cover a requirement that needs another repository or branch, that blocks on something this session waits for, or that this session could not finish together with the running work, so the running work would end this session undelivered.
+- This session cannot cover a requirement that:
+  - needs another repository or branch;
+  - blocks on something this session waits for;
+  - or this session could not finish together with the running work, so the running work would end this session undelivered.
 - Do not accept the whole request silently and deliver only the overlap.
 
 A stream is a line of work with its own stream issue, the open Dispatch issue labelled `stream`, and a lead session in its own tmux window. The command, by situation:
