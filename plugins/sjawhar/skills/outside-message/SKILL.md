@@ -11,7 +11,7 @@ Sami approves every outside message by default.
 
 A kind of message stops needing his approval once a skill or template guides it and he has seen how the reader's project reacts. What decides is whether the message is a vetted routine or novel contact, not who the reader is.
 
-An outside message is one a person outside Theorem reads, not one that is only public. A reply in a bot-opened thread on a pull request Theorem authors is public, so the public leak check covers it (`public-leak-check.sh check-public-text <file>`).
+An outside message is one a person outside Theorem reads, not one that is only public. A reply in a bot-opened thread on a pull request Theorem authors is public: run the public leak check on it (`public-leak-check.sh check-public-text <file>`).
 
 | A reply in a bot-opened thread on | Read by | Outside message |
 | --- | --- | --- |
@@ -22,7 +22,7 @@ A narrower decision of his, where one exists, is recorded in the project's AGENT
 
 ## Oh My Pi
 
-Messages to Oh My Pi (`can1357/oh-my-pi`), on our pull requests and on contributors', need neither his approval nor the two steps below. The public leak check still runs, since these comments are public. A fresh cut by a session that did not write the text is recommended, not a gate.
+Messages to Oh My Pi (`can1357/oh-my-pi`), on our pull requests and on contributors', need neither his approval nor the two steps below. Run the public leak check on them, since these comments are public. A fresh cut by a session that did not write the text is recommended, not a gate.
 
 The pi-envoy plugin's own `outside-message` skill states this exception only generically ("a project the operator has excluded by name"); the project name lives here on purpose.
 
