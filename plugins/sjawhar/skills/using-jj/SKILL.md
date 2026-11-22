@@ -67,12 +67,11 @@ Read `references/commands.md` for a command or revset you do not know, bookmark 
 4. **Check that `jj log -r '<name>@origin' --no-graph -T commit_id` is the recorded ID:** a push that published nothing can print `Nothing changed.` and exit 0.
 5. **Chain `jj new` after the push with `&&`**, so later edits cannot amend the published head.
    - Gate every command that depends on the one before it with `&&`, never `;`, which runs on after a failure.
-6. **Rebase published work only if the repository's docs or owner allow it.**
-   - Read `references/publishing-details.md` for that proof, and when a push fails or publishes nothing, when you delete a remote bookmark, or when a push chain meets a divergent change.
+6. **Read `references/publishing-details.md`** before you rebase published work, and when a push fails or publishes nothing, when you delete a remote bookmark, or when a push chain meets a divergent change.
 
 ## 5. Rebase, stacks, conflicts
 
-- Read `references/rebase-details.md` before you rebase: the rebase flags, the `jj log` read after every rebase, and when not to rebase.
+- Read `references/rebase-details.md` before you rebase: the rebase flags and the `jj log` read after every rebase.
 - If your private, unpublished chain conflicts at every commit, squash it to one commit, or to the layers that help review. Conflict chains in `references/stack-and-conflict-details.md` says when. Then rebase and resolve once.
 - Never rewrite another owner's chain or a published chain as cleanup.
 - Before you resolve a conflict, read jj's conflict markers in `references/commands.md`, then follow the `resolve-conflicts` skill for what to keep.
