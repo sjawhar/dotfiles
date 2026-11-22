@@ -8,7 +8,9 @@
   - the live or write probes it needs;
   - a pre-merge run with outcome and duration recorded.
 - Only Sami's explicit scope change narrows, substitutes or defers a slice's full acceptance scenario.
-- A dataset, fixture or table the scenario names does not exist, or a probe matches zero records: mark the scenario `BLOCKED` and repair the plan against existing data. Do not drop or narrow it.
+- When a dataset, fixture or table the scenario names does not exist, or a probe matches zero records, mark the scenario `BLOCKED`.
+- When a dataset, fixture or table the scenario names does not exist, or a probe matches zero records, repair the plan against existing data.
+- When a dataset, fixture or table the scenario names does not exist, or a probe matches zero records, do not drop or narrow the scenario.
 - Verification describes an outcome a user can observe. The reviewer rejects missing, proxy-only or internal-only verification.
 - Track implemented, integrated and acceptance-verified separately: an unresolved dependency does not make a slice complete.
 

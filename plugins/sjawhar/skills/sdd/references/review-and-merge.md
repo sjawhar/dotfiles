@@ -35,7 +35,8 @@ Keep one row per PR and one cell per required gate. At the packet, fill each cel
 
 ## Issue status
 
-- Do not ask Sami or the requester to look at or approve the result before `done`. Close with `dispatch issue-update --issue <KEY> --status done --reason '<what shipped; the check>'`.
+- Do not ask Sami or the requester to look at or approve the result before `done`.
+- Close with `dispatch issue-update --issue <KEY> --status done --reason '<what shipped; the check>'`.
 - An issue left at `triage` while work runs is a defect: the Dispatch roadmap view reads these statuses.
 - Waiting for a deploy or a CI job is not a status: the issue stays `needs_review` until your own production check passes. Do not announce the wait.
 - At each transition, run the owner audit over the project you own: read `dispatch issues --project <KEY> --all`, every priority and not only P0 and P1, and act on each open row as "The owner audit" in `skill://legion-controller/references/backlog-stewardship.md` says.

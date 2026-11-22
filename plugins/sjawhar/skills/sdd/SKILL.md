@@ -86,9 +86,9 @@ Each slice has one class (platform or application, infrastructure, task authorin
 
 - Once a slice's tasks are merged into its branch, dispatch `deep` acceptance for its outcome.
 - The last slice runs every driver in the plan (the script or command that runs a scenario through the real surface).
-- The acceptance worker dispatches no reviewer.
-- The acceptance worker writes a failing test for each defect.
-- The acceptance worker sends each defect and its test to the implementer session that built the slice.
+- Require the acceptance worker to dispatch no reviewer.
+- Require the acceptance worker to write a failing test for each defect.
+- Require the acceptance worker to send each defect and its test to the implementer session that built the slice.
 - Mark every scenario `RAN`, `BLOCKED` or `WAIVED-BY-SAMI` as `references/acceptance.md` defines them.
 - A `BLOCKED` scenario holds that slice's merge until every scenario runs or Sami waives its named blocker.
 - Independent work continues while a `BLOCKED` scenario holds a slice's merge.

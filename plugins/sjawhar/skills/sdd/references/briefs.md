@@ -2,10 +2,12 @@
 
 Each brief is Legion's role prompt parts, then a `# Task` section, joined with blank lines. Fetch the parts at dispatch time from `https://raw.githubusercontent.com/sjawhar/legion/main/packages/daemon/internal/prompts/roles/`, never from a local copy, which drifts from the prompts Legion reviews:
 
-- implement or debug (`deep`): `core/common.md`, `core/implementer.md`, `mechanics/interactive.md`
-- acceptance (`deep`): `core/common.md`, `core/tester.md`, `mechanics/interactive.md`
-- review (`reviewer`): `core/common.md`, `core/reviewer.md`, `mechanics/interactive.md`
-- research (`oracle`): `core/oracle.md`, `mechanics/interactive.md`
+| Role | Agent | Prompt parts |
+| --- | --- | --- |
+| Implement or debug | `deep` | `core/common.md`, `core/implementer.md`, `mechanics/interactive.md` |
+| Acceptance | `deep` | `core/common.md`, `core/tester.md`, `mechanics/interactive.md` |
+| Review | `reviewer` | `core/common.md`, `core/reviewer.md`, `mechanics/interactive.md` |
+| Research | `oracle` | `core/oracle.md`, `mechanics/interactive.md` |
 
 Do not fetch `core/planner.md`: you write the plan. Reject a non-200 response or an empty body:
 
