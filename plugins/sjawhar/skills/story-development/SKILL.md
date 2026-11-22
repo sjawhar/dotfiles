@@ -23,7 +23,9 @@ The author makes every story decision. You ask, triage, record and critique.
 
 ## Project files
 
-Before you create `docs/story/`, ask whether the project keeps this state elsewhere (a bible, a wiki, an issue tracker). If it does, use that. Keep scratch notes out of these files.
+- Before you create `docs/story/`, ask whether the project keeps this state elsewhere (a bible, a wiki, an issue tracker).
+- If the project keeps this state elsewhere, use that.
+- Keep scratch notes out of these files.
 
 | File | Holds |
 | --- | --- |
