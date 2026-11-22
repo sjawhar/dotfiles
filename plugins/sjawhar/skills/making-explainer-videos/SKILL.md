@@ -75,7 +75,7 @@ Leave out what the viewer already knows: their priorities and targets, which str
   - Delete the VM when the video ships.
 - **Voice:**
   - Put the tag `[very fast, rapid-fire delivery]` before each line: `eleven_v4` has no speed setting.
-  - Then speed the audio with ffmpeg `atempo` to about 210 words a minute: `eleven_v4` has no speed setting, and the tag gives Max about 183 words a minute.
+  - Then speed the audio with ffmpeg `atempo` to about 210 words a minute, for the same reason: the tag gives Max about 183 words a minute.
   - Measure each line's words a minute from the audio.
   - `.strip()` the API key (`secrets ELEVENLABS_API_KEY -- ...`): a trailing newline in the key breaks the request's header.
   - Do not print request headers.
@@ -118,4 +118,4 @@ Leave out what the viewer already knows: their priorities and targets, which str
 - If you own the subject, make the video, or have a subagent make it.
 - Do not wait on a question to the viewer to make the video.
 - While the work the video describes has open tasks, give the video to a subagent, so the video takes no time from that work.
-- While the work the video describes has open tasks, keep working on those tasks, so the video takes no time from that work.
+- While the work the video describes has open tasks, keep working on those tasks, for the same reason.
