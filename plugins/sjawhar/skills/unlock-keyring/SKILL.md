@@ -18,8 +18,8 @@ This skill applies only to a machine with the `gnome-keyring` package. Check wit
 - **Never automate the password:** the secrets would sit unencrypted on disk.
 - **Never bypass the lock with `PYTHON_KEYRING_BACKEND` or a plaintext backend:** the secrets would sit unencrypted on disk.
 - **Never run `gnome-keyring-daemon --unlock` yourself:** it unlocks only a daemon it starts, so it does nothing while Ubuntu's unit runs. Each run also takes `/run/user/1000/keyring/control` and deletes that directory when it exits, so clients fail with `couldn't access control socket: No such file or directory`.
-- **Sami must first stop both units Ubuntu ships if he unlocks without the function:** `gnome-keyring-daemon.service` and `gnome-keyring-daemon.socket`. While Ubuntu's daemon runs, each `--unlock` logs `another secret service is running` and changes nothing.
-- **Never pass `--start` with `--unlock` when Sami unlocks without the function:** the two flags are incompatible. The working invocation is the function's `--unlock --components=pkcs11,secrets --daemonize`.
+- **Have Sami stop both units Ubuntu ships first if he unlocks without the function:** `gnome-keyring-daemon.service` and `gnome-keyring-daemon.socket`. While Ubuntu's daemon runs, each `--unlock` logs `another secret service is running` and changes nothing.
+- **Never pass `--start` with `--unlock`:** the two flags are incompatible. The working invocation is the function's `--unlock --components=pkcs11,secrets --daemonize`.
 
 ## Recovery
 
