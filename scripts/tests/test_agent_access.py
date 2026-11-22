@@ -547,6 +547,24 @@ fi
                 (kubectl["status"], kubectl["detail"]), ("missing", "context: production; exit 3, no output")
             )
 
+    def test_failure_that_printed_text_never_reports_no_output(self) -> None:
+        """A failed tool's text reaches the detail from whichever stream it wrote, never `exit <code>, no output`.
+
+        pup writes to stderr (on oryx it prints `Not authenticated` there beside its JSON), and a gws that writes its
+        error to stdout leaves stderr empty; each check that reads one stream first falls back to the other.
+        """
+        write_stub(self.stub_dir, "pup", "printf '\\nError: request to api.datadoghq.com timed out\\n' >&2\nexit 1")
+        write_stub(self.stub_dir, "gws", "printf '\\nerror: 403 insufficient scope\\n'\nexit 1")
+        self.write_gws_registry("work")
+        rows = self.access_rows()
+        details = {
+            "datadog_pup": "Error: request to api.datadoghq.com timed out",
+            "google_workspace_work": "error: 403 insufficient scope",
+        }
+        for name, detail in details.items():
+            with self.subTest(check=name):
+                self.assertEqual((rows[name]["status"], rows[name]["detail"]), ("missing", detail))
+
     def test_datadog_answer_without_a_status_reports_its_first_line(self) -> None:
         """pup's answer with no `.status` gives its first line as the detail, not an empty one."""
         cases = {
