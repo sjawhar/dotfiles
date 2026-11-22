@@ -65,7 +65,7 @@ Each slice has one class (platform or application, infrastructure, task authorin
 - Name the shared contracts before dispatch: two workers who meet an interface mid-flight both rewrite it.
 - Check every claim about existing code against what it names. A number read in a skill is a claim too.
 - Cite file:line for every claim about existing code.
-- Read `references/slices.md` when you write the plan: how to cut slices.
+- **Read `references/slices.md` now:** what a slice is, what it merges as and ends in, how to cut, order and run slices, and a slice's tasks, contracts and scaffolding.
 - Cut over completely: migrate every caller and remove obsolete paths, shims, aliases and dead code, unless Sami requires compatibility.
 - Read `references/plan-sections.md` when you write the plan: its sections, workspaces, and a major design change.
 - A `reviewer` gates every new plan before implementation.

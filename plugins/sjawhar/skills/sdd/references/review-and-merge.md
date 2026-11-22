@@ -5,7 +5,10 @@
 - The final `reviewer` after acceptance checks correctness, security, dead code, shims, aliases, dual paths and half-migrations. Do not give it a depth or a file subset.
 - Resolve grounded findings (ones the code or a command output confirms) before you send the merge packet; no other approval or follow-up assignment waives them. Ungrounded preferences do not bind.
 - A re-review after fixes resumes the same reviewer session and reads only the diff since the head it last reviewed: it raises no finding it raised before and none on code that diff does not touch. A fresh reviewer reads the PR whole.
-- After a review round, do not repeat the thermonuclear pair when the diff from the head the pair judged to the new head touches only comments and docs. A docs-only or runtime-free diff skips `ce-simplify-code` and the pair. The changed paths decide the skip, not a claim that the change looks safe.
+- After a review round, do not repeat the thermonuclear pair when the diff from the head the pair judged to the new head touches only comments and docs.
+- A docs-only or runtime-free diff skips `ce-simplify-code`.
+- A docs-only or runtime-free diff skips the thermonuclear pair.
+- The changed paths decide the skip, not a claim that the change looks safe.
 
 ## Judging the result
 
@@ -29,4 +32,8 @@ Keep one row per PR and one cell per required gate. At the packet, fill each cel
 - An issue left at `triage` while work runs is a defect: the Dispatch roadmap view reads these statuses.
 - Waiting for a deploy or a CI job is not a status: the issue stays `needs_review` until your own production check passes. Do not announce the wait.
 - At each transition, run the owner audit over the project you own: read `dispatch issues --project <KEY> --all`, every priority and not only P0 and P1, and act on each open row as "The owner audit" in `skill://legion-controller/references/backlog-stewardship.md` says.
-- Producer-contract visibility: when a plan, spec or implementation changes a producer contract in a way a downstream surface shows, the `needs_review` packet and the PR body name every known downstream surface and its visible delta, and each affected consumer's owner reviews that account before merge. No consumer known: record the search that showed it. This needs no approval from Sami.
+- **Producer-contract visibility:** when a plan, spec or implementation changes a producer contract in a way a downstream surface shows:
+  - the `needs_review` packet and the PR body name every known downstream surface and its visible delta;
+  - each affected consumer's owner reviews that account before merge;
+  - no consumer known: record the search that showed it;
+  - this needs no approval from Sami.

@@ -2,7 +2,10 @@
 
 ## Sections every plan carries
 
-- `## Hardening ledger`: empty at first. Add a row for each shortcut you or a worker takes, and for each part of the request whose covering change or check (a diff hunk, a test or a scenario run) you or a worker cannot name, when it happens; step 1 of `opening-a-pr` finishes each row or names its blocker before the PR opens.
+- `## Hardening ledger`: empty at first.
+  - Add a row for each shortcut you or a worker takes, when it happens.
+  - Add a row for each part of the request whose covering change or check (a diff hunk, a test or a scenario run) you or a worker cannot name, when it happens.
+  - Step 1 of `opening-a-pr` finishes each row or names its blocker before the PR opens.
 - `## End-to-end verification plan`, per slice: its class and user-visible outcome; the real production transport and environment; the production identity and grant path (a human grant for human-facing work); the existing driver, or a task to build one; the cheapest real shared-resource substitute (staging, a branch run), never a local simulation of the transport.
 - `## Skill catalog`: each step's required worker skills.
 - `## Contract change census`: for a change that tightens a contract, as `opening-a-pr` defines it: the search commands, each hit's disposition, and the rollout line. Trace producers, consumers and shared builders in this repo and its siblings yourself, including callers that rebuild a value without spelling the field or endpoint (concatenation, `**kwargs`, a config map), which a name search does not find. The brief's caller list is not evidence.
@@ -10,7 +13,16 @@
 
 ## A major design change
 
-Hold an architectural change as a conversation with Sami in the issue's spec, written as `dispatch-writing-specs` says: its outline, a proposed answer to each point, and an ask only for what needs his authority, taste or risk appetite, or the reason for an instruction he gave without one. Without Dispatch, hold it on the tracker you have, or in chat when none is reachable. Outside that conversation, use chat only to carry out the plan and to settle a design question Sami is discussing with you in the current chat whose answer changes no shared contract, slice or decision he approved. Any other design question goes into the spec.
+- Hold an architectural change as a conversation with Sami in the issue's spec, written as `dispatch-writing-specs` says:
+  - its outline;
+  - a proposed answer to each point;
+  - an ask only for what needs his authority, taste or risk appetite, or the reason for an instruction he gave without one.
+- Without Dispatch, hold the architectural change on the tracker you have.
+- Without Dispatch, hold the architectural change in chat when no tracker is reachable.
+- Outside that conversation, use chat only:
+  - to carry out the plan;
+  - to settle a design question Sami is discussing with you in the current chat whose answer changes no shared contract, slice or decision he approved.
+- Any other design question goes into the spec.
 
 ## Workspaces
 
