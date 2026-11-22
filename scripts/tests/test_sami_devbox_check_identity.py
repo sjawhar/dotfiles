@@ -6,7 +6,7 @@ metadata_account_check reads the account the metadata server serves the way ever
 answers dev-sjawhar@ fails it, which is the check's state before the switch. identity_limits_check
 holds the four lines of what the plain dev box may not and may do: no infra-applier@ token mint (a
 testIamPermissions answer with no permission, the token on curl's stdin, never its argv), no Envoy
-Secret read, no exec into an Envoy pod, and `theorem-session list` working.
+Secret read, no exec into an Envoy pod, and `theorem-session list --all` working.
 
 Technique, as test_sami_devbox_check_logins.py: the real script sourced without its dispatch, each
 function run alone. gce_metadata_stub.py is the metadata server; `gcloud`, `curl`, `kubectl` and
@@ -84,8 +84,10 @@ case "$*" in
     *) echo "unexpected kubectl $*" >&2; exit 2 ;;
 esac
 """
+# Answers only `list --all`: a bare `list` shows the caller's own agents alone (theorem-labs/agent-infra#5776), so a
+# check that runs it gets exit 2 and fails its line.
 SESSION = r"""#!/bin/bash
-[[ "$1" == list ]] && exit "$(cat "$STUB_DIR/sessions")"
+[[ "$*" == "list --all" ]] && exit "$(cat "$STUB_DIR/sessions")"
 exit 2
 """
 
@@ -174,10 +176,12 @@ class IdentityLimits(CheckCase):
         got = self.lines()
         self.assertEqual((got["infra-applier closed"], got["no envoy secrets"], got["no envoy exec"]), ("FAIL", "FAIL", "FAIL"))
 
-    def test_no_theorem_session_on_path_fails_the_sessions_line(self) -> None:
+    def test_no_theorem_session_on_path_fails_the_sessions_line_naming_its_installer(self) -> None:
         (self.bin / "theorem-session").unlink()
         self.env["PATH"] = f"{self.bin}:/usr/bin:/bin"
-        self.assertEqual(self.lines()["sessions"], "FAIL")
+        [line] = [line for line in self.run_function('identity_limits_check "on the host"') if " sessions " in line]
+        self.assertTrue(line.startswith("FAIL "), line)
+        self.assertIn("installers/theorem-session.sh installs it", line)
 
     def test_a_cut_short_iam_answer_is_no_pass_even_if_the_json_is_complete(self) -> None:
         write_stub(self.bin, "curl", '#!/bin/bash\ncat >/dev/null\nprintf "{}"\nexit 18\n')

@@ -125,7 +125,7 @@ Host half (`sami-devbox-check`, on sami-devbox as sami):
 | infra-applier closed | the box's token, on curl's stdin, to `testIamPermissions` on `infra-applier@theorem-agent-infra` for `iam.serviceAccounts.getAccessToken` (the box half runs these four lines too) | no permission in the answer, and no error |
 | no envoy secrets | `kubectl --context gke_theorem-agent-infra_us-west1_dispatch -n envoy auth can-i get secrets` | `no` |
 | no envoy exec | `kubectl … -n envoy auth can-i create pods/exec` | `no` |
-| sessions | `theorem-session list` (built from agent-infra `sessions/`) | exit 0 |
+| sessions | `theorem-session list --all` (installed by `installers/theorem-session.sh`; a bare `list` shows only the caller's own agents) | exit 0 |
 | no credential file | `~/.config/gcloud/box_credential_config.json`, `$GOOGLE_APPLICATION_CREDENTIALS` | neither exists |
 | disks | `findmnt`, `stat` | `/mnt/nvme` = `google-state` xfs, `/mnt/durable` = `google-cold` xfs, `/home`, `/theorem`, `/theorem-ext4`, `/theorem-xfs` = `/mnt/nvme/<name>`, `/mnt/scratch` on `/dev/md*`, swap `/mnt/scratch/swapfile`; `/tmp`, `/var/tmp` = `/mnt/scratch/tmp`, `/mnt/scratch/var-tmp` (a WAIT until the next planned reset) |
 | nofile | `systemctl show tailscaled ssh -p LimitNOFILESoft -p ExecMainStartTimestamp`; `stat` of each `60-nofile.conf` | both units `65536`, and each started after its drop-in (tailscaled: a WAIT until it restarts, at the next planned reset). Not `/proc/<tailscaled>/limits`: Go raises its own soft limit to the hard one and gives its children the one it started with |

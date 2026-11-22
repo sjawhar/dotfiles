@@ -23,6 +23,12 @@ bash "${DOTFILES_DIR}/installers/agent-secrets.sh"
 # dispatch cluster's context (see installers/gcloud-sdk.sh). Before gcloud-box.sh, which needs it.
 bash "${DOTFILES_DIR}/installers/gcloud-sdk.sh"
 
+# theorem-session, agent-infra's command for the agent sessions on the dispatch cluster, from its
+# pinned release at ~/.local/bin, checked by SHA-256 (see installers/theorem-session.sh). After
+# agent-secrets.sh, whose broker mints the GitHub token the download needs. It reaches the cluster
+# with Google's application default credentials (gcloud-box.sh, below), not a kubeconfig.
+bash "${DOTFILES_DIR}/installers/theorem-session.sh"
+
 # gcloud and ADC act as the machine's own identity with no sign-in: the account the metadata
 # server serves on a Google VM, the box-identity account on an enrolled Azure VM (see
 # installers/gcloud-box.sh).
