@@ -206,13 +206,15 @@ fi
 # config.pbc.local.yml points the pbc roles at the gateway's `pbc/` groups, team verified-grader, which bill PBC;
 # Sami, 2026-11-03 14:31Z, dispatch://INFRA-481/ask/2a5a0149: "Just move our agents."). Without that file a named
 # profile keeps config.yml's direct `anthropic/...` roles. A nested launch inherits PI_CONFIG_FILES from its parent,
-# so a launch drops every local overlay the parent added before adding its own.
+# so a launch drops every local overlay the parent added before adding its own, and the parent's scope overlay
+# (config.scopes.yml, below) too.
 local_overlay="$DOTFILES_DIR/omp/config.local.yml"
 [[ -n "$profile" ]] && local_overlay="$DOTFILES_DIR/omp/config.$profile.local.yml"
 pi_files=""
 IFS=: read -ra pi_entries <<<"${PI_CONFIG_FILES:-}"
 for entry in "${pi_entries[@]}"; do
     [[ "$entry" == "$DOTFILES_DIR"/omp/config.*local.yml && "$entry" != "$local_overlay" ]] && continue
+    [[ "$entry" == */agent/config.scopes.yml ]] && continue
     pi_files="${pi_files:+$pi_files:}$entry"
 done
 export PI_CONFIG_FILES="$pi_files"
@@ -223,14 +225,15 @@ if [[ -f "$local_overlay" ]]; then
     esac
 fi
 
-# A profile's copy of one shared config file (mcp.json, lsp.json, keybindings.yml, WATCHDOG.*).
-# A link would let anything that writes the profile's file write the shared one instead: on
-# 2026-11-01 a probe harness wrote `{ "mcpServers": {} }` to its profile's agent/mcp.json, which
-# was a link to ~/.dotfiles/omp/mcp.json, and every session on the box started with no MCP
-# servers. So the profile holds a real copy, refreshed from the shared file on each launch while
-# it is still exactly what was last copied (recorded in DST/.mirror-src/NAME). A file the profile
-# wrote itself, or changed since, stays the profile's and is no longer refreshed.
-mirror_copy() { # mirror_copy SHARED_LINK DST NAME
+# A profile's copy of one shared config file (lsp.json, keybindings.yml, WATCHDOG.*,
+# SAMI-RULES.md), or of the mcp.json the scope step builds (below). A link would let anything that
+# writes the profile's file write the shared one instead: on 2026-11-01 a probe harness wrote
+# `{ "mcpServers": {} }` to its profile's agent/mcp.json, which was a link to
+# ~/.dotfiles/omp/mcp.json, and every session on the box started with no MCP servers. So the
+# profile holds a real copy, refreshed from the shared file on each launch while it is still
+# exactly what was last copied (recorded in DST/.mirror-src/NAME). A file the profile wrote itself,
+# or changed since, stays the profile's and is no longer refreshed.
+mirror_copy() { # mirror_copy SOURCE DST NAME
     local shared="$1" dst="$2" name="$3"
     local copy="$dst/$name" last="$dst/.mirror-src/$name"
     [[ -L "$copy" ]] && rm -f "$copy"
@@ -248,6 +251,8 @@ mirror_links() { # mirror_links SRC DST [copy-files]
     mkdir -p "$dst"
     for entry in "$dst"/*; do
         name="${entry##*/}"
+        # The scope step (below) builds mcp.json for each profile from omp/mcp.json.
+        [[ "$name" == mcp.json ]] && continue
         if [[ ! -L "$entry" ]]; then
             # A copy whose shared file is gone goes too, unless the profile changed it.
             if [[ -n "$copy_files" && -f "$dst/.mirror-src/$name" && ! -L "$src/$name" ]] \
@@ -264,7 +269,7 @@ mirror_links() { # mirror_links SRC DST [copy-files]
     done
     for entry in "$src"/*; do
         name="${entry##*/}"
-        case "$name" in config.yml|models.yml|envoy.json) continue ;; esac
+        case "$name" in config.yml|models.yml|envoy.json|mcp.json) continue ;; esac
         if [[ -L "$entry" ]]; then
             if [[ -n "$copy_files" && -f "$entry" && ! -d "$entry" ]]; then
                 mirror_copy "$entry" "$dst" "$name"
@@ -282,13 +287,15 @@ mirror_links() { # mirror_links SRC DST [copy-files]
 # not a separate install (dispatch://BET-59, 2026-10-30: the verified-grader sessions bill Anthropic
 # to another account). It shares every piece of state with the default: each entry of ~/.omp (but
 # agent/, profiles/, run/ and .no-shared-setup, since an old shim moved one there and a link to it
-# would opt the profile out) and of ~/.omp/agent (but models.yml, models.overlay.yml and SQLite's
-# -wal/-shm, which SQLite places beside the link's target) is a link to the default's, re-made on
-# every launch, so an entry a newer omp adds is shared too; dotfiles included, since omp reads an
-# agent/.env. An entry omp created in the profile first, with no default counterpart, is moved into
-# the default and linked. One that exists on both sides as a real entry stops the launch: it means
-# divergent state, and a human decides which copy is real. models.yml alone is the profile's: the
-# default's merged with the overlay, rebuilt on every launch, so it cannot drift from the default.
+# would opt the profile out) and of ~/.omp/agent (but models.yml, models.overlay.yml, SQLite's
+# -wal/-shm, which SQLite places beside the link's target, and what the scope step below builds for
+# each profile: mcp.json, config.scopes.yml, their temporary files and .mirror-src) is a link to the
+# default's, re-made on every launch, so an entry a newer omp adds is shared too; dotfiles
+# included, since omp reads an agent/.env. An entry omp created in the profile first, with no
+# default counterpart, is moved into the default and linked. One that exists on both sides as a
+# real entry stops the launch: it means divergent state, and a human decides which copy is real.
+# models.yml is the profile's: the default's merged with the overlay, rebuilt on every launch, so
+# it cannot drift from the default.
 # The merge deep-merges maps but replaces arrays, so an overlay that carries a `models:` list
 # replaces the default's list instead of adding to it. Measured by the omp maintainer on a scratch
 # home (2026-10-30): one SQLite WAL set, one session store, and sessions resume through either root.
@@ -342,6 +349,7 @@ share_links() { # share_links SRC DST KEEP_NAME...
     for entry in "$dst"/*; do
         [[ -e "$entry" && ! -L "$entry" ]] || continue
         name="${entry##*/}"
+        # shellcheck disable=SC2053 # each KEEP_NAME is a glob
         for keep in "$@"; do [[ "$name" == $keep ]] && continue 2; done
         if [[ -e "$src/$name" || -L "$src/$name" ]]; then
             # Same content on both sides is not divergent state, and refusing on it costs every
@@ -365,12 +373,28 @@ share_links() { # share_links SRC DST KEEP_NAME...
     for entry in "$src"/*; do
         [[ -e "$entry" || -L "$entry" ]] || continue
         name="${entry##*/}"
+        # shellcheck disable=SC2053 # each KEEP_NAME is a glob
         for keep in "$@"; do [[ "$name" == $keep ]] && continue 2; done
         [[ "$(readlink "$dst/$name" 2>/dev/null)" == "$entry" ]] || ln -sfn "$entry" "$dst/$name"
     done
     [[ -n "$dotglob_was" ]] || shopt -u dotglob
 }
 root="$HOME/${PI_CONFIG_DIR:-.omp}"
+# Sami's rules, for every session and its task subagents: ~/.omp/agent/SAMI-RULES.md, a link to
+# .claude/CLAUDE.md that omp/config.yml names in contextFiles.extra. installers/omp.sh makes it, but a
+# machine that takes a change through scripts/dotfiles-follow never runs that installer, so each
+# launch makes the link, or re-points one that names another file, before the setup below copies or
+# links it into a named profile. A real file there is someone's own and stays. The new link is made
+# under a dot name the mirror skips and renamed into place, so a concurrent launch never sees a gap.
+rules_link="$root/agent/SAMI-RULES.md"
+rules_src="$DOTFILES_DIR/.claude/CLAUDE.md"
+if [[ ! -e "$rules_link" && ! -L "$rules_link" ]] \
+    || { [[ -L "$rules_link" && ! -d "$rules_link" ]] && [[ "$(readlink "$rules_link")" != "$rules_src" ]]; }; then
+    mkdir -p "$root/agent"
+    { ln -s "$rules_src" "$root/agent/.SAMI-RULES.md.new.$$" \
+        && mv -f "$root/agent/.SAMI-RULES.md.new.$$" "$rules_link"; } 2>/dev/null \
+        || rm -f "$root/agent/.SAMI-RULES.md.new.$$"
+fi
 if [[ -n "$profile" && ! -e "$root/profiles/$profile/.no-shared-setup" ]]; then
     overlay_models="$root/profiles/$profile/agent/models.overlay.yml"
     if [[ -f "$overlay_models" ]]; then
@@ -387,7 +411,8 @@ if [[ -n "$profile" && ! -e "$root/profiles/$profile/.no-shared-setup" ]]; then
         fi
         share_links "$root" "$root/profiles/$profile" agent profiles run .share.lock .no-shared-setup
         share_links "$root/agent" "$root/profiles/$profile/agent" \
-            models.yml models.overlay.yml 'models.yml.new.*' '*-wal' '*-shm'
+            models.yml models.overlay.yml 'models.yml.new.*' '*-wal' '*-shm' \
+            mcp.json 'mcp.json.*' config.scopes.yml 'config.scopes.yml.*' .mirror-src '.SAMI-RULES.md.new.*'
         # pi-envoy reads a named profile's agent/envoy.json instead of ~/.config/legion/envoy.json.
         # A link to a missing file counts too: `ln` would refuse every later launch.
         envoy_json="$root/profiles/$profile/agent/envoy.json"
@@ -400,6 +425,7 @@ if [[ -n "$profile" && ! -e "$root/profiles/$profile/.no-shared-setup" ]]; then
             umask 077
             models_tmp="$models_out.new.$$"
             trap 'rm -f "$models_tmp"' EXIT
+            # shellcheck disable=SC2016 # a yq expression, not the shell's
             yq eval-all '. as $item ireduce ({}; . * $item)' "$root/agent/models.yml" "$overlay_models" > "$models_tmp"
             # Check the bytes being installed too: a source can change while the lock waits.
             "$DOTFILES_DIR/scripts/omp-models-check" "$models_tmp"
@@ -408,6 +434,112 @@ if [[ -n "$profile" && ! -e "$root/profiles/$profile/.no-shared-setup" ]]; then
     else
         mirror_links "$root" "$root/profiles/$profile"
         mirror_links "$root/agent" "$root/profiles/$profile/agent" copy-files
+    fi
+fi
+
+# Where each MCP server and skill loads. omp/scopes.yml names an MCP server, or a skill by a name or
+# a glob as skills.ignoredSkills takes them, each with `context: personal|theorem`,
+# `host: <short hostname>` or both; what it does not name loads everywhere. A session's context is
+# its profile when that is `personal` or `theorem`, else the word in the machine's own
+# ${XDG_CONFIG_HOME:-$HOME/.config}/omp/context (outside this repo, like omp/profile above). No
+# file, or any other word, is UNKNOWN: every context-scoped entry loads, so a machine or an agent
+# box that never declared a context loses nothing, and a `host:` entry still applies. The host is
+# the machine's short name, as ENVOY_MACHINE_ID takes it (scripts/agent-session): AGENTBOX_HOST in
+# an agent box, which shares its machine's ~/.omp and so these files, else `hostname -s`, each cut
+# at its first dot.
+# For each profile the shim sets up (the default, and a named profile without .no-shared-setup),
+# each launch builds two files in the profile's agent directory. mcp.json is omp/mcp.json without
+# the servers the context and host exclude, and with each of them in its disabledServers, which
+# hides a server of that name from every source: a plugin brings its own servers, named
+# `<plugin>:<server>` (the slack plugin's `slack:slack`), which a server of omp/mcp.json shadows
+# only while it loads. mcp.json follows mirror_copy's rule: a profile that wrote its own mcp.json,
+# or changed the built one (omp's /mcp disable writes it), keeps that file, unscoped from then on.
+# config.scopes.yml is a settings overlay whose skills.ignoredSkills is omp/config.yml's
+# list, the local overlay's when it sets one, and every skill the context and host exclude: a
+# later overlay's list replaces an earlier one's, so it must carry all three. It goes right after
+# the dotfiles overlays, so a caller's own overlays still win. Each file is written whole under a
+# temporary name and renamed into place, so concurrent launches never leave or read a partial file.
+# Without a yq that reads all three, the session starts unscoped and says so.
+# Claude Code's CLAUDE_CONFIG_DIR (.bashrc points it at the tracked .claude/) also opts omp into
+# Claude Code's user root, and omp then loads the stale plugin copies of Claude Code's plugin
+# registry (.claude/plugins/cache) as duplicate skills (sjawhar/*, superpowers/*, knives/*) in
+# every directory. So a session the shim sets up starts without it, once its own SAMI-RULES.md
+# (above; the setup copies or links it into each named profile) is a readable file: Sami's rules
+# reach it, and its task subagents, through that file. Without one, CLAUDE_CONFIG_DIR is how the
+# rules arrive, so the launch keeps it and says so. A marked profile's owner manages its setup, and
+# it keeps the variable.
+# scope_excluded SECTION: a yq expression for the keys of omp/scopes.yml's SECTION (mcp or skills)
+# that SCOPE_CONTEXT and SCOPE_HOST exclude; an empty SCOPE_CONTEXT is UNKNOWN.
+scope_excluded() {
+    printf '(.%s // {}) | to_entries | map(select(((.value.context // "") != "" and strenv(SCOPE_CONTEXT) != "" and .value.context != strenv(SCOPE_CONTEXT)) or ((.value.host // "") != "" and .value.host != strenv(SCOPE_HOST)))) | map(.key)' "$1"
+}
+scope_build() { # scope_build AGENT_DIR CONTEXT HOST
+    local dir="$1" lists='(load(strenv(SCOPE_CONFIG)).skills.ignoredSkills // [])'
+    local built="$1/mcp.json.built.$$" settings="$1/config.scopes.yml"
+    local -x SCOPE_MANIFEST="$DOTFILES_DIR/omp/scopes.yml" SCOPE_CONTEXT="$2" SCOPE_HOST="$3" \
+        SCOPE_CONFIG="$overlay" SCOPE_LOCAL="$local_overlay"
+    [[ -f "$local_overlay" ]] && lists+=' + (load(strenv(SCOPE_LOCAL)).skills.ignoredSkills // [])'
+    if yq -o=json -I2 "(load(strenv(SCOPE_MANIFEST)) | $(scope_excluded mcp)) as \$drop
+            | .mcpServers |= with_entries(select((.key as \$k | \$drop | any_c(. == \$k)) | not))
+            | .disabledServers = ((.disabledServers // []) + \$drop | unique)
+            | del(.disabledServers | select(length == 0))" \
+            "$DOTFILES_DIR/omp/mcp.json" >"$built" \
+        && yq "($lists + ($(scope_excluded skills))) | unique | {\"skills\": {\"ignoredSkills\": .}}" \
+            "$SCOPE_MANIFEST" >"$settings.new.$$"; then
+        mirror_copy "$built" "$dir" mcp.json
+        if cmp -s "$settings.new.$$" "$settings"; then rm -f "$settings.new.$$"; else mv -f "$settings.new.$$" "$settings"; fi
+        rm -f "$built"
+        return 0
+    fi
+    rm -f "$built" "$settings.new.$$"
+    return 1
+}
+if [[ -z "$profile" || ! -e "$root/profiles/$profile/.no-shared-setup" ]]; then
+    rules_file="$root/agent/SAMI-RULES.md"
+    [[ -z "$profile" ]] || rules_file="$root/profiles/$profile/agent/SAMI-RULES.md"
+    if [[ -f "$rules_file" && -r "$rules_file" ]]; then
+        unset CLAUDE_CONFIG_DIR
+    elif [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+        echo "omp: $rules_file is not a readable file, so this session keeps CLAUDE_CONFIG_DIR for Sami's rules (and Claude Code's stale plugin skills with them)" >&2
+    else
+        echo "omp: $rules_file is not a readable file and CLAUDE_CONFIG_DIR is unset, so this session has no rules file of Sami's" >&2
+    fi
+    agent_dir="$root/agent"
+    [[ -z "$profile" ]] || agent_dir="$root/profiles/$profile/agent"
+    context=""
+    case "$profile" in
+        personal | theorem) context="$profile" ;;
+        *)
+            context_file="${XDG_CONFIG_HOME:-$HOME/.config}/omp/context"
+            [[ ! -r "$context_file" ]] || context=$(tr -d '[:space:]' <"$context_file")
+            [[ "$context" == personal || "$context" == theorem ]] || context=""
+            ;;
+    esac
+    host="${AGENTBOX_HOST:-$(hostname -s)}"
+    mkdir -p "$agent_dir"
+    scope_failed=""
+    if ! command -v yq >/dev/null 2>&1; then
+        scope_failed="yq is not on PATH"
+    elif ! scope_build "$agent_dir" "$context" "${host%%.*}"; then
+        scope_failed="yq could not read omp/scopes.yml, omp/mcp.json or a config overlay (above)"
+    fi
+    if [[ -n "$scope_failed" ]]; then
+        echo "omp: $scope_failed, so this session loads every MCP server and skill (omp/scopes.yml)" >&2
+        mirror_copy "$DOTFILES_DIR/omp/mcp.json" "$agent_dir" mcp.json
+    else
+        # Right after the last dotfiles overlay: the local overlay where the list names it.
+        anchor="$overlay"
+        [[ ":$PI_CONFIG_FILES:" != *":$local_overlay:"* ]] || anchor="$local_overlay"
+        pi_files=""
+        IFS=: read -ra pi_entries <<<"$PI_CONFIG_FILES"
+        for entry in "${pi_entries[@]}"; do
+            pi_files="${pi_files:+$pi_files:}$entry"
+            if [[ "$entry" == "$anchor" ]]; then
+                pi_files+=":$agent_dir/config.scopes.yml"
+                anchor=""
+            fi
+        done
+        export PI_CONFIG_FILES="$pi_files"
     fi
 fi
 
