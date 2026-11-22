@@ -26,7 +26,7 @@ In `~/.dotfiles`, do not run `jj rebase` onto main, `git pull`, `git rebase`, `g
 - Sami's own software installs from a pinned release (a GitHub tag or SHA, or an exact npm version). A local path or a symlink to a checkout is for a prototype and never lands; the one exception is a `file://` plugin entry for a script in this repository. When a consumer needs something from the source repository (an `omp` manifest, an export, a release asset), change that repository; never commit its build output.
 - `vendor/` holds third-party clones the installers make: never edit them there.
 - Upgrade a pinned tool without asking, then say what changed and how to roll it back. Ask Sami first when running sessions must restart for it (bun, node, omp).
-- Two places build an agent session's environment: `scripts/agent-session`, which every host launcher execs, and `session_env()` in `scripts/agentbox`, for a box. A change every session needs goes in both: a launcher without it makes its sessions act as Sami on GitHub or Google Cloud.
+- Two places build an agent session's environment: `scripts/agent-session`, which every host launcher execs, and `session_env()` in `scripts/agentbox`, for a box. A change every session needs goes in both: a launcher without it makes its sessions act as Sami on GitHub or Google Cloud, lose Envoy messaging, or commit as the wrong author.
 - This repository is public. It keeps the terms that must not reach a public place only in the encrypted `leak-terms.sops.yaml`: change it only with `sops edit leak-terms.sops.yaml`, and never put a term in a file, an argument or the environment.
 
 ## Tests and lint

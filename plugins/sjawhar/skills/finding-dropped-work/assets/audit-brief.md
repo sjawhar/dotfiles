@@ -26,7 +26,7 @@ You are read-only. Write nothing except the report file. Send no message to any 
 A. Each request from the user in the window: typed in chat, a Dispatch message, comment or ask answer, a broadcast, or a relay that quotes the user. One row per distinct thing asked. A question is a request too: list what it asks for ("Why do you need my login?" asks the session to stop needing it), and check that the answer did that, not only explained.
 B. Each follow-up that a subagent's result or the session's own report raised: "next step", "later", "follow-up", "I will", "once X lands", an open item, a known defect left in place, a promise.
 C. Each sentence in which the session says something waits on a person ("waiting for your answer", "needs the user's click", "tell me and I'll do it", "after we talk"), and each span where the session stopped work for a person.
-D. Each Dispatch record (ask, comment, message, spec, artifact) that depends on a file only one machine holds: a path under /tmp, /home, ~, /mnt, a local branch, a box path.
+D. Each Dispatch record (ask, comment, message, spec, artifact) that depends on a file only one machine holds: a path under /tmp, /home, ~ or /mnt, a local branch, or any other path on one machine's own disk.
 E. Each span of more than an hour in which the session did no work while an item from A to C was still open, and what it was doing instead.
 F. Each long project (several slices, or more than a day) the session ran without its workflow skill (`skill://sdd` for engineering, `building-and-delivering-tasks` for RL task work).
 
@@ -34,7 +34,7 @@ F. Each long project (several slices, or more than a day) the session ran withou
 
 - DONE: delivered. Give the evidence (commit, merged PR, artifact, message, measured number) with its id or link. "Written into a spec", "approval requested", "sent to an agent" and "a todo closed" are not DONE unless the request was for exactly that. When the result is a document, artifact, report or draft for the user, it is DONE only if an open ask (an ask block in that document, or a `dispatch ask`) links it and asks the user's next step with it, or the user has already acted on it: creating or updating a document or artifact notifies nobody and puts nothing in their queue.
 - UNSURFACED: the result exists, but only a chat reply, a transcript line, a peer message or an artifact upload carries it, with no open ask. Count these rows with the dropped ones.
-- TRACKED: on a Dispatch issue that someone claims, or an open Dispatch ask. Name it.
+- TRACKED: an open Dispatch ask, or a Dispatch issue that another session claims. An issue this session filed for later, or claims itself, is not TRACKED. Name it.
 - DROPPED: no action after it, work abandoned with no record, the request answered as a different question, or a todo closed without the work.
 - MISSED-GOAL: work was delivered, but smaller or different than the request: a requirement unmet, a stand-in measured instead of the question asked, or the overlap with other running work done and the rest left. A list of what was not done, in a report or a pull request, does not make it DONE. Count these rows with the dropped ones.
 - WAITING-UNREPORTED: the session waits on a person with no open Dispatch ask for it. A question in chat, a note, a compaction summary, a peer message, a comment on an ask that is already answered, or a review request is not an ask.
@@ -44,7 +44,7 @@ For each DROPPED, MISSED-GOAL, UNSURFACED and WAITING-UNREPORTED row, give the m
 
 ## Report
 
-One table per list (A to F): time UTC, the words (verbatim, at most 40), outcome, evidence or mechanism with FILE:LINE. Then the totals per outcome and per mechanism. End with every DROPPED, MISSED-GOAL, UNSURFACED, WAITING-UNREPORTED and LOCAL-ONLY row again, and every E and F row, one line each, with the action that closes it: deliver the missing part; open the ask that links the result and asks the next step; put it on a claimed Dispatch issue with what done means and a date; or open the ask.
+One table per list (A to F): time UTC, the words (verbatim, at most 40), outcome, evidence or mechanism with FILE:LINE. Then the totals per outcome and per mechanism. End with every DROPPED, MISSED-GOAL, UNSURFACED, WAITING-UNREPORTED and LOCAL-ONLY row again, and every E and F row, one line each, with the action that closes it: deliver the missing part now, in the session or a subagent it waits for (an issue for later does not close it); open the ask that links the result and asks the next step; upload the local file as an artifact on its issue and link it; or open the ask. An E row closes with the action of the item from A to C that was open during it; an F row closes when the rest of the project runs under its workflow skill.
 ```
 
 ## tq recipe

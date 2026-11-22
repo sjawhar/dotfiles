@@ -26,7 +26,7 @@ uv run "$SKILL/scripts/fetch_papers.py" --out ./out --since 7 --max 40 --query '
 ```
 
 - It writes `out/manifest.json`, `out/pdfs/<id>.pdf` and full text in `out/text/<id>.txt`.
-- Take `--since` and `--max` from the feed, and fetch wide (about 40): Phase 2 curates.
+- Pass the feed's Since as `--since` and its Max as `--max`, as given. With no Max, keep the default `--max 40`: fetch wide, because Phase 2 curates.
 - Match abstracts, not only titles: widen every `ti:` term to `(ti:TERM OR abs:TERM)`, also in a user's query. AND a term other fields also use with one only this field uses: `... AND (abs:ANCHOR ...)`.
 
 ## Phase 2: the user picks the lineup
@@ -67,15 +67,17 @@ Write `out/ground-truth.json` in this shape, one object per paper. Keep the keys
 
 ## Phase 4: ground each paper
 
+This phase is required for every kept paper, before Phase 5: Alex's challenges come from `grounding`.
+
 1. `uv run "$SKILL/scripts/alphaxiv.py" --ids <ids> --similar 6`. Similar papers show baselines and competing work; comments hold replications and critiques. For papers only days old, comments are usually empty and the AI overview can 404: rely on similar papers.
 2. For each baseline the paper claims to beat, and each prior, competing or follow-up work it compares against, fetch its reception and its own numbers:
    ```bash
    uv run "$SKILL/scripts/litground.py" --ids <baseline ids>       # citations, influential citations, TLDRs
-   uv run "$SKILL/scripts/litground.py" --reception <baseline id>  # if TLDRs and counts leave its reception unclear
+   uv run "$SKILL/scripts/litground.py" --reception <baseline id>  # when its --ids record has no tldr, or influential_citations is null or 0
    uv run "$SKILL/scripts/arxiv_search.py" --ids <baseline ids>    # abstracts, exact numbers
    ```
    `litground.py`'s docstring covers why it reads the older works, its API key and its fallback.
-3. Dispatch `scout` subagents with the `task` tool in parallel, one per paper, for replications, critiques and competing results steps 1-2 missed.
+3. Dispatch `scout` subagents in parallel, one per paper, for replications, critiques and competing results steps 1-2 missed. `scout` is omp's bundled read-only agent: call the `task` tool with `agent: "scout"`.
 4. Record in `grounding` whether each related work corroborates, contests or contextualizes the framing. Look for a weakened or compute-capped baseline, a favorable metric, or a competitor with similar results.
 
 - Report a weak baseline as a limitation, with the stronger number from its own paper. State it plainly and assume good faith.
@@ -87,7 +89,7 @@ Write `out/script.txt`: one `Speaker: text` turn per line, exactly two labels ma
 
 - Length: roughly 1,200-1,800 spoken words (8-12 minutes) per paper, about 7,000-9,000 for five papers, at about 150 spoken words a minute. Count words per paper before render: under 1,200 means a part below is missing.
 - Alex is a calm, precise skeptic who tests claims against `grounding` and asks for the real delta ("Y's own paper reports Z under setting W, so the gap is narrower"). Jordan explains each mechanism and setup, and gives results mostly in qualitative terms. Not two co-equal experts: the listener needs one host who asks and one who explains.
-- Per paper, give real time to claim → mechanism → significance → grounding → limitations → open questions. Lead with what happened and why it matters.
+- Per paper, give each part of claim → mechanism → significance → grounding → limitations → open questions at least 100 spoken words. Lead with what happened and why it matters.
 - Speak a number only when the claim depends on its size; say the rest as "better than X" or "about the same as X".
 - No superlatives or hype words ("groundbreaking"). State limitations plainly, assume good faith, and do not allege misconduct.
 - Open with the most surprising result and its number. Attribute to the authors in third person. No "Great point" openers; Alex also challenges with `grounding` facts, so turns are not short question, long answer.
@@ -95,12 +97,12 @@ Write `out/script.txt`: one `Speaker: text` turn per line, exactly two labels ma
 ## Phase 6: render
 
 ```bash
-uv run "$SKILL/scripts/tts.py" --script ./out/script.txt --out ./out/episode.mp3 --voices "Alex=Kore,Jordan=Puck"
+PYTHONUNBUFFERED=1 uv run "$SKILL/scripts/tts.py" --script ./out/script.txt --out ./out/episode.mp3 --voices "Alex=Kore,Jordan=Puck"
 ```
 
-`tts.py`'s docstring covers auth and billing. A long episode takes several minutes: run it in the background and keep working.
+`tts.py`'s docstring covers auth and billing. A long episode takes several minutes: run it in the background, keep working, and check its progress in the `chunk i/n` line it prints per TTS call (`PYTHONUNBUFFERED=1` makes each line appear when printed, not at the end).
 
 ## Phase 7: deliver locally
 
-- `ffprobe out/episode.mp3`: duration should be near word count / 150 minutes; much shorter means audio was lost.
+- `ffprobe out/episode.mp3`: duration should be within 20% of word count / 150 minutes; more than 20% shorter means audio was lost.
 - Report the local paths of `episode.mp3` and `ground-truth.json`. Tell the user they can paste the JSON into any voice AI to be quizzed.

@@ -1,65 +1,106 @@
 ---
 name: writing-agent-skills
-description: "Use when you create, edit, shorten, test or delete an agent skill (its SKILL.md, references or description), or decide whether a lesson should become a rule in a skill. Also when a skill seems too long, is ignored, or loads on the wrong tasks. Not for text a person reads."
+description: "Use when you need evidence a change helps (an advisor, a skill, agent instructions, an AGENTS.md rule, a gate), or delete, create or shorten a skill (removing one breaks the code and skills that name it), decide if a lesson becomes a rule, or a skill is too long. Not for human text."
 ---
 
 # Writing agent skills
 
-An agent guide (AGENTS.md, CLAUDE.md) follows `updating-docs` instead. Every line of a skill also passes that skill's "The test for every line": no history, no restated code, no emphasis as force.
+Write, test, shorten or delete a skill so that an agent loads it for the right tasks and follows each of its rules.
+
+**Done when:** step 5's check passes the skill with no warning, step 3's test passes for each change to what an agent does, and each file that names a skill you renamed, moved or deleted is fixed.
+
+## Step 1: Decide that a rule is needed
+
+- **Use these steps for an agent guide's rules too** (AGENTS.md, CLAUDE.md).
+
+1. **Find it twice.** Find the failure in at least two sessions with `tq search '<phrase of the failure>'` (`using-transcript-store`): one incident turned into one rule is how instruction files triple in size.
+2. **Run a control.** Run the task in a fresh session with no guidance.
+3. **Write the rule only if the control fails** in at least 2 of 3 runs: a rule the model follows anyway costs tokens on every load.
+4. **Prefer a program.** Fix the tool, or add a script or a hook, before you write prose: a check a program runs holds where prose does not.
+5. **Extend first.** Extend a skill that already loads for the task before you create one: four or more skills in one task help less than one to three.
+6. **Separate by scope.** If two skills load on the same prompts after one description rewrite, merge them or split their scope: more words will not separate them.
+
+## Step 2: Write the body
+
+**Read `references/style.md` now**, before you write any line of a skill.
+
+For an agent guide, **read `updating-docs` now** for its shape and size.
+
+Choose the form by the failure:
+
+| The failure | The form |
+| --- | --- |
+| The agent lacks a fact (a path, a command, a trap) | State the fact |
+| The output has the wrong shape | Its parts in order, or a template; a list of prohibitions produces more unwanted output than no guidance |
+| The agent knows the rule and skips it under an excuse ("the change is small") | The rule, the excuse and the answer to it |
+| A program can check it | The check, and the command that runs it |
+| The agent already does it in a control run | Nothing |
+
+- **Use the words the code uses.**
+- **Give every instruction a verb and an object.**
+- **Write plain English, not ASD-STE100:** a strict rewrite drops facts.
+- **State the condition that decides:** "unless it matters" or "where reasonable" makes the rule optional.
+- **Keep the words that set a rule's scope** ("before every push", "in Rust files"): models apply a rule only as broadly as it says.
+- **Check that each path, command and skill you name exists:** an agent that follows a dead pointer creates the missing thing.
+- **Pass `updating-docs`' "The test for every line":** no history, no restated code, no emphasis as force.
+- Do not copy into a skill the rule to follow the code over a skill: `~/.dotfiles/.claude/CLAUDE.md` holds it.
+
+## Step 3: Test it
+
+**Read `references/testing.md` now** for its arms, sandbox command and scoring rules, before you run any test, a control run included.
+
+Read its section "Measuring a harness change" when the change is to the harness (an extension feature, a context line, an advisor prompt) or to a gate or classifier that predicts Sami's decisions, or when you judge text by the fleet's records.
+
+1. **Real cases.** Take cases from real sessions where the failure happened: invented cases pass where real ones fail.
+2. **Freeze first.** Before any model call, freeze the cases, the arms and each case's pass bar, so that no result steers them.
+3. **Blind runs.** Run each case in a fresh session that gets the raw task, not your diagnosis, and is not told it is a test.
+4. **Three arms.** Run the old text, the new text and a no-guidance control 3 times each. Run 3 more of each when the arms differ by one or two runs.
+5. **Near misses.** For a description, also run near-miss prompts that must not load it.
+6. **Held-out cases.** Before you tune, set aside 40% of the cases (rounded down, at least one). Tune on the rest.
+7. **Report the held-out cases:** a variant tuned on the cases you report wins only those.
+8. **Tuned-only gains.** Revert a change that improves only the tuned ones.
+9. **Three review rounds.** Stop a review loop after three rounds.
+10. **Only the change.** In each later round, check only what changed.
+11. **No repeats.** Repeat no finding.
+
+## Step 4: Remove rules
+
+| Situation | Do |
+| --- | --- |
+| Agents disobey a rule | Delete it. Run the same task 3 times with the rest unchanged. Rewrite it only if the failure shows in 2 of the 3 |
+| A rule's reason no longer holds: a duplicate, written for an older model, obeyed in a control run, one incident that never recurred, or now done by the code or the harness | Delete it |
+| A rule never fires | Do not delete it for that alone. Run the control first: deleting ignored rules can remove helpful ones |
+| You remove a required step | Name what now makes it happen (a script, a hook, another rule). If nothing does, keep the step: a step left to choice gets skipped |
+| A skill is too long | Move or delete whole blocks, not words: squeezing wording drops rules unnoticed |
+
+## Step 5: Check the skill
+
+1. **Run the check:** `uv run --script ~/.dotfiles/plugins/sjawhar/skills/writing-agent-skills/scripts/check_skill.py <skill dir>...`. Its `--help` lists each check.
+2. **Fix every FAIL and each warning.**
+
+## Step 6: Rewrite an existing skill
+
+**Read `references/rewriting-a-skill.md` now** for its instruction map, slop check, behavior test and size checks, before you rewrite or shorten an existing skill.
 
 ## Limits
 
-- `description`: starts "Use when", at most 300 characters, says when to load the skill and never its steps: an agent that reads the steps there follows them and skips the body.
-- Put the trigger words first, with the case where the agent thinks it can do without the skill ("also when the diff is pasted inline"). omp shows the model a hint of about 12 words made from the description, or its first 99 characters until that hint exists.
-- SKILL.md: at most 150 lines and 8,000 bytes, frontmatter included (`check_skill.py` warns above that). It holds the routing and the rules the model would not follow by default. Required steps and stop rules go first, because a cut keeps only the start.
-- References: in `references/`, one level deep, each at most 150 lines and 8 KB. Name each one in SKILL.md at the step that needs it, with the condition: "Read `references/<topic>.md` when ...". Merge a small reference into SKILL.md; delete one nothing names.
-- Code, prompts and other skills name skills and their paths, and code reads some frontmatter (`mcp:`): `git grep -n <name>` before you rename, move or delete one, and fix each namer in the same change.
-- Check: `python3 ~/.dotfiles/plugins/sjawhar/skills/writing-agent-skills/scripts/check_skill.py <skill dir>...`. Fix each FAIL and each warning. It does not count lines or measure reference files, so also run `wc -l -c` on SKILL.md and each reference.
+| Part | Limit | `check_skill.py` |
+| --- | --- | --- |
+| `description` start | "Use when" | Fails it |
+| `description` length | At most 300 characters | Fails it |
+| `description` content | When to load the skill, never its steps: an agent that reads them there follows them and skips the body | |
+| `SKILL.md` and each markdown file outside `assets/` and `templates/` | At most 8,000 bytes, the whole file counted; no line limit | Fails it |
+| Rules in `SKILL.md` (a list item, or a sentence of a paragraph) | At most 40. Over it, split the skill, move blocks into references, or delete rules (step 4): a model obeys fewer of its rules as their number grows | Warns |
 
-## 1. Decide that a rule is needed
+- **Put the trigger words first, with the case where the agent thinks it can do without the skill** ("also when the diff is pasted inline"): omp shows the model a hint of about 12 words made from the description, or its first 99 characters until that hint exists.
+- **Keep in SKILL.md only the routing and the rules the model would not follow by default.**
+- **Put required steps and stop rules first:** a harness that cuts a long file keeps only its start.
 
-1. Find the failure in at least two sessions with `tq search` (`using-transcript-store`). One incident turned into one rule is how instruction files triple in size.
-2. Run the task in a fresh session with no guidance. Write the rule only if it fails in at least 2 of 3 runs; a rule the model follows anyway costs tokens on every load.
-3. Fix the tool, or add a script or a hook, before you write prose: a check a program runs holds where prose does not.
-4. Extend a skill that already loads for the task before you create one: four or more skills in one task help less than one to three.
-5. If two skills load on the same prompts after one description rewrite, merge them or split their scope; more words will not separate them.
+| A file or block | Do |
+| --- | --- |
+| A block that only some tasks need | Move it into `references/<topic>.md`, one level deep. Name it at the step that needs it, with its condition |
+| A reference that every task reads | Merge it into SKILL.md when the merged file stays within the limits |
+| A reference that nothing names | Delete it |
+| A file the skill tells an agent to copy whole into another place (a brief, a form) | Put it under `assets/`, the Agent Skills specification's place for templates, when it would go over a limit: the limits do not hold a template. `check_skill.py` reads `templates/` the same way. Only those two directories make a file a template |
 
-## 2. Write the body
-
-- Choose the form by the failure:
-  - The agent lacks a fact (a path, a command, a trap): state the fact.
-  - The output has the wrong shape: give its parts in order, or a template. A list of prohibitions produces more unwanted output than no guidance.
-  - The agent knows the rule and skips it under an excuse ("the change is small"): state the rule, the excuse and the answer to it.
-  - A program can check it: write the check and name the command.
-  - The agent already does it in a control run: write nothing.
-- Give each rule its reason in one clause, the failure it prevents. A reason that restates the rule does nothing.
-- Write a procedure as numbered steps, not narrative.
-- Write plain English: short sentences, one idea each, the words the code uses, a verb and an object in every instruction. Not ASD-STE100: a strict rewrite drops facts.
-- State the condition that decides. "Unless it matters" or "where reasonable" makes the rule optional.
-- Keep the words that set a rule's scope ("before every push", "in Rust files"): models apply a rule only as broadly as it says.
-- Check that every path, command and skill you name exists: an agent that follows a dead pointer creates the missing thing.
-- Do not copy into a skill the rule to follow the code over a skill: `.claude/CLAUDE.md` holds it.
-
-## 3. Test it
-
-Test every new skill and every edit that changes what an agent does. Read `references/testing.md` before you run a test; it has the arms, the sandbox command and the scoring rules.
-
-1. Take cases from real sessions where the failure happened; invented cases pass where real ones fail.
-2. Write the pass bar for each case before the first run.
-3. Run each case in a fresh session that gets the raw task, not your diagnosis, and is not told it is a test.
-4. Run the old text, the new text and a no-guidance control, 3 times each; 3 more when the arms differ by one or two runs.
-5. For a description, also run near-miss prompts that must not load it.
-6. Tune on some cases and report on the others; revert a change that improves only the tuned ones.
-7. Stop a review loop after three rounds. Check only what changed, and never repeat a finding.
-
-## 4. Remove rules
-
-- To fix a rule agents disobey, delete it and run the same task 3 times with the rest unchanged; rewrite it only if the failure shows in 2 of the 3.
-- Delete a rule when its reason no longer holds: a duplicate, written for an older model, obeyed in a control run, one incident that never recurred, or now done by the code or the harness.
-- "It never fires" is not a reason by itself: run the control, because deleting ignored rules can remove helpful ones.
-- For each required step you remove, name what now makes it happen (a script, a hook, another rule). If nothing does, keep the step: a step left to choice gets skipped.
-- Shrink by moving or deleting whole blocks, not by squeezing wording, which drops rules unnoticed.
-
-## 5. Rewrite an existing skill
-
-Read `references/rewriting-a-skill.md` before you rewrite or shorten an existing skill. It has the instruction map and the slop check, which fresh agents run, the behavior test for the most-loaded skills, and the size checks.
+- **Before you rename, move or delete a skill, one of its paths or a frontmatter field such as `mcp:`, fix each code, prompt or skill that names it, in the same change:** `git grep -n <name>` finds them.
