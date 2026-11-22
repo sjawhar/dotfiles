@@ -13,13 +13,14 @@ Set `SKILL=~/.dotfiles/plugins/sjawhar/skills/disk-hygiene` and `S=$SKILL/script
 
 ## When a shell hangs
 
-Every command timing out, even `echo`, usually means a stalled filesystem. omp's search tools and its shell share one small thread pool. Searches on a stalled mount block it for every session in that omp process.
+Every command timing out, even `echo`, usually means a stalled filesystem. omp's search tools and its shell share one small thread pool. Searches on a stalled mount block it for every session in that omp process. Switching to `grep` or `read` blocks more threads.
 
 - Scope every search to a named path.
 - Never run a bare recursive walk.
 - Never search over `/mnt/durable`.
-- Switching to `grep` or `read` blocks more threads.
-- Probe: `timeout 2 true` hangs when the shell cannot fork (not the filesystem); `timeout 2 ls -d <cwd>` hangs when that filesystem is stalled. Wait and probe again; the stall recovers by itself.
+- Probe with `timeout 2 true`: it hangs when the shell cannot fork (not the filesystem).
+- Probe with `timeout 2 ls -d <cwd>`: it hangs when that filesystem is stalled.
+- Wait and probe again: the stall recovers by itself.
 
 ## Safety rules (your own paths too)
 
