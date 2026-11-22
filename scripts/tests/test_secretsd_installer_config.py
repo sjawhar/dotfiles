@@ -7,11 +7,23 @@ secrets.env files. A Trajectory root with only secrets.human.d needs no age key.
 The installer also leaves a converged configuration without another restart.
 Fixtures use throwaway age identities, a temporary HOME, stubbed system commands,
 and no inherited environment.
+
+The installer runs as install.sh runs it: sourced by a shell under set -euo pipefail that prints
+a marker line after it, so an exit or a failing command in the installer shows. Fakes stand in
+for mise (it names the pinned directory of secrets, sops and age-plugin-yubikey), systemctl (it
+logs each call with the hashes of config.toml and the drop-in, and answers MainPID), /proc
+(SECRETSD_PROC_ROOT holds the cgroup and cmdline of a fake main process) and each installed
+secrets release (it logs each call and answers grants as its mode says).
 """
+
+# unittest runs setUp, not __init__, before each test, and setUp sets every instance attribute.
+# pyright: reportUninitializedInstanceVariable=false
 
 from __future__ import annotations
 
+import hashlib
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -19,6 +31,7 @@ import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from typing import ClassVar, Literal
 
 DOTFILES = Path(__file__).resolve().parents[2]
 INSTALLER = DOTFILES / "installers" / "secretsd.sh"
@@ -35,10 +48,195 @@ TODAYS_TEXT = (
 )
 ENCRYPTED_VALUE = "HA_MCP_URL=ENC[AES256_GCM,data:AAAA,iv:AAAA,tag:AAAA,type:str]\n"
 
+# The pinned release (what `mise where` names) and a newer one, which latest names.
+PINNED_SECRETS = "9.9.8"
+LATEST_SECRETS = "9.9.9"
+PINNED_SOPS = "1.0.0"
+LATEST_SOPS = "1.0.1"
+PINNED_AGE_PLUGIN = "0.5.0"
+LATEST_AGE_PLUGIN = "0.5.1"
+# mise's install directory of github:str4d/age-plugin-yubikey.
+AGE_PLUGIN_TOOL = "github-str4d-age-plugin-yubikey"
+MiseId = Literal["secrets", "sops", "github:str4d/age-plugin-yubikey"]
+MISE_ANSWER_FILES: dict[MiseId, str] = {
+    "secrets": "secrets",
+    "sops": "sops",
+    "github:str4d/age-plugin-yubikey": AGE_PLUGIN_TOOL,
+}
+
+# The process ID of a fake main process, and the cgroup file of a process in secretsd.service.
+MAIN_PID = 4242
+UNIT_CGROUP = b"0::/user.slice/user-1000.slice/user@1000.service/app.slice/secretsd.service\n"
+OTHER_UNIT_CGROUP = b"0::/user.slice/user-1000.slice/user@1000.service/app.slice/other.service\n"
+
+# install.sh sources the installer under set -euo pipefail, so an exit in the installer, or a
+# failing command outside if/||, ends the shell before the marker line.
+GOES_ON = "secretsd-installer-test: the install goes on"
+RUNNER = f'set -euo pipefail; source "$1"; echo "{GOES_ON}"'
+
+# What a fake secrets release does for `grants`: print its grants file and exit 0, write
+# CLIENT_SLEEP_STDERR and sleep past the installer's timeout, write CLIENT_FAIL_STDERR and exit 1,
+# or exit 0 and print nothing.
+GrantsMode = Literal["print", "sleep", "fail", "empty"]
+CLIENT_SLEEP_STDERR = "secrets: waiting for the daemon to answer"
+CLIENT_FAIL_STDERR = "secrets: error: cannot connect to the daemon"
+FAKE_SECRETS = r'''printf '%s %s\n' "$0" "$*" >> "$SECRETSD_INSTALLER_TEST_CLIENT_LOG"
+if [ "${1:-}" = grants ]; then
+    control="${SECRETSD_INSTALLER_TEST_CONTROL}/secrets/"@VERSION@
+    case "$(cat "${control}/grants-mode")" in
+        print) cat "${control}/grants" ;;
+        sleep)
+            echo @SLEEP_STDERR@ >&2
+            # exec and no setsid: the signal of timeout reaches the sleep itself.
+            exec sleep 30
+            ;;
+        fail)
+            echo @FAIL_STDERR@ >&2
+            exit 1
+            ;;
+        empty) ;;
+        *)
+            echo "fake secrets: unknown grants mode" >&2
+            exit 2
+            ;;
+    esac
+fi
+exit 0'''
+
+# Answers only `mise -C <the scratch DOTFILES_DIR> where <id>` for the three ids that the
+# installer asks about, with the directory that the id's answer file names; else exits 1.
+FAKE_MISE = r'''if [ "$#" -ne 4 ] || [ "$1" != -C ] || [ "$2" != "$SECRETSD_INSTALLER_TEST_DOTFILES" ] \
+    || [ "$3" != where ]; then
+    exit 1
+fi
+case "$4" in
+    secrets | sops) answer="$4" ;;
+    github:str4d/age-plugin-yubikey) answer=github-str4d-age-plugin-yubikey ;;
+    *) exit 1 ;;
+esac
+answer="${SECRETSD_INSTALLER_TEST_CONTROL}/mise-where/${answer}"
+[ -f "$answer" ] || exit 1
+cat "$answer"'''
+
+# Logs each call with the sha256 (or none) of config.toml and the drop-in at that moment.
+# `show` prints the MainPID file unless show-prints-nothing exists, and exits with show-status;
+# `try-restart` exits with try-restart-status; every other call exits 0.
+FAKE_SYSTEMCTL = r'''control="${SECRETSD_INSTALLER_TEST_CONTROL}/systemctl"
+file_hash() {
+    if [ -f "$1" ]; then
+        sha256sum < "$1" | cut -d' ' -f1
+    else
+        echo none
+    fi
+}
+printf 'systemctl %s config=%s dropin=%s\n' "$*" \
+    "$(file_hash "${HOME}/.config/secretsd/config.toml")" \
+    "$(file_hash "${HOME}/.config/systemd/user/secretsd.service.d/local.conf")" \
+    >> "$SECRETSD_INSTALLER_TEST_LOG"
+verb=""
+for arg in "$@"; do
+    case "$arg" in
+        -*) ;;
+        *) verb="$arg"; break ;;
+    esac
+done
+case "$verb" in
+    show)
+        if [ ! -e "${control}/show-prints-nothing" ]; then
+            cat "${control}/main-pid"
+        fi
+        exit "$(cat "${control}/show-status")"
+        ;;
+    try-restart)
+        exit "$(cat "${control}/try-restart-status")"
+        ;;
+esac
+exit 0'''
+
+# The lines that the installer prints on stderr about a restart (spec, R2 and R3).
+MAIN_PID_NOTE = (
+    "secretsd: NOTE: cannot read the main process of secretsd.service, so it is not restarted; "
+    "the next install tries again"
+)
+OVERRIDE_LINE = "secretsd: SECRETSD_RESTART_WITH_GRANTS=1: restarting without asking for grants"
+GRANTS_HEAD = (
+    "secretsd: NOT restarting -- the running daemon holds grants that a restart would end:"
+)
+GRANTS_TAIL = (
+    "secretsd: tell the box (envoy) so that the sessions that hold them can finish, then wait for "
+    "the grants to end or re-run with SECRETSD_RESTART_WITH_GRANTS=1; the next install tries again."
+)
+NO_ANSWER_TAIL = (
+    "secretsd: the next install tries again; to restart anyway, re-run with "
+    "SECRETSD_RESTART_WITH_GRANTS=1."
+)
+TRY_RESTART_WARNING = (
+    "secretsd: WARNING: try-restart failed (systemctl --user status secretsd.service); "
+    "the next install tries again."
+)
+
+# A grants answer that names one live grant, and its lines as a refusal prints them.
+LIVE_GRANT = "KEY       SCOPE         AGE\nGH_TOKEN  agent:legion  42s\n"
+LIVE_GRANT_INDENTED = ("    KEY       SCOPE         AGE", "    GH_TOKEN  agent:legion  42s")
+
+# The drop-in that origin/main's installers/secretsd.sh writes in this fixture ({mise} is
+# MISE_DATA_DIR): a version marker read through latest, and ExecStart, sops and
+# age-plugin-yubikey through latest; the units hash is of the fixture's unit files. The constant
+# stands in for origin/main because CI's checkout is shallow and has no origin/main to read.
+ORIGIN_MAIN_DROPIN = (
+    "# Generated by installers/secretsd.sh — machine-specific wiring.\n"
+    "# secretsd-version: 9.9.9\n"
+    "# secretsd-units: a181301bc3277c05f1238e7f8187c69f72226e480931b0c9b2318b91c97ef647\n"
+    "[Service]\n"
+    "ExecStart=\n"
+    "ExecStart={mise}/installs/secrets/latest/bin/secrets serve\n"
+    "Environment=SECRETSD_SOPS_BIN={mise}/installs/sops/latest/sops\n"
+    "Environment=PATH={mise}/installs/github-str4d-age-plugin-yubikey/latest"
+    ":/usr/local/bin:/usr/bin\n"
+    "Environment=SECRETSD_TOUCH_POLICY=always\n"
+    "Environment=SECRETSD_COOLDOWN_SECS=2\n"
+)
+
+
+def started_from_line(argv0: Path, pinned: Path) -> str:
+    return f"secretsd: the running daemon started from {argv0}, not the pinned {pinned}"
+
+
+def cmdline_note(pid: int = MAIN_PID) -> str:
+    return (
+        f"secretsd: NOTE: cannot read the command line of the running daemon (pid {pid}), so its "
+        "version is not known; it is not restarted for the version"
+    )
+
+
+def no_answer_head(why: str) -> str:
+    return (
+        f"secretsd: NOT restarting -- 'secrets grants' did not answer ({why}), so it is not known "
+        "whether the running daemon holds grants that a restart would end:"
+    )
+
+
+def systemctl_line(args: str, config: bytes, dropin: bytes) -> str:
+    """The line that the fake systemctl logs for ARGS while config.toml and the drop-in hold
+    CONFIG and DROPIN."""
+    return (
+        f"systemctl {args} config={hashlib.sha256(config).hexdigest()} "
+        f"dropin={hashlib.sha256(dropin).hexdigest()}"
+    )
+
 
 def write_executable(path: Path, body: str) -> None:
     path.write_text(f"#!/bin/bash\nset -euo pipefail\n{body}\n", encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
+def fake_secrets_body(version: str) -> str:
+    """The fake secrets of one release, whose grants answer comes from control/secrets/VERSION."""
+    return (
+        FAKE_SECRETS.replace("@VERSION@", shlex.quote(version))
+        .replace("@SLEEP_STDERR@", shlex.quote(CLIENT_SLEEP_STDERR))
+        .replace("@FAIL_STDERR@", shlex.quote(CLIENT_FAIL_STDERR))
+    )
 
 
 def real_age_keygen() -> str:
@@ -63,6 +261,27 @@ def real_age_keygen() -> str:
 
 
 class SecretsdInstallerConfig(unittest.TestCase):
+    age_keygen: ClassVar[str]
+    temp_dir: tempfile.TemporaryDirectory[str]
+    root: Path
+    home: Path
+    dotfiles: Path
+    mise: Path
+    stubs: Path
+    control: Path
+    proc: Path
+    log: Path
+    client_log: Path
+    grants: Path
+    config: Path
+    dropin: Path
+    service_link: Path
+    socket_link: Path
+    keys: Path
+    trajectory: Path
+    dojo: Path
+    env: dict[str, str]
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.age_keygen = real_age_keygen()
@@ -80,9 +299,18 @@ class SecretsdInstallerConfig(unittest.TestCase):
         self.dotfiles = self.root / "dotfiles"
         self.mise = self.root / "mise"
         self.stubs = self.root / "stubs"
+        # What the fake mise, systemctl and secrets answer; the set_* helpers write it.
+        self.control = self.root / "control"
+        # Stands in for /proc (SECRETSD_PROC_ROOT); fake_main_process writes its entries.
+        self.proc = self.root / "proc"
+        # The calls of systemctl and sudo; each fake secrets release logs to client_log.
         self.log = self.root / "installer.log"
-        self.grants = self.root / "grants.txt"
+        self.client_log = self.root / "client.log"
         self.config = self.home / ".config" / "secretsd" / "config.toml"
+        units = self.home / ".config" / "systemd" / "user"
+        self.dropin = units / "secretsd.service.d" / "local.conf"
+        self.service_link = units / "secretsd.service"
+        self.socket_link = units / "secretsd.socket"
         self.keys = self.home / ".config" / "sops" / "age" / "keys.txt"
         self.trajectory = self.dotfiles / ".secrets-trajectory"
         self.dojo = self.home / "src" / "dojo"
@@ -90,29 +318,42 @@ class SecretsdInstallerConfig(unittest.TestCase):
         for directory in (
             self.home,
             self.dotfiles / ".secrets" / "secrets.human.d",
-            self.mise / "installs" / "secrets" / "9.9.9" / "bin",
-            self.mise / "installs" / "secrets" / "9.9.9" / "systemd",
             self.stubs,
+            self.control / "mise-where",
+            self.control / "systemctl",
+            self.proc,
+            self.root / "tmp",
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
-        write_executable(
-            self.mise / "installs" / "secrets" / "9.9.9" / "bin" / "secrets",
-            'if [ "${1:-}" = grants ]; then\n    cat "$SECRETSD_INSTALLER_TEST_GRANTS"\nfi\nexit 0',
+        # mise's layout: each tool has its pinned release and a newer one that latest names, so a
+        # path through latest is never the pin.
+        for version in (PINNED_SECRETS, LATEST_SECRETS):
+            _ = self.add_secrets_version(version)
+        self.secrets_dir("latest").symlink_to(LATEST_SECRETS)
+        for tool, binary, pinned, newer in (
+            ("sops", "sops", PINNED_SOPS, LATEST_SOPS),
+            (AGE_PLUGIN_TOOL, "age-plugin-yubikey", PINNED_AGE_PLUGIN, LATEST_AGE_PLUGIN),
+        ):
+            for version in (pinned, newer):
+                self.tool_dir(tool, version).mkdir(parents=True)
+                write_executable(self.tool_dir(tool, version) / binary, "exit 0")
+            self.tool_dir(tool, "latest").symlink_to(newer)
+        # The pins of mise.toml, as `mise where` names them.
+        self.set_mise_where("secrets", self.secrets_dir(PINNED_SECRETS))
+        self.set_mise_where("sops", self.tool_dir("sops", PINNED_SOPS))
+        self.set_mise_where(
+            "github:str4d/age-plugin-yubikey", self.tool_dir(AGE_PLUGIN_TOOL, PINNED_AGE_PLUGIN)
         )
-        (self.mise / "installs" / "secrets" / "9.9.9" / "systemd" / "secretsd.service").write_text(
-            "test secretsd service\n", encoding="utf-8"
-        )
-        (self.mise / "installs" / "secrets" / "9.9.9" / "systemd" / "secretsd.socket").write_text(
-            "test secretsd socket\n", encoding="utf-8"
-        )
-        (self.mise / "installs" / "secrets" / "latest").symlink_to("9.9.9")
-        self.grants.write_text("no active grants\n", encoding="utf-8")
+        # The grants answer of the pinned client.
+        self.grants = self.client_control(PINNED_SECRETS) / "grants"
 
-        write_executable(
-            self.stubs / "systemctl",
-            'printf "systemctl %s\\n" "$*" >> "$SECRETSD_INSTALLER_TEST_LOG"\nexit 0',
-        )
+        write_executable(self.stubs / "mise", FAKE_MISE)
+        write_executable(self.stubs / "systemctl", FAKE_SYSTEMCTL)
+        # No daemon runs (MainPID 0) until a test makes a fake main process.
+        self.set_main_pid(0)
+        self.set_show()
+        self.set_try_restart_status(0)
         write_executable(
             self.stubs / "sudo",
             'printf "sudo %s\\n" "$*" >> "$SECRETSD_INSTALLER_TEST_LOG"\nexit 97',
@@ -124,13 +365,149 @@ class SecretsdInstallerConfig(unittest.TestCase):
             "DOTFILES_DIR": str(self.dotfiles),
             "MISE_DATA_DIR": str(self.mise),
             "LANG": "C.UTF-8",
-            "SECRETSD_INSTALLER_TEST_GRANTS": str(self.grants),
+            "TMPDIR": str(self.root / "tmp"),
+            "SECRETSD_PROC_ROOT": str(self.proc),
+            "SECRETSD_INSTALLER_TEST_CONTROL": str(self.control),
+            "SECRETSD_INSTALLER_TEST_DOTFILES": str(self.dotfiles),
             "SECRETSD_INSTALLER_TEST_LOG": str(self.log),
+            "SECRETSD_INSTALLER_TEST_CLIENT_LOG": str(self.client_log),
             "PATH": f"{self.stubs}:/usr/local/bin:/usr/bin:/bin",
         }
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def secrets_dir(self, version: str) -> Path:
+        return self.mise / "installs" / "secrets" / version
+
+    def secrets_bin(self, version: str) -> Path:
+        return self.secrets_dir(version) / "bin" / "secrets"
+
+    def tool_dir(self, tool: str, version: str) -> Path:
+        return self.mise / "installs" / tool / version
+
+    def client_control(self, version: str) -> Path:
+        return self.control / "secrets" / version
+
+    def add_secrets_version(self, version: str) -> Path:
+        """Install a fake secrets release with its units; its grants answer is no active grants."""
+        directory = self.secrets_dir(version)
+        (directory / "bin").mkdir(parents=True)
+        (directory / "systemd").mkdir()
+        write_executable(directory / "bin" / "secrets", fake_secrets_body(version))
+        _ = (directory / "systemd" / "secretsd.service").write_text(
+            "test secretsd service\n", encoding="utf-8"
+        )
+        _ = (directory / "systemd" / "secretsd.socket").write_text(
+            "test secretsd socket\n", encoding="utf-8"
+        )
+        self.client_control(version).mkdir(parents=True)
+        self.set_grants(version=version)
+        return directory
+
+    def set_grants(
+        self,
+        answer: str | bytes = "no active grants\n",
+        *,
+        mode: GrantsMode = "print",
+        version: str = PINNED_SECRETS,
+    ) -> None:
+        """Set what `grants` of one fake release does; print writes ANSWER to stdout."""
+        control = self.client_control(version)
+        _ = (control / "grants").write_bytes(
+            answer.encode("utf-8") if isinstance(answer, str) else answer
+        )
+        _ = (control / "grants-mode").write_text(f"{mode}\n", encoding="utf-8")
+
+    def set_mise_where(self, tool_id: MiseId, directory: Path | None) -> None:
+        """Make `mise -C DOTFILES_DIR where TOOL_ID` print DIRECTORY, or exit 1 for None."""
+        answer = self.control / "mise-where" / MISE_ANSWER_FILES[tool_id]
+        if directory is None:
+            answer.unlink(missing_ok=True)
+        else:
+            _ = answer.write_text(f"{directory}\n", encoding="utf-8")
+
+    def set_main_pid(self, main_pid: int | str) -> None:
+        """Set the line that `systemctl --user show -p MainPID --value` prints."""
+        _ = (self.control / "systemctl" / "main-pid").write_text(f"{main_pid}\n", encoding="utf-8")
+
+    def set_show(self, *, status: int = 0, prints_nothing: bool = False) -> None:
+        """Make `systemctl show` print the MainPID line, or nothing, and exit STATUS."""
+        _ = (self.control / "systemctl" / "show-status").write_text(f"{status}\n", encoding="utf-8")
+        flag = self.control / "systemctl" / "show-prints-nothing"
+        if prints_nothing:
+            flag.touch()
+        else:
+            flag.unlink(missing_ok=True)
+
+    def set_try_restart_status(self, status: int) -> None:
+        """Make `systemctl try-restart` exit STATUS."""
+        _ = (self.control / "systemctl" / "try-restart-status").write_text(
+            f"{status}\n", encoding="utf-8"
+        )
+
+    def write_proc_entry(
+        self, pid: int, *, cmdline: bytes | None, cgroup: bytes | None = UNIT_CGROUP
+    ) -> None:
+        """Write the fake proc root's cmdline and cgroup files of PID; None writes no file."""
+        entry = self.proc / str(pid)
+        entry.mkdir(parents=True, exist_ok=True)
+        for name, content in (("cmdline", cmdline), ("cgroup", cgroup)):
+            if content is not None:
+                _ = (entry / name).write_bytes(content)
+
+    def fake_main_process(
+        self, argv0: Path | str, *, pid: int = MAIN_PID, cgroup: bytes | None = UNIT_CGROUP
+    ) -> None:
+        """Make PID the unit's main process, started as `ARGV0 serve` as systemd starts it."""
+        self.write_proc_entry(pid, cmdline=os.fsencode(argv0) + b"\0serve\0", cgroup=cgroup)
+        self.set_main_pid(pid)
+
+    def systemctl_calls(self) -> list[str]:
+        if not self.log.exists():
+            return []
+        lines = self.log.read_text(encoding="utf-8").splitlines()
+        return [line for line in lines if line.startswith("systemctl ")]
+
+    def client_calls(self) -> list[str]:
+        """Each call of a fake secrets release: `<argv[0]> <arguments>`."""
+        if not self.client_log.exists():
+            return []
+        return self.client_log.read_text(encoding="utf-8").splitlines()
+
+    @staticmethod
+    def file_hash(path: Path) -> str:
+        """The hash that the fake systemctl logs for PATH: its sha256, or none."""
+        return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "none"
+
+    def snapshot(self) -> dict[str, tuple[object, ...]]:
+        """The bytes and mtime of config.toml and the drop-in, and the lstat and target of the
+        unit links. st_atime is left out: reading a link can change it."""
+        state: dict[str, tuple[object, ...]] = {}
+        for path in (self.config, self.dropin):
+            state[str(path)] = (
+                (path.read_bytes(), path.stat().st_mtime_ns) if path.exists() else ("absent",)
+            )
+        for link in (self.service_link, self.socket_link):
+            if not os.path.lexists(link):
+                state[str(link)] = ("absent",)
+                continue
+            info = os.lstat(link)
+            state[str(link)] = (
+                info.st_mode,
+                info.st_dev,
+                info.st_ino,
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+                os.readlink(link) if stat.S_ISLNK(info.st_mode) else None,
+            )
+        return state
+
+    def assert_no_new_or_prev_files(self) -> None:
+        for directory in (self.config.parent, self.dropin.parent):
+            left = sorted(str(path) for path in directory.glob("*.new"))
+            left += sorted(str(path) for path in directory.glob("*.prev"))
+            self.assertEqual(left, [], f"files left in {directory}")
 
     def install_age_keygen_in_mise(self) -> None:
         age_keygen = self.mise / "installs" / "age" / "latest" / "age" / "age-keygen"
@@ -193,9 +570,16 @@ class SecretsdInstallerConfig(unittest.TestCase):
             "utf-8"
         )
 
-    def run_installer(self) -> subprocess.CompletedProcess[str]:
+    def run_installer(self, **env: str) -> subprocess.CompletedProcess[str]:
+        """Run the installer the way install.sh does, then the marker line; ENV adds variables."""
         return subprocess.run(
-            ["bash", str(INSTALLER)], capture_output=True, text=True, env=self.env, check=False
+            ["bash", "-c", RUNNER, "_", str(INSTALLER)],
+            capture_output=True,
+            text=True,
+            env={**self.env, **env},
+            stdin=subprocess.DEVNULL,
+            timeout=120,
+            check=False,
         )
 
     def run_config_function(self) -> subprocess.CompletedProcess[str]:
@@ -207,6 +591,11 @@ class SecretsdInstallerConfig(unittest.TestCase):
             check=False,
         )
 
+    def assert_goes_on(self, result: subprocess.CompletedProcess[str]) -> None:
+        """The installer exited 0 and the shell that sourced it went on to the marker line."""
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1:], [GOES_ON], result.stdout + result.stderr)
+
     def assert_installed(
         self,
         result: subprocess.CompletedProcess[str],
@@ -214,7 +603,7 @@ class SecretsdInstallerConfig(unittest.TestCase):
         *,
         expect_trajectory_note: bool = True,
     ) -> None:
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_goes_on(result)
         self.assertEqual(self.config.read_bytes(), expected, result.stdout + result.stderr)
         self.assertNotIn("AGE-SECRET-KEY-", result.stdout + result.stderr)
         if expect_trajectory_note:
@@ -226,6 +615,208 @@ class SecretsdInstallerConfig(unittest.TestCase):
         else:
             self.assertNotIn("NOTE: trajectory source root not configured:", result.stderr)
         self.assertNotIn("sudo", self.log.read_text(encoding="utf-8"))
+
+    def trajectory_note(self) -> str:
+        """The NOTE of a run whose trajectory root holds neither secrets.env nor secrets.human.d."""
+        return (
+            f"NOTE: trajectory source root not configured: {self.trajectory} holds no secrets.env "
+            "or secrets.human.d."
+        )
+
+    def clear_logs(self) -> None:
+        """Empty the systemctl and client logs, so that they hold only the next run's calls."""
+        for log in (self.log, self.client_log):
+            _ = log.write_text("", encoding="utf-8")
+
+    def install_idle(self) -> None:
+        """Install once with no daemon running (MainPID 0), so that config.toml and the drop-in
+        are the installer's own output, then empty the logs."""
+        self.assert_goes_on(self.run_installer())
+        self.clear_logs()
+
+    def change_config(self) -> None:
+        """Make the next run's config.toml trajectory_text: a trajectory secrets.human.d adds a
+        source root."""
+        (self.trajectory / "secrets.human.d").mkdir(parents=True)
+
+    def try_restarts(self) -> list[str]:
+        return [
+            call
+            for call in self.systemctl_calls()
+            if call.startswith("systemctl --user try-restart secretsd.service ")
+        ]
+
+    def expected_dropin(
+        self,
+        version: str = PINNED_SECRETS,
+        *,
+        touch_policy: bool = True,
+        sops: Path | None = None,
+        age_dir: Path | None = None,
+    ) -> bytes:
+        """The drop-in for the secrets release VERSION, with no age key file and no pcscd socket:
+        the 2.2+ lines when TOUCH_POLICY, and the pinned sops and age-plugin-yubikey unless SOPS
+        or AGE_DIR names another. MISE_DATA_DIR is outside the scratch HOME, so no path takes %h."""
+        units = self.secrets_dir(version) / "systemd"
+        units_hash = hashlib.sha256(
+            (units / "secretsd.service").read_bytes() + (units / "secretsd.socket").read_bytes()
+        ).hexdigest()
+        if sops is None:
+            sops = self.tool_dir("sops", PINNED_SOPS) / "sops"
+        if age_dir is None:
+            age_dir = self.tool_dir(AGE_PLUGIN_TOOL, PINNED_AGE_PLUGIN)
+        lines = [
+            "# Generated by installers/secretsd.sh — machine-specific wiring.",
+            f"# secretsd-units: {units_hash}",
+            "[Service]",
+            "ExecStart=",
+            f"ExecStart={self.secrets_bin(version)} serve",
+            f"Environment=SECRETSD_SOPS_BIN={sops}",
+            f"Environment=PATH={age_dir}:/usr/local/bin:/usr/bin",
+        ]
+        if touch_policy:
+            lines += [
+                "Environment=SECRETSD_TOUCH_POLICY=always",
+                "Environment=SECRETSD_COOLDOWN_SECS=2",
+            ]
+        return "".join(f"{line}\n" for line in lines).encode("utf-8")
+
+    def assert_unit_links(self, version: str) -> None:
+        """Both unit links point at the systemd files of the secrets release VERSION."""
+        for link in (self.service_link, self.socket_link):
+            target = self.secrets_dir(version) / "systemd" / link.name
+            self.assertEqual(os.readlink(link), str(target))
+
+    def assert_stderr(self, result: subprocess.CompletedProcess[str], *lines: str) -> None:
+        """The run's whole stderr is LINES."""
+        self.assertEqual(
+            result.stderr, "".join(f"{line}\n" for line in lines), result.stdout + result.stderr
+        )
+
+    def assert_restarted_once(self) -> None:
+        calls = self.systemctl_calls()
+        self.assertEqual(len(self.try_restarts()), 1, "\n".join(calls))
+
+    def assert_put_back(self, previous: tuple[bytes, bytes], written: tuple[bytes, bytes]) -> None:
+        """The run wrote WRITTEN (config.toml, drop-in) and reloaded, then put PREVIOUS back and
+        reloaded again as its last systemctl call, and left no .new or .prev file."""
+        self.assertEqual((self.config.read_bytes(), self.dropin.read_bytes()), previous)
+        self.assert_no_new_or_prev_files()
+        calls = self.systemctl_calls()
+        self.assertEqual(calls[:1], [systemctl_line("--user daemon-reload", *written)], calls)
+        self.assertEqual(calls[-1:], [systemctl_line("--user daemon-reload", *previous)], calls)
+
+    def assert_refused(
+        self,
+        result: subprocess.CompletedProcess[str],
+        previous: tuple[bytes, bytes],
+        *stderr: str,
+    ) -> None:
+        """After change_config_under_pinned_daemon: the run asked the pinned client for grants,
+        printed STDERR, restarted nothing, put PREVIOUS back and exited 1."""
+        self.assertEqual(self.client_calls(), [f"{self.secrets_bin(PINNED_SECRETS)} grants"])
+        self.assertEqual(self.try_restarts(), [])
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn(GOES_ON, result.stdout)
+        self.assert_stderr(result, *stderr)
+        self.assert_put_back(previous, (self.trajectory_text(), previous[1]))
+
+    def change_config_under_pinned_daemon(self) -> tuple[bytes, bytes]:
+        """Install once with no daemon, then make the unit's main process the pinned release and
+        change config.toml. Returns the previous config.toml and drop-in."""
+        self.install_idle()
+        previous = (self.config.read_bytes(), self.dropin.read_bytes())
+        self.assertEqual(previous[0], self.todays_text())
+        self.fake_main_process(self.secrets_bin(PINNED_SECRETS))
+        self.change_config()
+        return previous
+
+    def assert_follow_up_restarts(self) -> None:
+        """With no grant and a working try-restart, the next run restarts once and keeps the
+        changed config.toml."""
+        self.set_grants()
+        self.set_try_restart_status(0)
+        self.clear_logs()
+        result = self.run_installer()
+        self.assert_goes_on(result)
+        self.assert_restarted_once()
+        self.assertEqual(self.config.read_bytes(), self.trajectory_text())
+        self.assert_no_new_or_prev_files()
+
+    def add_stray_client(self, path: Path) -> None:
+        """An executable fake secrets at PATH that is not a release mise installed; it answers no
+        active grants, and a call of it logs PATH."""
+        path.parent.mkdir(parents=True)
+        write_executable(path, fake_secrets_body("stray"))
+        self.client_control("stray").mkdir(parents=True)
+        self.set_grants(version="stray")
+
+    def assert_pinned_client_answers_for(self, argv0: Path) -> None:
+        """With nothing changed and a unit main process started from ARGV0, the run asks the
+        pinned client for grants and restarts once."""
+        self.install_idle()
+        self.fake_main_process(argv0)
+        pinned = self.secrets_bin(PINNED_SECRETS)
+
+        result = self.run_installer()
+
+        self.assert_goes_on(result)
+        self.assert_stderr(result, self.trajectory_note(), started_from_line(argv0, pinned))
+        self.assertEqual(self.client_calls(), [f"{pinned} grants"])
+        self.assert_restarted_once()
+
+    def assert_unknown_version_restarts_only_for_a_change(self) -> None:
+        """With a MainPID whose command line the installer must not read: nothing changed restarts
+        nothing and changes no file; a changed config.toml restarts once after the pinned client
+        answers no active grants."""
+        before = self.snapshot()
+        result = self.run_installer()
+        self.assert_goes_on(result)
+        self.assert_stderr(result, self.trajectory_note(), cmdline_note())
+        self.assertEqual(self.client_calls(), [])
+        self.assertEqual(self.try_restarts(), [])
+        self.assertEqual(self.snapshot(), before)
+        self.assert_no_new_or_prev_files()
+
+        self.change_config()
+        self.clear_logs()
+        result = self.run_installer()
+        self.assert_goes_on(result)
+        self.assert_stderr(result, cmdline_note())
+        self.assertEqual(self.client_calls(), [f"{self.secrets_bin(PINNED_SECRETS)} grants"])
+        self.assert_restarted_once()
+        self.assertEqual(self.config.read_bytes(), self.trajectory_text())
+        self.assert_no_new_or_prev_files()
+
+    def assert_wiring_skipped(self, result: subprocess.CompletedProcess[str], where: str) -> None:
+        """The run printed decision 7's warning with WHERE as mise's answer, went on, and wrote no
+        file, no link and called no systemctl."""
+        self.assert_goes_on(result)
+        self.assertEqual(
+            result.stdout,
+            (
+                "WARNING: the pinned secrets release is not installed "
+                f"(mise -C {self.dotfiles} where secrets: {where}); "
+                "run 'mise install' to fetch it.\n"
+                "  Skipping systemd wiring until then.\n"
+                "secretsd: binary or units unavailable — skipping systemd wiring "
+                "(install stays non-fatal).\n"
+                f"{GOES_ON}\n"
+            ),
+        )
+        self.assertFalse(self.config.exists())
+        self.assertFalse(self.dropin.exists())
+        for link in (self.service_link, self.socket_link):
+            self.assertFalse(os.path.lexists(link), link)
+        self.assertEqual(self.systemctl_calls(), [])
+
+    def write_origin_main_unit(self, dropin: bytes) -> None:
+        """Make the unit what origin/main's installer leaves: DROPIN as the drop-in, and the unit
+        links on latest's unit files."""
+        _ = self.dropin.write_bytes(dropin)
+        for link in (self.service_link, self.socket_link):
+            link.unlink()
+            link.symlink_to(self.secrets_dir("latest") / "systemd" / link.name)
 
     def test_1_no_key_file(self) -> None:
         self.install_age_keygen_in_mise()
@@ -349,6 +940,8 @@ class SecretsdInstallerConfig(unittest.TestCase):
             self.assertEqual(self.log.read_text(encoding="utf-8"), "")
 
     def test_12_refused_restart_restores_pending_trajectory_config(self) -> None:
+        # The daemon runs the pinned release, so only a changed file asks for a restart.
+        self.fake_main_process(self.secrets_bin(PINNED_SECRETS))
         self.assert_installed(self.run_installer(), self.todays_text())
         self.log.write_text("", encoding="utf-8")
         self.assert_installed(self.run_installer(), self.todays_text())
@@ -375,6 +968,503 @@ class SecretsdInstallerConfig(unittest.TestCase):
             self.run_installer(), self.trajectory_text(), expect_trajectory_note=False
         )
         self.assertNotIn("try-restart", self.log.read_text(encoding="utf-8"))
+
+    # pinned-unit: the unit runs the release that mise.toml pins (spec, R1).
+
+    def test_pinned_unit_a_drop_in_names_the_pinned_release(self) -> None:
+        result = self.run_installer()
+
+        self.assert_goes_on(result)
+        self.assertEqual(self.dropin.read_bytes(), self.expected_dropin())
+        self.assertNotIn(b"# secretsd-version:", self.dropin.read_bytes())
+        self.assert_unit_links(PINNED_SECRETS)
+
+    def test_pinned_unit_b_a_2_0_pin_gets_the_2_0_drop_in(self) -> None:
+        _ = self.add_secrets_version("2.0.5")
+        self.set_mise_where("secrets", self.secrets_dir("2.0.5"))
+
+        result = self.run_installer()
+
+        self.assert_goes_on(result)
+        self.assertEqual(
+            self.dropin.read_bytes(), self.expected_dropin("2.0.5", touch_policy=False)
+        )
+        self.assertNotIn(b"SECRETSD_TOUCH_POLICY", self.dropin.read_bytes())
+        self.assertNotIn(b"SECRETSD_COOLDOWN_SECS", self.dropin.read_bytes())
+        self.assert_unit_links("2.0.5")
+
+    def test_pinned_unit_c_a_failed_mise_where_skips_the_wiring(self) -> None:
+        self.set_mise_where("secrets", None)
+
+        self.assert_wiring_skipped(self.run_installer(), "failed")
+
+    def test_pinned_unit_d_a_pin_without_its_binary_skips_the_wiring(self) -> None:
+        self.secrets_bin(PINNED_SECRETS).unlink()
+
+        self.assert_wiring_skipped(self.run_installer(), str(self.secrets_dir(PINNED_SECRETS)))
+
+    def test_pinned_unit_e_sops_falls_back_to_path(self) -> None:
+        self.set_mise_where("sops", None)
+        write_executable(self.stubs / "sops", "exit 0")
+
+        result = self.run_installer()
+
+        self.assert_goes_on(result)
+        self.assertEqual(self.dropin.read_bytes(), self.expected_dropin(sops=self.stubs / "sops"))
+
+    def test_pinned_unit_f_age_plugin_yubikey_falls_back_to_path(self) -> None:
+        self.set_mise_where("github:str4d/age-plugin-yubikey", None)
+        write_executable(self.stubs / "age-plugin-yubikey", "exit 0")
+
+        result = self.run_installer()
+
+        self.assert_goes_on(result)
+        self.assertEqual(self.dropin.read_bytes(), self.expected_dropin(age_dir=self.stubs))
+
+    # running-version: a daemon that did not start from the pinned binary restarts (spec, R2).
+
+    def test_running_version_a_a_daemon_off_the_pin_restarts_once(self) -> None:
+        self.install_idle()
+        newer = self.secrets_bin(LATEST_SECRETS)
+        pinned = self.secrets_bin(PINNED_SECRETS)
+        self.fake_main_process(newer)
+
+        result = self.run_installer()
+
+        self.assert_restarted_once()
+        self.assertEqual(self.client_calls(), [f"{newer} grants"])
+        self.assert_goes_on(result)
+        self.assert_stderr(result, self.trajectory_note(), started_from_line(newer, pinned))
+        self.assert_no_new_or_prev_files()
+
+        # The daemon now runs the pinned binary: no restart, and no file changes.
+        self.fake_main_process(pinned)
+        self.clear_logs()
+        before = self.snapshot()
+        result = self.run_installer()
+
+        self.assert_goes_on(result)
+        self.assert_stderr(result, self.trajectory_note())
+        self.assertEqual(self.client_calls(), [])
+        self.assertEqual(self.try_restarts(), [])
+        self.assertEqual(self.snapshot(), before)
+        self.assert_no_new_or_prev_files()
+
+    def test_running_version_b_an_idle_unit_keeps_the_new_files(self) -> None:
+        self.install_idle()
+        dropin = self.dropin.read_bytes()
+        self.change_config()
+
+        result = self.run_installer()
+
+        self.assert_goes_on(result)
+        self.assert_stderr(result)
+        new = (self.trajectory_text(), dropin)
+        self.assertEqual((self.config.read_bytes(), self.dropin.read_bytes()), new)
+        self.assertEqual(
+            self.systemctl_calls(),
+            [
+                systemctl_line("--user daemon-reload", *new),
+                systemctl_line("--user enable --now secretsd.socket", *new),
+                systemctl_line("--user show -p MainPID --value secretsd.service", *new),
+            ],
+        )
+        self.assertEqual(self.client_calls(), [])
+        self.assert_no_new_or_prev_files()
+
+    def test_running_version_c_an_unreadable_main_pid_restarts_nothing(self) -> None:
+        self.install_idle()
+        # A daemon runs, but systemctl show does not tell which.
+        self.fake_main_process(self.secrets_bin(LATEST_SECRETS))
+        previous = (self.config.read_bytes(), self.dropin.read_bytes())
+        for label, status, prints_nothing in (
+            ("show exits 1", 1, False),
+            ("show prints nothing", 0, True),
+        ):
+            with self.subTest(label):
+                self.set_show(status=status, prints_nothing=prints_nothing)
+
+                # Nothing changed: no file changes.
+                self.clear_logs()
+                before = self.snapshot()
+                result = self.run_installer()
+
+                self.assert_goes_on(result)
+                self.assert_stderr(result, self.trajectory_note(), MAIN_PID_NOTE)
+                self.assertEqual(self.client_calls(), [])
+                self.assertEqual(self.try_restarts(), [])
+                self.assertEqual(self.snapshot(), before)
+                self.assert_no_new_or_prev_files()
+
+                # A changed config.toml, without and with the override: the previous files are
+                # put back.
+                self.change_config()
+                for env in ({}, {"SECRETSD_RESTART_WITH_GRANTS": "1"}):
+                    self.clear_logs()
+                    result = self.run_installer(**env)
+
+                    self.assert_goes_on(result)
+                    self.assert_stderr(result, MAIN_PID_NOTE)
+                    self.assertEqual(self.client_calls(), [])
+                    self.assertEqual(self.try_restarts(), [])
+                    self.assert_put_back(previous, (self.trajectory_text(), previous[1]))
+                (self.trajectory / "secrets.human.d").rmdir()
+
+    def test_running_version_d_a_main_pid_without_a_proc_entry(self) -> None:
+        self.install_idle()
+        self.set_main_pid(MAIN_PID)
+
+        self.assert_unknown_version_restarts_only_for_a_change()
+
+    def test_running_version_e_a_main_pid_in_another_unit(self) -> None:
+        self.install_idle()
+        self.fake_main_process(self.secrets_bin(LATEST_SECRETS), cgroup=OTHER_UNIT_CGROUP)
+
+        self.assert_unknown_version_restarts_only_for_a_change()
+
+    def test_running_version_f_the_first_run_after_the_merge(self) -> None:
+        self.install_idle()
+        config = self.config.read_bytes()
+        origin_main_dropin = ORIGIN_MAIN_DROPIN.format(mise=self.mise).encode("utf-8")
+        latest = self.secrets_bin("latest")
+        pinned = self.secrets_bin(PINNED_SECRETS)
+        self.write_origin_main_unit(origin_main_dropin)
+        self.fake_main_process(latest)
+
+        result = self.run_installer()
+
+        self.assert_goes_on(result)
+        self.assert_stderr(result, self.trajectory_note(), started_from_line(latest, pinned))
+        self.assertEqual(self.client_calls(), [f"{latest} grants"])
+        self.assert_restarted_once()
+        self.assertEqual(self.dropin.read_bytes(), self.expected_dropin())
+        self.assert_unit_links(PINNED_SECRETS)
+        self.assert_no_new_or_prev_files()
+
+        # The same start while the running daemon holds a grant: origin/main's drop-in is back.
+        self.write_origin_main_unit(origin_main_dropin)
+        self.set_grants(LIVE_GRANT, version=LATEST_SECRETS)
+        self.clear_logs()
+        result = self.run_installer()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assert_stderr(
+            result,
+            self.trajectory_note(),
+            started_from_line(latest, pinned),
+            GRANTS_HEAD,
+            *LIVE_GRANT_INDENTED,
+            GRANTS_TAIL,
+        )
+        self.assertEqual(self.client_calls(), [f"{latest} grants"])
+        self.assertEqual(self.try_restarts(), [])
+        self.assert_put_back((config, origin_main_dropin), (config, self.expected_dropin()))
+        # The unit links are not put back (spec, Design, "Unit links after a refusal").
+        self.assert_unit_links(PINNED_SECRETS)
+
+    # grant-guard: a running daemon restarts only after `grants` answers no active grants, or with
+    # the override (spec, R3).
+
+    def test_grant_guard_a_a_timed_out_grants_is_no_answer(self) -> None:
+        previous = self.change_config_under_pinned_daemon()
+        self.set_grants(mode="sleep")
+
+        result = self.run_installer()
+
+        self.assert_refused(
+            result,
+            previous,
+            no_answer_head("exit status 124: it timed out after 10 s"),
+            f"    {CLIENT_SLEEP_STDERR}",
+            NO_ANSWER_TAIL,
+        )
+        self.assert_follow_up_restarts()
+
+    def test_grant_guard_b_a_failed_grants_is_no_answer(self) -> None:
+        previous = self.change_config_under_pinned_daemon()
+        self.set_grants(mode="fail")
+
+        result = self.run_installer()
+
+        self.assert_refused(
+            result,
+            previous,
+            no_answer_head("exit status 1"),
+            f"    {CLIENT_FAIL_STDERR}",
+            NO_ANSWER_TAIL,
+        )
+        self.assert_follow_up_restarts()
+
+    def test_grant_guard_c_a_live_grant_refuses(self) -> None:
+        previous = self.change_config_under_pinned_daemon()
+        self.set_grants(LIVE_GRANT)
+
+        result = self.run_installer()
+
+        self.assert_refused(result, previous, GRANTS_HEAD, *LIVE_GRANT_INDENTED, GRANTS_TAIL)
+        self.assert_unit_links(PINNED_SECRETS)
+        self.assert_follow_up_restarts()
+
+    def test_grant_guard_d_no_active_grants_restarts(self) -> None:
+        _ = self.change_config_under_pinned_daemon()
+
+        result = self.run_installer()
+
+        self.assert_goes_on(result)
+        self.assert_stderr(result)
+        self.assertEqual(self.client_calls(), [f"{self.secrets_bin(PINNED_SECRETS)} grants"])
+        self.assert_restarted_once()
+        self.assertEqual(self.config.read_bytes(), self.trajectory_text())
+        self.assert_no_new_or_prev_files()
+
+    def test_grant_guard_e_the_override_restarts_without_asking(self) -> None:
+        _ = self.change_config_under_pinned_daemon()
+        self.set_grants(mode="sleep")
+
+        result = self.run_installer(SECRETSD_RESTART_WITH_GRANTS="1")
+
+        self.assert_goes_on(result)
+        self.assert_stderr(result, OVERRIDE_LINE)
+        self.assertEqual(self.client_calls(), [])
+        self.assert_restarted_once()
+        self.assertEqual(self.config.read_bytes(), self.trajectory_text())
+        self.assert_no_new_or_prev_files()
+
+    def test_grant_guard_f_a_second_line_after_no_active_grants_refuses(self) -> None:
+        previous = self.change_config_under_pinned_daemon()
+        self.set_grants("no active grants\n1 request waits for a touch\n")
+
+        result = self.run_installer()
+
+        self.assert_refused(
+            result,
+            previous,
+            GRANTS_HEAD,
+            "    no active grants",
+            "    1 request waits for a touch",
+            GRANTS_TAIL,
+        )
+        self.assert_follow_up_restarts()
+
+    def test_grant_guard_g_an_empty_answer_is_no_answer(self) -> None:
+        previous = self.change_config_under_pinned_daemon()
+        self.set_grants(mode="empty")
+
+        result = self.run_installer()
+
+        self.assert_refused(
+            result, previous, no_answer_head("exit status 0, no output"), NO_ANSWER_TAIL
+        )
+        self.assert_follow_up_restarts()
+
+    def test_grant_guard_h_a_failed_try_restart_puts_back(self) -> None:
+        previous = self.change_config_under_pinned_daemon()
+        self.set_try_restart_status(1)
+
+        result = self.run_installer()
+
+        self.assert_goes_on(result)
+        self.assert_stderr(result, TRY_RESTART_WARNING)
+        self.assertEqual(self.client_calls(), [f"{self.secrets_bin(PINNED_SECRETS)} grants"])
+        self.assert_restarted_once()
+        self.assert_put_back(previous, (self.trajectory_text(), previous[1]))
+        self.assert_follow_up_restarts()
+
+    def test_grant_guard_i_the_client_is_the_running_release(self) -> None:
+        self.install_idle()
+        running = self.secrets_bin(LATEST_SECRETS)
+        self.fake_main_process(running)
+        self.set_grants(LIVE_GRANT, version=LATEST_SECRETS)
+        before = self.snapshot()
+
+        result = self.run_installer()
+
+        self.assertEqual(self.client_calls(), [f"{running} grants"])
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assert_stderr(
+            result,
+            self.trajectory_note(),
+            started_from_line(running, self.secrets_bin(PINNED_SECRETS)),
+            GRANTS_HEAD,
+            *LIVE_GRANT_INDENTED,
+            GRANTS_TAIL,
+        )
+        self.assertEqual(self.try_restarts(), [])
+        self.assertEqual(self.snapshot(), before)
+        self.assert_no_new_or_prev_files()
+
+        # The grant is gone: the next run restarts once.
+        self.set_grants(version=LATEST_SECRETS)
+        self.clear_logs()
+        result = self.run_installer()
+
+        self.assert_goes_on(result)
+        self.assertEqual(self.client_calls(), [f"{running} grants"])
+        self.assert_restarted_once()
+
+    def test_grant_guard_j_a_missing_argv0_gets_the_pinned_client(self) -> None:
+        missing = self.secrets_bin("9.9.7")
+        self.assertFalse(missing.exists())
+
+        self.assert_pinned_client_answers_for(missing)
+
+    def test_grant_guard_k_an_argv0_outside_installs_secrets_gets_the_pinned_client(self) -> None:
+        # Where mise would install a tool named forward: an executable secrets, not under
+        # installs/secrets.
+        outside = self.mise / "installs" / "forward" / LATEST_SECRETS / "bin" / "secrets"
+        self.add_stray_client(outside)
+
+        self.assert_pinned_client_answers_for(outside)
+
+    def test_grant_guard_l_a_first_install_keeps_its_new_config(self) -> None:
+        self.fake_main_process(self.secrets_bin(PINNED_SECRETS))
+        self.set_grants(LIVE_GRANT)
+
+        result = self.run_installer()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assert_stderr(
+            result, self.trajectory_note(), GRANTS_HEAD, *LIVE_GRANT_INDENTED, GRANTS_TAIL
+        )
+        self.assertEqual(self.client_calls(), [f"{self.secrets_bin(PINNED_SECRETS)} grants"])
+        self.assertEqual(self.try_restarts(), [])
+        new = (self.todays_text(), self.expected_dropin())
+        self.assertEqual((self.config.read_bytes(), self.dropin.read_bytes()), new)
+        self.assert_no_new_or_prev_files()
+        calls = self.systemctl_calls()
+        self.assertEqual(calls[-1:], [systemctl_line("--user daemon-reload", *new)], calls)
+
+    # The plan's cases (HOME-290 plan, task t6): decisions 2-5 and spec departure 1.
+
+    def test_plan_m_no_active_grants_and_an_empty_line_refuses(self) -> None:
+        previous = self.change_config_under_pinned_daemon()
+        self.set_grants("no active grants\n\n")
+
+        result = self.run_installer()
+
+        self.assert_refused(
+            result, previous, GRANTS_HEAD, "    no active grants", "    ", GRANTS_TAIL
+        )
+
+    def test_plan_n_no_active_grants_without_a_newline_refuses(self) -> None:
+        previous = self.change_config_under_pinned_daemon()
+        self.set_grants("no active grants")
+
+        result = self.run_installer()
+
+        self.assert_refused(result, previous, GRANTS_HEAD, "    no active grants", GRANTS_TAIL)
+
+    def test_plan_o_a_nested_argv0_under_installs_secrets_gets_the_pinned_client(self) -> None:
+        nested = self.secrets_dir("x") / "y" / "bin" / "secrets"
+        self.add_stray_client(nested)
+
+        self.assert_pinned_client_answers_for(nested)
+
+    def test_plan_p_the_cgroup_v1_systemd_line_counts_only_without_a_v2_line(self) -> None:
+        self.install_idle()
+        running = self.secrets_bin(LATEST_SECRETS)
+        app = b"/user.slice/user-1000.slice/user@1000.service/app.slice"
+        self.fake_main_process(
+            running,
+            cgroup=(
+                b"12:pids:" + app + b"/other.service\n"
+                + b"1:name=systemd:" + app + b"/secretsd.service\n"
+                + b"3:cpu,cpuacct:/user.slice\n"
+            ),
+        )
+
+        result = self.run_installer()
+
+        self.assert_goes_on(result)
+        self.assert_stderr(
+            result,
+            self.trajectory_note(),
+            started_from_line(running, self.secrets_bin(PINNED_SECRETS)),
+        )
+        self.assertEqual(self.client_calls(), [f"{running} grants"])
+        self.assert_restarted_once()
+
+        # A v2 line names another unit: the v1 line does not count.
+        self.fake_main_process(
+            running,
+            cgroup=b"1:name=systemd:" + app + b"/secretsd.service\n" + OTHER_UNIT_CGROUP,
+        )
+        self.clear_logs()
+        before = self.snapshot()
+        result = self.run_installer()
+
+        self.assert_goes_on(result)
+        self.assert_stderr(result, self.trajectory_note(), cmdline_note())
+        self.assertEqual(self.client_calls(), [])
+        self.assertEqual(self.try_restarts(), [])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_plan_q_an_empty_cmdline_is_unreadable(self) -> None:
+        self.install_idle()
+        self.write_proc_entry(MAIN_PID, cmdline=b"")
+        self.set_main_pid(MAIN_PID)
+        before = self.snapshot()
+
+        result = self.run_installer()
+
+        self.assert_goes_on(result)
+        self.assert_stderr(result, self.trajectory_note(), cmdline_note())
+        self.assertEqual(self.client_calls(), [])
+        self.assertEqual(self.try_restarts(), [])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_plan_r_a_leftover_prev_is_a_pending_change(self) -> None:
+        self.install_idle()
+        dropin = self.dropin.read_bytes()
+        older = b"# config.toml as an earlier run found it\n"
+        leftover = self.config.with_suffix(".toml.prev")
+        _ = leftover.write_bytes(older)
+        self.fake_main_process(self.secrets_bin(PINNED_SECRETS))
+        self.set_grants(LIVE_GRANT)
+
+        result = self.run_installer()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assert_stderr(
+            result, self.trajectory_note(), GRANTS_HEAD, *LIVE_GRANT_INDENTED, GRANTS_TAIL
+        )
+        self.assertEqual(self.try_restarts(), [])
+        self.assert_put_back((older, dropin), (self.todays_text(), dropin))
+
+        # No grant: the change restarts once.
+        self.set_grants()
+        self.clear_logs()
+        result = self.run_installer()
+
+        self.assert_goes_on(result)
+        self.assert_restarted_once()
+        self.assertEqual(self.config.read_bytes(), self.todays_text())
+        self.assert_no_new_or_prev_files()
+
+        # No daemon runs (MainPID 0): the new file stays and the leftover goes.
+        _ = leftover.write_bytes(older)
+        self.set_main_pid(0)
+        self.clear_logs()
+        result = self.run_installer()
+
+        self.assert_goes_on(result)
+        self.assertEqual(self.client_calls(), [])
+        self.assertEqual(self.try_restarts(), [])
+        self.assertEqual(self.config.read_bytes(), self.todays_text())
+        self.assert_no_new_or_prev_files()
+
+    def test_plan_s_the_override_with_an_idle_unit_restarts_nothing(self) -> None:
+        self.install_idle()
+        self.change_config()
+
+        result = self.run_installer(SECRETSD_RESTART_WITH_GRANTS="1")
+
+        self.assert_goes_on(result)
+        self.assert_stderr(result)
+        self.assertEqual(self.client_calls(), [])
+        self.assertEqual(self.try_restarts(), [])
+        self.assertEqual(self.config.read_bytes(), self.trajectory_text())
+        self.assert_no_new_or_prev_files()
 
 
 if __name__ == "__main__":

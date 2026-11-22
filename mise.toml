@@ -237,12 +237,13 @@ platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.ta
 # install dir.
 [tools.secrets]
 # Pinned to an exact release, not "latest": the client and daemon share a protocol version that
-# moved in 3.3.0, and the daemon is only restarted by hand (installers/secretsd.sh with
-# SECRETSD_RESTART_WITH_GRANTS=1 when grants are live; a restart drops every live grant). A bump
-# moves the client at once, and the daemon runs its old release until it is restarted after the
-# merge, at a time its owner allows, so bump only to a release whose protocol version is the
-# running daemon's - 2026-09-21 a "latest" client rolled to 3.3.1 under a 3.2.3 daemon and every
-# human-tier request from every box failed VersionMismatch.
+# moved in 3.3.0. A bump moves the client at once. The daemon's unit names the pinned release's own
+# directory, so the daemon runs its old release until installers/secretsd.sh runs on that machine
+# (install.sh runs it); that run restarts it when no grant is live, or with
+# SECRETSD_RESTART_WITH_GRANTS=1 after the box is told (a restart drops every live grant). So
+# bump only to a release whose protocol version is the running daemon's - 2026-09-21 a "latest"
+# client rolled to 3.3.1 under a 3.2.3 daemon and every human-tier request from every box failed
+# VersionMismatch.
 # mise needs a GitHub token for the release lookup (the unauthenticated API limit is 60/h and this
 # machine exhausts it) -- [settings.github] credential_command above supplies one (gh-app-token, the
 # same credential git's own GitHub App routing uses).

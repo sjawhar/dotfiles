@@ -6,7 +6,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # The source roots of ~/.config/secretsd/config.toml come from the two functions
 # below, which change nothing on the machine, so a check can print the file for
-# any DOTFILES_DIR (see the SECRETSD_INSTALLER_FUNCTIONS_ONLY guard after them).
+# any DOTFILES_DIR. The two after them, secretsd_main_in_unit and
+# secretsd_main_argv0, only read /proc, so a check can run them on the live
+# daemon (see the SECRETSD_INSTALLER_FUNCTIONS_ONLY guard after all four).
 # secretsd_age_recipient_ok FILE ROOT_NAME: succeeds when one of this machine's
 # age public keys is a recipient of FILE, a sops dotenv file; otherwise prints
 # one NOTE naming ROOT_NAME on stderr and fails.
@@ -95,10 +97,57 @@ secretsd_config_toml() {
     fi
 }
 
+# secretsd_main_in_unit PID: succeeds when PID runs in the cgroup of
+# secretsd.service: the path of the cgroup v2 line (0::) of
+# ${SECRETSD_PROC_ROOT:-/proc}/PID/cgroup ends in /secretsd.service, or, in a
+# file with no 0:: line, the path of the cgroup v1 <n>:name=systemd: line does.
+# Fails, printing nothing, when the file is missing or unreadable or has neither
+# line. In an agent box `systemctl --user` reaches the host's user manager while
+# /proc shows the box's processes, so a MainPID can name an unrelated process.
+# SECRETSD_PROC_ROOT stands in for /proc in tests.
+secretsd_main_in_unit() {
+    local cgroup_file="${SECRETSD_PROC_ROOT:-/proc}/$1/cgroup"
+    local line v2_path="" v1_path="" have_v2=0 have_v1=0
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [[ "$line" == 0::* ]]; then
+            have_v2=1
+            v2_path="${line#0::}"
+        elif [[ "$line" =~ ^[0-9]+:name=systemd:(.*)$ ]]; then
+            have_v1=1
+            v1_path="${BASH_REMATCH[1]}"
+        fi
+    done 2>/dev/null < "$cgroup_file" || return 1
+    if [ "$have_v2" -eq 1 ]; then
+        [[ "$v2_path" == */secretsd.service ]]
+    elif [ "$have_v1" -eq 1 ]; then
+        [[ "$v1_path" == */secretsd.service ]]
+    else
+        return 1
+    fi
+}
+
+# secretsd_main_argv0 PID: prints argv[0] of PID, the bytes of
+# ${SECRETSD_PROC_ROOT:-/proc}/PID/cmdline up to the first NUL byte (all of them
+# when the file has no NUL). Fails, printing nothing, when the file is missing
+# or unreadable or argv[0] is empty, as it is for a zombie or an exiting process.
+secretsd_main_argv0() {
+    local argv0=""
+
+    # read fails when it reaches the end of the file before a NUL; what it read
+    # still counts. stderr is redirected first, so a missing file prints nothing.
+    IFS= read -r -d '' argv0 2>/dev/null < "${SECRETSD_PROC_ROOT:-/proc}/$1/cmdline" || true
+    [ -n "$argv0" ] || return 1
+    printf '%s\n' "$argv0"
+}
+
 # Defined-functions-only mode, for tests and checks:
 #   DOTFILES_DIR=<dir> SECRETSD_INSTALLER_FUNCTIONS_ONLY=1 \
 #     bash -c 'source "$1" && secretsd_config_toml' _ installers/secretsd.sh
-# install.sh sources this script without the variable and so runs all of it.
+#   SECRETSD_INSTALLER_FUNCTIONS_ONLY=1 \
+#     bash -c 'source "$1" && secretsd_main_argv0 "$2"' _ installers/secretsd.sh <pid>
+# secretsd_main_in_unit runs the same way. install.sh sources this script
+# without the variable and so runs all of it.
 # shellcheck disable=SC2317
 if [ "${SECRETSD_INSTALLER_FUNCTIONS_ONLY:-}" = 1 ]; then
     return 0 2>/dev/null || exit 0
@@ -106,8 +155,10 @@ fi
 
 # --- secretsd: session secrets broker (github.com/sjawhar/secretsd) ----------
 # Mirrors installers/voxtype.sh: mise owns the binary, systemd user units are
-# linked + enabled, and re-runs are idempotent -- the drop-in carries marker
-# comments so a restart happens only when something actually changed.
+# linked + enabled, and re-runs are idempotent -- the drop-in names the pinned
+# release and carries a hash of the unit files, so a restart happens only when a
+# generated file changed or the running daemon did not start from the pinned
+# binary.
 # Deliberate divergences from voxtype:
 #   * systemd units come from a local checkout when one exists, so unit edits
 #     are live on a dev machine;
@@ -116,7 +167,9 @@ fi
 # machine; only its systemd/ directory is used. Unset, units come from the
 # pinned release -- installers never assume a machine-local checkout path.
 SECRETSD_SRC="${SECRETSD_SRC:-}"
-# Set when the binary version, the generated drop-in, or a unit file changed.
+# Set when a generated file changed (a pin change or a unit edit changes the
+# drop-in), when an earlier run left such a change pending, or when the running
+# daemon did not start from the pinned binary.
 secretsd_restart_needed=0
 SECRETSD_VERSION=""
 
@@ -124,23 +177,27 @@ SECRETSD_VERSION=""
 # --- 1. Locate the binary. mise owns it: mise.toml pins a release, and mise
 #        verifies the archive's GitHub build-provenance attestation on install.
 #        The systemd unit runs %h/.local/bin/secrets, and a unit's minimal
-#        environment cannot execute a mise shim (a shim re-execs mise), so link
-#        the real installed binary there instead. ------------------------------
-# mise keeps a `latest` symlink beside each installed version, so this path is
-# stable across updates and needs no wrapper, shim, or symlink of our own. The
-# same release also ships the systemd units next to the binary.
-MISE_INSTALLS="${MISE_DATA_DIR:-${HOME}/.mise}/installs"
+#        environment cannot execute a mise shim (a shim re-execs mise), so the
+#        drop-in's ExecStart names the real installed binary instead. ---------
+# `mise where` names the pinned release's own install directory (as
+# installers/agent-secrets.sh takes its pin), and -C makes the mise.toml of this
+# checkout decide the pin whatever the working directory. The drop-in's
+# ExecStart names that directory, so a pin change is a drop-in change. The same
+# release also ships the systemd units next to the binary.
 # `secrets` is a mise tool_alias onto sjawhar/forward (the consolidation ships
 # the broker as a second release asset); the alias gives it its own install
 # dir next to forward's. Pre-merge this was github-sjawhar-secretsd.
-SECRETSD_MISE_DIR="${MISE_INSTALLS}/secrets/latest"
+if ! SECRETSD_MISE_DIR="$(mise -C "$DOTFILES_DIR" where secrets 2>/dev/null)"; then
+    SECRETSD_MISE_DIR=""
+fi
 SECRETSD_BIN="${SECRETSD_MISE_DIR}/bin/secrets"
-if [ ! -x "$SECRETSD_BIN" ]; then
-    echo "WARNING: ${SECRETSD_BIN} is absent; run 'mise install' to fetch the pinned release."
+if [ -n "$SECRETSD_MISE_DIR" ] && [ -f "$SECRETSD_BIN" ] && [ -x "$SECRETSD_BIN" ]; then
+    # The directory's name is the version that the drop-in's gates read.
+    SECRETSD_VERSION="${SECRETSD_MISE_DIR##*/}"
+else
+    echo "WARNING: the pinned secrets release is not installed (mise -C ${DOTFILES_DIR} where secrets: ${SECRETSD_MISE_DIR:-failed}); run 'mise install' to fetch it."
     echo "  Skipping systemd wiring until then."
     SECRETSD_BIN=""
-else
-    SECRETSD_VERSION="$(basename "$(readlink -f "$SECRETSD_MISE_DIR")")"
 fi
 
 
@@ -148,14 +205,39 @@ fi
 #        machine); otherwise the copy bundled in the release tarball. ----------
 if [ -d "${SECRETSD_SRC}/systemd" ]; then
     UNIT_SRC="${SECRETSD_SRC}/systemd"
-elif [ -d "${SECRETSD_MISE_DIR}/systemd" ]; then
+elif [ -n "$SECRETSD_MISE_DIR" ] && [ -d "${SECRETSD_MISE_DIR}/systemd" ]; then
     UNIT_SRC="${SECRETSD_MISE_DIR}/systemd"
 else
     UNIT_SRC=""
 fi
 
+# Puts back each previous generated file that the block below kept (a .prev of
+# this run or of an earlier one) and reloads systemd, so the next run finds the
+# change again. The unit links stay: the drop-in that comes back names its own
+# ExecStart, which overrides the unit's.
+secretsd_put_back() {
+    local file
+
+    for file in "$SECRETSD_CONFIG_FILE" "$SECRETSD_DROPIN"; do
+        if [ -f "${file}.prev" ]; then
+            mv "${file}.prev" "$file"
+        fi
+    done
+    systemctl --user daemon-reload 2>/dev/null || true
+}
+
 if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
     [ -f "${UNIT_SRC}/secretsd.service" ] && [ -f "${UNIT_SRC}/secretsd.socket" ]; then
+    SECRETSD_CONFIG_FILE="${HOME}/.config/secretsd/config.toml"
+    SECRETSD_DROPIN="${HOME}/.config/systemd/user/secretsd.service.d/local.conf"
+    # A .prev that an earlier run left means that run replaced the file and
+    # stopped before its restart decision (set -e at ensure_link or apt, or a
+    # Ctrl-C during the grants wait). Its change is still pending, so a restart
+    # is needed, and that .prev, the oldest file, is the one to put back when
+    # the restart does not happen: a run that changes the file again keeps it.
+    if [ -f "${SECRETSD_CONFIG_FILE}.prev" ] || [ -f "${SECRETSD_DROPIN}.prev" ]; then
+        secretsd_restart_needed=1
+    fi
     # Source roots live in the daemon's own config file (secretsd v2+), written
     # below from DOTFILES_DIR so a checkout outside ~/.dotfiles is configured
     # correctly instead of being pointed at a directory that does not exist.
@@ -165,12 +247,13 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
     # directions of an upgrade or rollback.
     #
     mkdir -p ~/.config/secretsd
-    SECRETSD_CONFIG_FILE="${HOME}/.config/secretsd/config.toml"
     secretsd_config_toml > "${SECRETSD_CONFIG_FILE}.new"
     if cmp -s "${SECRETSD_CONFIG_FILE}.new" "$SECRETSD_CONFIG_FILE" 2>/dev/null; then
         rm -f "${SECRETSD_CONFIG_FILE}.new"
     else
-        [ -f "$SECRETSD_CONFIG_FILE" ] && cp "$SECRETSD_CONFIG_FILE" "${SECRETSD_CONFIG_FILE}.prev"
+        if [ -f "$SECRETSD_CONFIG_FILE" ] && [ ! -f "${SECRETSD_CONFIG_FILE}.prev" ]; then
+            cp "$SECRETSD_CONFIG_FILE" "${SECRETSD_CONFIG_FILE}.prev"
+        fi
         mv "${SECRETSD_CONFIG_FILE}.new" "$SECRETSD_CONFIG_FILE"
         # Source roots are read at daemon startup, so a change needs a restart.
         secretsd_restart_needed=1
@@ -182,8 +265,8 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
     # in a drop-in. mise keeps
     # sops and the YubiKey plugin outside that PATH, and mise *shims* re-exec mise
     # (which fails in a unit's minimal environment), so resolve real absolute paths.
-    # mise keeps a `latest` symlink beside each installed version, so these paths
-    # follow the pin in mise.toml without naming a version here.
+    # `mise where` names each pinned release's own directory, so these paths
+    # change with the pins in mise.toml, and a pin change is a drop-in change.
     # age-plugin-yubikey links against libpcsclite even for pure encryption
     # (wrapping to an age1yubikey1… recipient needs no card, but the binary
     # will not load without the library). The shared .sops.yaml catch-all rule
@@ -195,19 +278,25 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
     if command -v dpkg &>/dev/null && ! dpkg -s libpcsclite1 &>/dev/null; then
         sudo apt-get install -y -qq libpcsclite1 >/dev/null
     fi
-    SOPS_ABS="${MISE_INSTALLS}/sops/latest/sops"
-    AGE_DIR="${MISE_INSTALLS}/github-str4d-age-plugin-yubikey/latest"
-    [ -x "$SOPS_ABS" ] || SOPS_ABS="$(command -v sops || true)"
-    [ -x "${AGE_DIR}/age-plugin-yubikey" ] || AGE_DIR="$(dirname "$(command -v age-plugin-yubikey || echo /nonexistent/x)")"
+    if secretsd_tool_dir="$(mise -C "$DOTFILES_DIR" where sops 2>/dev/null)" \
+        && [ -n "$secretsd_tool_dir" ] && [ -x "${secretsd_tool_dir}/sops" ]; then
+        SOPS_ABS="${secretsd_tool_dir}/sops"
+    else
+        SOPS_ABS="$(command -v sops || true)"
+    fi
+    if secretsd_tool_dir="$(mise -C "$DOTFILES_DIR" where github:str4d/age-plugin-yubikey 2>/dev/null)" \
+        && [ -n "$secretsd_tool_dir" ] && [ -x "${secretsd_tool_dir}/age-plugin-yubikey" ]; then
+        AGE_DIR="$secretsd_tool_dir"
+    else
+        AGE_DIR="$(dirname "$(command -v age-plugin-yubikey || echo /nonexistent/x)")"
+    fi
     mkdir -p ~/.config/systemd/user/secretsd.service.d
-    SECRETSD_DROPIN="${HOME}/.config/systemd/user/secretsd.service.d/local.conf"
     {
         echo "# Generated by installers/secretsd.sh — machine-specific wiring."
-        # ExecStart resolves through mise's `latest` symlink, so it reads the
-        # same on every version. Record what `latest` points at, and the unit
-        # contents, so an upgrade or a unit edit is visible in this file and
-        # triggers exactly one restart instead of one per install run.
-        echo "# secretsd-version: ${SECRETSD_VERSION}"
+        # ExecStart below names the pinned release's own directory, so a pin
+        # change shows in this file. Record the unit contents too, so a unit
+        # edit shows here as well; either triggers exactly one restart instead
+        # of one per install run.
         echo "# secretsd-units: $(cat "${UNIT_SRC}/secretsd.service" "${UNIT_SRC}/secretsd.socket" | sha256sum | cut -d' ' -f1)"
         echo "[Service]"
         # The shipped unit runs %h/.local/bin/secrets; point it at the mise
@@ -290,10 +379,13 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
     if cmp -s "${SECRETSD_DROPIN}.new" "$SECRETSD_DROPIN" 2>/dev/null; then
         rm -f "${SECRETSD_DROPIN}.new"
     else
-        # The drop-in's markers are how the next run knows whether the daemon
-        # still needs restarting, so the previous one is kept until the restart
-        # below actually happens; a refused restart puts it back.
-        [ -f "$SECRETSD_DROPIN" ] && cp "$SECRETSD_DROPIN" "${SECRETSD_DROPIN}.prev"
+        # The drop-in is how the next run knows whether the daemon still needs
+        # restarting, so the previous one is kept as .prev until the restart
+        # below happens; a restart that does not happen puts it back. A .prev
+        # that an earlier run left is older and stays as it is.
+        if [ -f "$SECRETSD_DROPIN" ] && [ ! -f "${SECRETSD_DROPIN}.prev" ]; then
+            cp "$SECRETSD_DROPIN" "${SECRETSD_DROPIN}.prev"
+        fi
         mv "${SECRETSD_DROPIN}.new" "$SECRETSD_DROPIN"
         secretsd_restart_needed=1
     fi
@@ -309,41 +401,132 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
     systemctl --user enable --now secretsd.socket 2>/dev/null \
         || echo "NOTE: could not enable secretsd.socket (no user systemd session here?) — enable it on the target machine."
 
-    # Devbox only: the daemon reads PCSCLITE_CSOCK_NAME from ITS OWN env to reach
-    # the YubiKey over the on-demand pcscd tunnel. systemd user units do not
-    # inherit the shell env, so import it when present. Absent = laptop (direct
-    # YubiKey) or tunnel down (daemon fails fast with a clear message, by design).
-
-    if [ "$secretsd_restart_needed" -eq 1 ]; then
-        # Only when the binary version, the generated environment, or a unit
-        # file actually changed -- see the marker comments in the drop-in. A
-        # restart clears memory-only grants (by design: they are never
-        # persisted), so while any session on this box holds one, restarting
-        # kills credentialed work mid-flight in a session that is not this one.
-        # 2026-09-17: two broker upgrades wiped the merge queue's admin-PAT
-        # grant mid-merge, twice. Refuse unless the caller says so; the new
-        # binary is already installed and takes effect at the next restart.
-        # `grants` is an unscoped control op: it never prompts for a touch.
-        active_grants="$(timeout 10 "$SECRETSD_BIN" grants 2>/dev/null | grep -v '^no active grants$' || true)"
-        if [ -n "$active_grants" ] && [ "${SECRETSD_RESTART_WITH_GRANTS:-}" != 1 ]; then
-            # Put previous generated files back so the next run sees the pending
-            # change instead of concluding the daemon is current.
-            if [ -f "${SECRETSD_CONFIG_FILE}.prev" ]; then
-                mv "${SECRETSD_CONFIG_FILE}.prev" "$SECRETSD_CONFIG_FILE"
-            fi
-            if [ -f "${SECRETSD_DROPIN}.prev" ]; then
-                mv "${SECRETSD_DROPIN}.prev" "$SECRETSD_DROPIN"
-            fi
-            systemctl --user daemon-reload 2>/dev/null || true
-            echo "secretsd: NOT restarting -- the new version is installed but the running daemon holds human-tier grants that a restart would wipe:" >&2
-            printf '%s\n' "$active_grants" | while IFS= read -r line; do printf '    %s\n' "$line"; done >&2
-            echo "secretsd: announce the restart to the box (envoy) so grant-holders can finish, then either wait for the grants to lapse or re-run with SECRETSD_RESTART_WITH_GRANTS=1." >&2
-            exit 1
+    # Whether to restart. A restart ends every grant: grants live only in the
+    # daemon's memory (by design: they are never persisted), so while any
+    # session on this box holds one, a restart kills credentialed work
+    # mid-flight in a session that is not this one. 2026-09-17: two broker
+    # upgrades wiped the merge queue's admin-PAT grant mid-merge, twice. So a
+    # running daemon restarts only after `secrets grants` exits 0 and prints
+    # exactly "no active grants", or with SECRETSD_RESTART_WITH_GRANTS=1; a
+    # `grants` call that fails or times out is no answer and ends no grant.
+    # `grants` is an unscoped control op: it never prompts for a touch. A
+    # restart that is needed and does not happen puts the previous generated
+    # files back, so the next run finds the change again.
+    if ! secretsd_main_pid="$(systemctl --user show -p MainPID --value secretsd.service 2>/dev/null)" \
+        || [[ ! "$secretsd_main_pid" =~ ^[0-9]+$ ]]; then
+        # A shell that cannot read the main process cannot restart the unit
+        # either (a daemon can run while this shell reaches no user manager, for
+        # example over ssh with no XDG_RUNTIME_DIR), whatever
+        # SECRETSD_RESTART_WITH_GRANTS says.
+        echo "secretsd: NOTE: cannot read the main process of secretsd.service, so it is not restarted; the next install tries again" >&2
+        if [ "$secretsd_restart_needed" -eq 1 ]; then
+            secretsd_put_back
         fi
+    elif [[ "$secretsd_main_pid" =~ ^0+$ ]]; then
+        # No daemon runs. An idle daemon holds no grants, and its next start
+        # runs what the new drop-in names; `grants` would connect to the socket
+        # and so start the daemon.
         rm -f "${SECRETSD_CONFIG_FILE}.prev" "${SECRETSD_DROPIN}.prev"
-        systemctl --user try-restart secretsd.service 2>/dev/null || true
     else
-        rm -f "${SECRETSD_CONFIG_FILE}.prev" "${SECRETSD_DROPIN}.prev"
+        # systemd passes the ExecStart path as argv[0], so argv[0] names the
+        # release the daemon started from (secretsd is non-dumpable, so its exe
+        # link is not readable from every user namespace; its cmdline is). In an
+        # agent box the host's MainPID can name an unrelated box process, so a
+        # process outside the unit's cgroup is never compared or run.
+        secretsd_argv0=""
+        if secretsd_main_in_unit "$secretsd_main_pid" \
+            && secretsd_argv0="$(secretsd_main_argv0 "$secretsd_main_pid")"; then
+            if [ "$secretsd_argv0" != "$SECRETSD_BIN" ]; then
+                echo "secretsd: the running daemon started from ${secretsd_argv0}, not the pinned ${SECRETSD_BIN}" >&2
+                secretsd_restart_needed=1
+            fi
+        else
+            secretsd_argv0=""
+            echo "secretsd: NOTE: cannot read the command line of the running daemon (pid ${secretsd_main_pid}), so its version is not known; it is not restarted for the version" >&2
+        fi
+        if [ "$secretsd_restart_needed" -eq 0 ]; then
+            rm -f "${SECRETSD_CONFIG_FILE}.prev" "${SECRETSD_DROPIN}.prev"
+        else
+            if [ "${SECRETSD_RESTART_WITH_GRANTS:-}" = 1 ]; then
+                echo "secretsd: SECRETSD_RESTART_WITH_GRANTS=1: restarting without asking for grants" >&2
+            else
+                # The client is the running daemon's own binary when that is a
+                # release that mise installed, <dir>/<release>/bin/secrets where
+                # <dir> is the parent of the pinned directory: `grants` first
+                # checks the wire protocol version with the daemon, so after a
+                # pin move across a protocol change only the old client gets an
+                # answer. Else it is the pinned binary. [[ == ]] lets * match /,
+                # so <release> is tested to be one path part.
+                secretsd_client="$SECRETSD_BIN"
+                secretsd_release=""
+                if [[ "$secretsd_argv0" == "${SECRETSD_MISE_DIR%/*}"/*/bin/secrets ]]; then
+                    secretsd_release="${secretsd_argv0#"${SECRETSD_MISE_DIR%/*}"/}"
+                    secretsd_release="${secretsd_release%/bin/secrets}"
+                fi
+                if [ -n "$secretsd_release" ] && [[ "$secretsd_release" != */* ]] \
+                    && [ "$secretsd_release" != . ] && [ "$secretsd_release" != .. ] \
+                    && [ -f "$secretsd_argv0" ] && [ -x "$secretsd_argv0" ]; then
+                    secretsd_client="$secretsd_argv0"
+                fi
+                # stdout and stderr go to files, because $(...) drops the trailing
+                # newline of the exact answer. A failing mktemp ends the install
+                # here (set -e), and the kept .prev files make the next run try
+                # again.
+                secretsd_grants_dir="$(mktemp -d)"
+                if timeout 10 "$secretsd_client" grants \
+                    > "${secretsd_grants_dir}/out" 2> "${secretsd_grants_dir}/err"; then
+                    secretsd_grants_rc=0
+                else
+                    secretsd_grants_rc=$?
+                fi
+                secretsd_grants_answer=unknown
+                secretsd_grants_file=err
+                if [ "$secretsd_grants_rc" -eq 0 ] \
+                    && cmp -s "${secretsd_grants_dir}/out" <(printf 'no active grants\n'); then
+                    secretsd_grants_answer=none
+                elif [ "$secretsd_grants_rc" -eq 0 ] && [ -s "${secretsd_grants_dir}/out" ]; then
+                    secretsd_grants_answer=grants
+                    secretsd_grants_file=out
+                fi
+                # Every line of the file to print, four spaces in, a last line
+                # with no newline included.
+                secretsd_grants_lines=""
+                while IFS= read -r secretsd_line || [ -n "$secretsd_line" ]; do
+                    secretsd_grants_lines+="    ${secretsd_line}"$'\n'
+                done < "${secretsd_grants_dir}/${secretsd_grants_file}"
+                rm -rf -- "$secretsd_grants_dir"
+                if [ "$secretsd_grants_answer" = grants ]; then
+                    secretsd_put_back
+                    {
+                        echo "secretsd: NOT restarting -- the running daemon holds grants that a restart would end:"
+                        printf '%s' "$secretsd_grants_lines"
+                        echo "secretsd: tell the box (envoy) so that the sessions that hold them can finish, then wait for the grants to end or re-run with SECRETSD_RESTART_WITH_GRANTS=1; the next install tries again."
+                    } >&2
+                    exit 1
+                elif [ "$secretsd_grants_answer" = unknown ]; then
+                    if [ "$secretsd_grants_rc" -eq 124 ]; then
+                        secretsd_grants_why="exit status 124: it timed out after 10 s"
+                    elif [ "$secretsd_grants_rc" -eq 0 ]; then
+                        secretsd_grants_why="exit status 0, no output"
+                    else
+                        secretsd_grants_why="exit status ${secretsd_grants_rc}"
+                    fi
+                    secretsd_put_back
+                    {
+                        echo "secretsd: NOT restarting -- 'secrets grants' did not answer (${secretsd_grants_why}), so it is not known whether the running daemon holds grants that a restart would end:"
+                        printf '%s' "$secretsd_grants_lines"
+                        echo "secretsd: the next install tries again; to restart anyway, re-run with SECRETSD_RESTART_WITH_GRANTS=1."
+                    } >&2
+                    exit 1
+                fi
+            fi
+            if systemctl --user try-restart secretsd.service 2>/dev/null; then
+                rm -f "${SECRETSD_CONFIG_FILE}.prev" "${SECRETSD_DROPIN}.prev"
+            else
+                echo "secretsd: WARNING: try-restart failed (systemctl --user status secretsd.service); the next install tries again." >&2
+                secretsd_put_back
+            fi
+        fi
     fi
 else
     echo "secretsd: binary or units unavailable — skipping systemd wiring (install stays non-fatal)."
