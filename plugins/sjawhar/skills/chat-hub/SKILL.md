@@ -93,12 +93,14 @@ A room name is the contact or group name from the network.
   ```sh
   secrets MATRIX_HUB_URL MATRIX_HUB_TOKEN -- sh -c 'printf "Authorization: Bearer %s\n" "$MATRIX_HUB_TOKEN" | curl -fsS -H @- "$MATRIX_HUB_URL/_matrix/client/v3/rooms/$1/state"' _ '<room ID>' | jq -r '.[] | select(.type == "m.bridge") | .content.channel["fi.mau.receiver"]'
   ```
-- Send nothing in an SMS room whose login differs from the login ID you chose.
+  - Send nothing in an SMS room whose login differs from the login ID you chose.
 - **A Discord server channel:**
   1. **Find the channel ID** in `~/.local/share/chathub/discord/discord.db` on oryx: the `portal` rows with that server's `dc_guild_id`.
   2. **Send `guilds bridging-mode <server id> if-portal-exists`** in the Discord bot's control room.
-  3. **Send `create-portal <channel id>`** in the Discord bot's control room. Only that channel joins the hub.
+  3. **Send `create-portal <channel id>`** in the Discord bot's control room.
   4. **Send to people in the new room** with `hub-send`.
+
+  Only that channel joins the hub.
 
 ## Logins
 
