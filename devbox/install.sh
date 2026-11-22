@@ -19,6 +19,11 @@ bash "${DOTFILES_DIR}/installers/omp-embed.sh"
 # registers them and enrolls their boxes (see installers/agent-secrets.sh).
 bash "${DOTFILES_DIR}/installers/agent-secrets.sh"
 
+# The secrets broker's device sign-in client in the client's own settings file, so every process
+# of this user can renew a person's `agent-secrets login` once its enrollment ends (see
+# installers/agent-secrets-signin.sh). On a Google VM only.
+bash "${DOTFILES_DIR}/installers/agent-secrets-signin.sh"
+
 # The Google Cloud SDK where boxes can see it (~/.gcloud), with the GKE auth plugin and the
 # dispatch cluster's context (see installers/gcloud-sdk.sh). Before gcloud-box.sh, which needs it.
 bash "${DOTFILES_DIR}/installers/gcloud-sdk.sh"
