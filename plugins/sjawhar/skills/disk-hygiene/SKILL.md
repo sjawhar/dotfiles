@@ -13,20 +13,25 @@ Set `SKILL=~/.dotfiles/plugins/sjawhar/skills/disk-hygiene` and `S=$SKILL/script
 
 ## When a shell hangs
 
-- Every command timing out, even `echo`, usually means a stalled filesystem: omp's search tools and its shell share one small thread pool, and searches on a stalled mount block it for every session in that omp process.
-- Scope every search to a named path. Never run a bare recursive walk, and never search over `/mnt/durable`. Switching to `grep` or `read` blocks more threads.
+- Every command timing out, even `echo`, usually means a stalled filesystem. omp's search tools and its shell share one small thread pool. Searches on a stalled mount block it for every session in that omp process.
+- Scope every search to a named path.
+- Never run a bare recursive walk.
+- Never search over `/mnt/durable`.
+- Switching to `grep` or `read` blocks more threads.
 - Probe: `timeout 2 true` hangs when the shell cannot fork (not the filesystem); `timeout 2 ls -d <cwd>` hangs when that filesystem is stalled. Wait and probe again; the stall recovers by itself.
 
 ## Safety rules (your own paths too)
 
-- Never delete a directory a live session stands in, or content that exists only on disk (untracked, gitignored and modified tracked files all count).
+- Never delete a directory a live session stands in.
+- Never delete content that exists only on disk (untracked, gitignored and modified tracked files all count).
 - Learn liveness from check-in replies and process cwds (`$S procs`). Age or mtime never proves a path dead; an age threshold may only keep a path longer.
-- Cold is not finished, and not on a remote is not unsaved: such a worktree can be withdrawn work (a review checkout of a squash-merged pull request) or the only copy. Only its owner or the repository's own record settles it.
+- Cold is not finished. Not on a remote is not unsaved. Such a worktree can be withdrawn work (a review checkout of a squash-merged pull request) or the only copy. Only its owner or the repository's own record settles it.
 - A dangling `.git` does not prove abandonment: any session's `git worktree prune` drops live registrations. `[ -e .git ]` tests the file, not a registration.
 - Run `chmod -R u+w <tree>` before an `rm -rf`: `rm -rf` leaves read-only trees partly deleted, and the rest looks like someone else's files.
   - After the `rm -rf`, check that the path is gone.
   - Use sudo only on the owner's say-so.
-- Run this skill by hand, never on a timer (it needs the check-in), and stop when done.
+- Run this skill by hand, never on a timer (it needs the check-in).
+- Stop this skill when done.
 - A `.no-offbox` file in a directory, or a match in `~/.config/no-offbox/patterns`, means nothing in or below it may leave this machine.
 - Only the data's owner writes or removes the marker.
 - A move on this machine keeps the marker: a marker inside the moved tree moves with it.
