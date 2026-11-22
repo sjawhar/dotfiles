@@ -26,12 +26,12 @@ description: Use when someone wants one plan or design reviewed before it is bui
 4. **Present one summary** when all five finish:
    - Sort the findings by level:
 
-     | Level | Meaning | Action |
-     | --- | --- | --- |
-     | Critical | Causes a bug, security hole or data loss | Fix before implementing |
-     | High | Works, but forces a rework later | |
-     | Medium | An improvement with no known failure behind it | |
-     | Low | Style or preference | |
+     | Level | Meaning |
+     | --- | --- |
+     | Critical | Causes a bug, security hole or data loss; fix before implementing |
+     | High | Works, but forces a rework later |
+     | Medium | An improvement with no known failure behind it |
+     | Low | Style or preference |
 
    - Name where the agents agree.
    - Name where the agents disagree, with your recommendation.
