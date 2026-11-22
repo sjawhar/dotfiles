@@ -19,8 +19,9 @@ An expected failure (xfail) ran: junit records it as a skip of type pytest.xfail
 A failing test is the run's own exit code's to report, not this script's.
 
 Why it exists: a job that runs a test directory passes when a file collects nothing, and a skip says nothing unless
-someone reads it. shims-tests (dispatch://INFRA-5046) runs shims/tests, where a missing public leak check made 138
-cases skip on every runner without a word.
+someone reads it (dispatch://INFRA-5046). In shims-tests, which runs shims/tests, a missing public leak check made 138
+cases skip on every runner without a word. In scripts-tests, 88 tests skipped and three files ran nothing (run
+44952329275).
 """
 
 from __future__ import annotations

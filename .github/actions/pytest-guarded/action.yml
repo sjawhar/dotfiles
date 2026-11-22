@@ -1,0 +1,42 @@
+name: pytest, guarded
+description: >-
+  Runs pytest on a test directory from the checkout root, then scripts/pytest-expected-skips on the
+  run's junit report against the suite's skip list, and uploads the report.
+
+inputs:
+  tests:
+    description: The test directory, from the checkout root.
+    required: true
+  skips:
+    description: >-
+      The tests that may skip, one pytest node id a line, each under a `# ` line giving the reason
+      (EXPECTED_SKIPS, as scripts/pytest-expected-skips reads it).
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # Every test runs, or is on the skip list under its reason. The job fails on a failing test
+    # (pytest's exit code) and, through scripts/pytest-expected-skips, on a skip the list does not
+    # name, a listed test that ran, a list entry that names no test that skipped, and a test file
+    # that ran no test (it collected none, or skipped every one).
+    # scripts/tests/test_pytest_expected_skips.py tests each failure the guard reports.
+    - name: pytest, then the skip-list guard
+      shell: bash
+      env:
+        TESTS: ${{ inputs.tests }}
+        EXPECTED_SKIPS: ${{ inputs.skips }}
+        REPORT: ${{ runner.temp }}/pytest-junit.xml
+      run: |
+        rc=0
+        uvx pytest@9.2.0 -p no:cacheprovider -rs -o junit_family=xunit1 --junitxml="$REPORT" "$TESTS" || rc=$?
+        scripts/pytest-expected-skips "$REPORT" "$TESTS" || rc=1
+        exit "$rc"
+    # The report names each test and its result, for reading what a run collected and ran.
+    - uses: actions/upload-artifact@v7
+      if: always()
+      with:
+        name: ${{ github.job }}-junit
+        path: ${{ runner.temp }}/pytest-junit.xml
+        if-no-files-found: ignore
