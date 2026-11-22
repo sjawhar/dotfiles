@@ -45,7 +45,7 @@ Your record is the ledger: `dispatch doc-read --project INFRA --artifact librari
 - Write into a lesson's home only after Sami says yes, whatever kind of home `references/homes.md` gives it: a repository PR, a skill, CLAUDE.md and memory alike. A skill or CLAUDE.md edit, for one, reaches every agent on the machine at once.
 - Bring Sami all the edits one wake proposes together, at the end of that wake, not one at a time.
 - Give every due session both the seance consult and the reader.
-  - Give the consult `references/interview-question.md` and the reader `references/reader-brief.md`, each verbatim: those files carry the read-only, signal and dollar rules your own prompt would drop.
+  - Give each its file in `references/` verbatim: those files carry the read-only, signal and dollar rules your own prompt would drop.
   - Do not replace either with reading the transcript yourself or writing your own prompt, however large the transcript.
 
 ## Startup (again after every resume)
