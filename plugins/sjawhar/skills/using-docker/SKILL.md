@@ -66,7 +66,7 @@ Docker, depot and registry access work on this machine. Before you say one is un
 - Name each outside caller you publish publicly for in the repo's docs.
 - Check `docker version`: Docker Engine before 28.0 lets hosts on the local network reach even a loopback-published port, through 127.0.0.1 and through the container's own address on the Docker bridge network.
 - On an engine before 28.0, this rule in the `DOCKER-USER` chain, which Docker runs before its own rules, closes only the 127.0.0.1 route: `sudo iptables -I DOCKER-USER -m conntrack --ctorigdst 127.0.0.0/8 -j DROP`.
-- The full fix is to update the engine to 28.0 or later. Ask the user first: the update restarts the daemon and every session's containers.
+- For the full fix, update the engine to 28.0 or later. Ask the user first: the update restarts the daemon and every session's containers.
 - Copy files out of an image with no CMD: `docker create --name <n> <img> true`, `docker cp <n>:<path> <dest>`, `docker rm <n>`. Without `true`, `docker create` fails with "no command specified".
 
 | Situation | Check |
@@ -93,7 +93,7 @@ done
 
 - Do not retry the removal: each try blocks another daemon thread.
 - Do not restart the daemon: it stops every session's containers.
-- `docker ps` can still say "healthy": `grep -l <container-id> /proc/[0-9]*/cgroup` printing nothing means its init is gone.
+- Run `grep -l <container-id> /proc/[0-9]*/cgroup`: printing nothing means its init is gone, even when `docker ps` still says "healthy".
 - It clears when the unmount finishes, or at a reboot.
 - Send the user the container id and the thread line.
 - Leave the container.
