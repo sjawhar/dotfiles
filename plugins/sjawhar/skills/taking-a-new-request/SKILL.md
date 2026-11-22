@@ -25,4 +25,11 @@ Nothing uncovered stays only in this session's head: a request folded into runni
 
 Do steps 1 to 3 anyway. Then name what this session cannot cover. Offer a fresh agent for it with the command that starts it. This session cannot cover a requirement that needs another repository or branch, that blocks on something this session waits for, or that this session could not finish together with the running work, so the running work would end this session undelivered. Do not accept the whole request silently and deliver only the overlap.
 
-The command is `agent-new <issue key>` when the request has a Dispatch issue, else `agent-new @brief.md` or `agent-new "<request>"`. Add `--repo <repo> --name <name>` to start it in its own worktree. When the request belongs to a stream (a line of work with its own stream issue, the open Dispatch issue labelled `stream`, and a lead session in its own tmux window), add `--window <that window's name>` to open the new agent as a pane beside that lead (`agent-new --help`).
+A stream is a line of work with its own stream issue, the open Dispatch issue labelled `stream`, and a lead session in its own tmux window. The command, by situation:
+
+| Situation | Command |
+| --- | --- |
+| The request has a Dispatch issue | `agent-new <issue key>` |
+| The request has no Dispatch issue | `agent-new @brief.md` or `agent-new "<request>"` |
+| To start it in its own worktree | Add `--repo <repo> --name <name>` |
+| The request belongs to a stream | Add `--window <that window's name>` to open the new agent as a pane beside that lead (`agent-new --help`) |
