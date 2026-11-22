@@ -7,8 +7,6 @@ description: "Use when you are a session started on one Dispatch issue; before y
 
 You own one issue, and you end when it is done. Filing part of your work as a new issue, or moving it to someone else's, does not make your issue done.
 
-**Done when:** for your issue to be done, each done condition has its evidence link, and no child issue you created under your issue is open.
-
 ## When you start
 
 1. **Claim your issue** (`dispatch claim --issue <KEY>`).
@@ -100,7 +98,7 @@ To end:
 
 ## When your issue is done
 
-1. **Check it is done** against the Done when line.
+1. **Check it is done:** each done condition has its evidence link, and no child issue you created under your issue is open.
    - An issue you filed unclaimed for another owner (above) does not hold it open.
    - An issue closed with your own child open, or with a condition handed on and not yet done, is not done.
 2. **Close it.**
