@@ -26,9 +26,13 @@ Every command timing out, even `echo`, usually means a stalled filesystem. omp's
 
 - Never delete a directory a live session stands in.
 - Never delete content that exists only on disk (untracked, gitignored and modified tracked files all count).
-- Learn liveness from check-in replies and process cwds (`$S procs`). Age or mtime never proves a path dead; an age threshold may only keep a path longer.
-- Cold is not finished. Not on a remote is not unsaved. Such a worktree can be withdrawn work (a review checkout of a squash-merged pull request) or the only copy. Only its owner or the repository's own record settles it.
-- A dangling `.git` does not prove abandonment: any session's `git worktree prune` drops live registrations. `[ -e .git ]` tests the file, not a registration.
+- Learn liveness from check-in replies and process cwds (`$S procs`).
+- Age or mtime never proves a path dead.
+- An age threshold may only keep a path longer.
+- Cold is not finished: such a worktree can be withdrawn work (a review checkout of a squash-merged pull request) or the only copy. Only its owner or the repository's own record settles it.
+- Not on a remote is not unsaved, for the same reason. Only the worktree's owner or the repository's own record settles it.
+- A dangling `.git` does not prove abandonment: any session's `git worktree prune` drops live registrations.
+- `[ -e .git ]` tests the file, not a registration.
 - Run `chmod -R u+w <tree>` before an `rm -rf`: `rm -rf` leaves read-only trees partly deleted, and the rest looks like someone else's files.
   - After the `rm -rf`, check that the path is gone.
   - Use sudo only on the owner's say-so.
@@ -43,17 +47,24 @@ Every command timing out, even `echo`, usually means a stalled filesystem. omp's
 
 ## Procedure
 
-1. **Baseline:** `df <path>`, `/proc/pressure/io`, `sudo python3 $S writers` and `python3 $S cpu` while the disk still fills. Pick a ledger path under `~/.local/state/`. Read `references/finding-space.md` before you size, rank or watch disk use.
-2. **Check in:** read `references/check-in.md`. Send its message to each titled session `envoy_sessions` lists on this machine (not subagents). Build the protected and releases files. Go on when each has replied or 20 minutes have passed; replies change the plan.
+1. **Baseline:** `df <path>`, `/proc/pressure/io`, `sudo python3 $S writers` and `python3 $S cpu` while the disk still fills.
+   - Pick a ledger path under `~/.local/state/`.
+   - Read `references/finding-space.md` before you size, rank or watch disk use.
+2. **Check in:** read `references/check-in.md`.
+   - Send its message to each titled session `envoy_sessions` lists on this machine (not subagents).
+   - Build the protected and releases files.
+   - Go on when each session has replied or 20 minutes have passed.
+   - Replies change the plan.
 3. **Classify:** read `references/workspaces.md`, then classify:
    ```bash
    python3 $S inventory --repo ~/REPO --root ~/.worktrees --root /tmp > inv.json
    python3 $S plan --inventory inv.json --protected protected.json [--releases releases.json] > plan.json
    ```
-4. **Apply:** apply until the ledger shows 0 errors (to undo a forget, read `references/workspaces.md`):
+4. **Apply:** apply until the ledger shows 0 errors:
    ```bash
    systemd-run --user --same-dir -E PATH="$PATH" nice -n19 python3 $S apply --plan plan.json --protected protected.json --ledger ledger.jsonl [--releases releases.json]
    ```
+   - To undo a forget, read `references/workspaces.md`.
 5. **Docker:** follow `references/docker.md`.
 6. **Temp, caches and the jj op store:** follow `references/caches.md`.
 
@@ -61,13 +72,20 @@ Read `references/shared-git-store.md` before you prune, forget a jj workspace, r
 
 The space is usually, largest first, in: dangling images, buildkit cache with leaked leases, unused tagged images, orphaned sandboxes, `/tmp` families, workspaces.
 
-`~/.dotfiles/devbox/box-cleanup` (its cleaners: `devbox/box-cleanup.md`) and `~/.dotfiles/agentbox/devbox-prune` (its header) already prune dangling Docker objects, idle Go build cache, capped tool caches and stale `/tmp` entries. Read them before you add automation. In a box, `systemctl --user status devbox-prune.service` shows the host unit's last run. The box's `journalctl` cannot read its log: read it from a host session, `journalctl --user -u devbox-prune.service`. Nothing automatic judges a workspace or a tagged image live. Do by hand what they leave: unused tagged images, non-default builders, leaked leases, containers, Docker volumes, box directories agentbox did not delete, `~/.local/share/opencode` and a retired jj store (`references/caches.md` defines it).
+- `~/.dotfiles/devbox/box-cleanup` (its cleaners: `devbox/box-cleanup.md`) and `~/.dotfiles/agentbox/devbox-prune` (its header) already prune dangling Docker objects, idle Go build cache, capped tool caches and stale `/tmp` entries.
+- Read `box-cleanup` and `devbox-prune` before you add automation.
+- In a box, `systemctl --user status devbox-prune.service` shows the host unit's last run.
+- The box's `journalctl` cannot read the host unit's log: read it from a host session, `journalctl --user -u devbox-prune.service`.
+- Nothing automatic judges a workspace or a tagged image live.
+- Do by hand what `box-cleanup` and `devbox-prune` leave: unused tagged images, non-default builders, leaked leases, containers, Docker volumes, box directories agentbox did not delete, `~/.local/share/opencode` and a retired jj store (`references/caches.md` defines it).
 
 ## Pacing (every phase)
 
-- Run one `rm` or ad-hoc `du` at a time, under `sudo ionice -c3 nice -n19`: parallel walkers plus an `rm` can hang every shell.
+- Run one `rm` or ad-hoc `du` at a time: parallel walkers plus an `rm` can hang every shell.
+- Run each `rm` or ad-hoc `du` under `sudo ionice -c3 nice -n19`, for the same reason.
 - Delete only while `/proc/pressure/io` `full avg10` is under 20 (`apply` and `tmp --apply` wait on it: `--io-limit`).
-- Never `lsof +D` or `fuser` a tree per candidate. Before each item, check one `$S procs` for a cwd inside it.
+- Never `lsof +D` or `fuser` a tree per candidate.
+- Before each candidate, check one `$S procs` for a cwd inside it.
 - Never size a candidate to decide its deletion.
 - Never run one `du` of everything.
 - Read `references/shared-disk-writes.md` before a step that writes more than 2 GB to a shared mount, or before you write a free-space guard for a batch.

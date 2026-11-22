@@ -17,9 +17,12 @@ Read this before you run `inventory`, `plan` or `apply`, before a manual `rm` of
 
 ## Classify
 
-- In a box, a missing directory proves nothing and `ps` ages read 0. Judge absence and process age from a host session (`inventory --box-dir none`), not through `systemd-run --user`, which from a box starts its command on the host (`box-mounts.md`).
+- In a box, a missing directory proves nothing and `ps` ages read 0.
+  - Judge absence and process age from a host session (`inventory --box-dir none`), not through `systemd-run --user`, which from a box starts its command on the host (`box-mounts.md`).
 - Judge by the classes, never by `jj workspace list` "(empty)": it says nothing about unmerged ancestors.
-- Idle hours come from the freshness gate (`plan --fresh-hours`, default 24): the mtime of `.jj/working_copy/tree_state` for a jj workspace, and the newest mtime in the top 3 levels for a plain directory. A file written deeper does not move it, so idle hours are an upper bound on how stale a tree is, never proof that nothing writes in it; `$S procs` and `$S writers` give that proof.
+- Idle hours come from the freshness gate (`plan --fresh-hours`, default 24): the mtime of `.jj/working_copy/tree_state` for a jj workspace, and the newest mtime in the top 3 levels for a plain directory.
+  - A file written deeper does not move it, so idle hours are an upper bound on how stale a tree is, never proof that nothing writes in it.
+  - `$S procs` and `$S writers` give the proof that nothing writes in a tree.
 - A stale checkout's diff shows later merges as changes: run `jj log -r '::@ ~ ::trunk()'` before you call it a revert.
 - Leave alone knives fork checkouts, check-in holds and Legion daemon state (`check-in.md` finds its paths).
   - Knives fork checkouts are each path `knives repos --json` lists, every sibling of a `default` checkout it lists, and each `workspaces` directory in `~/.config/knives/repos.toml`.
@@ -27,14 +30,20 @@ Read this before you run `inventory`, `plan` or `apply`, before a manual `rm` of
 
 ## Apply
 
-- Keep `systemd-run` and `-E PATH="$PATH"` in SKILL.md's apply command: a tool timeout kills a foreground run, and without `PATH` `jj` is not found. From a box, run that `apply` as a named bash service instead: there `systemd-run --user` runs it on the host (`box-mounts.md`).
+- Keep `systemd-run` in SKILL.md's apply command: a tool timeout kills a foreground run.
+- Keep `-E PATH="$PATH"` in SKILL.md's apply command: without `PATH`, `jj` is not found.
+- From a box, run SKILL.md's `apply` command as a named bash service instead: there `systemd-run --user` runs it on the host (`box-mounts.md`).
 - A loop that waits on the run needs a pattern that cannot match itself: `pgrep -f 'disk_hygiene[.]py apply'`.
-- To undo a forget, run `jj op revert <forget_op>` with the `forget_op` of the forget's ledger line. It restores the registration, not the files, and does nothing if someone reused the name since.
+- To undo a forget, run `jj op revert <forget_op>` with the `forget_op` of the forget's ledger line.
+  - The revert restores the registration, not the files.
+  - The revert does nothing if someone reused the name since.
 
 ## A manual `rm`
 
 - Right before it, check liveness again (`$S procs`, late check-in replies).
 - For a folder that holds a git store, read apply's `borrower-scan` ledger line and the store's `.git/agent-workspace-borrowers` file first.
-- Before you delete a finished session's scratch, search running sessions' transcripts (the `session-attribution` skill) for the path; keep it if a task prompt names it.
-- Before you delete a whole folder, `tar` all its entries next to the ledger, not only the workspaces; for a jj-only workspace, also the files `.jj/working_copy/tree_state` records.
+- Before you delete a finished session's scratch, search running sessions' transcripts (the `session-attribution` skill) for the path.
+  - Keep the scratch if a task prompt names it.
+- Before you delete a whole folder, `tar` all its entries next to the ledger, not only the workspaces.
+  - For a jj-only workspace, also `tar` the files `.jj/working_copy/tree_state` records.
 - In your own deletion loop, keep the folder when a `jj` call fails: the forget may not have happened.

@@ -4,7 +4,7 @@ Read this before you move data onto a mount, count on data on a mount to survive
 
 ## Which mounts survive a machine stop
 
-A mount's name does not say, and `/mnt/nvme` means opposite things on the two machines. Read the device before you move data onto a mount or treat anything on it as safe. Name the machine with the mount.
+A mount's name does not say. `/mnt/nvme` means opposite things on the two machines. Read the device before you move data onto a mount or treat anything on it as safe. Name the machine with the mount.
 
 | Machine | Mount | Disk | After a stop |
 | --- | --- | --- | --- |
@@ -28,10 +28,13 @@ A mount's name does not say, and `/mnt/nvme` means opposite things on the two ma
 
 ## Inside an agent box
 
-- `/mnt/scratch` in a box is the container overlay, not the local SSD. The SSD reaches a box only as its own filesystem: `/tmp` and `$HOME` live in the box's sparse disk image.
-- Put a large sort, extract or build in box `/tmp`. When it fills, grow the image online with `agentbox grow <box|session-id> <size>`; never move `TMPDIR` to a `--dir` path, which is a disk every session on the host shares.
+- `/mnt/scratch` in a box is the container overlay, not the local SSD.
+- The local SSD reaches a box only as its own filesystem: `/tmp` and `$HOME` live in the box's sparse disk image.
+- Put a large sort, extract or build in box `/tmp`.
+- When box `/tmp` fills, grow the image online with `agentbox grow <box|session-id> <size>`; never move `TMPDIR` to a `--dir` path, which is a disk every session on the host shares.
 - Check a mount from inside the namespace that writes to it (`findmnt -T <path>`, `stat -f <path>`), never from the host.
-- From a box, `systemd-run --user` starts its command on the host, through the relayed session bus (`agentbox/README.md`), where the box's own paths (`/tmp`, `$HOME`) are other files. Never run a delete or `apply` that way. Run a long one as a named bash service, or with `setsid <cmd> </dev/null >log 2>&1 &`.
+- From a box, `systemd-run --user` starts its command on the host, through the relayed session bus (`agentbox/README.md`), where the box's own paths (`/tmp`, `$HOME`) are other files. Never run a delete or `apply` that way.
+  - Run a long one as a named bash service, or with `setsid <cmd> </dev/null >log 2>&1 &`.
 
 ## Box bind-mount sources
 
