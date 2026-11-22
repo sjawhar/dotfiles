@@ -5,9 +5,9 @@ description: Use when about to report an issue or a request done or end a sessio
 
 # Finding dropped work
 
-Audit a session's transcript for dropped work, and close each row the audit finds. A session's own memory of its work is the thing that fails, so a fresh agent reads the transcript instead.
+A session's own memory of its work is the thing that fails, so a fresh agent reads the transcript instead.
 
-**Done when:** you took the action in Close each row for each row the report's closing list names (step 3), and reported done with the audit's counts (step 4).
+**Done when:** you reported done with the audit's counts: rows found, and rows closed by each action.
 
 ## When
 
@@ -33,7 +33,6 @@ Audit a session's transcript for dropped work, and close each row the audit find
    WAITING-UNREPORTED and LOCAL-ONLY row before you act on it.
 3. **Close each row.** Within one hour of receiving the report, take the action below for each row its closing list
    names. Work that takes longer starts in that hour and goes on until it is delivered.
-4. **Report the counts.** Report done with the audit's counts: rows found, and rows closed by each action.
 
 ## Close each row
 
