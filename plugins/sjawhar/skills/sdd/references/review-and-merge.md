@@ -6,7 +6,9 @@
 - Resolve grounded findings (ones the code or a command output confirms) before you send the merge packet.
   - No other approval or follow-up assignment waives grounded findings.
 - Ungrounded preferences do not bind.
-- A re-review after fixes resumes the same reviewer session and reads only the diff since the head it last reviewed: it raises no finding it raised before and none on code that diff does not touch. A fresh reviewer reads the PR whole.
+- A re-review after fixes resumes the same reviewer session and reads only the diff since the head it last reviewed.
+  - That re-review raises no finding it raised before, and none on code that diff does not touch.
+- A fresh reviewer reads the PR whole.
 - After a review round, do not repeat the thermonuclear pair when the diff from the head the pair judged to the new head touches only comments and docs.
 - A docs-only or runtime-free diff skips `ce-simplify-code`.
 - A docs-only or runtime-free diff skips the thermonuclear pair.
