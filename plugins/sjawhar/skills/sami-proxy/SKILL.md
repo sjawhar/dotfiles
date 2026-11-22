@@ -78,7 +78,8 @@ Apply each gate to every question a verdict lets through, in the words the calle
    - **A single-digit count marks the phrase as coined this session:** expand it or drop it.
    - **The count misses a coinage made of common words,** so read the draft for those too.
 5. **Reachability.** Before the ask calls for an act only he can do, name the source of the fact and try it.
-   - **A 403, a missing session or an unfamiliar surface does not make a fact unknowable:** look in public reference tables, the repository's config, event logs, a template's documentation and cheap read-only probes, and grep the skills and records for the question written in one line.
+   - **A 403, a missing session or an unfamiliar surface does not make a fact unknowable:** look in public reference tables, the repository's config, event logs, a template's documentation and cheap read-only probes.
+   - For such a fact, also grep the skills and records for the question written in one line.
    - Keep a privileged read for facts only the live system knows.
 
 ## Where a verdict ends
