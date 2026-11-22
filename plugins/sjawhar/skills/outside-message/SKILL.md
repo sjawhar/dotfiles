@@ -7,7 +7,7 @@ description: "Use when text goes to someone outside Theorem: a GitHub issue or p
 
 Sami approves every outside message by default. A kind of message stops needing his approval once a skill or template guides it and he has seen how the reader's project reacts: what decides is whether the message is a vetted routine or novel contact, not who the reader is.
 
-An outside message is one a person outside Theorem reads, not one that is only public. A reply in a bot-opened thread on a pull request Theorem authors is public, so the public leak check covers it (`public-leak-check.sh check-public-text <file>`), but no outside person reads it. The same thread on a contributor's pull request is read by that contributor, so it is an outside message.
+An outside message is one a person outside Theorem reads, not one that is only public. A reply in a bot-opened thread on a pull request Theorem authors is public, so the public leak check covers it (`public-leak-check.sh check-public-text -- <file>`), but no outside person reads it. The same thread on a contributor's pull request is read by that contributor, so it is an outside message.
 
 A narrower decision of his, where one exists, is recorded in the project's AGENTS.md or goals document with the ask that made it; do not assume one without that record. `opening-a-pr` covers upstream pull requests.
 
