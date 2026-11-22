@@ -40,6 +40,15 @@ row() {
 
 first_line() { head -n1 <<<"$1" | tr -d '\r'; }
 
+# failure_detail RC TEXT: TEXT, unless RC is 124: `timeout` killed the command, and what it printed is not its answer.
+failure_detail() {
+    if (($1 == 124)); then
+        printf 'timed out after %ss' "$TIMEOUT_S"
+    else
+        printf '%s' "$2"
+    fi
+}
+
 # jwt_field FIELD: print FIELD from the JWT payload in $JWT_FIELD_TOKEN, or
 # nothing (rc 1). The token goes through the environment, never argv
 # (scripts/AGENTS.md: a secret in argv is readable from /proc/<pid>/cmdline)
@@ -75,7 +84,7 @@ check_aws() {
         arn="$(jq -r '.Arn // empty' <<<"$out" 2>/dev/null)"
         row aws live "${arn:-unknown}" "n/a (instance-role session, no fixed expiry)" "aws sts get-caller-identity"
     else
-        row aws missing - - "aws sts get-caller-identity" "$(first_line "$out")"
+        row aws missing - - "aws sts get-caller-identity" "$(failure_detail "$rc" "$(first_line "$out")")"
     fi
 }
 
@@ -104,7 +113,7 @@ check_ant() {
     out="$(timeout "$TIMEOUT_S" ant auth status 2>&1)"
     rc=$?
     if ((rc != 0)); then
-        row anthropic_ant missing - - "ant auth status" "$(first_line "$out")"
+        row anthropic_ant missing - - "ant auth status" "$(failure_detail "$rc" "$(first_line "$out")")"
         return
     fi
     email="$(grep -oP 'Logged in to .* as \K\S+' <<<"$out" || true)"
@@ -121,7 +130,7 @@ check_vercel() {
         user="$(tail -n1 <<<"$out" | tr -d '\r')"
         row vercel live "$user" "n/a" "vercel whoami"
     else
-        row vercel missing - - "vercel whoami" "$(tail -n1 <<<"$out" | tr -d '\r')"
+        row vercel missing - - "vercel whoami" "$(failure_detail "$rc" "$(tail -n1 <<<"$out" | tr -d '\r')")"
     fi
 }
 
@@ -136,7 +145,8 @@ check_datadog() {
         exp="$(jq -r '.expires_at // empty' <<<"$out" 2>/dev/null)"
         row datadog_pup live "${site:-unknown}" "${exp:-unknown}" "pup --no-agent auth status"
     else
-        row datadog_pup missing - - "pup --no-agent auth status" "$(jq -r '.status // empty' <<<"$out" 2>/dev/null || first_line "$out")"
+        row datadog_pup missing - - "pup --no-agent auth status" \
+            "$(failure_detail "$rc" "$(jq -r '.status // empty' <<<"$out" 2>/dev/null || first_line "$out")")"
     fi
 }
 
@@ -152,7 +162,7 @@ check_gcloud() {
             row gcloud missing - - "gcloud auth list" "no ACTIVE account"
         fi
     else
-        row gcloud missing - - "gcloud auth list" "$(first_line "$out")"
+        row gcloud missing - - "gcloud auth list" "$(failure_detail "$rc" "$(first_line "$out")")"
     fi
 }
 
@@ -184,10 +194,9 @@ check_gws() {
             if ((rc == 0)); then
                 email="$(jq -r '.emailAddress // empty' <<<"$out" 2>/dev/null)"
                 row "google_workspace_${account}" live "${email:-unknown}" "n/a" "GWS_ACCOUNT=${account} gws gmail users getProfile"
-            elif ((rc == 124)); then
-                row "google_workspace_${account}" missing - - "GWS_ACCOUNT=${account} gws gmail users getProfile" "timed out after ${TIMEOUT_S}s"
             else
-                row "google_workspace_${account}" missing - - "GWS_ACCOUNT=${account} gws gmail users getProfile" "$(tail -n1 "$err")"
+                row "google_workspace_${account}" missing - - "GWS_ACCOUNT=${account} gws gmail users getProfile" \
+                    "$(failure_detail "$rc" "$(tail -n1 "$err")")"
             fi
         ) &
     done <<<"$accounts"
@@ -202,7 +211,7 @@ check_fleetctl() {
     if ((rc == 0)); then
         row fleetctl live "${email:-unknown}" "n/a" "fleetctl get config"
     else
-        row fleetctl missing - - "fleetctl get config" "$(tail -n1 <<<"$out")"
+        row fleetctl missing - - "fleetctl get config" "$(failure_detail "$rc" "$(tail -n1 <<<"$out")")"
     fi
 }
 
@@ -214,7 +223,7 @@ check_sentry() {
     if ((rc == 0)) && [[ -n "$user" ]]; then
         row sentry live "$user" "n/a (auth token)" "sentry-cli info"
     else
-        row sentry missing - - "sentry-cli info" "$(first_line "$out")"
+        row sentry missing - - "sentry-cli info" "$(failure_detail "$rc" "$(first_line "$out")")"
     fi
 }
 
@@ -223,7 +232,7 @@ check_kubectl() {
     ctx="$(timeout "$TIMEOUT_S" kubectl config current-context 2>&1)"
     rc=$?
     if ((rc != 0)); then
-        row kubectl missing - - "kubectl config current-context" "$(first_line "$ctx")"
+        row kubectl missing - - "kubectl config current-context" "$(failure_detail "$rc" "$(first_line "$ctx")")"
         return
     fi
     out="$(timeout "$TIMEOUT_S" kubectl auth whoami 2>&1)"
@@ -232,7 +241,7 @@ check_kubectl() {
         username="$(grep -oP '^Username\s+\K\S+' <<<"$out" || true)"
         row kubectl live "${username:-unknown} (context: $ctx)" "n/a (assumed-role session)" "kubectl auth whoami"
     else
-        row kubectl missing - - "kubectl auth whoami" "context: $ctx; $(first_line "$out")"
+        row kubectl missing - - "kubectl auth whoami" "context: $ctx; $(failure_detail "$rc" "$(first_line "$out")")"
     fi
 }
 
@@ -251,13 +260,9 @@ check_secretsd() {
     out="$(timeout "$TIMEOUT_S" secrets grants 2>"$err")"
     rc=$?
     if ((rc != 0)); then
-        if ((rc == 124)); then
-            detail="timed out after ${TIMEOUT_S}s"
-        else
-            detail="$(tail -n1 "$err")"
-            detail="$(first_line "${detail:-$out}")"
-        fi
-        row secretsd_grants missing - - "secrets grants" "$detail"
+        detail="$(tail -n1 "$err")"
+        detail="$(first_line "${detail:-$out}")"
+        row secretsd_grants missing - - "secrets grants" "$(failure_detail "$rc" "$detail")"
         return
     fi
     {
@@ -289,7 +294,8 @@ check_agent_secrets_broker() {
         row agent_secrets_broker live "this process is a registered broker session" "n/a" "agent-secrets identity" \
             "secret-run uses the broker instead of secretsd for this session"
     else
-        row agent_secrets_broker missing - - "agent-secrets identity" "${out:-no broker identity; secret-run falls back to secretsd}"
+        row agent_secrets_broker missing - - "agent-secrets identity" \
+            "$(failure_detail "$rc" "${out:-no broker identity; secret-run falls back to secretsd}")"
     fi
 }
 
@@ -316,7 +322,7 @@ check_dispatch() {
     if ((rc == 0)); then
         row dispatch live "$(first_line "$out")" "n/a" "dispatch whoami"
     else
-        row dispatch missing - - "dispatch whoami" "$(first_line "$out")"
+        row dispatch missing - - "dispatch whoami" "$(failure_detail "$rc" "$(first_line "$out")")"
     fi
 }
 

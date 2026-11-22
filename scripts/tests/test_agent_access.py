@@ -83,6 +83,39 @@ SECRETS_SHIM_NOTICE = (
     "secrets shim: non-interactive SSH, so an agent's call: agent-tier only, through the broker"
     " (set AGENT_SHIM_PERSON=1 for your own)\n"
 )
+# Each check that runs its command under `timeout`: its row name, and the command its stub replaces. gws runs once per
+# account in its registry; the timeout tests give it one account, `work`.
+TIMED_CHECKS = {
+    "aws": "aws",
+    "anthropic_ant": "ant",
+    "vercel": "vercel",
+    "datadog_pup": "pup",
+    "gcloud": "gcloud",
+    "google_workspace_work": "gws",
+    "fleetctl": "fleetctl",
+    "sentry": "sentry-cli",
+    "kubectl": "kubectl",
+    "secretsd_grants": "secrets",
+    "agent_secrets_broker": "agent-secrets",
+    "dispatch": "dispatch",
+}
+# What each command has printed when `timeout` stops it, where its check reads a failure: stdout and stderr merged,
+# stdout alone for pup, stderr apart from stdout for gws and secrets. kubectl's current context answers, and
+# `kubectl auth whoami` is the call that times out.
+PARTIAL_OUTPUT = {
+    "aws": """echo '{"UserId": "AROA123:i-abc", "Arn": "arn:aws:sts::123:'""",
+    "ant": 'echo "  Logged in to Example Org as"',
+    "vercel": 'echo "Vercel CLI 39.1.0" >&2',
+    "pup": """echo '{"authenticated": true, "site": "us5.'""",
+    "gcloud": """echo '[{"account": "sami@'""",
+    "gws": """echo "Using keyring backend: keyring" >&2\necho '{"emailAddress": '""",
+    "fleetctl": 'echo "Fetching config from https://fleet.example.com"',
+    "sentry-cli": 'echo "Sentry Server: https://sentry.io"',
+    "kubectl": '[[ "$1 $2" == "config current-context" ]] && { echo production; exit 0; }\necho "Username   arn:aws:sts::123:"',
+    "secrets": f"printf %s {shlex.quote(SECRETS_SHIM_NOTICE)} >&2\nprintf 'SECRET GRANT\\tSCOPE\\n'",
+    "agent-secrets": 'echo "agent-secrets: dialing the broker"',
+    "dispatch": 'echo "dispatch: contacting the server"',
+}
 
 
 class RealBinary(unittest.TestCase):
@@ -435,6 +468,38 @@ fi
         self.assertEqual(rows["agent_secrets_broker"]["status"], "live")
 
         self.assert_no_secrets(result.stdout)
+
+    def timed_out_rows(self, outputs: dict[str, str]) -> dict[str, dict[str, str]]:
+        """Return the rows when each command in OUTPUTS runs its stub body, then exits 124 as `timeout` does."""
+        for command, body in outputs.items():
+            write_stub(self.stub_dir, command, f"{body}\nexit 124")
+        gws_dir = self.home / ".config" / "gws"
+        gws_dir.mkdir(parents=True)
+        (gws_dir / "accounts.json").write_text(json.dumps({"work": {}}), encoding="utf-8")
+        result = self.run_access("--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return {row["name"]: row for row in json.loads(result.stdout)}
+
+    def assert_timed_out(self, rows: dict[str, dict[str, str]], details: dict[str, str]) -> None:
+        """Each check in TIMED_CHECKS is missing, its detail the one DETAILS names or `timed out after 6s`."""
+        for name, command in TIMED_CHECKS.items():
+            with self.subTest(check=name):
+                row = rows[name]
+                self.assertEqual(
+                    (row["status"], row["detail"]),
+                    ("missing", details.get(name, "timed out after 6s")),
+                    f"{name} ({command} exited 124)",
+                )
+
+    def test_timeout_after_partial_output_reports_the_timeout(self) -> None:
+        """`timeout` exits 124 when it stops a command; the detail says so, not the partial answer printed first."""
+        rows = self.timed_out_rows(PARTIAL_OUTPUT)
+        self.assert_timed_out(rows, {"kubectl": "context: production; timed out after 6s"})
+
+    def test_timeout_with_no_output_reports_the_timeout(self) -> None:
+        """A command stopped before it printed: no empty detail, no broker fallback, and kubectl's context timed out."""
+        rows = self.timed_out_rows({command: "" for command in TIMED_CHECKS.values()})
+        self.assert_timed_out(rows, {})
 
     def secretsd_row(self, stdout: str, stderr: str = "", code: int = 0) -> dict[str, str]:
         """Return the secretsd_grants row when `secrets grants` writes STDERR, then STDOUT, and exits CODE.
