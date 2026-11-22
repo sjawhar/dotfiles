@@ -14,8 +14,8 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 - Do not run another owner's end-to-end scenarios, rebase or push their branch, or change CI, validators or models to get a PR through: a gate you changed no longer tests their work.
 - The one review you commission is a read-only `oracle` task that red-teams the end-to-end plan and evidence (step 5).
 - Give no reviewer you commission write access to a workspace another session uses.
-- Send the owner the exact gap.
-- Then go on with other ready work.
+- When a gate or packet falls short, send the owner the exact gap.
+- After you send the gap, go on with other ready work.
 
 ## 1. Read current authority and priorities
 
@@ -29,9 +29,9 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 - Ask Sami once for a merge window: a span to merge READY PRs without asking per PR. A grant given to this queue session stays live for it.
 - At registration, check the author, the account this session writes as (`gh api user --jq .login`), required reviews and CODEOWNERS.
 - An approval that account cannot give is unmet until `landing-a-pr`'s repo merge rules name who gives it.
-- **Read `references/sequencing.md` now** before you decide the merge order.
+- **Read `references/sequencing.md` now** before you decide the merge order: the order with no explicit priority (Sami's goal, parents, corpus changes), never by READY arrival order.
 - Ask Sami with `dispatch ask` on the Dispatch issue the PR names, or on the queue record for a question about the whole queue. Dispatch is the issue tracker the `dispatch` skill covers.
-- Read [sequencing](references/sequencing.md) for holds that need a composition test, migration batches, colliding PRs, stacks, or reading a Dispatch answer.
+- Read `references/sequencing.md` for holds that need a composition test, migration batches, colliding PRs, stacks, or reading a Dispatch answer.
 
 ## 2. Register PRs and act on packets
 
@@ -56,11 +56,11 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 - Start CI waits as background jobs (for example an async `gh pr checks N --watch --interval 120`).
 - Keep working while a CI wait runs.
 - Ask for a rebase or push only when main conflicts with the PR or the PR's own diff needs a change, never only to pick up main: each push restarts CI and review.
-- Read [evidence quality](references/evidence-quality.md) for stale-main reds, empty results or missing logs.
+- Read `references/evidence-quality.md` for stale-main reds, empty results or missing logs.
 
 ## 3. Check findings
 
-Before you declare READY or merge, read [review evidence](references/review-evidence.md): the surfaces to read, each finding's disposition, the smaller gates for prose-only and test-only PRs, and review seats.
+Before you declare READY or merge, read `references/review-evidence.md`: the surfaces to read, each finding's disposition, the smaller gates for prose-only and test-only PRs, and review seats.
 
 - You check the enumeration and the dispositions, not code or severity: the owner dispositions findings and the independent reviewer states that nothing blocking remains.
 - On disagreement, return the exact list of undispositioned findings.
@@ -68,7 +68,7 @@ Before you declare READY or merge, read [review evidence](references/review-evid
 ## 4. Bind evidence to the head
 
 - Take each reviewed SHA from the review body.
-- When the head moved, read [head changes](references/head-changes.md) before you keep any evidence.
+- When the head moved, read `references/head-changes.md` before you keep any evidence.
 - Prove ancestry before you treat a change as an appended delta.
 - After an amend or rebase, keep the old review only when the reviewer posts a comment naming the new head, backed by the contribution comparison in head changes.
 - Never read hunks yourself to call a change harmless.
@@ -76,18 +76,18 @@ Before you declare READY or merge, read [review evidence](references/review-evid
 ## 5. Check every gate
 
 - Run `pr-gate <owner/repo> <N> <head>` for GitHub's side of the gates.
-- Read the reasons `pr-gate` gives, not only its exit code.
-- CI, mergeability, holds, the base, the file and commit scope and the Dispatch key at the head: check each as [merge mechanics](references/merge-mechanics.md) lists them.
+- Read `pr-gate`'s reasons, not only its exit code.
+- CI, mergeability, holds, the base, the file and commit scope and the Dispatch key at the head: check each as `references/merge-mechanics.md` lists them.
 - Review: an independent review artifact on the PR names the head, with every blocking finding closed and every other one dispositioned. Your approval is not one.
-- Runtime code, CI configuration, scripts, Dockerfiles and infrastructure: after the ordinary review rounds, the owner (under `sdd`, the coordinator) runs `ce-simplify-code` once, then the thermonuclear pair (`thermonuclear-deep-review` and `thermonuclear-code-quality`) once at the final code head. Never waived. Order and exceptions: [review evidence](references/review-evidence.md).
+- Runtime code, CI configuration, scripts, Dockerfiles and infrastructure: after the ordinary review rounds, the owner (under `sdd`, the coordinator) runs `ce-simplify-code` once, then the thermonuclear pair (`thermonuclear-deep-review` and `thermonuclear-code-quality`) once at the final code head. Never waived. Order and exceptions: `references/review-evidence.md`.
 - Acceptance: every change to what runs needs its changed end-to-end scenarios run at the intended head before merge.
 - A `.md` or `.yaml` suffix does not make an operative change prose-only: the scenario runs through the program that reads that file.
 - Prose that changes nothing that runs needs no scenario and no oracle.
-- Read [acceptance](references/acceptance.md) before you check acceptance evidence.
+- Read `references/acceptance.md` before you check acceptance evidence.
 
 ## 6. Merge through the protected, pinned path
 
-- Read [merge mechanics](references/merge-mechanics.md) before any write.
+- Read `references/merge-mechanics.md` before any write.
 - Refresh every gate for one SHA.
 - Merge only by the pinned command in merge mechanics.
 - Never bypass branch protection.
@@ -96,4 +96,4 @@ Before you declare READY or merge, read [review evidence](references/review-evid
 
 ## 7. Close the loop
 
-- After each merge, and after each round with waits, read [close the loop](references/close-the-loop.md) and do each item: the production check, stacked children, the learnings PR and the list of waits.
+- After each merge, and after each round with waits, read `references/close-the-loop.md` and do each item: the production check, stacked children, the learnings PR and the list of waits.
