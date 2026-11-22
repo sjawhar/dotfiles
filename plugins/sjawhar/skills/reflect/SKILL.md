@@ -9,8 +9,8 @@ A run reads every message Sami sent agents in one window, each with the agent wo
 
 - Propose a fix only after step 5: a run that starts landing changes reports categories instead of failures.
 - Keep scratch on a large disk (`/mnt/nvme/<user>/<run>/`), not `/tmp`: records run to tens of MB.
-- Run every reader, checker and coder, and the synthesis, on the session's strongest model.
-- Use fast models for inventory only (counting, globbing, listing): a reader that skims returns findings the checker cannot verify.
+- Run every reader, checker and coder, and the synthesis, on the session's strongest model: a reader that skims returns findings the checker cannot verify.
+  - Use fast models for inventory only (counting, globbing, listing).
 
 ## 1. Enumerate his messages, and pick the window by them
 
@@ -21,15 +21,15 @@ python3 $S/enumerate-messages.py --from '<start>' --to '<end>' --legion legion.j
 python3 $S/extract-dispatch-human.py --since '<start>' --out dispatch-events.jsonl --text dispatch-events.md
 ```
 
-- Pick the window by his messages, not by active time: set `--from` and `--to` around the day or week of his messages you mean to review.
-- Keep the window only when the enumerator counts at least one message to read. A window of agent activity with none of his messages returns tool trivia.
+- Pick the window by his messages, not by active time: set `--from` and `--to` around the day or week of his messages you mean to review. A window of agent activity with none of his messages returns tool trivia.
+  - Keep the window only when the enumerator counts at least one message to read.
 - Do not grep the sessions tree: a grep finds the phrase you guessed, not the message you missed. `enumerate-messages.py` reads the transcript store (`using-transcript-store`).
 - Read by hand, or name in the report as unread, each session the transcript store does not hold: one on another host, an OpenCode session, or a Claude Code log it did not copy. The store holds the omp sessions of the hosts `tq sql "SELECT host, count() FROM sessions GROUP BY host"` lists, and Claude Code and Codex logs from some of them.
 - Put the count of Legion volumes no pod mounts, which `fetch-legion.py` prints, in the report as unread.
 - Do not create a pod to read those volumes.
 - Print the enumerator's counts before any reading: messages to read, rows excluded per reason, and whether Legion was read.
-- Open five excluded rows per reason and judge each.
-- Put any real message of his among those rows back into `messages.jsonl`. `agent-sent` and `single-prompt` exclude a real message he writes once to a fresh session.
+- Open five excluded rows per reason and judge each. `agent-sent` and `single-prompt` exclude a real message he writes once to a fresh session.
+  - Put any real message of his among those rows back into `messages.jsonl`.
 
 ## 2. Build one record per message
 
