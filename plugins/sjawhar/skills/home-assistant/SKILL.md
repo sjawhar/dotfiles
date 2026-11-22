@@ -9,13 +9,18 @@ mcp:
 
 # Home Assistant
 
-Read and write access through [ha-mcp](https://github.com/homeassistant-ai/ha-mcp), MCP server `home-assistant`.
+Read and write access through ha-mcp, MCP server `home-assistant`.
 
 | Situation | Call a tool |
 | --- | --- |
-| The working directory holds a `.omp/mcp.json` that declares the server (omp loads it only then, and does not look in parent directories) | Write its JSON arguments with the `write` tool as the content of the path `xd://mcp__home_assistant_<tool>`, after you read that path for the tool's argument schema |
+| omp loaded the server | The two steps below |
 | A `skill_mcp` tool exists | `skill_mcp(mcp_name="home-assistant", ...)` |
 | Anywhere else, and for batch calls | [ha-mcp-call.sh](ha-mcp-call.sh), with the commands below |
+
+omp loads the server only in a session whose working directory holds a `.omp/mcp.json` that declares it (it does not look in parent directories).
+
+1. Read the path `xd://mcp__home_assistant_<tool>` for the tool's argument schema.
+2. Write the tool's JSON arguments with the `write` tool as the content of that path.
 
 ha-mcp-call.sh prints each text content and exits 0. It exits non-zero and prints the error on stderr on a curl failure (such as a 401 refusal), a JSON-RPC error, a result with `isError` true, or no answer.
 
@@ -31,7 +36,7 @@ The keys below are agent tier: `secrets <KEY> -- <command>` gives them to an age
 | Works from | Any network, through the remote address | Only that LAN (oryx is on it) |
 | Token key | `HA_TOKEN` | `HA_TOKEN_BUSH`, the Wren user's long-lived token |
 
-- `dojo.thecybermonk.com` is not Salt Lake's webhook host: that name is for Sami's primary instance.
+- `dojo.thecybermonk.com` is not Salt Lake's webhook host: that name is for Sami's primary instance, which moves to the SF Green.
 - Salt Lake's webhook id at `http://10.0.51.23:8123/api/webhook/<id>` works only on that house's LAN.
 - SF's address is static and set on the Green. It is outside the gateway's assumed DHCP pool. The gateway reserves nothing for it (`skills/majordomo/references/sites/wiz.md` in sjawhar/dojo).
 - SF's webhook is in auth mode (below), so each call also sends `HA_TOKEN_BUSH`. The webhook answers 401 without it.
@@ -45,7 +50,7 @@ The keys below are agent tier: `secrets <KEY> -- <command>` gives them to an age
 
 - Send the Green only a token you have seen work.
 - Test the Green's refusals against a stub.
-- Read [references/sf-green-lockout.md](references/sf-green-lockout.md) when the Green answers 403 to every request from an address, or before you change its ban threshold.
+- Read `references/sf-green-lockout.md` when the Green answers 403 to every request from an address, or before you change its ban threshold.
 - Do not start the stopped container `homeassistant-sf` on oryx: it is a rollback copy, not the SF instance.
 
 ## Credentials and auth mode
@@ -54,7 +59,7 @@ The keys below are agent tier: `secrets <KEY> -- <command>` gives them to an age
   - Pass them through the environment, a config file or stdin.
 - The MCP launch in this skill's frontmatter runs `~/.dotfiles/scripts/mcp-remote-from-env`. It takes the URL from `HA_MCP_URL`, unsets it, runs `mcp-remote` 0.14.3 in its own process, and redacts the URL from stderr.
 - **Auth mode:** a webhook whose HA-MCP Server option `webhook_auth` is `ha_auth` ("Sign in with Home Assistant") answers 401 without a long-lived HA token.
-- Read [references/auth-mode.md](references/auth-mode.md) when a call answers 401, or before you call or launch a client for an auth-mode webhook other than with the SF commands above.
+- Read `references/auth-mode.md` when a call answers 401, or before you call or launch a client for an auth-mode webhook other than with the SF commands above.
 - ha-mcp runs inside HA: HACS component "HA-MCP Custom Component", entry "HA-MCP Server". The admin-only HA-MCP panel in the HA sidebar turns tools on and off and sets Read Only Mode, feature flags and edit backups.
 - File and YAML tools (`ha_read_file`, `ha_config_set_yaml`, ...) are beta and off. They need the "HA-MCP File & YAML Tools" entry and its feature flags.
 
@@ -77,7 +82,7 @@ The keys below are agent tier: `secrets <KEY> -- <command>` gives them to an age
 
 ## Tool quirks
 
-Read [references/tool-quirks.md](references/tool-quirks.md) before you create or update an automation, install an update, or call `ha_set_entity`, `ha_remove_helpers_integrations`, `ha_manage_backup`, `ha_manage_hacs`, `ha_get_history`, `ha_manage_energy_prefs` or `ha_restart`. It gives the arguments each needs and what each answer means.
+Read `references/tool-quirks.md` before you create or update an automation, install an update, or call `ha_set_entity`, `ha_remove_helpers_integrations`, `ha_manage_backup`, `ha_manage_hacs`, `ha_get_history`, `ha_manage_energy_prefs` or `ha_restart`. It gives the arguments each needs and what each answer means.
 
 ## Known behavior
 
@@ -93,4 +98,4 @@ Read [references/tool-quirks.md](references/tool-quirks.md) before you create or
 - Do not let an automation that turns a device on override a human's off.
   - Store a human action in a hold helper (`input_boolean.office_ac_hold`): context `parent_id` none marks it.
   - Check the hold helper first.
-- Read [references/matter-and-tapo.md](references/matter-and-tapo.md) when you work on Matter or Tapo devices or their firmware, or need a UI-only action that has no tool or service.
+- Read `references/matter-and-tapo.md` when you work on Matter or Tapo devices or their firmware, or need a UI-only action that has no tool or service.

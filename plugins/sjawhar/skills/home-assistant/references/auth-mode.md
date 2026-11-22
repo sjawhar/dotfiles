@@ -6,10 +6,8 @@ Both callers send the token when the variable named next to the URL holds it. Th
 
 - `ha-mcp-call.sh` reads `HA_MCP_TOKEN` and puts it in curl's `--config`, like the URL. A refusal prints `curl: (22) The requested URL returned error: 401` and exits non-zero.
 - `~/.dotfiles/scripts/mcp-remote-from-env <URL_NAME>` reads the variable named like `<URL_NAME>` with its `URL` part replaced by `TOKEN` (`HA_MCP_URL` → `HA_MCP_TOKEN`, `HA_MCP_URL_BUSH` → `HA_MCP_TOKEN_BUSH`). It unsets that variable, hands mcp-remote `--header "Authorization: Bearer <token>"` in its own process, and redacts the token from stderr.
-- **Salt Lake call and launch in auth mode:** run the "SF call" and "SF MCP client" commands of SKILL.md with Salt Lake's names in place of SF's:
 
-  | SF name | Salt Lake name |
-  | --- | --- |
-  | `HA_MCP_URL_BUSH` | `HA_MCP_URL` |
-  | `HA_TOKEN_BUSH` | `HA_TOKEN` |
-  | `HA_MCP_TOKEN_BUSH` | `HA_MCP_TOKEN` |
+| Run | Command |
+| --- | --- |
+| Salt Lake call in auth mode | `secrets HA_MCP_URL HA_TOKEN -- bash -c 'export HA_MCP_TOKEN="$HA_TOKEN"; exec ~/.dotfiles/plugins/sjawhar/skills/home-assistant/ha-mcp-call.sh "$@"' _ <tool> '<json>'` |
+| Salt Lake launch in auth mode | `secrets HA_MCP_URL HA_TOKEN -- bash -c 'export HA_MCP_TOKEN="$HA_TOKEN"; unset HA_TOKEN; exec npx -y -p mcp-remote@0.14.3 mcp-remote-from-env HA_MCP_URL --allow-http'` |

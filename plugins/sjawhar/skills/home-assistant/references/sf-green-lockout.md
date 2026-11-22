@@ -1,6 +1,6 @@
 # The SF Green's lockout
 
-- The Green bans an address after 5 requests with invalid authentication (a wrong, expired or revoked token, or a failed login).
+- Since 2026-11-20 the Green bans an address after 5 requests with invalid authentication (a wrong, expired or revoked token, or a failed login).
 - Home Assistant then answers 403 to every request from that address on port 8123, ha-mcp included. It does so until the address leaves `ip_bans.yaml` and Home Assistant restarts.
 - SSH and the apps on their own ports still answer.
 - The count is per address. A request with a valid token never resets it. Only a login through the login page, a websocket login from that address, or a restart does.
