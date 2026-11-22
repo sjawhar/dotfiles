@@ -17,14 +17,22 @@
   2. `pr-preflight` for a new PR; the rest of `maintaining-fork-pr` for an open one.
   3. The project's conventions: its contributing guide, and the size and form of its recently merged PRs.
   4. The feedback its maintainers would predictably give: read every maintainer comment on our PRs to that project, and make the change answer it before they ask.
-- A reply to maintainer review, and the code change or push that answers it (a force-push that replaces the commits as they asked included), goes out once it passes the gate, with no ask. A new PR's description, or a rewrite of an open PR's description, goes to Sami first, all of a session's texts in one ask (`outside-message` has the ask's form).
+- A reply to maintainer review, and the code change or push that answers it (a force-push that replaces the commits as they asked included), goes out once it passes the gate, with no ask.
+- A new PR's description, or a rewrite of an open PR's description, goes to Sami first, all of a session's texts in one ask (`outside-message` has the ask's form).
 - Upstream commits keep their `Omp-Session` trailer. Do not ask Sami whether to keep it.
 
 ## The upstream PR description
 
 Before an upstream PR opens and after every body edit:
 
-- Follow the procedure in the `pr-description.md` reference of `maintaining-prover-forks`, all five steps, for every upstream project, not only the provers: size and form from the project's merged PRs; what the change does, why it is correct, what it costs; the rest in tests and code comments; a fresh reader that only deletes; no line about who or what wrote the text. The contributor sentence below is the one exception to step 5. For rocq-prover/rocq, follow the "Rocq upstream PR" rules of `maintaining-prover-forks` too. This replaces "The body" in [commits-and-body.md](commits-and-body.md). Name nothing internal: no name of our own machines, clusters or tools (such as the grading farm and its `farm` command), no run IDs, no fork names.
+- Follow the procedure in the `pr-description.md` reference of `maintaining-prover-forks`, all five steps, for every upstream project, not only the provers. This replaces "The body" in [commits-and-body.md](commits-and-body.md). The five steps:
+  1. Size and form from the project's merged PRs.
+  2. What the change does, why it is correct, what it costs.
+  3. The rest in tests and code comments.
+  4. A fresh reader that only deletes.
+  5. No line about who or what wrote the text. The contributor sentence below is the one exception to step 5.
+- For rocq-prover/rocq, follow the "Rocq upstream PR" rules of `maintaining-prover-forks` too.
+- Name nothing internal: no name of our own machines, clusters or tools (such as the grading farm and its `farm` command), no run IDs, no fork names.
 - Write in Sami's first person (`speaking-as-sami`), with no other line about who or what wrote the text. His standard contributor sentence goes in every upstream PR and needs no ask; use it unchanged unless he asks for a change:
   - short: `My agent found this while analyzing our fleet's transcripts.`
   - fuller, preferred for a change larger than the recently merged PRs you read for step 1 of `pr-description.md`, or one from a fleet-scale observation, since its disclaimer is true and a maintainer needs it: `my agents found this while we were running hundreds of agents at once; I have not personally reviewed this myself, it came out of analysing live runs on my own machine.`

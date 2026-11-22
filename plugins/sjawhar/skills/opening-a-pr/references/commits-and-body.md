@@ -37,7 +37,10 @@ This section is for our own repositories. An upstream PR body follows "The upstr
 - Name each downstream surface of a producer change, as the census rule in SKILL.md says.
 - A unify or dedupe PR shows a net loss of source lines in the unified files, or says why not.
 - A review verdict links the review comment posted at the current head SHA by a GitHub App, whose author login ends in `[bot]`, not by a human account: the repository's review App where it has one (`landing-a-pr`'s `repo-merge-rules.md`), else the App identity your `gh` posts as.
-- A repository someone else maintains: say what changes on their production, the benefit you measured on their setup (the figure and the command that produced it), and the rollback. Put `## Verification` and any census on the issue that already tracks this work, such as its Dispatch issue (open no new issue for them), and link it from the body in one line.
+- A repository someone else maintains:
+  - Say what changes on their production, the benefit you measured on their setup (the figure and the command that produced it), and the rollback.
+  - Put `## Verification` and any census on the issue that already tracks this work, such as its Dispatch issue. Open no new issue for them.
+  - Link that issue from the body in one line.
 - Last, give only the body, without the diff, to a fresh agent and ask it what failed, what changed, and which observation supports that. Add each part it cannot answer from the body.
 
 ## User-visible changes

@@ -26,10 +26,15 @@ thing. Report what you ran, what you saw, and every defect.
 ## End-to-end scenarios
 
 - Every change to what runs needs them, a pin, prompt, grader or workflow included. The affected scenarios are the ones the change adds, changes or claims to fix, and every existing one that exercises what it changed. Run each at the head under review.
-- In `## Verification`, record per scenario what ran and where, the outcome, the duration, a link, and one marker:
-  - `RAN`: observed through the real surface (the command, URL or record a user touches, not a test, a fixture or a log line).
-  - `BLOCKED`: the failed command and its authoritative record (the CI run, issue or record, linked), never a person's name. Check a blocker another session reports against that record. Not merge-ready.
-  - `WAIVED-BY-SAMI`: a named blocker that Sami explicitly waived, linked to his words. It covers that blocker on that change only.
+- In `## Verification`, record per scenario what ran and where, the outcome, the duration, a link, and one marker from this table:
+
+| Marker | Means |
+| --- | --- |
+| `RAN` | Observed through the real surface (the command, URL or record a user touches, not a test, a fixture or a log line). |
+| `BLOCKED` | The failed command and its authoritative record (the CI run, issue or record, linked), never a person's name. Not merge-ready. |
+| `WAIVED-BY-SAMI` | A named blocker that Sami explicitly waived, linked to his words. It covers that blocker on that change only. |
+
+- Check a blocker another session reports against its authoritative record.
 - Size, kind, green CI and approvals are not waivers. Never skip a scenario because it is slow.
 - This adds to the repository's required checks and replaces none of them.
 
@@ -42,10 +47,12 @@ thing. Report what you ran, what you saw, and every defect.
 
 ## Excuses that mean: run this step
 
-- "CI is green", "the mechanism says it works", "verified by inspection": you saw a mechanism, not a result.
-- "Only a pin, a prompt, a doc", "too small to boot": what runs changed. Find its consumer and run it.
-- "I verified it before the last fixes": those fixes are the diff now.
-- "I disclosed the gap", "no test environment here": report not merge-ready, do not open it for review, and build the missing surface.
-- "It gets verified after the merge", "Sami wanted it fast", "separate PR", "follow-up issue?": that is deferral, and the change is unverified now. Do it now, and open no issue Sami did not ask for.
-- "Want me to run the smoke test?": do not ask. Running it is the job.
-- "Nothing is actionable until you merge": usually false. Read this list again.
+| Excuse | Reality |
+| --- | --- |
+| "CI is green", "the mechanism says it works", "verified by inspection" | You saw a mechanism, not a result. |
+| "Only a pin, a prompt, a doc", "too small to boot" | What runs changed. Find its consumer and run it. |
+| "I verified it before the last fixes" | Those fixes are the diff now. |
+| "I disclosed the gap", "no test environment here" | Report not merge-ready, do not open it for review, and build the missing surface. |
+| "It gets verified after the merge", "Sami wanted it fast", "separate PR", "follow-up issue?" | That is deferral, and the change is unverified now. Do it now, and open no issue Sami did not ask for. |
+| "Want me to run the smoke test?" | Do not ask. Running it is the job. |
+| "Nothing is actionable until you merge" | Usually false. Read this table again. |
