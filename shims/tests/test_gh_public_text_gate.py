@@ -96,6 +96,13 @@ class Gate(Base):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.stub_log.read_text().strip(), "gh-guard pr comment 9 -R o/r --body hello")
 
+    def test_gate_hands_a_one_word_call_after_a_double_dash(self):
+        # `<check> gh-guard WORD` is a call of two arguments whose first is a mode word: the shape
+        # of a pre-push hook's call, which leak-check-v33 and later refuse. One word goes after `--`.
+        result = self.run_gate("status", check_path=str(self.stub))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.stub_log.read_text().strip(), "gh-guard -- status")
+
     def test_gate_refuses_when_the_check_refuses(self):
         result = self.run_gate("pr", "comment", "9", "-R", "o/r", "--body", "x", rc="3", check_path=str(self.stub))
         self.assertNotEqual(result.returncode, 0)
