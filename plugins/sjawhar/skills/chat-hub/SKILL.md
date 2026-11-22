@@ -17,7 +17,19 @@ A private Matrix server on oryx bridges Sami's chat networks. Each conversation 
 
 ## Networks
 
-`BOTS` in `chathub/login` maps each network name (the one `chathub/login` and `mautrix@<network>` take) to its bridge bot, `@<bot>:chathub`. The DM with a bot is that network's control room. A person's ID starts with its bridge's prefix: `@gmessages_`, `@whatsapp_`, `@signal_`, `@facebook_` (Messenger), `@instagram_`, `@discord_`, `@linkedin_`. A room name is the contact or group name from the network.
+`BOTS` in `chathub/login` maps each network name (the one `chathub/login` and `mautrix@<network>` take) to its bridge bot, `@<bot>:chathub`. The DM with a bot is that network's control room. A person's ID starts with its bridge's prefix:
+
+| Network | ID prefix |
+| --- | --- |
+| SMS/RCS | `@gmessages_` |
+| WhatsApp | `@whatsapp_` |
+| Signal | `@signal_` |
+| Messenger | `@facebook_` |
+| Instagram | `@instagram_` |
+| Discord | `@discord_` |
+| LinkedIn | `@linkedin_` |
+
+A room name is the contact or group name from the network.
 
 ## Reading
 
