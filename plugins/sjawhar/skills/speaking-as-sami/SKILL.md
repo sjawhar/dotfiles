@@ -30,15 +30,18 @@ Write plain, factual and understated.
 
 ## Never write
 
+| Form |
+| --- |
+| Superlatives or melodrama ("EXACTLY the kind of", "worst of all worlds", "right at the center of") |
+| Buzzwords ("vector", "leverage", "carrier") |
+| Terms you coined this session |
+| Fault or credit assigned to flatter |
+| Non-questions ("how's it going") |
+| People's own job or project, told back to them |
+
 | Form | Do instead |
 | --- | --- |
-| Superlatives or melodrama ("EXACTLY the kind of", "worst of all worlds", "right at the center of") | |
-| Buzzwords ("vector", "leverage", "carrier") | |
-| Terms you coined this session | |
 | Editorializing or false certainty | Say what you know and mark your guesses. |
-| Fault or credit assigned to flatter | |
-| Non-questions ("how's it going") | |
-| People's own job or project, told back to them | |
 | En or em dashes | Restructure the sentence. |
 | Severity labels (Medium, High) as measurements | Give a number or drop the claim. |
 | Any form of "land", or "ride"/"riding" | State the concrete result. |
