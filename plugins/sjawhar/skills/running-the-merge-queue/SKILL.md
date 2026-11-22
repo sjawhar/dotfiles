@@ -42,18 +42,19 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 - Give the owner the gate list at registration, so the packet arrives complete.
 - Act on packets and on CI events for PRs that have one.
 - Do not sweep all owners.
-- Every 30 minutes, find orphans: PRs whose owner is gone (`envoy_sessions` lists its session as neither live nor unresponsive) and that nobody will packet. Owners drive their PRs while they are live.
+- Owners drive their PRs while they are live.
+- Every 30 minutes, find orphans: PRs whose owner is gone (`envoy_sessions` lists its session as neither live nor unresponsive) and that nobody will packet.
 - Close or reassign an orphan only under a current decision from Sami that names it.
 - Until such a decision, an orphan stays yours: keep it registered and report it in each queue status.
 
 | PR | Who sends the packet |
 |---|---|
 | For an issue a coordinator (the `sdd` lead) owns | That coordinator's gate packet, naming the head |
-| With an active gate session (the session a coordinator assigned to check its gates) | That session's packet, or a verdict on the PR naming the head from any other reviewer who is not the author |
+| With an active gate session (the session a coordinator assigned to check its gates) | That session's packet or a verdict on the PR naming the head from any other reviewer who is not the author |
 | From an uncoordinated session | The session itself, with an independent reviewer's verdict |
 
 - A packet from anyone but the work owner: also ask the owner whether a round is in flight before you merge, since green CI cannot tell "finished" from "between pushes".
-- Hold a self-verdict packet until Sami approves that PR by name, or an independent reviewer posts a verdict on the PR that names the head. A self-verdict packet begins `SELF-VERDICT - needs clearance or an independent reader`.
+- Hold a self-verdict packet until Sami approves that PR by name or an independent reviewer posts a verdict on the PR that names the head. A self-verdict packet begins `SELF-VERDICT - needs clearance or an independent reader`.
 - For each head, record the registration facts, its gate session and each fact steps 3 to 5 check, each with its read time and source link, plus the disposition and who acts next.
 - Re-read held PRs on GitHub at each wake before you write "unchanged": GitHub is the live truth, not your record.
 - Start CI waits as background jobs (like an async `gh pr checks N --watch --interval 120`).
@@ -65,7 +66,7 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 
 Before you declare READY or merge, read `references/review-evidence.md`: the surfaces to read, each finding's disposition, the smaller gates for prose-only and test-only PRs, and review seats.
 
-- The owner dispositions findings and the independent reviewer states that nothing blocking remains. You check the enumeration and dispositions, not code or severity.
+- You check the enumeration and dispositions, not code or severity. The owner dispositions findings and the independent reviewer states that nothing blocking remains.
 - On disagreement, return the exact list of undispositioned findings.
 
 ## 4. Bind evidence to the head
