@@ -5,11 +5,10 @@ description: "Use when the devbox GNOME keyring is locked, or after a devbox reb
 
 # Unlock the devbox keyring
 
-A machine without the `gnome-keyring` package has no keyring to unlock. On such a machine, `unlock-keyring` says so. There, a tool that keeps its login in a keyring falls back to the kernel keyring. The kernel keyring is session-scoped: the login ends with the shell that made it.
-
 This skill applies only to a machine with the `gnome-keyring` package. Check with `command -v gnome-keyring-daemon`.
 
-**Why:** on a machine without it, a tool that keeps its login in a keyring needs its own login again.
+- On a machine without the package, expect `unlock-keyring` to say there is no keyring to unlock.
+- On such a machine, log a tool that keeps its login in a keyring in again in each new shell: it falls back to the kernel keyring, which is session-scoped, so the login ends with the shell that made it.
 
 ## Unlock
 
