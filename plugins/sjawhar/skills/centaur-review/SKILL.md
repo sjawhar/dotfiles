@@ -114,8 +114,9 @@ review=$(jq -n --arg body "$SUMMARY" --arg commit_id "$head" --arg c1 "$COMMENT1
 - A comment on a deleted line also needs `side: "LEFT"`, with `line` in the old file.
 - Set each body, `$SUMMARY` too, with a quoted heredoc like `COMMENT1` and pass it with `--arg`, so quotes,
   backticks and backslashes reach GitHub unchanged.
-- On `"line" is not a permitted key`, use `/pulls/{number}/reviews`, not `/comments`: that error means the wrong
-  endpoint.
-- On HTTP 422 or a missing comment, recheck `path`, `line`, `side` and `body` against the diff.
-- If the POST fails, show Sami the status and error.
-- If the POST fails, post a top-level PR comment only if he asks: it loses each comment's line.
+
+| Situation | Action |
+| --- | --- |
+| `"line" is not a permitted key` | It means the wrong endpoint: use `/pulls/{number}/reviews`, not `/comments`. |
+| HTTP 422 or a missing comment | Recheck `path`, `line`, `side` and `body` against the diff. |
+| The POST fails | Show Sami the status and error. Post a top-level PR comment only if he asks: it loses each comment's line. |
