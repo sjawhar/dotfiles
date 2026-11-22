@@ -53,6 +53,9 @@ when you are away from the laptop.
 | 12804 | RemoteForward | 127.0.0.1:12804 | PC/SC for YubiKey use |
 | 12805 | LocalForward | 127.0.0.1:12805 | Browser grant feed |
 | 12806 | RemoteForward | 127.0.0.1:12806 | Audio |
+| 8776 | LocalForward | 127.0.0.1:8776 | Personal Dispatch (default omp profile) |
+| 9030 | LocalForward | 127.0.0.1:9030 | Personal Envoy listener |
+| 4223 | LocalForward | 127.0.0.1:4223 | Personal Envoy NATS |
 
 ## Oryx
 
