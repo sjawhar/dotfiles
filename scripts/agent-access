@@ -260,14 +260,20 @@ check_sentry() {
     fi
 }
 
+# kubectl can write a warning to stderr, so the context is stdout alone; a failure of current-context reports
+# stderr's first non-empty line, or stdout's when stderr is empty. A context with no visible character is
+# `unknown`. `kubectl auth whoami` stays merged: its identity is the Username line, which grep picks out.
 check_kubectl() {
-    local ctx rc out username
-    ctx="$(timeout "$TIMEOUT_S" kubectl config current-context 2>&1)"
+    local ctx rc out username detail err="$tmp/kubectl.stderr"
+    ctx="$(timeout "$TIMEOUT_S" kubectl config current-context 2>"$err")"
     rc=$?
     if ((rc != 0)); then
-        row kubectl missing - - "kubectl config current-context" "$(failure_detail "$rc" "$(first_line "$ctx")")"
+        detail="$(first_line "$(<"$err")")"
+        row kubectl missing - - "kubectl config current-context" \
+            "$(failure_detail "$rc" "${detail:-$(first_line "$ctx")}")"
         return
     fi
+    [[ "$ctx" =~ [^[:space:]] ]] || ctx=unknown
     out="$(timeout "$TIMEOUT_S" kubectl auth whoami 2>&1)"
     rc=$?
     if ((rc == 0)); then
@@ -343,21 +349,25 @@ check_modal() {
 
 # Dispatch: the session's harness plugin (pi-envoy, claude-envoy) puts
 # `dispatch` on its shell's PATH and names the
-# session for it; `dispatch whoami` answers whom Dispatch takes it for.
+# session for it; `dispatch whoami` answers whom Dispatch takes it for. The
+# identity is stdout's first non-empty line, so a warning on stderr is not it;
+# a failure reports stderr's first non-empty line, or stdout's when stderr is
+# empty.
 check_dispatch() {
-    local out rc identity
+    local out rc identity detail err="$tmp/dispatch.stderr"
     if ! command -v dispatch >/dev/null 2>&1; then
         row dispatch missing - - "command -v dispatch" \
             "no dispatch on PATH; the session's harness plugin puts it there, so this shell is not an agent session's"
         return
     fi
-    out="$(timeout "$TIMEOUT_S" dispatch whoami 2>&1)"
+    out="$(timeout "$TIMEOUT_S" dispatch whoami 2>"$err")"
     rc=$?
     if ((rc == 0)); then
         identity="$(first_line "$out")"
         row dispatch live "${identity:-unknown}" "n/a" "dispatch whoami"
     else
-        row dispatch missing - - "dispatch whoami" "$(failure_detail "$rc" "$(first_line "$out")")"
+        detail="$(first_line "$(<"$err")")"
+        row dispatch missing - - "dispatch whoami" "$(failure_detail "$rc" "${detail:-$(first_line "$out")}")"
     fi
 }
 

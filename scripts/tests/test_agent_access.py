@@ -715,6 +715,69 @@ fi
                 row = self.access_rows()["agent_secrets_broker"]
                 self.assertEqual((row["status"], row["detail"]), ("missing", detail))
 
+    def test_kubectl_context_is_stdout_and_a_failure_reports_stderr(self) -> None:
+        """A kubectl warning on stderr is not part of the context; a current-context failure reports stderr's line."""
+        # `kubectl auth whoami` answers; any call but `config current-context` exits 2.
+        stub = (
+            'if [[ "$1 $2" == "auth whoami" ]]; then\n'
+            '    echo "Username   arn:aws:sts::123:assumed-role/test/i-abc"; exit 0\n'
+            "fi\n"
+            '[[ "$1 $2" == "config current-context" ]] || exit 2'
+        )
+        cases = {
+            "a warning on stderr before the context": (
+                "echo 'W1122 warning: config is old' >&2\necho production",
+                ("live", "arn:aws:sts::123:assumed-role/test/i-abc (context: production)", ""),
+            ),
+            "a failure with its error on stderr after stdout": (
+                "echo 'Fetching context'\necho 'error: current-context is not set' >&2\nexit 1",
+                ("missing", "-", "error: current-context is not set"),
+            ),
+        }
+        for case, (context, expected) in cases.items():
+            with self.subTest(case=case):
+                write_stub(self.stub_dir, "kubectl", f"{stub}\n{context}")
+                row = self.access_rows()["kubectl"]
+                self.assertEqual((row["status"], row["identity"], row["detail"]), expected)
+
+    def test_kubectl_empty_context_is_unknown(self) -> None:
+        """current-context exiting 0 with no non-empty line gives `(context: unknown)`, not an empty context."""
+        cases = {
+            "no output": "exit 0",
+            "only blank lines": "printf '\\n \\t\\r\\n'\nexit 0",
+        }
+        for case, context in cases.items():
+            with self.subTest(case=case):
+                write_stub(
+                    self.stub_dir,
+                    "kubectl",
+                    f'if [[ "$1 $2" == "config current-context" ]]; then\n{context}\nfi\n'
+                    'echo "Username   arn:aws:sts::123:assumed-role/test/i-abc"',
+                )
+                row = self.access_rows()["kubectl"]
+                self.assertEqual(
+                    (row["status"], row["identity"]),
+                    ("live", "arn:aws:sts::123:assumed-role/test/i-abc (context: unknown)"),
+                )
+
+    def test_dispatch_identity_is_stdout_and_a_failure_reports_stderr(self) -> None:
+        """A dispatch warning on stderr is not the identity; a failure reports stderr's first line, else stdout's."""
+        cases = {
+            "a warning on stderr before the identity": (
+                "echo 'dispatch: warning: config is old' >&2\necho 'session 01a20508 (Legion implementer)'",
+                ("live", "session 01a20508 (Legion implementer)", ""),
+            ),
+            "a failure with its error on stderr after stdout": (
+                "echo 'contacting the server'\necho 'dispatch: not logged in' >&2\nexit 1",
+                ("missing", "-", "dispatch: not logged in"),
+            ),
+        }
+        for case, (body, expected) in cases.items():
+            with self.subTest(case=case):
+                write_stub(self.stub_dir, "dispatch", f'[[ "$1" == whoami ]] || exit 2\n{body}')
+                row = self.access_rows()["dispatch"]
+                self.assertEqual((row["status"], row["identity"], row["detail"]), expected)
+
     def secretsd_row(self, stdout: str, stderr: str = "", code: int = 0) -> dict[str, str]:
         """Return the secretsd_grants row when `secrets grants` writes STDERR, then STDOUT, and exits CODE.
 
