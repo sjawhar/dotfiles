@@ -23,6 +23,7 @@ The keys below are agent tier: `secrets <KEY> -- <command>` gives them to an age
 - SF: a Home Assistant Green at `10.0.0.254` on the apartment LAN. That address is static, set on the Green, and outside the gateway's assumed DHCP pool; the gateway reserves nothing for it (`skills/majordomo/references/sites/wiz.md` in sjawhar/dojo). `HA_MCP_URL_BUSH` is its webhook URL `http://10.0.0.254:8123/api/webhook/<id>`; the id is a secret. It works only from that LAN (oryx is on it). Its webhook is in auth mode (below), so each call also sends `HA_TOKEN_BUSH`, the Wren user's long-lived token; without it the webhook answers 401. There is no `HA_MCP_TOKEN_BUSH` secret; the `bash -c` maps the names:
   - Call: `secrets HA_MCP_URL_BUSH HA_TOKEN_BUSH -- bash -c 'export HA_MCP_URL="$HA_MCP_URL_BUSH" HA_MCP_TOKEN="$HA_TOKEN_BUSH"; exec ~/.dotfiles/plugins/sjawhar/skills/home-assistant/ha-mcp-call.sh "$@"' _ <tool> '<json>'`
   - MCP client: `secrets HA_MCP_URL_BUSH HA_TOKEN_BUSH -- bash -c 'export HA_MCP_TOKEN_BUSH="$HA_TOKEN_BUSH"; unset HA_TOKEN_BUSH; exec npx -y -p mcp-remote@0.14.3 mcp-remote-from-env HA_MCP_URL_BUSH --allow-http'`
+  - Send the Green only a token you have seen work, and test refusals against a stub.
   - Read [references/sf-green-lockout.md](references/sf-green-lockout.md) when the Green answers 403 to every request from an address, or before you change its ban threshold.
 - The stopped container `homeassistant-sf` on oryx is a rollback copy, not the SF instance. Do not start it.
 
