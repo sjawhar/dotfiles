@@ -5,9 +5,11 @@ description: "Use when the devbox GNOME keyring is locked, or after a devbox reb
 
 # Unlock the devbox keyring
 
+A machine without the `gnome-keyring` package has no keyring to unlock. On such a machine, `unlock-keyring` says so. There, a tool that keeps its login in a keyring falls back to the kernel keyring. The kernel keyring is session-scoped: the login ends with the shell that made it.
+
 This skill applies only to a machine with the `gnome-keyring` package. Check with `command -v gnome-keyring-daemon`.
 
-**Why:** a machine without it has no keyring to unlock, and `unlock-keyring` says so. There, a tool that keeps its login in a keyring falls back to the kernel keyring. The kernel keyring is session-scoped: the login ends with the shell that made it. The tool then needs its own login again.
+**Why:** on a machine without it, a tool that keeps its login in a keyring needs its own login again.
 
 ## Unlock
 
@@ -17,7 +19,7 @@ This skill applies only to a machine with the `gnome-keyring` package. Check wit
 - **Never automate the password:** the secrets would sit unencrypted on disk.
 - **Never bypass the lock with `PYTHON_KEYRING_BACKEND` or a plaintext backend:** the secrets would sit unencrypted on disk.
 - **Never run `gnome-keyring-daemon --unlock` yourself:** it unlocks only a daemon it starts, so it does nothing while Ubuntu's unit runs.
-  - **Why:** each run takes `/run/user/1000/keyring/control` and deletes that directory when it exits; clients then fail with `couldn't access control socket: No such file or directory`.
+  - **Why:** each run takes `/run/user/1000/keyring/control`. Each run deletes that directory when it exits. Clients then fail with `couldn't access control socket: No such file or directory`.
 - **If Sami unlocks without the function:**
   - He must first stop both units Ubuntu ships, `gnome-keyring-daemon.service` and `gnome-keyring-daemon.socket`. While Ubuntu's daemon runs, each `--unlock` logs `another secret service is running` and changes nothing.
   - Never pass `--start` with `--unlock`: the two flags are incompatible. The working invocation is the function's `--unlock --components=pkcs11,secrets --daemonize`.
