@@ -73,7 +73,7 @@ Read `references/commands.md` for a command or revset you do not know, bookmark 
 
 - Read `references/rebase-details.md` before you rebase: the rebase flags and the `jj log` read after every rebase.
 - If your private, unpublished chain conflicts at every commit, squash it to one commit, or to the layers that help review. Conflict chains in `references/stack-and-conflict-details.md` says when. Then rebase and resolve once.
-- Never rewrite another owner's chain.
+- Never rewrite another owner's chain as cleanup.
 - Never rewrite a published chain as cleanup, other than by a rebase.
 - Before you resolve a conflict, read jj's conflict markers in `references/commands.md`, then follow the `resolve-conflicts` skill for what to keep.
 - Before you restructure a stack, read `references/stack-and-conflict-details.md` and `jj rebase --help`: to restack after a squash merge, move a child stack, publish from a stack other sessions share, or fix a divergent change.
