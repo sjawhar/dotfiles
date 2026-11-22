@@ -4,6 +4,10 @@ Read the current queue decision record first. Nothing here creates holds, merge 
 
 ## Priority and holds
 
+- With no explicit priority, merge in this order, never by READY arrival order:
+  1. What Sami's stated goal needs.
+  2. Parents before children.
+  3. A corpus change before the other open PRs that edit its content, so they integrate with it. A corpus change is one that adds or rewrites a body of content, such as task data, that other open PRs edit.
 - Equally ready same-file siblings with no stronger priority or dependency: of those approved, the PR opened first (the lowest PR number) goes first. Serialize only the shared boundary. When one owner is already repairing a collision, that owner resolves it.
 - A hold that needs a conflict check needs the actual three-way composition, not overlap guessed from filenames.
 - A lifted hold ends at once. On the next wake, re-read the live head, verdicts and mergeability. An old "held" label is not an observation.

@@ -6,11 +6,14 @@ Read when a packet reports no findings, no checks, missing content, an expected 
 
 - Do not ask for a push to pick up main when main only changes runner labels or fixes a failure that reds many PRs at once.
 - A rerun of a cached test-merge keeps its original base, so it cannot prove a later main-side fix. Do not repeat a known no-op.
-- By what the run evidence shows:
-  - flake: rerun the failed job;
-  - runner lost or run incomplete: check that the run belongs to the current head, then rerun that attempt;
-  - red explained only by a newer main-side fix: wait until the owner pushes a content change, or Sami gives a new decision;
-  - a failure that fix does not cover: the owner diagnoses it.
+
+| The run evidence shows | Action |
+| --- | --- |
+| Flake | Rerun the failed job |
+| Runner lost or run incomplete | Check that the run belongs to the current head, then rerun that attempt |
+| Red explained only by a newer main-side fix | Wait until the owner pushes a content change, or Sami gives a new decision |
+| A failure that fix does not cover | The owner diagnoses it |
+
 - Required red CI is not mergeable. When several PRs are red from the same failure on main (a main-red class) and no action above fits it, ask Sami once with `dispatch ask` on the queue record (SKILL.md step 1; with none, on the Dispatch issue one of those PRs names) for a queue-wide action, and continue other work.
 - A queued check-suite with zero check-runs is not a failed check. Read `mergeable_state` and the repository's docs on which GitHub App posts each required check; the owner follows `landing-a-pr`.
 - A superseded cancelled run is not a current required failure. Identify it by run and head, not by conclusion alone.

@@ -25,12 +25,17 @@ Read before you verify READY, and again when a new review artifact appears.
 
 ## Disposition of each finding
 
-- Correctness or security defect in shipped behavior: blocking, fixed in this PR.
-- Test that would pass on the bug it is offered to prove: blocking, fixed in this PR.
-- Other valid finding: fixed, or a named destination (follow-up PR, existing backlog item, next task of that session) in the thread reply and merge record, thread resolved. "Later" is not a destination.
-- Refuted: the owner's evidence plus independent confirmation, never a silently resolved thread.
-- Human thread: blocking until the human resolves it.
-- One push per review round, not per finding. Never tell an owner to stop pushing a correctness fix. Do not turn a wording change in text that nothing executes, or a change to a finding's disposition reply, into a new review round.
+| Finding | Disposition |
+| --- | --- |
+| Correctness or security defect in shipped behavior | Blocking, fixed in this PR |
+| Test that would pass on the bug it is offered to prove | Blocking, fixed in this PR |
+| Other valid finding | Fixed, or a named destination (follow-up PR, existing backlog item, next task of that session) in the thread reply and merge record, thread resolved. "Later" is not a destination |
+| Refuted | The owner's evidence plus independent confirmation, never a silently resolved thread |
+| Human thread | Blocking until the human resolves it |
+
+- One push per review round, not per finding.
+- Never tell an owner to stop pushing a correctness fix.
+- Do not turn a wording change in text that nothing executes, or a change to a finding's disposition reply, into a new review round.
 
 ## Simplify and the thermonuclear pair
 
