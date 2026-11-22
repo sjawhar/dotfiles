@@ -14,9 +14,9 @@ Read this in Phase 5, and before you delete a tree in which a container left roo
    - `.Size` counts shared layers, and `Reclaimable` assumes nothing is shared. Report the difference of `docker system df` before and after. Where the daemon stores images under containerd, the bytes are in `/var/lib/containerd`.
    - One image under two tags is one image: compare `docker image inspect --format '{{.Id}}' <ref>`. An `rmi` that prints only `Untagged:` and no `Deleted:` freed nothing.
    - Delete what you built.
+     - A local build (no registry prefix) can take its builder an hour to rebuild.
    - Delete an image from a shared registry, even one you pulled, only when `docker ps -a --filter ancestor=<id>` lists no container and a grep of the checkouts on the box for its digest and tag (pipeline scripts, lock files) finds nothing.
      - **Why:** the first check says whether the image is used now, not whether another session will pull it. The image can be the only reachable copy of a toolchain.
-   - A local build (no registry prefix) can take its builder an hour to rebuild.
    - An unauthenticated registry read cannot tell a private tag from a missing one, so do not read its answer as "the image is irreplaceable" or as "the tag is gone".
 5. Containers: `python3 $S containers` gives each a family, an owner and a verdict; read `cmd_containers` in `$S` for how it sets each verdict. Labels attribute; they never decide liveness. Trust its client check only on a host whose `docker ps` lists the container. Delete only what the verdict allows, and run the census again before `rm`:
 
