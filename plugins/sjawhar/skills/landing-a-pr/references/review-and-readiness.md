@@ -35,7 +35,10 @@ gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<node
   3. Each open finding's ID, status and evidence; for threads, the node ID and original commit ID.
   4. The probes or mutants each reviewer reruns at the new head.
   5. What to post: one comment, verdict first, naming the full head in the verdict-line format `pr-gate` parses (read its source for the pattern). Do not write a verdict line in the request itself: the parser can read it as an approval.
-- Set a re-review's depth from what the round changed, not from how long it took: by default a delta review of the change and every open finding ("Review gates tied to a head"); real re-proof, not a textual re-cite, for a change to what the code reads or reaches at run time (a config, a credential, a schema, a service); a review of the change at the highest effort for a rewritten head whose diff changed.
+- Set a re-review's depth from what the round changed, not from how long it took:
+  - By default, a delta review of the change and every open finding ("Review gates tied to a head").
+  - Real re-proof, not a textual re-cite, for a change to what the code reads or reaches at run time (a config, a credential, a schema, a service).
+  - A review of the change at the highest effort for a rewritten head whose diff changed.
 - For silent failure modes, several readings of one guard cannot show coverage outside its reach. Use complementary reviewers, and have the tester plant the defect where the guard does not look (`guard-probes.md`).
 
 ## Review gates tied to a head

@@ -46,7 +46,7 @@ gh run rerun <run-id> -R <owner>/<repo> --failed
 
 ## Cached merges and missing runs
 
-- Checks can run a cached test-merge. When the PR's result depends on what the base holds (a migration chain, or a file both the PR and the base change), read the checkout line and the test-merge parents. A test-merge on an older base is normal, so do not hold every PR until its test-merge uses the latest base; act only when the base commits it lacks touch those files.
+- Checks can run a cached test-merge. When the PR's result depends on what the base holds (a migration chain, or a file both the PR and the base change), read the checkout line and the test-merge parents. A test-merge on an older base is normal, so do not hold every PR until its test-merge uses the latest base. Act on a test-merge on an older base only when the base commits it lacks touch those files.
 - A rerun can replay the cached merge with its old base and workflow. Compare the tested head and base with the intended ones before another retry. An identical failure is a reason to inspect that input, not proof of a stale base or a flake. For failures in untouched files, reproduce at the exact head and a pristine base.
 - A conflicted PR can get no `pull_request` run: read mergeability before you blame webhooks. A mergeable head with zero runs: check trigger and path filters and commit-message skip directives. To get a run, add commits on top; do not rewrite published commits.
 - Count the CI app's suites, not another integration's queued empty suite. Re-snapshot after UNKNOWN mergeability computes. Read the gate's code before you claim how it treats UNKNOWN.
@@ -68,5 +68,8 @@ gh run rerun <run-id> -R <owner>/<repo> --failed
 - Do not read a producer's exit status through a pager or filter pipeline. Run a check whose result permits a write (push, merge, delete) without a pipe, or keep its exit code (`${PIPESTATUS[0]}`), and read its output before the write.
 - Scope shell options to a subshell. Set `GIT_DIR`, `VIRTUAL_ENV`, `KUBECONFIG` and similar per command, never `export`ed. Treat inherited venv and config pointers as untrusted, and identify what a run loaded.
 - Single-quote jq programs or put them in a file, fail on an empty parse, and check that every expected field name is present. Keep stderr out of compared values.
-- With a GitHub App installation token, `gh api user` returns 403 by design: probe the repo endpoint instead. A write-rate 403 has its own reset time: wait for it and serialize writes.
-- A token without `read:org` can edit a body with `gh api -X PATCH repos/<owner>/<repo>/pulls/<N> -F body=@<file>`. A GraphQL mutation with no repository argument needs `GH_REPO=<owner>/<repo>` on that command. Check every write with a separate GET.
+- With a GitHub App installation token, `gh api user` returns 403 by design: probe the repo endpoint instead.
+- A write-rate 403 has its own reset time: wait for it and serialize writes.
+- A token without `read:org` can edit a body with `gh api -X PATCH repos/<owner>/<repo>/pulls/<N> -F body=@<file>`.
+- A GraphQL mutation with no repository argument needs `GH_REPO=<owner>/<repo>` on that command.
+- Check every write with a separate GET.
