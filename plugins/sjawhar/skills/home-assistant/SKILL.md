@@ -26,7 +26,7 @@ ha-mcp-call.sh prints each text content and exits 0. It exits non-zero and print
 
 ## Instances
 
-The keys below are agent tier: `secrets <KEY> -- <command>` gives them to an agent with no YubiKey touch and no approval (a human-tier key needs one of those).
+- The keys below are agent tier. `secrets <KEY> -- <command>` gives them to an agent with no YubiKey touch and no approval. A human-tier key needs one of those.
 
 | Fact | Salt Lake | SF |
 | --- | --- | --- |
