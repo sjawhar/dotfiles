@@ -35,4 +35,5 @@ When the function reports the keyring still locked, or after a stray manual unlo
 The unlocked daemon crashes (SIGABRT, a bug in Ubuntu's `gnome-keyring` package, not in a client). D-Bus then restarts Ubuntu's unit, which has no password. The crash signature in the journal is `GLib-GIO:ERROR:../../../gio/gdbusconnection.c:4749:invoke_get_property_in_idle_cb: assertion failed: (error != NULL)`.
 
 - Unlock again.
-- Never poll `busctl get-property ... Locked` in a loop, because a D-Bus property read triggers the crash; check once after each unlock.
+- Never poll `busctl get-property ... Locked` in a loop: a D-Bus property read triggers the crash.
+- Check `Locked` once after each unlock, for the same reason.
