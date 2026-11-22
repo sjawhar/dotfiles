@@ -9,7 +9,9 @@ description: Use when running docker, docker compose, buildx or depot, or when o
 
 Every agent on the machine shares one Docker daemon, its build cache, and depot's remote cache.
 
-- Stop or remove only containers this session started. Give each a `--name` (`<task>-$$`) and remove it when you finish. Never sweep (`docker ps -q | xargs docker rm`).
+- Stop or remove only containers this session started.
+- Give each container this session starts a `--name` (`<task>-$$`) and remove it when you finish.
+- Never sweep (`docker ps -q | xargs docker rm`).
 - Never pass `--no-cache`: it rebuilds every stage from scratch, which can take hours on a daemon and disk every session shares.
 - Force one stage with `--no-cache-filter=<stage>`.
 - Do not quote a cold-cache time as the build time.
@@ -27,7 +29,7 @@ Every agent on the machine shares one Docker daemon, its build cache, and depot'
 
 ## Check, never guess
 
-Docker, depot and registry access work on this machine; before you say one is unavailable, quote the output of the command you ran. Before you say a repo has no Docker setup, search from its root (`fd -HI Dockerfile`, `fd -HI 'compose.*ya?ml'`) and read its CI workflows.
+Docker, depot and registry access work on this machine. Before you say one is unavailable, quote the output of the command you ran. Before you say a repo has no Docker setup, search from its root (`fd -HI Dockerfile`, `fd -HI 'compose.*ya?ml'`) and read its CI workflows.
 
 | Situation | Check |
 | --- | --- |
@@ -41,9 +43,10 @@ Docker, depot and registry access work on this machine; before you say one is un
 
 ## Builds
 
-- Run the build before you call an image change done, and again after every source edit that goes into the image; tests do not replace it.
-- A full build can take hours: find its usual time (CI logs, the repo's docs), run it in the background and keep working. If it still runs after 30 minutes, tell the user its last log line and keep working.
-- Modal and compose cache an image by its tag, so a re-pushed `:main` is not pulled again. After a push, refer to the image as `<repo>@sha256:<digest>` (the digest `docker push` prints).
+- Run the build before you call an image change done. Run it again after every source edit that goes into the image. Tests do not replace the build.
+- Find a full build's usual time (CI logs, the repo's docs), run it in the background and keep working: a full build can take hours.
+- If a full build still runs after 30 minutes, tell the user its last log line and keep working.
+- After a push, refer to the image as `<repo>@sha256:<digest>` (the digest `docker push` prints). Modal and compose cache an image by its tag, so a re-pushed `:main` is not pulled again.
 - Run the project the way the repo does (its make target, compose service or CI step). Hand-roll `docker run` only when the repo defines none.
 
 ## Containers
@@ -56,13 +59,16 @@ Docker, depot and registry access work on this machine; before you say one is un
 - Serve our own people and machines over the VPN (`tailscale serve`).
 - Publish publicly only for a named outside caller that cannot join the VPN.
 - Name each outside caller you publish publicly for in the repo's docs.
-- Docker Engine before 28.0 lets hosts on the local network reach even a loopback-published port, through 127.0.0.1 and through the container's own address on the Docker bridge network. Check `docker version`.
+- Check `docker version`: Docker Engine before 28.0 lets hosts on the local network reach even a loopback-published port, through 127.0.0.1 and through the container's own address on the Docker bridge network.
 - On an engine before 28.0, this rule in the `DOCKER-USER` chain, which Docker runs before its own rules, closes only the 127.0.0.1 route: `sudo iptables -I DOCKER-USER -m conntrack --ctorigdst 127.0.0.0/8 -j DROP`.
 - The full fix is to update the engine to 28.0 or later. Ask the user first: the update restarts the daemon and every session's containers.
-- A container fails or answers wrongly: read `docker logs <c>`, then `docker exec <c> sh -c 'ps; curl -s localhost:<port>'` (no `-it`: an agent session has no TTY) before you propose a cause.
-- A container exits at once: read `docker logs <c>` and `docker inspect --format '{{.Config.Cmd}} {{.Config.Entrypoint}}' <img>`. An entrypoint script needs the exec bit, a correct shebang and LF line endings.
-- A file is missing in the container: `.dockerignore` excluded it, or the image is stale. Check `.dockerignore`, then rebuild.
 - Copy files out of an image with no CMD: `docker create --name <n> <img> true`, `docker cp <n>:<path> <dest>`, `docker rm <n>`. Without `true`, `docker create` fails with "no command specified".
+
+| Situation | Check |
+| --- | --- |
+| A container fails or answers wrongly | Read `docker logs <c>`, then `docker exec <c> sh -c 'ps; curl -s localhost:<port>'` (no `-it`: an agent session has no TTY) before you propose a cause |
+| A container exits at once | Read `docker logs <c>` and `docker inspect --format '{{.Config.Cmd}} {{.Config.Entrypoint}}' <img>`. An entrypoint script needs the exec bit, a correct shebang and LF line endings |
+| A file is missing in the container | `.dockerignore` excluded it, or the image is stale. Check `.dockerignore`, then rebuild |
 
 ## Dockerfiles
 
