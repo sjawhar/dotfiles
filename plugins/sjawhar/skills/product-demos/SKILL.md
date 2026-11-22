@@ -5,8 +5,6 @@ description: Use when making a product demo video, a narrated walkthrough or a p
 
 # Product demo videos
 
-**Done when:** you have used the `task` tool to run the two reviewers of step 3 ("Review before it ships") in parallel on the finished MP4; each finds blockers the other misses.
-
 Read [references/pipeline.md](references/pipeline.md) when you install the tools or run a step below: it has the commands and settings.
 
 ## Production rules
@@ -89,6 +87,8 @@ Read [references/pipeline.md](references/pipeline.md) when you install the tools
 10. Normalize all clips (resolution, fps, pixel format, stereo 44100 Hz AAC) before concat (`references/pipeline.md`, "Normalize, title cards, concat").
 
 ## 3. Review before it ships
+
+Use the `task` tool to run two reviewers in parallel on the finished MP4; each finds blockers the other misses.
 
 - **Strategy reviewer** (`task` tool, agent `oracle`: a read-only advisor on a non-Anthropic model): can the audience do the thing afterwards? What cut loses nothing? What does narration claim that the screen does not show? Is a video the right format at all? What goes at 30% shorter?
 - **Vision reviewer** (a `task` subagent reading sampled frames):
