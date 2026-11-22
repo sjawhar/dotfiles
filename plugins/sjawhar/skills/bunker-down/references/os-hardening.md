@@ -15,7 +15,7 @@ sudo apt-get install -y unattended-upgrades
 cat /etc/apt/apt.conf.d/20auto-upgrades  # both values should be "1"
 ```
 
-Ask the user whether anything on the machine uses IPv6. If nothing on the machine uses IPv6, also add `net.ipv6.conf.all.disable_ipv6 = 1`. Add to the user's bashrc, so an idle shell outside tmux closes and a pending reboot shows:
+If nothing on the machine uses IPv6 (ask the user), also add `net.ipv6.conf.all.disable_ipv6 = 1`. Add to the user's bashrc, so an idle shell outside tmux closes and a pending reboot shows:
 
 ```bash
 [ -z "${TMUX:-}" ] && TMOUT=900
