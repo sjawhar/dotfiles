@@ -26,6 +26,13 @@ if [[ -z "$_check" ]]; then
     [[ -s "$_pointer" ]] && _check="$(< "$_pointer")"
 fi
 if [[ -x "$_check" ]]; then
+    # A call of exactly two arguments whose first is a mode word is how a pre-push hook calls the
+    # check, and leak-check-v33 and later refuse it (leak-check/README.md, "Modes"), so a gh call
+    # of one word goes as `gh-guard -- WORD`. A call of more words is never that shape and keeps
+    # `gh-guard ARGS`, which every tag reads the same. Do not make it `--` always: leak-check-v32
+    # and before read `gh-guard -- pr comment …` as an unknown command and refuse it, so a box that
+    # still runs one would refuse every gh write until its check is reinstalled.
+    (( $# == 1 )) && exec "$_check" gh-guard -- "$@"
     exec "$_check" gh-guard "$@"
 fi
 
