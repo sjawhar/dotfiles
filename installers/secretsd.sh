@@ -226,6 +226,93 @@ secretsd_put_back() {
     systemctl --user daemon-reload 2>/dev/null || true
 }
 
+# secretsd_replace_generated FILE: when FILE.new differs from FILE, moves it
+# over FILE and sets secretsd_restart_needed=1, first keeping FILE as FILE.prev
+# unless a .prev exists already; else removes FILE.new.
+secretsd_replace_generated() {
+    local file="$1"
+
+    if cmp -s "${file}.new" "$file" 2>/dev/null; then
+        rm -f "${file}.new"
+    else
+        if [ -f "$file" ] && [ ! -f "${file}.prev" ]; then
+            cp "$file" "${file}.prev"
+        fi
+        mv "${file}.new" "$file"
+        secretsd_restart_needed=1
+    fi
+}
+
+# secretsd_require_no_grants ARGV0: returns only when `timeout 10 <client>
+# grants` exits 0 and its stdout is exactly the line "no active grants".
+# Otherwise it puts back the previous generated files, prints why on stderr and
+# ends the install with exit 1. ARGV0 is the running daemon's argv[0], or empty
+# when it is not known.
+secretsd_require_no_grants() {
+    local argv0="$1"
+    local installs="${SECRETSD_MISE_DIR%/*}"
+    local client="$SECRETSD_BIN" release="" dir rc file why head tail line lines=""
+
+    # The client is the running daemon's own binary when that is a release that
+    # mise installed, <dir>/<release>/bin/secrets where <dir> is the parent of
+    # the pinned directory: `grants` first checks the wire protocol version with
+    # the daemon, so after a pin move across a protocol change only the old
+    # client gets an answer. Else it is the pinned binary. [[ == ]] lets * match
+    # /, so <release> is tested to be one path part.
+    if [[ "$argv0" == "$installs"/*/bin/secrets ]]; then
+        release="${argv0#"$installs"/}"
+        release="${release%/bin/secrets}"
+    fi
+    if [ -n "$release" ] && [[ "$release" != */* ]] \
+        && [ "$release" != . ] && [ "$release" != .. ] \
+        && [ -f "$argv0" ] && [ -x "$argv0" ]; then
+        client="$argv0"
+    fi
+    # stdout and stderr go to files, because $(...) drops the trailing newline
+    # of the exact answer. A failing mktemp ends the install here (set -e), and
+    # the pending change (the kept .prev files, or an argv[0] that still
+    # differs) makes the next run try again.
+    dir="$(mktemp -d)"
+    if timeout 10 "$client" grants > "${dir}/out" 2> "${dir}/err"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    if [ "$rc" -eq 0 ] && cmp -s "${dir}/out" <(printf 'no active grants\n'); then
+        rm -rf -- "$dir"
+        return 0
+    fi
+    if [ "$rc" -eq 0 ] && [ -s "${dir}/out" ]; then
+        file=out
+        head="secretsd: NOT restarting -- the running daemon holds grants that a restart would end:"
+        tail="secretsd: tell the box (envoy) so that the sessions that hold them can finish, then wait for the grants to end or re-run with SECRETSD_RESTART_WITH_GRANTS=1; the next install tries again."
+    else
+        file=err
+        if [ "$rc" -eq 124 ]; then
+            why="exit status 124: it timed out after 10 s"
+        elif [ "$rc" -eq 0 ]; then
+            why="exit status 0, no output"
+        else
+            why="exit status ${rc}"
+        fi
+        head="secretsd: NOT restarting -- 'secrets grants' did not answer (${why}), so it is not known whether the running daemon holds grants that a restart would end:"
+        tail="secretsd: the next install tries again; to restart anyway, re-run with SECRETSD_RESTART_WITH_GRANTS=1."
+    fi
+    # Every line of the file to print, four spaces in, a last line with no
+    # newline included.
+    while IFS= read -r line || [ -n "$line" ]; do
+        lines+="    ${line}"$'\n'
+    done < "${dir}/${file}"
+    rm -rf -- "$dir"
+    secretsd_put_back
+    {
+        echo "$head"
+        printf '%s' "$lines"
+        echo "$tail"
+    } >&2
+    exit 1
+}
+
 if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
     [ -f "${UNIT_SRC}/secretsd.service" ] && [ -f "${UNIT_SRC}/secretsd.socket" ]; then
     SECRETSD_CONFIG_FILE="${HOME}/.config/secretsd/config.toml"
@@ -248,16 +335,8 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
     #
     mkdir -p ~/.config/secretsd
     secretsd_config_toml > "${SECRETSD_CONFIG_FILE}.new"
-    if cmp -s "${SECRETSD_CONFIG_FILE}.new" "$SECRETSD_CONFIG_FILE" 2>/dev/null; then
-        rm -f "${SECRETSD_CONFIG_FILE}.new"
-    else
-        if [ -f "$SECRETSD_CONFIG_FILE" ] && [ ! -f "${SECRETSD_CONFIG_FILE}.prev" ]; then
-            cp "$SECRETSD_CONFIG_FILE" "${SECRETSD_CONFIG_FILE}.prev"
-        fi
-        mv "${SECRETSD_CONFIG_FILE}.new" "$SECRETSD_CONFIG_FILE"
-        # Source roots are read at daemon startup, so a change needs a restart.
-        secretsd_restart_needed=1
-    fi
+    # Source roots are read at daemon startup, so a change needs a restart.
+    secretsd_replace_generated "$SECRETSD_CONFIG_FILE"
     mkdir -p ~/.config/systemd/user
     ensure_link "${UNIT_SRC}/secretsd.service" ~/.config/systemd/user/secretsd.service
     ensure_link "${UNIT_SRC}/secretsd.socket" ~/.config/systemd/user/secretsd.socket
@@ -376,19 +455,11 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
                 ;;
         esac
     } > "${SECRETSD_DROPIN}.new"
-    if cmp -s "${SECRETSD_DROPIN}.new" "$SECRETSD_DROPIN" 2>/dev/null; then
-        rm -f "${SECRETSD_DROPIN}.new"
-    else
-        # The drop-in is how the next run knows whether the daemon still needs
-        # restarting, so the previous one is kept as .prev until the restart
-        # below happens; a restart that does not happen puts it back. A .prev
-        # that an earlier run left is older and stays as it is.
-        if [ -f "$SECRETSD_DROPIN" ] && [ ! -f "${SECRETSD_DROPIN}.prev" ]; then
-            cp "$SECRETSD_DROPIN" "${SECRETSD_DROPIN}.prev"
-        fi
-        mv "${SECRETSD_DROPIN}.new" "$SECRETSD_DROPIN"
-        secretsd_restart_needed=1
-    fi
+    # The drop-in is how the next run knows whether the daemon still needs
+    # restarting, so the previous one is kept as .prev until the restart
+    # below happens; a restart that does not happen puts it back. A .prev
+    # that an earlier run left is older and stays as it is.
+    secretsd_replace_generated "$SECRETSD_DROPIN"
     if [ -z "$SOPS_ABS" ]; then
         echo "WARNING: sops not found — secretsd cannot decrypt human-tier keys until it is installed."
     fi
@@ -441,84 +512,13 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
                 secretsd_restart_needed=1
             fi
         else
-            secretsd_argv0=""
             echo "secretsd: NOTE: cannot read the command line of the running daemon (pid ${secretsd_main_pid}), so its version is not known; it is not restarted for the version" >&2
         fi
-        if [ "$secretsd_restart_needed" -eq 0 ]; then
-            rm -f "${SECRETSD_CONFIG_FILE}.prev" "${SECRETSD_DROPIN}.prev"
-        else
+        if [ "$secretsd_restart_needed" -eq 1 ]; then
             if [ "${SECRETSD_RESTART_WITH_GRANTS:-}" = 1 ]; then
                 echo "secretsd: SECRETSD_RESTART_WITH_GRANTS=1: restarting without asking for grants" >&2
             else
-                # The client is the running daemon's own binary when that is a
-                # release that mise installed, <dir>/<release>/bin/secrets where
-                # <dir> is the parent of the pinned directory: `grants` first
-                # checks the wire protocol version with the daemon, so after a
-                # pin move across a protocol change only the old client gets an
-                # answer. Else it is the pinned binary. [[ == ]] lets * match /,
-                # so <release> is tested to be one path part.
-                secretsd_client="$SECRETSD_BIN"
-                secretsd_release=""
-                if [[ "$secretsd_argv0" == "${SECRETSD_MISE_DIR%/*}"/*/bin/secrets ]]; then
-                    secretsd_release="${secretsd_argv0#"${SECRETSD_MISE_DIR%/*}"/}"
-                    secretsd_release="${secretsd_release%/bin/secrets}"
-                fi
-                if [ -n "$secretsd_release" ] && [[ "$secretsd_release" != */* ]] \
-                    && [ "$secretsd_release" != . ] && [ "$secretsd_release" != .. ] \
-                    && [ -f "$secretsd_argv0" ] && [ -x "$secretsd_argv0" ]; then
-                    secretsd_client="$secretsd_argv0"
-                fi
-                # stdout and stderr go to files, because $(...) drops the trailing
-                # newline of the exact answer. A failing mktemp ends the install
-                # here (set -e), and the kept .prev files make the next run try
-                # again.
-                secretsd_grants_dir="$(mktemp -d)"
-                if timeout 10 "$secretsd_client" grants \
-                    > "${secretsd_grants_dir}/out" 2> "${secretsd_grants_dir}/err"; then
-                    secretsd_grants_rc=0
-                else
-                    secretsd_grants_rc=$?
-                fi
-                secretsd_grants_answer=unknown
-                secretsd_grants_file=err
-                if [ "$secretsd_grants_rc" -eq 0 ] \
-                    && cmp -s "${secretsd_grants_dir}/out" <(printf 'no active grants\n'); then
-                    secretsd_grants_answer=none
-                elif [ "$secretsd_grants_rc" -eq 0 ] && [ -s "${secretsd_grants_dir}/out" ]; then
-                    secretsd_grants_answer=grants
-                    secretsd_grants_file=out
-                fi
-                # Every line of the file to print, four spaces in, a last line
-                # with no newline included.
-                secretsd_grants_lines=""
-                while IFS= read -r secretsd_line || [ -n "$secretsd_line" ]; do
-                    secretsd_grants_lines+="    ${secretsd_line}"$'\n'
-                done < "${secretsd_grants_dir}/${secretsd_grants_file}"
-                rm -rf -- "$secretsd_grants_dir"
-                if [ "$secretsd_grants_answer" = grants ]; then
-                    secretsd_put_back
-                    {
-                        echo "secretsd: NOT restarting -- the running daemon holds grants that a restart would end:"
-                        printf '%s' "$secretsd_grants_lines"
-                        echo "secretsd: tell the box (envoy) so that the sessions that hold them can finish, then wait for the grants to end or re-run with SECRETSD_RESTART_WITH_GRANTS=1; the next install tries again."
-                    } >&2
-                    exit 1
-                elif [ "$secretsd_grants_answer" = unknown ]; then
-                    if [ "$secretsd_grants_rc" -eq 124 ]; then
-                        secretsd_grants_why="exit status 124: it timed out after 10 s"
-                    elif [ "$secretsd_grants_rc" -eq 0 ]; then
-                        secretsd_grants_why="exit status 0, no output"
-                    else
-                        secretsd_grants_why="exit status ${secretsd_grants_rc}"
-                    fi
-                    secretsd_put_back
-                    {
-                        echo "secretsd: NOT restarting -- 'secrets grants' did not answer (${secretsd_grants_why}), so it is not known whether the running daemon holds grants that a restart would end:"
-                        printf '%s' "$secretsd_grants_lines"
-                        echo "secretsd: the next install tries again; to restart anyway, re-run with SECRETSD_RESTART_WITH_GRANTS=1."
-                    } >&2
-                    exit 1
-                fi
+                secretsd_require_no_grants "$secretsd_argv0"
             fi
             if systemctl --user try-restart secretsd.service 2>/dev/null; then
                 rm -f "${SECRETSD_CONFIG_FILE}.prev" "${SECRETSD_DROPIN}.prev"
