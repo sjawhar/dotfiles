@@ -13,7 +13,8 @@ Set `SKILL=~/.dotfiles/plugins/sjawhar/skills/disk-hygiene` and `S=$SKILL/script
 
 ## When a shell hangs
 
-- Every command timing out, even `echo`, usually means a stalled filesystem. omp's search tools and its shell share one small thread pool. Searches on a stalled mount block it for every session in that omp process.
+Every command timing out, even `echo`, usually means a stalled filesystem. omp's search tools and its shell share one small thread pool. Searches on a stalled mount block it for every session in that omp process.
+
 - Scope every search to a named path.
 - Never run a bare recursive walk.
 - Never search over `/mnt/durable`.
@@ -42,7 +43,7 @@ Set `SKILL=~/.dotfiles/plugins/sjawhar/skills/disk-hygiene` and `S=$SKILL/script
 ## Procedure
 
 1. **Baseline:** `df <path>`, `/proc/pressure/io`, `sudo python3 $S writers` and `python3 $S cpu` while the disk still fills. Pick a ledger path under `~/.local/state/`. Read `references/finding-space.md` before you size, rank or watch disk use.
-2. **Check in:** read `references/check-in.md`, send its message to each titled session `envoy_sessions` lists on this machine (not subagents), and build the protected and releases files. Go on when each has replied or 20 minutes have passed; replies change the plan.
+2. **Check in:** read `references/check-in.md`. Send its message to each titled session `envoy_sessions` lists on this machine (not subagents). Build the protected and releases files. Go on when each has replied or 20 minutes have passed; replies change the plan.
 3. **Classify:** read `references/workspaces.md`, then classify:
    ```bash
    python3 $S inventory --repo ~/REPO --root ~/.worktrees --root /tmp > inv.json
@@ -66,7 +67,8 @@ The space is usually, largest first, in: dangling images, buildkit cache with le
 - Run one `rm` or ad-hoc `du` at a time, under `sudo ionice -c3 nice -n19`: parallel walkers plus an `rm` can hang every shell.
 - Delete only while `/proc/pressure/io` `full avg10` is under 20 (`apply` and `tmp --apply` wait on it: `--io-limit`).
 - Never `lsof +D` or `fuser` a tree per candidate. Before each item, check one `$S procs` for a cwd inside it.
-- Never size a candidate to decide its deletion, and never run one `du` of everything.
+- Never size a candidate to decide its deletion.
+- Never run one `du` of everything.
 - Read `references/shared-disk-writes.md` before a step that writes more than 2 GB to a shared mount, or before you write a free-space guard for a batch.
 - Before you promise space back, measure every path that may share inodes in one run: `$S sizes --hardlinks <tree> <cache>` (a workspace and `~/.cache/uv`, a cache and a data directory, `os.link` copies).
 - Read `references/test-leaks.md` when processes a test or harness left behind cause the space or load.
