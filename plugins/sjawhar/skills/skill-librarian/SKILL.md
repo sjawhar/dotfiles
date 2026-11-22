@@ -83,5 +83,6 @@ Your record is the ledger: `dispatch doc-read --project INFRA --artifact librari
 
 ## Reports
 
-- When a lesson lands or closes (a commit, a merged PR or a tool fix, by anyone), in the same step as its ledger row: `dispatch issue-update --issue <the librarian's issue> --external-link <URL>`. The ledger's first paragraph names that issue.
+- Run `dispatch issue-update --issue <the librarian's issue> --external-link <URL>` when a lesson lands or closes (a commit, a merged PR or a tool fix, by anyone). The ledger's first paragraph names that issue.
+- When a lesson lands or closes, run that `issue-update` in the same step as its ledger row.
 - Post a Dispatch message, with its link, only when a deliverable lands that a person asked for or that changes what a person, not only an agent, must do. Any other landing gets only the `issue-update` link.
