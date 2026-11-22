@@ -30,7 +30,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 # row NAME STATUS IDENTITY EXPIRY COMMAND [DETAIL]: write one tab-separated
 # result row. row makes each tab and newline in IDENTITY, EXPIRY, COMMAND and
-# DETAIL a space (NAME and STATUS are the caller's fixed words).
+# DETAIL a space, and writes NAME and STATUS as the caller gives them.
 row() {
     local name=$1 status=$2 identity=$3 expiry=$4 command=$5 detail=${6:-}
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
