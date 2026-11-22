@@ -91,7 +91,7 @@ printf '[sshd]\nenabled = true\nport = ssh\nmaxretry = 5\nbantime = 600\nfindtim
 sudo systemctl enable --now fail2ban
 ```
 
-**Read `references/tailscale-ssh.md` now** only if the user wants keyless SSH from a phone.
+**Read `references/tailscale-ssh.md` now** only if the user wants keyless SSH from a phone: `sudo tailscale up --ssh`, the Tailscale SSH check ACL in the admin console, and why only that ACL, not the Step 5 settings or fail2ban, covers Tailscale SSH.
 
 ## 6. Security group
 
