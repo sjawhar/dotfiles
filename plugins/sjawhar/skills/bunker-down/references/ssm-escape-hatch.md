@@ -41,7 +41,7 @@ Inline policy (Session Manager only, explicit deny on all else):
      --iam-instance-profile Name=EC2-SSM-SessionOnly
    ```
 
-2. **Agent.** On the instance, run `sudo snap restart amazon-ssm-agent` (or `sudo systemctl restart amazon-ssm-agent`). Wait 15 s. Then, on the instance, check it registered: `aws ssm describe-instance-information --filters Key=InstanceIds,Values=$INSTANCE_ID`.
+2. **Agent.** On the instance, run `sudo snap restart amazon-ssm-agent` (or `sudo systemctl restart amazon-ssm-agent`). Wait 15 s. Then check it registered: `aws ssm describe-instance-information --filters Key=InstanceIds,Values=$INSTANCE_ID`.
 3. **Plugin.** On the machine that runs `aws ssm start-session` (the user's laptop), install the Session Manager plugin. On Ubuntu:
 
    ```bash

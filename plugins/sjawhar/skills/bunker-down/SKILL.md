@@ -33,9 +33,9 @@ Record for later steps:
 ## 2. SSM escape hatch
 
 1. **Agent.** Do this first: SSM access does not depend on SSH, Tailscale or network rules. Check that the agent runs: `sudo systemctl status snap.amazon-ssm-agent.amazon-ssm-agent.service` (`amazon-ssm-agent` when it is not a snap).
-2. **Install.** If the agent is missing: `sudo snap install amazon-ssm-agent --classic`.
-3. **Role and plugin.** Read `references/ssm-escape-hatch.md` now: it has the two IAM policies and the commands that create and attach the role and install the Session Manager plugin.
-4. **GATE:** the user runs `aws ssm start-session --target $INSTANCE_ID --region $REGION` from their laptop.
+   - If the agent is missing: `sudo snap install amazon-ssm-agent --classic`.
+2. **Role and plugin.** Read `references/ssm-escape-hatch.md` now: it has the two IAM policies and the commands that create and attach the role and install the Session Manager plugin.
+3. **GATE:** the user runs `aws ssm start-session --target $INSTANCE_ID --region $REGION` from their laptop.
 
 ## 3. Tailscale
 
