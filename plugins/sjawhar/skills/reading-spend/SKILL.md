@@ -57,7 +57,7 @@ One row per UTC `day`, `project`, `platform`, `item` and `kind`, with `usd`.
 - Ours: also leave out kinds `colleague`, `caller_unknown`, `other_project`, `overhead`, `credit`, and projects `People's machines` and `No owner found`.
 - `Google Cloud` rows count dollars before Google's promotional credit.
 - One signed `credit` row a day, in `(no project)`, brings the platform back to the bill Google charges.
-- The bill less Support (the `overhead` row) less the estimate is split, signed, between ours, `People's machines` and `No owner found`, so a remainder row can be below 0.
+- The bill less Support (the `overhead` row), less the estimate and less the services mapped to a stream's project, is split, signed, between ours, `People's machines` and `No owner found`, so a remainder row can be below 0.
 - Today and yesterday still grow: OpenAI posts a day's costs during that day and the next.
 
 A project's week by platform:
