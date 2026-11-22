@@ -58,7 +58,9 @@ Any one of these, except for Oh My Pi:
   - Send such a project one pull request, and no second one until Sami has seen how its maintainers reacted to the first. Put that reaction, or that they have not reacted yet, in the ask for the second.
 - No skill or template yet, or a send that departs from its template.
 - It commits him or represents his position: a promise, a deadline, a disclosure, a claim he would have to stand behind.
-- A program that will post to people outside the company (a CI review comment, a merge reply, a bot answer). He reviews what it can post before it posts (to Oh My Pi too). He reviews its fixed text and the prompt behind any text a model writes.
+- A program that will post to people outside the company (a CI review comment, a merge reply, a bot answer).
+  - He reviews what it can post before it posts (to Oh My Pi too).
+  - He reviews its fixed text and the prompt behind any text a model writes.
   - Check both first for a promise nobody decided to make, such as a promise to publish proofs.
 - A case between the two lists waits, and the ask says which way it leaned and why.
 
