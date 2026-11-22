@@ -25,8 +25,8 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 - Record each decision's source, time and scope: standing approvals (kept through handoffs until superseded), holds, release conditions, priorities, merge windows.
 - Read the record again at each wake and before each merge.
 - Only a current decision sets a hold or a quiet window: never restore a lifted hold or infer a window from history.
-- Merge only by an ordinary protected squash merge, never under a permission inferred from earlier use.
-- Ask Sami once for a merge window: a span to merge READY PRs without asking per PR. A grant to this queue session stays live for it.
+- Merge only by an ordinary protected squash merge, never under a permission inferred from earlier use. A grant to this queue session stays live for it.
+- Ask Sami once for a merge window: a span to merge READY PRs without asking per PR.
 - At registration, check the author, the account this session writes as (`gh api user --jq .login`), required reviews and CODEOWNERS.
 - An approval that account cannot give is unmet until `landing-a-pr`'s repo merge rules name who gives it.
 - **Read `references/sequencing.md` now** before you decide the merge order: the order with no explicit priority (Sami's goal, parents, corpus changes), never by READY arrival order.
@@ -62,7 +62,7 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 
 Before you declare READY or merge, read `references/review-evidence.md`: the surfaces to read, each finding's disposition, the smaller gates for prose-only and test-only PRs, and review seats.
 
-- You check the enumeration and dispositions, not code or severity: the owner dispositions findings and the independent reviewer states that nothing blocking remains.
+- The owner dispositions findings and the independent reviewer states that nothing blocking remains. You check the enumeration and dispositions, not code or severity.
 - On disagreement, return the exact list of undispositioned findings.
 
 ## 4. Bind evidence to the head
