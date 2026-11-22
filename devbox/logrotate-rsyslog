@@ -1,0 +1,31 @@
+# rsyslog's files on sami-devbox's boot disk (dispatch://INFRA-5287). devbox/gce-host.sh copies this
+# over the rsyslog package's /etc/logrotate.d/rsyslog, and installs devbox/logrotate-hourly.conf so
+# that logrotate runs every hour.
+#
+# rsyslog writes a text copy of every record journald holds. The package rotates these files weekly
+# and keeps four, with no size bound: on 2026-11-22 /var/log/syslog.1 held one week in 4.2 GiB
+# (about 600 MiB a day, a third of it Postgres checkpoint lines), and /var/log held 7.3 GiB against
+# sami-devbox-check's limit. Here a file rotates daily, and at the hourly run once it is over
+# 200 MiB. 20 rotations are kept, gzip-compressed (15 to 1 on this box's syslog); the newest stays
+# uncompressed until the next rotation, as in the package's file, since rsyslog writes to it until
+# its HUP lands. So syslog takes at most about 250 MiB live, 250 MiB in syslog.1 and 19 x 17 MiB,
+# under 1 GiB; at the volume of 2026-11-22, 20 rotations hold about a week.
+/var/log/syslog
+/var/log/mail.log
+/var/log/kern.log
+/var/log/auth.log
+/var/log/user.log
+/var/log/cron.log
+{
+	daily
+	maxsize 200M
+	rotate 20
+	missingok
+	notifempty
+	compress
+	delaycompress
+	sharedscripts
+	postrotate
+		/usr/lib/rsyslog/rsyslog-rotate
+	endscript
+}
