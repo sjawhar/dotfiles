@@ -57,8 +57,7 @@ Any one of these, except for Oh My Pi:
 - No skill or template yet, or a send that departs from its template.
 - It commits him or represents his position: a promise, a deadline, a disclosure, a claim he would have to stand behind.
 - A program that will post to people outside the company (a CI review comment, a merge reply, a bot answer).
-  - He reviews what it can post before it posts (to Oh My Pi too).
-  - He reviews its fixed text and the prompt behind any text a model writes.
+  - He reviews what it can post before it posts (to Oh My Pi too), its fixed text and the prompt behind any text a model writes.
   - Check both first for a promise nobody decided to make, such as a promise to publish proofs.
 
 A case between the two lists waits. The ask for such a case says which way it leaned and why.
