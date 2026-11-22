@@ -8,7 +8,17 @@ A mount's name does not say, and `/mnt/nvme` means opposite things on the two ma
 
 - sami-devbox: `/mnt/nvme` and `/mnt/durable` are persistent disks and survive; `/mnt/scratch` is raid0 over local SSD and is empty after a stop.
 - sami-rocqperf: `/mnt/durable` is a managed disk and survives; `/mnt/nvme` is raid0 over local NVMe and is empty after a stop.
-- On an unfamiliar machine, read the devices under the mount: `lsblk -s -no NAME,MODEL,TYPE "$(findmnt -no SOURCE <mount>)"`, or `sudo nvme list`. On Google Cloud a persistent disk's model is `nvme_card-pd` and a local SSD's is `nvme_card<N>`. On Azure a managed disk shows as `MSFT NVMe Accelerator` with serial `00000` and a local one as `Microsoft NVMe Direct Disk`; an empty `/dev/disk/azure/data/by-lun` does not mean there is no data disk, because an NVMe data disk is not listed there. The surest check on Azure: a managed disk shares a controller with the namespace `/dev/disk/azure/os` points at, and that OS disk survives a stop.
+- On an unfamiliar machine, read the devices under the mount: `lsblk -s -no NAME,MODEL,TYPE "$(findmnt -no SOURCE <mount>)"`, or `sudo nvme list`.
+
+  | Cloud | Disk | Shows as |
+  | --- | --- | --- |
+  | Google Cloud | persistent disk | model `nvme_card-pd` |
+  | Google Cloud | local SSD | model `nvme_card<N>` |
+  | Azure | managed disk | `MSFT NVMe Accelerator`, serial `00000` |
+  | Azure | local disk | `Microsoft NVMe Direct Disk` |
+
+  - On Azure, an empty `/dev/disk/azure/data/by-lun` does not mean there is no data disk, because an NVMe data disk is not listed there.
+  - The surest check on Azure: a managed disk shares a controller with the namespace `/dev/disk/azure/os` points at. That OS disk survives a stop.
 
 ## Inside an agent box
 

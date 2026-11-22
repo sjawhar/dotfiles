@@ -16,12 +16,16 @@ Read this in Phase 5, and before you delete a tree in which a container left roo
    - Delete what you built. Delete an image from a shared registry, even one you pulled, only when `docker ps -a --filter ancestor=<id>` lists no container and a grep of the checkouts on the box for its digest and tag (pipeline scripts, lock files) finds nothing. The first check says whether it is used now, not whether another session will pull it, and the image can be the only reachable copy of a toolchain. A local build (no registry prefix) can take its builder an hour to rebuild.
    - An unauthenticated registry read cannot tell a private tag from a missing one, so do not read its answer as "the image is irreplaceable" or as "the tag is gone".
 5. Containers: `python3 $S containers` gives each a family, an owner and a verdict; read `cmd_containers` in `$S` for how it sets each verdict. Labels attribute; they never decide liveness. Trust its client check only on a host whose `docker ps` lists the container. Delete only what the verdict allows, and run the census again before `rm`:
-   - local-stack `idle`: leave it and message the owner.
-   - ryuk, running: never delete it by hand; it removes its fixtures about 10 s after its client disconnects. Find the client with `docker port <ryuk>` and `ss -tnp`; if that is an orphaned pytest, kill it.
-   - ryuk, `stranded` (created, never started): remove it together with the fixtures labelled with its `org.testcontainers.session-id`.
-   - tc-fixture: delete without its ryuk only at `orphan-no-ryuk`. A manual delete of a fixture whose ryuk exists can collide with the ryuk's removal.
-   - agentbox: never.
-   - other: delete only eval or task sandboxes, never service containers (postgres, nats, registries, envoy, buildx). A sandbox is an orphan when no eval process exists and nothing names it, or when its only holder is a dangling `docker exec -it ... bash`: kill the shell, then `docker compose -p PROJECT down -v`. If a live session can be the owner, ask it first.
+
+   | Family and verdict | Action |
+   | --- | --- |
+   | local-stack `idle` | Leave it and message the owner. |
+   | ryuk, running | Never delete it by hand; it removes its fixtures about 10 s after its client disconnects. Find the client with `docker port <ryuk>` and `ss -tnp`; if that is an orphaned pytest, kill it. |
+   | ryuk, `stranded` (created, never started) | Remove it together with the fixtures labelled with its `org.testcontainers.session-id`. |
+   | tc-fixture | Delete without its ryuk only at `orphan-no-ryuk`. A manual delete of a fixture whose ryuk exists can collide with the ryuk's removal. |
+   | agentbox | Never. |
+   | other | Delete only eval or task sandboxes, never service containers (postgres, nats, registries, envoy, buildx). A sandbox is an orphan when no eval process exists and nothing names it, or when its only holder is a dangling `docker exec -it ... bash`: kill the shell, then `docker compose -p PROJECT down -v`. If a live session can be the owner, ask it first. |
+
    - A container's bind-mounted output appears in no docker measurement: measure the directory it writes to, and cap that output from inside the container.
 6. `docker volume prune -f` (dangling only, attached to no container). Always safe.
 

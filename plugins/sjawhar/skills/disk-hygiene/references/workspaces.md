@@ -4,14 +4,16 @@ Read this before you run `inventory`, `plan` or `apply`, before a manual `rm` of
 
 ## What each class means for you
 
-- `LIVE`: a process stands in it. Leave it.
-- `UNPUSHED`, `GIT_UNPUSHED`: it holds commits no remote has. Keep it and list it for its owner.
-- `PUSHED`, `MERGED`, `STALE_REGISTRATION`: `apply` handles it. Nothing to do by hand.
-- `SCRATCH`: a plain directory `apply` removes once idle, unless the protected set covers it.
-- `HOLDS_WORKING_COPY`, `SCRATCH_UNVERIFIED`: a plain directory with a checkout inside, or one the scan could not read. Keep it. Look inside it by hand when `$S sizes --top 15` on its root lists it (`finding-space.md`).
-- `UNREGISTERED`: jj forgot it but the directory remains, and `apply` will not remove it. Find its owner before you remove it by hand.
-- `UNOBSERVABLE`: outside what this process can see, often another box's. `plan` never plans it: keep it, and judge it from a host session.
-- `GIT_HEAD_PUSHED`: a plain git worktree, removed only through its owner's release (`check-in.md`).
+| Class | What it is | Action |
+| --- | --- | --- |
+| `LIVE` | A process stands in it. | Leave it. |
+| `UNPUSHED`, `GIT_UNPUSHED` | It holds commits no remote has. | Keep it and list it for its owner. |
+| `PUSHED`, `MERGED`, `STALE_REGISTRATION` | | `apply` handles it. Nothing to do by hand. |
+| `SCRATCH` | A plain directory. | `apply` removes it once idle, unless the protected set covers it. |
+| `HOLDS_WORKING_COPY`, `SCRATCH_UNVERIFIED` | A plain directory with a checkout inside, or one the scan could not read. | Keep it. Look inside it by hand when `$S sizes --top 15` on its root lists it (`finding-space.md`). |
+| `UNREGISTERED` | jj forgot it but the directory remains. | `apply` will not remove it. Find its owner before you remove it by hand. |
+| `UNOBSERVABLE` | Outside what this process can see, often another box's. | `plan` never plans it: keep it, and judge it from a host session. |
+| `GIT_HEAD_PUSHED` | A plain git worktree. | Removed only through its owner's release (`check-in.md`). |
 
 ## Classify
 
