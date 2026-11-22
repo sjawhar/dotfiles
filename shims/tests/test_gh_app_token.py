@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import importlib.util
+import http.server
 import io
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -75,6 +77,58 @@ printf '%s' "$SECRET_RUN_STUB_RESPONSE"
 """
 
 
+def checked_now():
+    """A cache entry's checked_at for a check at GitHub just now: inside the shim's interval, so
+    a case about something else asks GitHub nothing (live_cached_token)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class GitHubStandIn:
+    """GitHub's GET /rate_limit, the one call the shim makes with a cached token: 401 for a token
+    in revoked, answers[token] for a token there ("not-http" for a reply that is not HTTP), 200
+    for any other. Each request is recorded as (path, token), and during, when set, runs before
+    the answer: what another caller does while the check is out."""
+
+    def __init__(self):
+        self.revoked = set()
+        self.answers = {}
+        self.requests = []
+        self.during = None
+        stand_in = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                token = self.headers.get("Authorization", "").removeprefix("Bearer ")
+                stand_in.requests.append((self.path, token))
+                if stand_in.during:
+                    stand_in.during()
+                status = 401 if token in stand_in.revoked else stand_in.answers.get(token, 200)
+                if status == "not-http":
+                    self.wfile.write(b"not an HTTP reply\r\n\r\n")
+                    return
+                body = b"{}"
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass  # a line here would land in the stderr a case captures
+
+        class Server(http.server.ThreadingHTTPServer):
+            def handle_error(self, request, client_address):
+                pass  # a reply to a shim that stopped waiting fails; its traceback would land there too
+
+        self.server = Server(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
 class GhAppTokenTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -89,8 +143,10 @@ class GhAppTokenTests(unittest.TestCase):
             stub.chmod(0o700)
         self.secrets_log = Path(self.temp_dir.name) / "secrets.log"
         self.secret_run_log = Path(self.temp_dir.name) / "secret-run.log"
+        self.github = GitHubStandIn()
         self.patches = [
             patch.object(gh_app_token, "CACHE_DIR", self.cache_dir),
+            patch.object(gh_app_token, "GITHUB_API", self.github.url),
             patch.object(gh_app_token, "git_config", side_effect=self.config_value),
             patch.object(gh_app_token, "git_config_optional", side_effect=self.git_config.get),
             patch.object(gh_app_token, "refused_owners", side_effect=self.refused_owners),
@@ -101,6 +157,8 @@ class GhAppTokenTests(unittest.TestCase):
                     "SECRETS_STUB_LOG": str(self.secrets_log),
                     "SECRET_RUN_STUB_LOG": str(self.secret_run_log),
                     "SECRET_RUN_STUB_RESPONSE": BROKER_RESPONSE,
+                    "NO_PROXY": "127.0.0.1",
+                    "no_proxy": "127.0.0.1",
                 },
             ),
         ]
@@ -110,6 +168,7 @@ class GhAppTokenTests(unittest.TestCase):
     def tearDown(self):
         for patcher in reversed(self.patches):
             patcher.stop()
+        self.github.close()
         self.temp_dir.cleanup()
 
     def config_value(self, key):
@@ -872,6 +931,185 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertIn("a --repo/--read-only token has no fallback", stderr)
         self.assertEqual(self.secrets_calls(), [])
 
+    def cache_entry(self, owner, token, checked_seconds_ago, scope=None, left=timedelta(minutes=50)):
+        """Cache token for owner (and scope) with left before it lapses, its last check at GitHub
+        checked_seconds_ago seconds back: negative is in the future, and None is an entry with no
+        check, which a shim from before the check wrote."""
+        now = datetime.now(timezone.utc)
+        entry = {"token": token, "expires_at": (now + left).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        if checked_seconds_ago is not None:
+            entry["checked_at"] = (now - timedelta(seconds=checked_seconds_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cache_file = gh_app_token.token_cache_file("agent", owner, gh_app_token.scope_key(scope))
+        gh_app_token.write_cache_file(cache_file, entry)
+        return cache_file
+
+    def assert_checked_between(self, cache_file, before, after):
+        """cache_file's checked_at is a time between before and after (it is kept to the second)."""
+        checked = datetime.fromisoformat(json.loads(cache_file.read_text())["checked_at"].replace("Z", "+00:00"))
+        self.assertLessEqual(before.replace(microsecond=0), checked)
+        self.assertLessEqual(checked, after)
+
+    def broker_mints(self):
+        return len([arg for arg in self.secret_run_calls() if arg == "--reason"])
+
+    def test_a_cached_token_github_revoked_is_dropped_and_minted_once_afresh(self):
+        # Given: a cached token GitHub has revoked since (2026-11-22: a leaked token's revoke left
+        # every call for its repository with the dead token and a 401 until it lapsed), its last
+        # check 61 s back, past the 60 s interval; never checked; or checked "in the future".
+        cases = (
+            ("narrowed", ["agent", "--owner", "sjawhar", "--repo", "oh-my-pi"], {"repositories": ["oh-my-pi"]},
+             NARROWED_RESPONSE, "broker-token-sjawhar-narrowed"),
+            ("owner-wide", ["agent", "--owner", "sjawhar"], None, BROKER_RESPONSE, "broker-token-sjawhar"),
+        )
+        for name, argv, scope, response, fresh in cases:
+            for checked in (61, None, -120):
+                with self.subTest(token=name, checked_seconds_ago=checked):
+                    self.secret_run_log.unlink(missing_ok=True)
+                    self.github.requests.clear()
+                    cache_file = self.cache_entry("sjawhar", "revoked-token", checked, scope)
+                    self.github.revoked.add("revoked-token")
+                    self.set_broker_response(response)
+
+                    rc, stdout, stderr = self.run_main(argv)
+
+                    # Then: GitHub is asked once, the dead token is not served, and one fresh
+                    # token is minted and cached in its place.
+                    self.assertEqual((rc, stdout), (0, fresh + "\n"), stderr)
+                    self.assertEqual(self.github.requests, [("/rate_limit", "revoked-token")])
+                    self.assertIn("GitHub answered 401 for the cached token", stderr)
+                    self.assertNotIn("revoked-token", stderr)
+                    self.assertEqual(self.broker_mints(), 1)
+                    self.assertEqual(json.loads(cache_file.read_text())["token"], fresh)
+                    # And the next call is served the fresh token from the cache: it was checked
+                    # when minted, so neither GitHub nor the broker is asked again.
+                    self.assertEqual(self.run_main(argv), (0, fresh + "\n", ""))
+                    self.assertEqual(len(self.github.requests), 1)
+                    self.assertEqual(self.broker_mints(), 1)
+
+    def test_a_cached_token_checked_inside_the_interval_is_served_without_asking_github(self):
+        # Given: a cached token last checked 30 s back, inside the 60 s interval, that GitHub
+        # would answer 401 for if asked.
+        self.cache_entry("sjawhar", "revoked-token", 30)
+        self.github.revoked.add("revoked-token")
+
+        rc, stdout, stderr = self.run_main(["agent", "--owner", "sjawhar"])
+
+        # Then: it is served as cached, and neither GitHub nor the broker is asked: a revoke is
+        # seen at the next check, at most a minute late, and a call in between costs nothing.
+        self.assertEqual((rc, stdout, stderr), (0, "revoked-token\n", ""))
+        self.assertEqual(self.github.requests, [])
+        self.assertEqual(self.secret_run_calls(), [])
+
+    def test_a_live_cached_token_is_checked_once_an_interval_and_the_check_recorded(self):
+        cache_file = self.cache_entry("sjawhar", "live-token", 61)
+
+        before = datetime.now(timezone.utc)
+        first = self.run_main(["agent", "--owner", "sjawhar"])
+        second = self.run_main(["agent", "get"], stdin="host=github.com\npath=sjawhar/repo.git\n\n")
+        after = datetime.now(timezone.utc)
+
+        self.assertEqual(first, (0, "live-token\n", ""))
+        self.assertEqual(second[0], 0)
+        self.assertIn("password=live-token", second[1])
+        self.assertEqual(self.github.requests, [("/rate_limit", "live-token")])
+        self.assertEqual(self.secret_run_calls(), [])
+        self.assert_checked_between(cache_file, before, after)
+
+    def test_any_answer_but_401_or_none_serves_the_cached_token_and_records_the_check(self):
+        # GitHub refusing for another reason (a rate limit, an outage), a reply that is not HTTP,
+        # or no answer at all says nothing about the token: it is served as before, and the check
+        # is not repeated inside the interval, so an outage costs one wait a minute, not one a call.
+        with socket.socket() as closed:
+            closed.bind(("127.0.0.1", 0))
+            nothing_listens = f"http://127.0.0.1:{closed.getsockname()[1]}"
+        for answer in (403, 429, 500, 503, "not-http", None):
+            with self.subTest(answer=answer):
+                self.github.requests.clear()
+                cache_file = self.cache_entry("sjawhar", "cached-token", 61)
+                api = self.github.url
+                if answer is None:
+                    api = nothing_listens
+                else:
+                    self.github.answers["cached-token"] = answer
+                before = datetime.now(timezone.utc)
+                with patch.object(gh_app_token, "GITHUB_API", api):
+                    first = self.run_main(["agent", "--owner", "sjawhar"])
+                    second = self.run_main(["agent", "--owner", "sjawhar"])
+                after = datetime.now(timezone.utc)
+                self.assertEqual(first, (0, "cached-token\n", ""))
+                self.assertEqual(second, (0, "cached-token\n", ""))
+                self.assertEqual(len(self.github.requests), 0 if answer is None else 1)
+                self.assertEqual(self.secret_run_calls(), [])
+                self.assert_checked_between(cache_file, before, after)
+
+    def test_a_github_that_does_not_answer_holds_the_call_only_for_the_timeout(self):
+        # GitHub accepts the connection and says nothing for 3 s; the shim waits LIVENESS_TIMEOUT
+        # (here 0.5 s) for it, then serves the cached token and records the check.
+        cache_file = self.cache_entry("sjawhar", "cached-token", 61)
+        self.github.during = lambda: time.sleep(3)
+
+        before = datetime.now(timezone.utc)
+        with patch.object(gh_app_token, "LIVENESS_TIMEOUT", 0.5):
+            answer = self.run_main(["agent", "--owner", "sjawhar"])
+        after = datetime.now(timezone.utc)
+
+        self.assertEqual(answer, (0, "cached-token\n", ""))
+        self.assertLess((after - before).total_seconds(), 2.5)
+        self.assertEqual(self.secret_run_calls(), [])
+        self.assert_checked_between(cache_file, before, after)
+
+    def test_a_check_never_replaces_an_entry_another_call_wrote_while_it_was_out(self):
+        # Given: a stale entry whose check is out when another call caches a fresh token there
+        # (its mint after a 401, or a GH_APP_TOKEN_MIN_LIFETIME caller's).
+        cache_file = self.cache_entry("sjawhar", "cached-token", 61)
+        fresh = {"token": "fresh-token", "expires_at": "2099-01-01T00:00:00Z", "checked_at": checked_now()}
+        self.github.during = lambda: gh_app_token.write_cache_file(cache_file, fresh)
+
+        answer = self.run_main(["agent", "--owner", "sjawhar"])
+
+        # Then: the checked token is served, and the record of its check does not put the older
+        # token back over the fresh one.
+        self.assertEqual(answer, (0, "cached-token\n", ""))
+        self.assertEqual(json.loads(cache_file.read_text()), fresh)
+
+    def test_a_drop_waits_for_the_token_cache_lock_and_keeps_what_was_written_under_it(self):
+        # A drop's compare and remove run under the lock every cache write of a mint takes, so a
+        # fresh token written between the compare and the remove is never removed.
+        cache_file = self.cache_entry("sjawhar", "revoked-token", 61)
+        fresh = {"token": "fresh-token", "expires_at": "2099-01-01T00:00:00Z", "checked_at": checked_now()}
+        drop = threading.Thread(target=gh_app_token.settle_checked_entry, args=(cache_file, "revoked-token", None))
+        with gh_app_token.token_cache_locked():
+            drop.start()
+            drop.join(0.5)
+            self.assertTrue(drop.is_alive(), "the drop did not wait for the token-cache lock")
+            gh_app_token.write_cache_file(cache_file, fresh)
+        drop.join(10)
+        self.assertFalse(drop.is_alive())
+        self.assertEqual(json.loads(cache_file.read_text()), fresh)
+
+    def test_a_cached_token_whose_check_outlasts_the_life_asked_for_is_not_served(self):
+        # Given: a cached token with about 1810 s left, a caller that needs 1800 s, and a check
+        # during which the shim's clock moves on 20 s.
+        class Clock(datetime):
+            offset = timedelta(0)
+
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.now(tz) + cls.offset
+
+        self.cache_entry("sjawhar", "cached-token", 61, left=timedelta(seconds=1811))
+        self.github.during = lambda: setattr(Clock, "offset", timedelta(seconds=20))
+
+        with patch.object(gh_app_token, "datetime", Clock), \
+                patch.dict(os.environ, {gh_app_token.MIN_LIFETIME_ENV: "1800"}):
+            rc, stdout, stderr = self.run_main(["agent", "--owner", "sjawhar"])
+
+        # Then: the token was checked, and, now short of the life asked for, is not served; a
+        # fresh one is.
+        self.assertEqual(self.github.requests, [("/rate_limit", "cached-token")])
+        self.assertEqual((rc, stdout), (0, "broker-token-sjawhar\n"), stderr)
+        self.assertEqual(self.broker_mints(), 1)
+
 class BoxEnrollmentWait(unittest.TestCase):
     """A new agent box has no broker identity for its first ~100 s, so its first GitHub call
     waits for the enrollment instead of failing it (dispatch://INFRA-702). The wait is keyed on
@@ -1030,7 +1268,9 @@ class CacheOffTheRootDisk(unittest.TestCase):
         cache = home / ".cache" / "gh-app-token"
         cache.mkdir(parents=True, mode=0o700)
         expires = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-        (cache / "token-agent--app-123--acme.json").write_text(json.dumps({"token": "ghs_cached", "expires_at": expires}))
+        (cache / "token-agent--app-123--acme.json").write_text(
+            json.dumps({"token": "ghs_cached", "expires_at": expires, "checked_at": checked_now()})
+        )
         gitconfig = self.root / "gitconfig"
         gitconfig.write_text('[gh-app "agent"]\n\tapp-id = 123\n')
         log = cache / "decisions.log"
@@ -1071,7 +1311,9 @@ class CacheOffTheRootDisk(unittest.TestCase):
         cache = home / ".cache" / "gh-app-token"
         cache.mkdir(parents=True, mode=0o700)
         expires = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-        (cache / "token-agent--app-123--acme.json").write_text(json.dumps({"token": "ghs_cached", "expires_at": expires}))
+        (cache / "token-agent--app-123--acme.json").write_text(
+            json.dumps({"token": "ghs_cached", "expires_at": expires, "checked_at": checked_now()})
+        )
         gitconfig = self.root / "gitconfig"
         gitconfig.write_text('[gh-app "agent"]\n\tapp-id = 123\n')
         log = cache / "decisions.log"
@@ -1191,7 +1433,7 @@ class RefuseOwnerReadsOnlyTheMachinesOwnConfig(unittest.TestCase):
 
     def cache_token(self, owner, token):
         (self.cache / f"token-agent--app-123--{owner}.json").write_text(
-            json.dumps({"token": token, "expires_at": "2099-01-01T00:00:00Z"})
+            json.dumps({"token": token, "expires_at": "2099-01-01T00:00:00Z", "checked_at": checked_now()})
         )
 
     def run_shim(self, env, *argv, stdin="", cwd=None):
