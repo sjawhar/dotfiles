@@ -44,12 +44,12 @@ his phone appears as sent by him. Sami is the only user, so WhatsApp and Signal 
 people from his phone's contacts first. The bridges leave that off by default so that
 one user's contacts don't leak to the others on a shared bridge.
 
-A second registration, `envoy-relay`, is for the chat relay of dojo's Compose file
+Another registration, `envoy-relay`, is for the chat relay of dojo's Compose file
 (HOME-247). Its user namespace matches `@sami:chathub` alone, so Tuwunel sends it each
 event of every room Sami is in, at `http://127.0.0.1:29342`. Its url is null, and Tuwunel
 sends it nothing, until the file `envoy-relay.on` exists in the hub's state folder. A full
-run of the installer writes the url from that file and, when the url changed, restarts
-Tuwunel once.
+run of the installer sets that url when the file exists and null when it does not, and
+restarts Tuwunel once when the registration changed.
 
 ## State and secrets
 

@@ -5,7 +5,9 @@
 # every bridge config on the values below and keeps each bridge's tokens.
 # It also registers the chat relay of dojo's Compose file (registrations/envoy-relay.yaml);
 # its url is null, so Tuwunel sends it nothing, until envoy-relay.on exists in the state
-# folder. `chathub.sh relay-registration` writes only that file. Switch the relay on, or off:
+# folder. `chathub.sh relay-registration` writes only that file and, when it changed, the
+# marker that makes the next full run restart Tuwunel; it runs neither mise nor systemctl.
+# Switch the relay on, or off:
 #   touch ~/.local/share/chathub/envoy-relay.on && env -u XDG_DATA_HOME ~/.dotfiles/installers/chathub.sh
 #   rm -f ~/.local/share/chathub/envoy-relay.on && env -u XDG_DATA_HOME ~/.dotfiles/installers/chathub.sh
 set -euo pipefail
@@ -89,7 +91,6 @@ YQ="$("$MISE" which yq)"
 install -d -m 0700 "$STATE"
 install -d -m 0700 "$STATE/registrations"
 
-new_registration=false
 changed=()
 
 # Double puppeting: one registration whose user namespace covers the hub, so every
@@ -112,7 +113,7 @@ namespaces:
       exclusive: false
 EOF
     )
-    new_registration=true
+    touch "$RESTART_PENDING"
 fi
 dp_secret="as_token:$("$YQ" '.as_token' "$dp_reg")"
 
@@ -185,7 +186,7 @@ render_bridge() {
 
     if [ ! -f "$reg" ]; then
         "$MISE" exec -- "mautrix-$name" -g -c "$cfg" -r "$reg" >/dev/null
-        new_registration=true
+        touch "$RESTART_PENDING"
     fi
 }
 
@@ -193,7 +194,6 @@ for bridge in "${BRIDGES[@]}"; do
     # shellcheck disable=SC2086 # each entry is four space-separated fields
     render_bridge $bridge
 done
-[ "$new_registration" = true ] && touch "$RESTART_PENDING"
 
 mkdir -p "${HOME}/.config/systemd/user"
 for unit in tuwunel.service mautrix@.service; do

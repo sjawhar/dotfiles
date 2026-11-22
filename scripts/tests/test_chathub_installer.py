@@ -116,7 +116,8 @@ fi
 """
 
 # Stands in for `curl -fsSL URL -o FILE`: serves the legacy example config only at
-# the pinned tag's URL, and fails like curl -f does for anything else.
+# the pinned tag's URL, and fails like curl -f does for anything else, or for every
+# URL when FAIL_CURL=1.
 CURL_STUB = r"""
 url=""; out=""
 while [ $# -gt 0 ]; do
@@ -126,7 +127,8 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-if [ "$url" = "https://raw.githubusercontent.com/mautrix/discord/v0.7.7/example-config.yaml" ]; then
+pinned="https://raw.githubusercontent.com/mautrix/discord/v0.7.7/example-config.yaml"
+if [ "${FAIL_CURL:-}" != 1 ] && [ "$url" = "$pinned" ]; then
     cp "$LEGACY_EXAMPLE" "$out"
 else
     echo "curl: (22) The requested URL returned error: 404" >&2; exit 22
@@ -140,7 +142,7 @@ if [ "${FAIL_RESTART:-}" = 1 ] && [ "${2:-}" = restart ]; then exit 1; fi
 """
 
 RELAY_URL = "http://127.0.0.1:29342"
-TOKEN = r"\A[0-9a-f]{64}\Z"
+TOKEN_RE = r"\A[0-9a-f]{64}\Z"
 
 STATUS_EVENT_PATHS: tuple[tuple[str, str], ...] = (
     ("gmessages", "matrix"),
@@ -229,16 +231,13 @@ class ChathubInstaller(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def install(self, **env: str) -> None:
-        result = subprocess.run(
-            ["bash", str(INSTALLER)], capture_output=True, text=True, env={**self.env, **env}, check=False
+    def run_installer(self, *args: str, **env: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(INSTALLER), *args], capture_output=True, text=True, env={**self.env, **env}, check=False
         )
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
-    def relay_registration(self) -> None:
-        result = subprocess.run(
-            ["bash", str(INSTALLER), "relay-registration"], capture_output=True, text=True, env=self.env, check=False
-        )
+    def install(self, *args: str, **env: str) -> None:
+        result = self.run_installer(*args, **env)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
     def stub_calls(self) -> str:
@@ -257,7 +256,7 @@ class ChathubInstaller(unittest.TestCase):
         reg = self.yaml(self.relay_reg)
         tokens = (reg["as_token"], reg["hs_token"])
         for token in tokens:
-            self.assertRegex(token, TOKEN)
+            self.assertRegex(token, TOKEN_RE)
         self.assertNotEqual(tokens[0], tokens[1])
         return tokens
 
@@ -350,8 +349,7 @@ class ChathubInstaller(unittest.TestCase):
         self.install()
         token = self.config("signal")["appservice"]["as_token"]
         double_puppet = self.yaml(self.state / "registrations" / "doublepuppet.yaml")["as_token"]
-        log = self.root / "systemctl.log"
-        log.write_text("", encoding="utf-8")
+        self.clear_logs()
 
         self.install()
 
@@ -360,7 +358,7 @@ class ChathubInstaller(unittest.TestCase):
         generated = self.generate_log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(generated.count("mautrix-signal"), 1)
         # Restarting Tuwunel restarts every bridge; a rerun with no new registration must not.
-        self.assertNotIn("--user restart tuwunel", log.read_text(encoding="utf-8").splitlines())
+        self.assertEqual(self.tuwunel_restarts(), 0)
 
     def test_rerun_restores_drift_and_restarts_only_that_bridge(self) -> None:
         """A bridge reads its config at startup, so a corrected config needs a restart;
@@ -368,13 +366,13 @@ class ChathubInstaller(unittest.TestCase):
         self.install()
         cfg = self.state / "gmessages" / "config.yaml"
         subprocess.run([REAL_YQ, "-i", '.homeserver.domain = "elsewhere"', str(cfg)], check=True)
-        log = self.root / "systemctl.log"
-        log.write_text("", encoding="utf-8")
+        self.clear_logs()
 
         self.install()
 
         self.assertEqual(self.config("gmessages")["homeserver"]["domain"], "chathub")
-        restarts = [l for l in log.read_text(encoding="utf-8").splitlines() if "try-restart mautrix@" in l]
+        lines = self.systemctl_log.read_text(encoding="utf-8").splitlines()
+        restarts = [l for l in lines if "try-restart mautrix@" in l]
         self.assertEqual(restarts, ["--user try-restart mautrix@gmessages"])
 
     def test_rerun_turns_on_send_status_and_restarts_each_bridge_once(self) -> None:
@@ -385,8 +383,7 @@ class ChathubInstaller(unittest.TestCase):
             cfg = self.state / bridge / "config.yaml"
             subprocess.run([REAL_YQ, "-i", f".{section}.message_status_events = false", str(cfg)], check=True)
         before = {bridge: self.config(bridge) for bridge, _ in STATUS_EVENT_PATHS}
-        log = self.root / "systemctl.log"
-        log.write_text("", encoding="utf-8")
+        self.clear_logs()
 
         self.install()
 
@@ -396,22 +393,22 @@ class ChathubInstaller(unittest.TestCase):
                     changed_leaves(before[bridge], self.config(bridge)),
                     {(section, "message_status_events"): (False, True)},
                 )
-        lines = log.read_text(encoding="utf-8").splitlines()
+        lines = self.systemctl_log.read_text(encoding="utf-8").splitlines()
         restarts = [line for line in lines if "try-restart" in line]
         self.assertEqual(
             restarts,
             [f"--user try-restart mautrix@{bridge}" for bridge, _ in STATUS_EVENT_PATHS],
         )
-        self.assertNotIn("--user restart tuwunel", lines)
+        self.assertEqual(self.tuwunel_restarts(), 0)
 
     def test_state_is_private(self) -> None:
         self.install()
 
         self.assertEqual(stat.S_IMODE(self.state.stat().st_mode), 0o700)
 
-    def test_relay_registration_alone_writes_only_the_relay_file(self) -> None:
+    def test_relay_registration_alone_writes_only_the_relay_registration(self) -> None:
         """The registration-only call needs neither mise nor systemctl, and keeps its tokens."""
-        self.relay_registration()
+        self.install("relay-registration")
 
         reg = self.yaml(self.relay_reg)
         self.assertEqual(
@@ -430,16 +427,14 @@ class ChathubInstaller(unittest.TestCase):
         self.assertEqual(self.stub_calls(), "")
 
         self.switch.touch()
-        self.relay_registration()
+        self.install("relay-registration")
 
         self.assertEqual(self.yaml(self.relay_reg)["url"], RELAY_URL)
         self.assertEqual(self.relay_tokens(), tokens)
         self.assertEqual(self.stub_calls(), "")
 
     def test_unknown_argument_changes_nothing(self) -> None:
-        result = subprocess.run(
-            ["bash", str(INSTALLER), "relay-registraton"], capture_output=True, text=True, env=self.env, check=False
-        )
+        result = self.run_installer("relay-registraton")
 
         self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
         self.assertFalse(self.state.exists())
@@ -478,7 +473,7 @@ class ChathubInstaller(unittest.TestCase):
         self.clear_logs()
         self.switch.touch()
 
-        self.relay_registration()
+        self.install("relay-registration")
         self.assertEqual(self.stub_calls(), "")
 
         self.install()
@@ -504,15 +499,70 @@ class ChathubInstaller(unittest.TestCase):
 
         self.assertEqual(self.tuwunel_restarts(), 1)
 
+    def test_new_bridge_registration_restarts_tuwunel_once(self) -> None:
+        """A bridge registration made again on a rerun is new to Tuwunel, so it restarts once."""
+        self.install()
+        self.clear_logs()
+        (self.state / "registrations" / "whatsapp.yaml").unlink()
+
+        self.install()
+
+        self.assertEqual(self.tuwunel_restarts(), 1)
+        self.assertFalse(self.marker.exists())
+
+    def test_registration_made_before_a_failed_run_is_restarted_by_the_next_run(self) -> None:
+        """The marker is made with the registration, so a run that stops later still leaves
+        the restart to the next run. Discord renders after whatsapp and fetches its example
+        config with curl only when that config is missing."""
+        self.install()
+        self.clear_logs()
+        (self.state / "registrations" / "whatsapp.yaml").unlink()
+        (self.state / "discord" / "config.yaml").unlink()
+
+        result = self.run_installer(FAIL_CURL="1")
+
+        self.assertNotEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertTrue((self.state / "registrations" / "whatsapp.yaml").is_file())
+        self.assertTrue(self.marker.exists())
+        self.assertEqual(self.tuwunel_restarts(), 0)
+
+        self.install()
+
+        self.assertEqual(self.tuwunel_restarts(), 1)
+        self.assertFalse(self.marker.exists())
+
     def test_unusable_token_is_replaced(self) -> None:
         """Tuwunel stops loading registrations/ at a file it cannot parse, so an empty token
         is made new, never written back."""
         self.relay_reg.parent.mkdir(parents=True)
         self.relay_reg.write_text(f"id: envoy-relay\nurl: null\nas_token:\nhs_token: {'ab' * 32}\n", encoding="utf-8")
 
-        self.relay_registration()
+        self.install("relay-registration")
 
         self.relay_tokens()
+
+    def test_unusable_openssl_output_writes_nothing(self) -> None:
+        """A token openssl did not make usable stops the run before anything is written, and a
+        registration whose tokens are usable is kept without calling openssl."""
+        broken = self.root / "broken-openssl"
+        broken.mkdir()
+        write_executable(broken / "openssl", "echo x")
+        path = f"{broken}:{self.env['PATH']}"
+
+        result = self.run_installer("relay-registration", PATH=path)
+
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertFalse(self.relay_reg.exists())
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(list(self.state.glob(".envoy-relay.*")), [])
+
+        self.install("relay-registration")
+        before = self.relay_reg.read_bytes()
+
+        self.install("relay-registration", PATH=path)
+
+        self.assertEqual(self.relay_reg.read_bytes(), before)
+        self.assertEqual(list(self.state.glob(".envoy-relay.*")), [])
 
 
 if __name__ == "__main__":
