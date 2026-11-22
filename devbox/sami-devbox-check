@@ -68,6 +68,10 @@ ok() { echo "ok   $*"; }
 fail() { echo "FAIL $*"; fails=$((fails + 1)); }
 note() { echo "note $*"; }
 stamp() { date -u +%FT%TZ; }
+# Whether $1, the output of `kubectl auth can-i`, is its refusal: `no`, or `no - <reason>` where the
+# API server gives one (GKE names the IAM permission and the RBAC verb that would grant it). An error,
+# `yes` and nothing at all are not one.
+refused() { [[ "$1" == no || "$1" == "no - "* ]]; }
 
 # The account the metadata server serves, read as every client reads it: through GCE_METADATA_HOST,
 # which names the host's relay on the host (once the switch is on) and the box relay in a box.
@@ -99,10 +103,10 @@ identity_limits_check() {
         fail "infra-applier closed $where: gcloud auth print-access-token: $(tail -1 <<<"$tok")"
     fi
     got="$(kubectl --context "$KUBE_CONTEXT" -n envoy auth can-i get secrets 2>&1)"
-    [[ "$got" == no ]] && ok "no envoy secrets $where: kubectl -n envoy auth can-i get secrets: no" \
+    refused "$got" && ok "no envoy secrets $where: kubectl -n envoy auth can-i get secrets: no" \
         || fail "no envoy secrets $where: kubectl -n envoy auth can-i get secrets: $(tail -1 <<<"$got")"
     got="$(kubectl --context "$KUBE_CONTEXT" -n envoy auth can-i create pods/exec 2>&1)"
-    [[ "$got" == no ]] && ok "no envoy exec $where: kubectl -n envoy auth can-i create pods/exec: no" \
+    refused "$got" && ok "no envoy exec $where: kubectl -n envoy auth can-i create pods/exec: no" \
         || fail "no envoy exec $where: kubectl -n envoy auth can-i create pods/exec: $(tail -1 <<<"$got")"
     if ! command -v theorem-session >/dev/null; then
         fail "sessions $where: theorem-session is not on PATH (installers/theorem-session.sh installs it)"
@@ -379,7 +383,7 @@ n6_check() {
 grade_pool_check() {
     local where="$1" got
     got="$(kubectl --context "$GRADE_KUBE_CONTEXT" -n grade auth can-i create jobs 2>&1)"
-    [[ "$got" == no ]] && ok "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: no (a Legion pod submits as grade-submit@)" \
+    refused "$got" && ok "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: no (a Legion pod submits as grade-submit@)" \
         || fail "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: want no, got: $(tail -1 <<<"$got")"
 }
 # signer_try SA: mint SA's token and sign a blob as it. Sets sign_tok_rc, sign_tok_out (the token,
@@ -428,7 +432,7 @@ n6_routes_check() {
         && ok "N6 bucket $where: $ACCOUNT is refused the listing of gs://theorem-ossv-runs/out/ossv/ (the farm's pods write it)" \
         || fail "N6 bucket $where: gs://theorem-ossv-runs/out/ossv/: want a refusal, got: $(tail -1 <<<"$out")"
     got="$(kubectl --context "$KUBE_CONTEXT" -n "$N6_NAMESPACE" auth can-i create jobs 2>&1)"
-    [[ "$got" == no ]] && ok "N6 farm $where: kubectl -n $N6_NAMESPACE auth can-i create jobs: no (the farm's pods submit)" \
+    refused "$got" && ok "N6 farm $where: kubectl -n $N6_NAMESPACE auth can-i create jobs: no (the farm's pods submit)" \
         || fail "N6 farm $where: kubectl -n $N6_NAMESPACE auth can-i create jobs: want no, got: $(tail -1 <<<"$got")"
 }
 
