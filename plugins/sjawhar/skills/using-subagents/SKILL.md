@@ -34,7 +34,7 @@ A subagent starts with none of your context. What it needs, and every channel ba
 - Read `references/models-and-refusals.md` before you pick a lane's model, one for independence included, or claim a model family for a verdict, and when a provider refuses.
 - For a lane that commits or pushes: its own clone path and the branch it may push, since a commit or rebase in your checkout changes the files under your own checks.
 - A read-only lane gets neither: `git show <rev>:<path>` or `gh api` contents at a ref.
-- Read `references/workspaces.md` before you give a lane a clone or an `isolated` task or write a brief or a pull request body through a shell, and after lanes that edit return.
+- Read `references/workspaces.md` before you give a lane a clone or an `isolated` task or write a brief or a pull request body through a shell.
 - Read `references/lane-briefs.md` before you write a tester, reviewer, proof, survey or measurement brief.
 
 ## The six rules, verbatim in every brief
@@ -73,6 +73,8 @@ Every brief says how the lane reaches you.
 - Push a branch after every reviewed task, and keep no subagent's work unpushed past its own task: a branch only in a working copy is one bad command from gone.
 
 ## When a lane reports
+
+Read `references/workspaces.md` after lanes that edit return.
 
 1. **Treat the report as a claim.** Read `references/relaying-rules.md` before you relay a rule, a premise or a claim to a lane, or act on someone else's claim.
    - When you relay it, attribute it ("my tester reports X").
