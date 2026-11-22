@@ -157,11 +157,12 @@ check_vercel() {
     fi
 }
 
-# pup exits 0 and prints "Not authenticated" when it holds no token, so the exit code and a text
-# match on "Authenticated" both read as live; its --no-agent JSON carries the real answer.
+# pup exits 0 and writes "Not authenticated" to stderr when it holds no token, so the exit code and a text
+# match on "Authenticated" both read as live; its --no-agent JSON on stdout carries the real answer. A missing
+# row reports the JSON's .status, else stderr's first non-empty line, else stdout's first non-empty line.
 check_datadog() {
-    local out rc site exp detail
-    out="$(timeout "$TIMEOUT_S" pup --no-agent auth status 2>/dev/null)"
+    local out rc site exp detail err="$tmp/pup.stderr"
+    out="$(timeout "$TIMEOUT_S" pup --no-agent auth status 2>"$err")"
     rc=$?
     if ((rc == 0)) && jq -e '.authenticated == true' >/dev/null 2>&1 <<<"$out"; then
         site="$(jq -r '.site // empty' <<<"$out" 2>/dev/null)"
@@ -169,6 +170,7 @@ check_datadog() {
         row datadog_pup live "${site:-unknown}" "${exp:-unknown}" "pup --no-agent auth status"
     else
         detail="$(jq -r '.status // empty' <<<"$out" 2>/dev/null)"
+        detail="${detail:-$(first_line "$(<"$err")")}"
         row datadog_pup missing - - "pup --no-agent auth status" \
             "$(failure_detail "$rc" "${detail:-$(first_line "$out")}")"
     fi
@@ -202,8 +204,9 @@ check_gws() {
     # is the Gmail profile: every account's read tier holds Gmail read-only, and
     # some (wren) hold nothing else. gws writes advisories ("Using keyring
     # backend: ...") to stderr, so stdout alone is parsed and a failure reports
-    # stderr's last non-empty line.
-    local accounts_file="$HOME/.config/gws/accounts.json" accounts account out rc email err
+    # stderr's last non-empty line, or stdout's first non-empty line when stderr
+    # is empty.
+    local accounts_file="$HOME/.config/gws/accounts.json" accounts account out rc email err detail
     if [[ ! -f "$accounts_file" ]]; then
         row google_workspace missing - - "jq keys $accounts_file" "no $accounts_file"
         return
@@ -225,8 +228,9 @@ check_gws() {
                 email="$(jq -r '.emailAddress // empty' <<<"$out" 2>/dev/null)"
                 row "google_workspace_${account}" live "${email:-unknown}" "n/a" "GWS_ACCOUNT=${account} gws gmail users getProfile"
             else
+                detail="$(last_line "$(<"$err")")"
                 row "google_workspace_${account}" missing - - "GWS_ACCOUNT=${account} gws gmail users getProfile" \
-                    "$(failure_detail "$rc" "$(last_line "$(<"$err")")")"
+                    "$(failure_detail "$rc" "${detail:-$(first_line "$out")}")"
             fi
         ) &
     done <<<"$accounts"

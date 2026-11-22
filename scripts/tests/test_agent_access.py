@@ -99,9 +99,8 @@ TIMED_CHECKS = {
     "agent_secrets_broker": "agent-secrets",
     "dispatch": "dispatch",
 }
-# What each command has printed when `timeout` stops it, where its check reads a failure: stdout and stderr merged,
-# stdout alone for pup, stderr apart from stdout for gws and secrets. kubectl's current context answers, and
-# `kubectl auth whoami` is the call that times out.
+# What each command has printed when `timeout` stops it, on a stream its check reads (some checks read stdout and
+# stderr merged, others apart). kubectl's current context answers, and `kubectl auth whoami` is the call that times out.
 PARTIAL_OUTPUT = {
     "aws": """echo '{"UserId": "AROA123:i-abc", "Arn": "arn:aws:sts::123:'""",
     "ant": 'echo "  Logged in to Example Org as"',
