@@ -263,7 +263,7 @@ def real_age_keygen() -> str:
 
 
 class SecretsdInstallerConfig(unittest.TestCase):
-    maxDiff = None  # a snapshot failure names the file whose bytes or mtime changed
+    maxDiff: int | None = None  # a snapshot failure names the file whose bytes or mtime changed
 
     age_keygen: ClassVar[str]
     temp_dir: tempfile.TemporaryDirectory[str]
