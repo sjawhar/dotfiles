@@ -16,16 +16,24 @@ description: "Use when you create, move or wire a file or directory in ~/.dotfil
 4. **Binaries.** A tool's binary comes from its `mise.toml` pin, never one placed in `bin/` by hand.
 5. **Skills.** When you change a skill in `plugins/sjawhar/skills/`, read `plugins/AGENTS.md` too.
    - A skill there loads in every repository Sami works in, so it names no repository, no single-repository path, and no project's workflow or task names.
-6. **Symlinks.** A committed symlink is relative, stays in the repository, and never points into `vendor/` or `plugins/` from elsewhere in it: copy the file, or point the consumer at the source directory.
+6. **Symlinks.**
+   - A committed symlink is relative.
+   - A committed symlink stays in the repository.
+   - A committed symlink never points into `vendor/` or `plugins/` from elsewhere in the repository.
+   - Instead of a committed symlink that is not relative, does not stay in the repository, or points into `vendor/` or `plugins/` from elsewhere in it, copy the file, or point the consumer at the source directory.
 7. **Values that differ per machine.** Commit no value that differs per machine (a checkout path, a machine's own model routing) and no manifest of such values: an installer makes the value on each machine, or a gitignored local file holds it.
 8. **Launchers.** When you change a launcher (`shims/omp`, `scripts/cld`, `scripts/agentbox` or `scripts/agent-session`), give each session the same environment from every launcher, as the root guide's "Conventions" says.
    - A launcher sets no Dispatch or Envoy connection setting or credential: each profile's `envoy.json` holds them. `scripts/envoy`'s header gives the order in which a client finds that file.
    - The one Envoy identity variable the launchers set is `ENVOY_MACHINE_ID`, the host's short name (`AGENTBOX_HOST`, else `hostname -s`, cut at the first dot), so all sessions on one host group under one name.
    - A launcher also sets or clears no provider key. A provider key lives in the profile's machine-local file:
-     - the gitignored `omp/models.local.yml`;
-     - a named profile's `~/.omp/profiles/NAME/agent/models.yml`;
-     - `models.overlay.yml` in a shared profile;
-     - for `cld`, the profile's `cld-settings.json`.
+
+     | Profile | Machine-local file that holds its provider key |
+     | --- | --- |
+     | The default profile | The gitignored `omp/models.local.yml` |
+     | A named profile | `~/.omp/profiles/NAME/agent/models.yml` |
+     | A shared profile | `models.overlay.yml` |
+     | `cld`'s profile | The profile's `cld-settings.json` |
+
 9. **Committing.** Publish only when your task is about these files.
 
    | Situation | Action |
