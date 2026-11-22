@@ -26,6 +26,7 @@ The readers are the people of the company: engineers on other projects and staff
    Read the last recap of the same shape (a weekly page or the short shape), so nothing in it returns as new.
 2. **Pull the window's merged pull requests once** with `scripts/merged_prs.py` (its docstring has an example call). GitHub search has one rate limit for the whole machine, so every drafter reads that file instead of searching.
 3. **Start one fresh drafter per stream,** in parallel, from the stream table: the table of Sami's work streams, each with its lead and its stream issue, that the chief of staff keeps. The chief of staff is the agent that sets the order of his streams and checks in with each lead daily. `dispatch search --query '"Stream issue" "Main numbers"'` finds the table.
+   - Start the drafters no earlier than one hour before the standup, so the morning's results are in the recap.
    - Read `references/drafter-brief.md` when you write their brief.
    - Keep your own list of expected streams with each lead and draft path, so a missing draft does not pass as a stream that delivered nothing.
 4. **Write version 1** in the shape of `references/page.md`, then build the page and its charts.
@@ -58,7 +59,7 @@ The rules reviewer checks the draft against each rule here, one at a time.
 - Another person's work is theirs: a company total is not evidence that our agents delivered it.
 - Another person's number may appear as a labelled comparison.
 - Each missed goal, with its date and where we are.
-- For missed goals, use only the targets and dates Sami set: no softer target, and no later date in place of his.
+- Use only the targets and dates Sami set: no softer target, and no later date in place of his.
 - What actually ships today ("This week" on a weekly page), arranged in advance, not an intention and not redefined at each check-in.
 - Only real blockers. A to-do is not a blocker.
 - Sami is never the blocker: a decision that needs him goes to him alone as a Dispatch ask (`dispatch ask`, unless one is already open on it), never on the page.
@@ -107,4 +108,3 @@ The rules reviewer checks the draft against each rule here, one at a time.
   - a label on missing data (an unlabelled gap reads as a zero).
 - No narrated slideshow.
 - No boxes of numbers.
-- Start the drafters no earlier than one hour before the standup, so the morning's results are in the recap.
