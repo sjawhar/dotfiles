@@ -28,6 +28,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import tomllib
 import unittest
 from pathlib import Path
@@ -1469,6 +1470,74 @@ class SecretsdInstallerConfig(unittest.TestCase):
         self.assertEqual(self.client_calls(), [])
         self.assertEqual(self.try_restarts(), [])
         self.assertEqual(self.config.read_bytes(), self.trajectory_text())
+        self.assert_no_new_or_prev_files()
+
+    # Two installs at once over one HOME (dispatch://HOME-290, plan task t10): each goes on.
+
+    def test_two_installs_at_once_both_go_on(self) -> None:
+        identity, recipient = self.create_identity("matching")
+        self.write_key_file(identity)
+        self.write_dojo_secrets(recipient)
+        # age-keygen runs while the installer writes config.toml.new. The first call after
+        # gate/hold exists waits there until gate/release exists, so the first install below
+        # stops halfway through that write while the second one starts.
+        gate = self.root / "gate"
+        gate.mkdir()
+        hold, held, release = (shlex.quote(str(gate / name)) for name in ("hold", "held", "release"))
+        write_executable(
+            self.stubs / "age-keygen",
+            f"if mv {hold} {held} 2>/dev/null; then\n"
+            f"    for _ in $(seq 600); do [ -e {release} ] && break; sleep 0.1; done\n"
+            f"fi\n"
+            f'exec {shlex.quote(self.age_keygen)} "$@"',
+        )
+        self.install_idle()
+        self.fake_main_process(self.secrets_bin(PINNED_SECRETS))
+        self.change_config()
+        (gate / "hold").touch()
+
+        def start() -> subprocess.Popen[str]:
+            return subprocess.Popen(
+                ["bash", "-c", RUNNER, "_", str(INSTALLER)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=self.env,
+                stdin=subprocess.DEVNULL,
+            )
+
+        first = start()
+        for _ in range(600):
+            if (gate / "held").exists():
+                break
+            _ = first.poll()
+            if first.returncode is not None:
+                break
+            time.sleep(0.05)
+        self.assertTrue((gate / "held").exists(), "the first install never reached age-keygen")
+        second = start()
+        second_output: tuple[str, str] | None = None
+        try:
+            # A second install that waits for the first one is also right: give it 3 s.
+            second_output = second.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            pass
+        (gate / "release").touch()
+        first_output = first.communicate(timeout=120)
+        if second_output is None:
+            second_output = second.communicate(timeout=120)
+        results = {
+            name: subprocess.CompletedProcess(process.args, process.returncode, *output)
+            for name, process, output in (
+                ("first", first, first_output),
+                ("second", second, second_output),
+            )
+        }
+
+        for name, result in results.items():
+            with self.subTest(name):
+                self.assert_goes_on(result)
+        self.assertEqual(self.config.read_bytes(), self.trajectory_dojo_text())
         self.assert_no_new_or_prev_files()
 
 
