@@ -13,7 +13,7 @@ Turn papers into a faithful, critical, long-form two-host MP3.
 - Record in `out/ground-truth.json`, the real product, because the user also quizzes themselves from it with a voice AI:
   - every claim, number and limitation the script speaks;
   - each claim's `source`.
-- State no claim in the audio that is not in `out/ground-truth.json`: it is the real product.
+- State no claim in the audio that is not in `out/ground-truth.json`, for the same reason.
 - **Deliver locally.** Do not write to the user's Google Drive or any cloud account.
 - Upload only when the user asks.
 - Ask the user where before you upload.
