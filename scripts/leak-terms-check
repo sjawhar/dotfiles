@@ -2616,7 +2616,8 @@ RECORD_TAG = b"leak-terms-check record 1\0"
 def record_key(matcher: TermMatcher, list_digest: str | None) -> str:
     """The key a note's line `pass <key>` names, in lower-case hex: the sha256 of RECORD_TAG and of these, each ended by
     a NUL: the sha256 of this program's bytes (SCRIPT_DIGEST), the interpreter's major.minor and its Unicode version
-    (str.casefold and the `\\s` of paragraph_view follow it), the sha256 of the encrypted term list's bytes
+    (str.casefold, the `\\s` of paragraph_view and the `\\s` of TERM_SEPARATOR, which decides every match, follow its
+    tables), the sha256 of the encrypted term list's bytes
     (LIST_DIGEST, from record_terms), and the labels of the scoped lists MATCHER reads (those that reach the
     destination), sorted. A change of any of them gives a new key, so every blob is read again; two destinations that
     read the same lists share one key.
