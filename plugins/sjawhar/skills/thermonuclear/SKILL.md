@@ -10,15 +10,18 @@ This is the double review. `ce-code-review` is the general diff or PR review.
 
 1. **Set the scope** from the request: the PR, the current branch, else the files changed against the base branch.
 2. **Collect the diff,** plus the function holding each changed hunk and the definitions it calls, so the reviewers do not guess.
-3. **Start the two reviewers on omp** in one `task` call: `thermonuclear-deep-review` (correctness, security) and `thermonuclear-code-quality` (maintainability), as two entries in `tasks[]`.
-   - omp is oh-my-pi, the agent harness. Its shell has `OMPCODE=1` set. Its `task` tool takes a `tasks[]` list.
-4. **Dispatch the same two on Claude Code** as independent read-only subagents in parallel, each reading its rubric from `https://raw.githubusercontent.com/sjawhar/legion/main/skills/<name>/SKILL.md`.
-   - **A failed read stops that reviewer.** Report the URL and the error.
-5. **Give both the same scoped diff and context.**
+3. **Start the two reviewers:**
+
+   | Host | How to start the two reviewers |
+   | --- | --- |
+   | omp (oh-my-pi, the agent harness: its shell has `OMPCODE=1` set, and its `task` tool takes a `tasks[]` list) | Start `thermonuclear-deep-review` (correctness, security) and `thermonuclear-code-quality` (maintainability) in one `task` call, as two entries in `tasks[]`. |
+   | Claude Code | Dispatch the same two as independent read-only subagents in parallel, each reading its rubric from `https://raw.githubusercontent.com/sjawhar/legion/main/skills/<name>/SKILL.md`. A failed read stops that reviewer: report the URL and the error. |
+
+4. **Give both the same scoped diff and context.**
    - Ask both for findings ranked Critical, High, Medium or Low, each with a file reference and evidence.
    - Tell each to keep scratch in its own `d=$(mktemp -d)`.
    - Tell each to delete only `"$d"`, never a glob such as `<dir>/tmp.*`, which also matches other roles' live scratch.
-6. **Report only these, in this order,** when both finish:
+5. **Report only these, in this order,** when both finish:
    1. The findings.
    2. The verdict: merge, or fix first.
    3. What neither reviewer settled:
