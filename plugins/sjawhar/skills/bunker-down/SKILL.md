@@ -5,7 +5,11 @@ description: Use when hardening a publicly reachable EC2 instance used as a dail
 
 # Harden an EC2 devbox
 
-Apply each setting below where the box's current config is looser. Where the box already has a stricter value (a lower `MaxAuthTries`, a longer `bantime`), write that value in the command instead. Tell the user each setting you change.
+Apply each setting below where the box's current config is looser.
+
+**Done when:** the user confirms from their laptop that a new SSH session to the Tailscale IP works, that `ssh` to the public IP times out, and that `aws ssm start-session` works.
+
+Where the box already has a stricter value (a lower `MaxAuthTries`, a longer `bantime`), write that value in the command instead. Tell the user each setting you change.
 
 - Open each new access path and confirm it works before you close the old one, so the user is never locked out.
 - At each GATE, stop until the user confirms.
@@ -19,9 +23,10 @@ Record for later steps: `INSTANCE_ID` (instance metadata or `aws ec2 describe-in
 
 ## 2. SSM escape hatch
 
-1. Do this first: SSM access does not depend on SSH, Tailscale or network rules. Check that the agent runs: `sudo systemctl status snap.amazon-ssm-agent.amazon-ssm-agent.service` (`amazon-ssm-agent` when it is not a snap). If it is missing: `sudo snap install amazon-ssm-agent --classic`.
-2. Read `references/ssm-escape-hatch.md` now: it has the two IAM policies and the commands that create and attach the role and install the Session Manager plugin.
-3. GATE: the user runs `aws ssm start-session --target $INSTANCE_ID --region $REGION` from their laptop.
+1. **Agent.** Do this first: SSM access does not depend on SSH, Tailscale or network rules. Check that the agent runs: `sudo systemctl status snap.amazon-ssm-agent.amazon-ssm-agent.service` (`amazon-ssm-agent` when it is not a snap).
+2. **Install.** If the agent is missing: `sudo snap install amazon-ssm-agent --classic`.
+3. **Role and plugin.** Read `references/ssm-escape-hatch.md` now: it has the two IAM policies and the commands that create and attach the role and install the Session Manager plugin.
+4. **GATE:** the user runs `aws ssm start-session --target $INSTANCE_ID --region $REGION` from their laptop.
 
 ## 3. Tailscale
 
@@ -36,7 +41,7 @@ sudo apt-get update && sudo apt-get install -y tailscale
 sudo tailscale up
 ```
 
-The user opens the auth URL; then run `tailscale ip -4`. GATE: the user SSHes to the Tailscale IP from their laptop or phone.
+The user opens the auth URL. Then run `tailscale ip -4`. GATE: the user SSHes to the Tailscale IP from their laptop or phone.
 
 ## 4. UFW
 
@@ -76,7 +81,7 @@ EOF
 sudo sshd -t && sudo systemctl reload ssh
 ```
 
-GATE: keep your current session open; the user opens a new SSH session to the Tailscale IP. A reload that breaks authentication locks out everyone without an open session. Then:
+GATE: keep your current session open. The user opens a new SSH session to the Tailscale IP. A reload that breaks authentication locks out everyone without an open session. Then:
 
 ```bash
 sudo rm -f /root/.ssh/authorized_keys   # blocks root even if PermitRootLogin is ever undone
@@ -86,7 +91,7 @@ printf '[sshd]\nenabled = true\nport = ssh\nmaxretry = 5\nbantime = 600\nfindtim
 sudo systemctl enable --now fail2ban
 ```
 
-Keyless SSH from a phone, only if the user wants it: run `sudo tailscale up --ssh`, then add `"ssh": [{"action": "check", "src": ["autogroup:member"], "dst": ["autogroup:self"], "users": ["autogroup:nonroot"]}]` to the ACL in the Tailscale admin console. Tailscale SSH bypasses `sshd`, so the settings above and fail2ban do not cover it; only the ACL does.
+**Read `references/tailscale-ssh.md` now** only if the user wants keyless SSH from a phone.
 
 ## 6. Security group
 
@@ -111,18 +116,22 @@ Read `references/os-hardening.md` now and run it: it writes the network sysctls,
 
 ## 8. Security review
 
-Give the `cybersecurity-expert` agent (the `task` tool) this brief, or do the review yourself if it is not available, and fix every HIGH finding before Step 9:
+Give the `cybersecurity-expert` agent (the `task` tool) this brief, or do the review yourself if it is not available:
 
 > Review the security posture of this EC2 instance, a personal development machine reached over Tailscale with SSM as an escape hatch: open ports, listening services, SSH config, firewall rules, IAM role scope, IMDS options, kernel params, permissions on ~/.ssh, /etc/shadow and sudoers, AppArmor, and the Docker daemon config if installed. Report anything else concerning. Label each finding HIGH, MEDIUM or LOW, HIGH first.
 
+Fix every HIGH finding before Step 9.
+
 ## 9. Final verification
 
-Check each change end to end: read the live state with the command named below, not the file you wrote, and have the user confirm from their laptop that a new SSH session to the Tailscale IP works, that `ssh` to the public IP times out, and that `aws ssm start-session` works. Give the user a summary table: UFW status (`sudo ufw status verbose`), the effective `sudo sshd -T` values, the fail2ban sshd jail (`sudo fail2ban-client status sshd`), `tailscale status`, kernel params (`sysctl <key>` for each key in `/etc/sysctl.d/99-hardening.conf`), IMDS options (`aws ec2 describe-instances --instance-ids $INSTANCE_ID --query 'Reservations[0].Instances[0].MetadataOptions'`), listening ports (`sudo ss -tulpn`), and the new security group's ingress rules (`aws ec2 describe-security-groups --group-ids $SG_ID`).
+Check each change end to end: read the live state with the command named below, not the file you wrote. Give the user a summary table: UFW status (`sudo ufw status verbose`), the effective `sudo sshd -T` values, the fail2ban sshd jail (`sudo fail2ban-client status sshd`), `tailscale status`, kernel params (`sysctl <key>` for each key in `/etc/sysctl.d/99-hardening.conf`), IMDS options (`aws ec2 describe-instances --instance-ids $INSTANCE_ID --query 'Reservations[0].Instances[0].MetadataOptions'`), listening ports (`sudo ss -tulpn`), and the new security group's ingress rules (`aws ec2 describe-security-groups --group-ids $SG_ID`).
 
 ## Common issues
 
-- SSM agent does not register: check the instance has the IAM role, restart the agent, wait 30 s.
-- Tailscale auth link expired: `sudo tailscale up` again.
-- Locked out after `ufw enable`: connect over SSM and run `sudo ufw disable`.
-- fail2ban banned you: `sudo fail2ban-client set sshd unbanip <YOUR_IP>`.
-- SFTP clients break: rerun Step 5 with `SFTP_LINE="Subsystem sftp internal-sftp"`.
+| Situation | Action |
+| --- | --- |
+| SSM agent does not register | Check the instance has the IAM role, restart the agent, wait 30 s |
+| Tailscale auth link expired | `sudo tailscale up` again |
+| Locked out after `ufw enable` | Connect over SSM and run `sudo ufw disable` |
+| fail2ban banned you | `sudo fail2ban-client set sshd unbanip <YOUR_IP>` |
+| SFTP clients break | Rerun Step 5 with `SFTP_LINE="Subsystem sftp internal-sftp"` |
