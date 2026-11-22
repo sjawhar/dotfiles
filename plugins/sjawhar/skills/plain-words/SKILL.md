@@ -7,8 +7,6 @@ description: "Use when you write, send or publish text a person reads: an ask, a
 
 The rule is against phrases that sound like an action and name none.
 
-**Done when:** "Before you send" ran, as the two lists from its step 2 show; a reviewer that reads only to approve has not done it.
-
 ## Answering a question
 
 1. Answer the exact question, only it, in the order it was asked; anything else reads as evasion and the question comes again.
@@ -31,6 +29,8 @@ Do both in your first draft. Before any review reads it, check that each decisio
 1. **Start a fresh session.** Give it only what the reader has: the draft and what the reader already knows.
 2. **Receive its edited draft and two lists.** It deletes from the draft what the reader does not need, and returns the edited draft with two lists: what it deleted, and every term it cannot define.
 3. **Fix the listed terms.** Continue from its edited draft, and fix each listed term.
+
+A reviewer that reads only to approve has not done this step; the two lists from step 2 show that it ran.
 
 ## The test
 
