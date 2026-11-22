@@ -15,7 +15,7 @@ Every agent on the machine shares one Docker daemon, its build cache, and depot'
 - Never pass `--no-cache`: it rebuilds every stage from scratch, which can take hours on a daemon and disk every session shares.
 - Force one stage with `--no-cache-filter=<stage>`.
 - Do not quote a cold-cache time as the build time.
-- `docker build`, `docker buildx build` and `depot build` can use different builders and caches: `docker buildx ls` shows which one you are on.
+- Check which builder you are on with `docker buildx ls`: `docker build`, `docker buildx build` and `depot build` can use different builders and caches.
 - Never write `~/.docker/config.json`: every session pulls with it. `docker login`, `crane auth login` and `docker-credential-*` helpers write it unless you point them elsewhere:
 
   ```bash
@@ -29,10 +29,11 @@ Every agent on the machine shares one Docker daemon, its build cache, and depot'
 
 ## Check, never guess
 
-Docker, depot and registry access work on this machine. Before you say one is unavailable, quote the output of the command you ran. Before you say a repo has no Docker setup, search from its root (`fd -HI Dockerfile`, `fd -HI 'compose.*ya?ml'`) and read its CI workflows.
+Docker, depot and registry access work on this machine. Before you say one is unavailable, quote the output of the command you ran.
 
 | Situation | Check |
 | --- | --- |
+| Saying a repo has no Docker setup | Search from its root (`fd -HI Dockerfile`, `fd -HI 'compose.*ya?ml'`) and read its CI workflows |
 | Reusing a container id from an earlier step | `docker ps` first: it may have exited or been removed |
 | Naming an image tag or registry path | `docker images`, `docker manifest inspect` |
 | Passing `-f <compose file>` or naming a service | Read that file |
@@ -53,7 +54,8 @@ Docker, depot and registry access work on this machine. Before you say one is un
 
 - Never pair `-d` with `--rm`: a crash takes the logs with it. Use `-d`, read `docker logs`, then `docker rm`.
 - `docker stop` returns before `--rm` removal finishes, so a reused `--name` can collide.
-- Start a `docker run` you may interrupt with `--init`: killing the client (`timeout`, Ctrl-C) leaves the container running when PID 1 has no signal handler. Stop yours with `docker rm -f <name>`.
+- Start a `docker run` you may interrupt with `--init`: killing the client (`timeout`, Ctrl-C) leaves the container running when PID 1 has no signal handler.
+- To stop the container of a `docker run` you may interrupt, use `docker rm -f <name>`.
 - Port unreachable: the app must bind `0.0.0.0` inside the container; then compare `docker port <c>` with your `-p`.
 - Publish to `127.0.0.1:8080:8080`. `-p 8080:8080` publishes on every host address, the public one included. Docker's rules run before the host firewall, so `ufw deny` does not close it.
 - Serve our own people and machines over the VPN (`tailscale serve`).
@@ -85,6 +87,7 @@ for t in /proc/$(pgrep -x dockerd)/task/*; do
 done
 ```
 
-- Do not retry the removal: each try blocks another daemon thread. Do not restart the daemon: it stops every session's containers.
+- Do not retry the removal: each try blocks another daemon thread.
+- Do not restart the daemon: it stops every session's containers.
 - `docker ps` can still say "healthy": `grep -l <container-id> /proc/[0-9]*/cgroup` printing nothing means its init is gone.
-- It clears when the unmount finishes, or at a reboot. Send the user the container id and the thread line, leave the container, and go on with the rest of your task.
+- It clears when the unmount finishes, or at a reboot. Send the user the container id and the thread line. Leave the container. Go on with the rest of your task.
