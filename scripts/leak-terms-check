@@ -376,12 +376,21 @@ def allowed_token(token: str) -> re.Pattern[str]:
     return re.compile(r"(?<![A-Za-z0-9._@/-])" + re.escape(token) + r"(?![A-Za-z0-9._/-])")
 
 
+# What parts the words of a term: a run of any whitespace but a line feed, so a term whose words a no-break space,
+# an en space (U+2002), a narrow no-break space (U+202F), an ideographic space (U+3000) or a line separator (U+2028)
+# parts is still the term, in a ref name, a path or a code line. Until 2026-11-22 only spaces and tabs parted them, and
+# a ref name holds no space, so a branch or tag named with such a term was pushed. A line feed never parts them: each
+# line of a code file is read alone, and a prose run's line breaks are spaces in its paragraph view.
+TERM_SEPARATOR = r"[^\S\n]+"
+
+
 class TermMatcher:
-    """Case-folded, whitespace-flexible matching while keeping source-string positions. SCOPED holds (Scope, terms) for
-    each scoped list read, and `scopes` maps each label to its Scope. A term two lists hold matches once for each,
-    since each list says where its terms may not go. ALLOWED holds (repository pattern, tokens): a match inside such
-    a token is not a term in that repository (a third-party name that holds one), and with REPOSITORIES, the places a
-    text goes, a match every one of them allows is dropped; otherwise each match says where it is allowed."""
+    """Case-folded, whitespace-flexible matching while keeping source-string positions: a term's words match when any
+    run of whitespace but a line feed (TERM_SEPARATOR) parts them. SCOPED holds (Scope, terms) for each scoped list
+    read, and `scopes` maps each label to its Scope. A term two lists hold matches once for each, since each list says
+    where its terms may not go. ALLOWED holds (repository pattern, tokens): a match inside such a token is not a term in
+    that repository (a third-party name that holds one), and with REPOSITORIES, the places a text goes, a match every
+    one of them allows is dropped; otherwise each match says where it is allowed."""
 
     def __init__(self, terms: Sequence[str], scoped: Sequence[tuple[Scope, Sequence[str]]] = (),
                  allowed: Sequence[tuple[str, Sequence[str]]] = (), repositories: Sequence[str] | None = None):
@@ -390,8 +399,8 @@ class TermMatcher:
         self.scopes = {scope.label: scope for scope, _ in scoped}
         for label, listed in (("", terms), *((scope.label, listed) for scope, listed in scoped)):
             for number, term in enumerate(listed, start=1):
-                pieces = re.split(r"[ \t]+", term.casefold())
-                pattern = r"[ \t]+".join(re.escape(piece) for piece in pieces)
+                pieces = re.split(TERM_SEPARATOR, term.casefold())
+                pattern = TERM_SEPARATOR.join(re.escape(piece) for piece in pieces)
                 if pattern and (label, pattern) not in seen:
                     patterns.append((re.compile(pattern), number, label))
                     seen.add((label, pattern))
@@ -2724,10 +2733,11 @@ def holds_no_term(content: bytes, matcher: TermMatcher) -> bool:
     character, so each line it reads is a line of TEXT, decoded alike (no attribute or conversion applies to a diff's
     lines: scan_diff_arguments). It reads a code file's added lines one at a time (matcher.spans of the line), and a
     prose file's runs of consecutive added lines as the paragraph view of the run (line_findings); a merge's own lines
-    the same way (scan_outgoing_merges). Each term's pattern is its words, escaped, joined by `[ \\t]+`, with no anchor,
-    and no term holds a line break (term_lines); str.casefold folds each character alone. So a match in a line is a
-    match in TEXT. paragraph_view turns each character the same way wherever it stands, and each line break between two
-    lines by those two lines alone, so the paragraph view of a run of lines is a part of the paragraph view of TEXT, and
+    the same way (scan_outgoing_merges). Each term's pattern is its words, escaped, joined by TERM_SEPARATOR (a run of
+    any whitespace but a line feed), with no anchor, and no term holds a line break (term_lines); str.casefold folds
+    each character alone. So a match in a line, which a line feed ends, is a match in TEXT. paragraph_view turns each
+    character the same way wherever it stands, and each line break between two lines by those two lines alone, so the
+    paragraph view of a run of lines is a part of the paragraph view of TEXT, and
     a match in it is a match there. Both views are read whatever the blob's path, so it is covered as code and as prose.
 
     MATCHER drops no match inside an allowed token (load_terms, drop_allowed off): a blob holding a token the

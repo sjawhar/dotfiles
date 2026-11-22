@@ -187,6 +187,41 @@ class Record(unittest.TestCase):
                 self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
                 self.assertIn(f'leak terms: ref v1{shown}{TERM}: "{TERM}" (the global list)', result.stderr)
 
+    # Whitespace a ref name may hold, which a term's words may be parted by: U+00A0, U+2002, U+202F, U+3000, U+2028.
+    OTHER_SPACES = ("\u00a0", "\u2002", "\u202f", "\u3000", "\u2028")
+
+    def test_a_ref_named_with_a_term_whose_words_other_whitespace_parts_is_refused(self) -> None:
+        # A ref name holds no ASCII space, and until 2026-11-22 a term's words matched only across spaces and tabs, so a
+        # branch or tag named with a term whose words a no-break space parts was pushed (exit 0).
+        commit = self.commit({"code.py": "print('nothing listed')\n"})
+        for character in self.OTHER_SPACES:
+            joined = character.join(TEST_TERMS[0].split(" "))
+            shown = TEST_TERMS[0].replace(" ", f"\\u{ord(character):04x}")
+            for kind in ("heads", "tags"):
+                with self.subTest(character=f"U+{ord(character):04X}", kind=kind):
+                    ref = f"refs/{kind}/v1-{joined}"
+                    self.git("check-ref-format", ref)
+                    result, _ = self.run_check("push", "--remote", "origin", "--url", self.url,
+                                               stdin=f"{ref} {commit} {ref} {'0' * 40}\n")
+                    self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
+                    self.assertIn(f'leak terms: ref v1-{shown}: "{shown}" (the global list)', result.stderr)
+
+    def test_a_code_path_and_line_with_a_term_whose_words_a_no_break_space_parts_are_refused(self) -> None:
+        # A code file is read a line at a time, as written: a no-break space between a term's words hid it from a path
+        # and from a code line until 2026-11-22. A prose file's paragraph view already turned it into a space.
+        joined = "\u00a0".join(TEST_TERMS[0].split(" "))
+        shown = TEST_TERMS[0].replace(" ", "\\u00a0")
+        for name, files, place in (
+                ("a .py path", {f"src/{joined}.py": "print('nothing listed')\n"}, f"src/{shown}.py"),
+                ("a .py line", {"code.py": f"name = '{joined}'\n"}, "code.py:1"),
+                ("a .md line, the control", {"notes.md": f"See {joined} here.\n"}, "notes.md:1")):
+            with self.subTest(case=name):
+                self.git("checkout", "-q", "--detach", self.base)
+                commit = self.commit(files)
+                result, _ = self.push(commit)
+                self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
+                self.assertIn(f'leak terms: commit {commit[:12]} {place}: "{shown}" (the global list)', result.stderr)
+
     def test_no_record_reads_every_file_and_says_nothing_of_it(self) -> None:
         commit = self.commit({"code.py": "print('nothing listed')\n"})
         result, diffs = self.push(commit)
