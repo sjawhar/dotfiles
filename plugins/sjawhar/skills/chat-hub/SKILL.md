@@ -56,11 +56,13 @@ A private Matrix server on oryx bridges Sami's chat networks. Each conversation 
    | `UNCONFIRMED` | `hub-send` could not learn the result |
    | `REFUSED` | `hub-send` posted nothing, for the reason the line gives |
 
-   A message visible in the room, or no error notice, proves nothing.
+   | Result | Do |
+   | --- | --- |
+   | `FAILED` or `UNCONFIRMED` | Tell Sami |
+   | `FAILED` or `UNCONFIRMED` | Do not resend or send anything more to that person, on that network or any other, unless Sami asks |
+   | `REFUSED`, when its reason is a down login | See Logins |
 
-   - Tell Sami after `FAILED` or `UNCONFIRMED`.
-   - Do not resend or send anything more to that person, on that network or any other, after `FAILED` or `UNCONFIRMED`, unless Sami asks.
-   - See Logins when the `REFUSED` reason is a down login.
+   A message visible in the room, or no error notice, proves nothing.
 
 - Do not send to a person with `matrix_send_message`, `matrix_reply`, `matrix_send_media` or the hub API's `/send` route.
 - Use `--force` only when Sami asks, or when you test `hub-send` itself against a fake hub (a test server, not the real `MATRIX_HUB_URL`), where no message reaches a person. `--force` skips the bridge and login checks, so it can post through a down login. It still needs the room's `m.bridge` state.
