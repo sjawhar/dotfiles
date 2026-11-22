@@ -27,7 +27,9 @@ An explainer teaches the viewer what a dashboard cannot: how a thing works and w
 4. **What it changes, and what comes next, in the viewer's terms:** what it makes possible, the next target and its date.
    - Speed is wall-clock time, not CPU time.
 
-A stream update covers what merged since that stream's last video, items 2 to 4 for each change. A video about a question answers the question as it was asked. If the work cannot answer the question yet, say what is missing and what will settle it.
+- A stream update covers what merged since that stream's last video, items 2 to 4 for each change.
+- A video about a question answers the question as it was asked.
+- If the work cannot answer a video's question yet, say what is missing and what will settle it.
 
 Leave out what the viewer already knows: their priorities and targets, which streams and leads exist, the rules they set, and anything the last video said.
 
@@ -36,7 +38,10 @@ Leave out what the viewer already knows: their priorities and targets, which str
 - Each term is plain English, or defined in one plain sentence where it first appears.
   - A label from inside the work (a lane code, a run name, an internal tool) comes after that sentence, or not at all.
 - **A rule or requirement attributed to the viewer:**
-  - Check it against their own words at the source. The sources are the session transcript, Slack, and Dispatch, the issue tracker that holds each stream's issues, asks and comments (`dispatch search --query '<words>'`, then `dispatch read`).
+  - Check it against their own words at the source.
+    - The sources are the session transcript, Slack, and Dispatch.
+    - Dispatch is the issue tracker that holds each stream's issues, asks and comments.
+    - Dispatch's commands are `dispatch search --query '<words>'`, then `dispatch read`.
   - Quote it.
   - Do not restate it more strictly.
 
@@ -105,11 +110,12 @@ Leave out what the viewer already knows: their priorities and targets, which str
    - One video per subject: a correction is a new version of the same artifact, not a second name.
    - Keep `<subject>.src/` in your own directory, beside your copy of the Revideo project: script, narration audio, clips, and the exact rebuild command.
 
-Run at most 3 rounds of any check here (red team, teach-back, video review), because agent checking agent does not converge on its own.
-
-- Each round re-reads only what changed.
-- Each round may not raise a finding an earlier round raised.
-- After the third round, ship it.
-- After the third round, write what is still weak in the video's `.src/README.md`.
-
-If you own the subject, make the video, or have a subagent make it. Do not wait on a question to the viewer to make the video. While the work the video describes has open tasks, give the video to a subagent. Keep working on those tasks, so the video takes no time from that work.
+- Run at most 3 rounds of any check here (red team, teach-back, video review), because agent checking agent does not converge on its own.
+  - Each round re-reads only what changed.
+  - Each round may not raise a finding an earlier round raised.
+  - After the third round, ship it.
+  - After the third round, write what is still weak in the video's `.src/README.md`.
+- If you own the subject, make the video, or have a subagent make it.
+- Do not wait on a question to the viewer to make the video.
+- While the work the video describes has open tasks, give the video to a subagent.
+- While the work the video describes has open tasks, keep working on those tasks, so the video takes no time from that work.
