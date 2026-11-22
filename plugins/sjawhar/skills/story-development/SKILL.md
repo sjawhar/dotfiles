@@ -32,7 +32,9 @@ Before you create `docs/story/`, ask whether the project keeps this state elsewh
 | `open-questions.md` | Everything undecided, including deferred questions |
 | `sessions/YYYY-MM-DD.md` | One note per session, marking what came from the author and what you added |
 
-Start each session by reading the files that exist, before you ask anything. Write each entry as a plain, accurate statement of the decision, not a paste of the author's words: dictation errors become canon. Keep exact wording only for dialogue, names and titles.
+- Start each session by reading the files that exist, before you ask anything.
+- Write each entry as a plain, accurate statement of the decision, not a paste of the author's words: dictation errors become canon.
+- Keep exact wording only for dialogue, names and titles.
 
 ## Phases
 
@@ -56,9 +58,9 @@ Go roughly in order. Let the author lead: "I know the ending, let's outline towa
      - Read `references/game-story.md`.
      - Settle a one-page frame (logline, core fantasy, pillars, one or two themes, tone) before any lore.
      - Tie each pillar to a mechanic: a mechanic the player repeats hundreds of times carries the theme or fights it. Dialogue cannot fix one that works against the feeling.
-   - Ask whether the mechanic expresses the theme, and what in the design works against it.
-   - Point out each piece of lore that serves none of the frame's pillars or themes: a story with too much to say ends up saying little.
-   - Ask the author whether to cut each such piece of lore, for the same reason.
+     - Ask whether the mechanic expresses the theme, and what in the design works against it.
+     - Point out each piece of lore that serves none of the frame's pillars or themes: a story with too much to say ends up saying little.
+     - Ask the author whether to cut each such piece of lore, for the same reason.
 4. **Structure, in stages:** premise, then synopsis or beats, then scene or chapter briefs. The author reviews each stage before the next.
    - For a game:
      - Add each character's want versus need.
@@ -69,7 +71,8 @@ Go roughly in order. Let the author lead: "I know the ending, let's outline towa
    - When no other family is reachable (`oracle` refuses):
      - Run the critic on the drafter's family.
      - Tell the author that critique is same-family.
-   - The critic returns a numbered list of things to consider, with no rewrite and no score of any kind, for one version or between versions. The author rules on each point.
+   - The critic returns a numbered list of things to consider, with no rewrite and no score of any kind, for one version or between versions.
+   - The author rules on each point.
    - To judge versions, set them side by side and compare them.
    - Label a simulated reader reaction as simulated.
 6. **Words last, only on request.** Draft from an approved brief and a voice sheet of the author's own sample lines for that character or narrator. The sheet holds lines, not adjectives.
@@ -101,4 +104,5 @@ Triage flagged prose lines before you fix them:
 | P1 | Obvious tells (a pattern above) |
 | P2 | Stylistic polish |
 
-Tell the author which passages you drafted, so they can disclose model prose. Treat an automated AI detector's output as a signal to investigate, not a verdict.
+- Tell the author which passages you drafted, so they can disclose model prose.
+- Treat an automated AI detector's output as a signal to investigate, not a verdict.
