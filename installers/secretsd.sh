@@ -317,6 +317,28 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
     [ -f "${UNIT_SRC}/secretsd.service" ] && [ -f "${UNIT_SRC}/secretsd.socket" ]; then
     SECRETSD_CONFIG_FILE="${HOME}/.config/secretsd/config.toml"
     SECRETSD_DROPIN="${HOME}/.config/systemd/user/secretsd.service.d/local.conf"
+    # Two installs at once over one HOME share the .new and .prev names below,
+    # so without a lock one of them ends under set -e (its mv finds no .new:
+    # the other run moved it) and leaves a .prev that the next run reads as a
+    # pending change. So the whole block holds an exclusive flock on
+    # install.lock: a second install waits for the first one, then finds its
+    # change already done. The lock lives as long as the open descriptor: the
+    # end of the block closes it, and so does the exit 1 of a refused restart.
+    # Commands the block runs inherit the descriptor, so none may go on in the
+    # background past the block. A failing open or flock ends the install here
+    # (set -e), as a failing write of config.toml.new would. Systemd user units
+    # mean Linux, where util-linux ships flock; without flock on PATH the block
+    # runs unlocked, as it did before the lock.
+    secretsd_lock_file="${HOME}/.config/secretsd/install.lock"
+    secretsd_lock_fd=""
+    mkdir -p "${secretsd_lock_file%/*}"
+    if command -v flock >/dev/null 2>&1; then
+        exec {secretsd_lock_fd}>"$secretsd_lock_file"
+        if ! flock -n "$secretsd_lock_fd"; then
+            echo "secretsd: another install holds ${secretsd_lock_file}; waiting for it" >&2
+            flock "$secretsd_lock_fd"
+        fi
+    fi
     # A .prev that an earlier run left means that run replaced the file and
     # stopped before its restart decision (set -e at ensure_link or apt, or a
     # Ctrl-C during the grants wait). Its change is still pending, so a restart
@@ -333,7 +355,6 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
     # without it, and a v1 daemon ignores it, so this order is safe in both
     # directions of an upgrade or rollback.
     #
-    mkdir -p ~/.config/secretsd
     secretsd_config_toml > "${SECRETSD_CONFIG_FILE}.new"
     # Source roots are read at daemon startup, so a change needs a restart.
     secretsd_replace_generated "$SECRETSD_CONFIG_FILE"
@@ -527,6 +548,11 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
                 secretsd_put_back
             fi
         fi
+    fi
+    # Lets a waiting install go on, and keeps the descriptor out of the
+    # installers that install.sh runs next.
+    if [ -n "$secretsd_lock_fd" ]; then
+        exec {secretsd_lock_fd}>&-
     fi
 else
     echo "secretsd: binary or units unavailable — skipping systemd wiring (install stays non-fatal)."
