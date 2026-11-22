@@ -7,7 +7,7 @@ description: "Use when asked what a project, stream, repository, workflow, VM, m
 
 All of Theorem's spend is in the BigQuery dataset `theorem-agent-infra.agent_spend`, which every agent identity can read. Do not ask a person for GitHub organization, billing or console access to see costs.
 
-**Done when:** you have run the freshness query (see "Other questions") before you report a number: a source whose last `day` is before yesterday stopped loading, so a number that covers later days is too low.
+**Done when:** you have run the freshness query (in `spend/README.md`, "For agents: reading your project's spend") before you report a number: a source whose last `day` is before yesterday stopped loading, so a number that covers later days is too low.
 
 For a query per question and the meaning of every column, the full guide is theorem-labs/agent-infra `spend/README.md`, "For agents: reading your project's spend".
 
@@ -55,7 +55,9 @@ One row per UTC `day`, `project`, `platform`, `item` and `kind`, with `usd`.
 - Column `provisional` is TRUE on an Anthropic row whose share of a bill can still move, until both of that day's reports were read at least 24 hours after the day ended.
 - The company's charged total: every row except kinds `not_billed` and `attributed_org_unknown`.
 - Ours: also leave out kinds `colleague`, `caller_unknown`, `other_project`, `overhead`, `credit`, and projects `People's machines` and `No owner found`.
-- `Google Cloud` rows count dollars before Google's promotional credit; one signed `credit` row a day, in `(no project)`, brings the platform back to the bill Google charges. The bill less Support (the `overhead` row) less the estimate is split, signed, between ours, `People's machines` and `No owner found`, so a remainder row can be below 0.
+- `Google Cloud` rows count dollars before Google's promotional credit.
+- One signed `credit` row a day, in `(no project)`, brings the platform back to the bill Google charges.
+- The bill less Support (the `overhead` row) less the estimate is split, signed, between ours, `People's machines` and `No owner found`, so a remainder row can be below 0.
 - Today and yesterday still grow: OpenAI posts a day's costs during that day and the next.
 
 A project's week by platform:
