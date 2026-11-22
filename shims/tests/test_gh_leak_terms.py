@@ -1104,7 +1104,7 @@ class GhLeakTerms(unittest.TestCase):
         first, rest = TEST_TERMS[0].split(" ", 1)
         for name, text, matched in (("line break", f"See {first}\n{rest} soon.\n", f"{first}\\n{rest}"),
                                     ("CRLF", f"See {first}\r\n{rest}.\n", f"{first}\\r\\n{rest}"),
-                                    ("no-break space", f"See {first}\u00a0{rest}.\n", f"{first}\u00a0{rest}"),
+                                    ("no-break space", f"See {first}\u00a0{rest}.\n", f"{first}\\u00a0{rest}"),
                                     ("hard break", f"See {first}  \n{rest}\n", f"{first}  \\n{rest}")):
             with self.subTest(form=name):
                 self.setUp_calls()
@@ -2761,7 +2761,7 @@ class GhLeakTerms(unittest.TestCase):
                 ("a hexadecimal reference", [*comment, CANARY.replace("-", "&#x2D;", 1)], self.env, "--body", CANARY,
                  GLOBAL),
                 ("a named reference", [*comment, TEST_TERMS[0].replace(" ", "&nbsp;", 1)], self.env, "--body",
-                 TEST_TERMS[0].replace(" ", "\u00a0", 1), GLOBAL),
+                 TEST_TERMS[0].replace(" ", "\\u00a0", 1), GLOBAL),
                 ("a JSON body's string", ["api", f"repos/{PUBLIC}/issues/1/comments", "--input", input_body], self.env,
                  "--input md.json .body", CANARY, GLOBAL),
                 ("INFRA\\-1 under the ygo list", [*ygo, "see INFRA\\-1"], env, "--body", "INFRA-", YGO_LIST),

@@ -505,20 +505,30 @@ class Record(unittest.TestCase):
 
     def test_a_folder_of_refs_named_like_the_record_covers_nothing_and_says_git_s_reason(self) -> None:
         # No ref is named refs/notes/leak-terms-check, but refs/notes/leak-terms-check/inner makes the name a folder, so
-        # git cannot read the name (and record could not write it). The push says why in git's words, read with no
-        # trace variable: under GIT_TRACE=1 a trace line went to the same standard error as git's own message.
+        # git cannot read the name (and record could not write it). The push says why in git's words, read with every
+        # trace off: under GIT_TRACE=1, or with trace2 targets in git's global config (which trace2 reads from the
+        # global and system config only), trace lines went to the same standard error as git's own message, and the
+        # line's 200-character bound then cut git's message out.
         commit = self.commit({"code.py": "print('nothing listed')\n"})
         self.git("update-ref", f"{REF}/inner", self.base)
-        result, diffs = self.push(commit, env={"GIT_TRACE": "1"})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        (line,) = [line for line in result.stderr.splitlines() if "cannot use the record" in line]
-        self.assertEqual(line, f"leak terms: cannot use the record {REF}, so every file version is read: git cannot "
-                               "read the ref (git show-ref --exists exit 1: error: failed to look up reference: Is a "
-                               "directory)")
-        self.assertEqual(diffs, [[]])
-        result = self.record("main")
-        self.assertEqual(result.returncode, RECORD_EXIT, result.stdout)
-        self.assertIn("Is a directory); nothing was recorded", result.stderr)
+        global_config = self.root / "trace2.gitconfig"
+        for key in ("trace2.normalTarget", "trace2.perfTarget", "trace2.eventTarget"):
+            self.git("config", "-f", str(global_config), key, "2")
+        for name, environment in (("GIT_TRACE=1", {"GIT_TRACE": "1"}),
+                                  ("trace2 targets in the global config", {"GIT_CONFIG_GLOBAL": str(global_config)})):
+            with self.subTest(name=name):
+                result, diffs = self.push(commit, env=environment)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                (line,) = [line for line in result.stderr.splitlines() if "cannot use the record" in line]
+                self.assertEqual(line, f"leak terms: cannot use the record {REF}, so every file version is read: git "
+                                       "cannot read the ref (git show-ref --exists exit 1: error: failed to look up "
+                                       "reference: Is a directory)")
+                self.assertEqual(diffs, [[]])
+                result, _ = self.run_check("record", "--url", self.url, "main", env=environment)
+                self.assertEqual(result.returncode, RECORD_EXIT, result.stdout)
+                (line,) = [line for line in result.stderr.splitlines() if "nothing was recorded" in line]
+                self.assertTrue(line.endswith("error: failed to look up reference: Is a directory); nothing was "
+                                              "recorded"), line)
         self.assertEqual(self.rev(f"{REF}/inner"), self.base)
 
     @contextlib.contextmanager

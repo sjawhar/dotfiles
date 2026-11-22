@@ -32,7 +32,7 @@ import urllib.parse
 from functools import lru_cache
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable, Iterator, Mapping, Sequence, TypeVar, cast
+from typing import Callable, Iterable, Iterator, Mapping, Sequence, TypeVar, cast
 
 
 LIST_EXIT = 2
@@ -454,6 +454,11 @@ def paragraph_view(text: str) -> str:
 
 
 def c_escape(text: str) -> str:
+    """TEXT as one line a terminal shows as written: a backslash doubled, a line feed, a carriage return and a tab as
+    `\\n`, `\\r` and `\\t`, any other ASCII control as `\\xNN`, and every other character str.isprintable refuses as
+    `\\uNNNN` (`\\UNNNNNNNN` past U+FFFF): the C1 controls U+0080 to U+009F, which a terminal can take as a command
+    (U+009B starts one), format characters such as U+202E, which reverses the text after it, separators other than the
+    space (a no-break space, U+2028), and the bytes surrogateescape keeps (U+DC80 to U+DCFF)."""
     escaped: list[str] = []
     for character in text:
         if character == "\\":
@@ -466,8 +471,12 @@ def c_escape(text: str) -> str:
             escaped.append("\\t")
         elif ord(character) < 32 or ord(character) == 127:
             escaped.append(f"\\x{ord(character):02x}")
-        else:
+        elif character.isprintable():
             escaped.append(character)
+        elif ord(character) <= 0xFFFF:
+            escaped.append(f"\\u{ord(character):04x}")
+        else:
+            escaped.append(f"\\U{ord(character):08x}")
     return "".join(escaped)
 
 
@@ -2023,6 +2032,27 @@ class RawChange:
     result_mode: str
     result: str
 
+    @property
+    def deleted(self) -> bool:
+        """Whether the commit deletes the file: its mode is 000000, and it has no version."""
+        return self.result_mode == "000000"
+
+    @property
+    def file_version(self) -> bool:
+        """Whether the commit's version is a file's content (a blob): neither a deletion nor a gitlink, whose object
+        is a commit and whose `Subproject commit` line is always read."""
+        return file_version_mode(self.result_mode)
+
+    @property
+    def source_file_version(self) -> bool:
+        """Whether the parent's version is a file's content (file_version, of the parent's mode)."""
+        return file_version_mode(self.source_mode)
+
+
+def file_version_mode(mode: str) -> bool:
+    """Whether MODE, a raw tree diff's, is a file's: neither 000000 (no file) nor 160000 (a gitlink)."""
+    return mode not in ("000000", "160000")
+
 
 def raw_tree_diffs(pairs: Sequence[tuple[str, str | None]]) -> list[dict[str, RawChange]]:
     """For each of PAIRS, (a commit, the parent to read it against, or None for its own parent, or for a root commit
@@ -2104,20 +2134,20 @@ def scan_outgoing_merges(merges: Mapping[str, Sequence[str]], matcher: TermMatch
             path_spans = matcher.spans(path)
             shown = c_escape(path)
             changes = [files[path] for files in parent_files]
-            results = {(change.result_mode, change.result) for change in changes}
-            if len(results) != 1:
+            if len({(change.result_mode, change.result) for change in changes}) != 1:
                 raise TextError(f"git gave two versions of file {shown} of merge commit {merge[:12]}")
-            result_mode, result = results.pop()
-            if result_mode == "000000":
+            merged = changes[0]
+            result = merged.result
+            if merged.deleted:
                 continue
             findings.extend(name_findings(prefix + shown, path, path_spans))
-            if result_mode == "160000":
+            if not merged.file_version:
                 continue
             if coverage is not None:
-                if coverage.covers(result_mode, result):
+                if coverage.covers(merged):
                     continue
-                coverage.read.add(result)
-            sources = {change.source for change in changes if change.source_mode not in {"000000", "160000"}}
+                coverage.reads([merged])
+            sources = {change.source for change in changes if change.source_file_version}
             try:
                 contents = blob_objects(sorted({result, *sources}))
             except TextError as error:
@@ -2148,21 +2178,24 @@ RECORD_REF = "refs/notes/leak-terms-check"
 @dataclass
 class Coverage:
     """COVERED, the file versions (blobs) the record covers for this push's key (record_key); SEEN, those the outgoing
-    commits add or change, which `covers` tallies; and READ, those of SEEN whose content the push reads. The push's
-    summary counts them."""
+    commits add or change, which `covers` tallies; and READ, those of SEEN whose content the push reads, which `reads`
+    tallies. The push's summary counts them."""
 
     covered: set[str]
     seen: set[str] = field(default_factory=set)
     read: set[str] = field(default_factory=set)
 
-    def covers(self, mode: str, blob: str) -> bool:
-        """Whether a push may leave unread the content of BLOB, a file of MODE that a commit adds or changes: never for
-        a deletion or a gitlink, whose `Subproject commit` line names a commit and is always read; else when the record
-        covers it."""
-        if mode in ("000000", "160000"):
+    def covers(self, change: RawChange) -> bool:
+        """Whether a push may leave unread the content of CHANGE, a file a commit adds or changes: never for a deletion
+        or a gitlink (RawChange.file_version); else when the record covers its version."""
+        if not change.file_version:
             return False
-        self.seen.add(blob)
-        return blob in self.covered
+        self.seen.add(change.result)
+        return change.result in self.covered
+
+    def reads(self, changes: Iterable[RawChange]) -> None:
+        """Tally the content of CHANGES as read: each that is a file version (RawChange.file_version)."""
+        self.read.update(change.result for change in changes if change.file_version)
 
     def summary(self) -> str:
         return (f"leak terms: the record {RECORD_REF} covered {len(self.seen & self.covered)} of the {len(self.seen)} "
@@ -2244,16 +2277,15 @@ def scan_covered_diffs(commits: Sequence[str], matcher: TermMatcher, findings: l
     whole: list[str] = []
     mixed: list[tuple[str, dict[str, RawChange], set[str]]] = []
     for commit, files in zip(commits, raw_tree_diffs([(commit, None) for commit in commits]), strict=True):
-        covered = {path for path, change in files.items() if coverage.covers(change.result_mode, change.result)}
-        unread = [path for path, change in files.items() if change.result_mode != "000000" and path not in covered]
+        covered = {path for path, change in files.items() if coverage.covers(change)}
+        unread = [path for path, change in files.items() if not change.deleted and path not in covered]
         if len(covered) < len(unread):
             whole.append(commit)
-            coverage.read.update(change.result for change in files.values()
-                                 if change.result_mode not in ("000000", "160000"))
+            coverage.reads(files.values())
         else:
             mixed.append((commit, files, covered))
     paths = list(dict.fromkeys(path for _, files, covered in mixed for path, change in files.items()
-                               if change.result_mode != "000000" and path not in covered))
+                               if not change.deleted and path not in covered))
     named = set(paths)
     for commit, _, covered in mixed:
         for path in sorted(covered):
@@ -2266,8 +2298,7 @@ def scan_covered_diffs(commits: Sequence[str], matcher: TermMatcher, findings: l
             reached = [change for path, change in files.items() if pathspec_reaches(chunk_named, path)]
             if reached:
                 group.append(commit)
-                coverage.read.update(change.result for change in reached
-                                     if change.result_mode not in ("000000", "160000"))
+                coverage.reads(reached)
         scan_outgoing_diffs(group, matcher, findings, policy, [literal_pathspec(path) for path in chunk])
     scan_outgoing_diffs(whole, matcher, findings, policy)
 
@@ -2612,10 +2643,13 @@ def record_ref_absent() -> None:
     included, 2 for none, and 1 when it cannot read the name: a ref file that names no object ("Invalid argument"), one
     the user may not read ("Permission denied"), a folder of that name that holds other refs, such as
     refs/notes/leak-terms-check/inner ("Is a directory"), or a file where a folder of the name should be ("Not a
-    directory"). The error is git's, shown as it gave it, read with no GIT_TRACE* variable so no trace line is taken
-    for it. An older git knows no --exists (exit 129): there such a name goes unreported, as it did before, and every
-    file version is read all the same."""
+    directory"). The error is git's, shown as it gave it (c_escape, in the refusal), read with every trace off so that
+    no trace line is taken for it: no GIT_TRACE* variable of the caller's, and GIT_TRACE2, GIT_TRACE2_PERF and
+    GIT_TRACE2_EVENT set to 0, which overrides a trace2.*Target in git's global or system config. An older git knows no
+    --exists (exit 129): there such a name goes unreported, as it did before, and every file version is read all the
+    same."""
     environment = {name: value for name, value in git_environment().items() if not name.startswith("GIT_TRACE")}
+    environment.update(GIT_TRACE2="0", GIT_TRACE2_PERF="0", GIT_TRACE2_EVENT="0")
     try:
         completed = subprocess.run(["git", "show-ref", "--exists", RECORD_REF], stdin=subprocess.DEVNULL,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=environment, check=False)

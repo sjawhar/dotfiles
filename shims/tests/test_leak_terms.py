@@ -130,7 +130,8 @@ REFUSAL_LINE = re.compile(r"leak terms: (?P<place>.*?): " + REFUSAL_TAIL.pattern
 
 
 def unescaped(shown: str) -> str:
-    """A refusal's C-escaped text with its line breaks and tabs back."""
+    """A refusal's C-escaped text with its line breaks and tabs back, and each character it shows as `\\uNNNN`."""
+    shown = re.sub(r"\\u([0-9a-f]{4})", lambda found: chr(int(found[1], 16)), shown)
     return shown.replace("\\n", "\n").replace("\\r", "\r").replace("\\t", "\t")
 
 
@@ -923,6 +924,21 @@ Quillfeather Lane 9
         self.assertIn("diff --git", generated)
         result = self.check("diff", generated)
         self.assert_found(result, 'raw-"\\t\\\\\\nzorbleplex.txt', "zorbleplex")
+
+    def test_scanner_escapes_c1_controls_and_format_characters_in_a_refusal(self) -> None:
+        # A refusal shows the path and the line as written, so a C1 control (U+009B starts a terminal command) or a
+        # format character (U+202E reverses the text after it) went to the terminal raw until 2026-11-22. Each is shown
+        # as \uNNNN, as are a no-break space and the other characters str.isprintable refuses.
+        for name, character, shown in (("C1 control", "\u009b", "\\u009b"), ("format character", "\u202e", "\\u202e")):
+            path = f"x{character}zorbleplex.txt"
+            diff = (f"diff --git a/{path} b/{path}\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n"
+                    f"+++ b/{path}\n@@ -0,0 +1 @@\n+see {character}Quillfeather Lane 9{character} here\n")
+            with self.subTest(character=name):
+                result = self.check("diff", diff)
+                self.assert_found(result, f"x{shown}zorbleplex.txt", "zorbleplex")
+                line = self.assert_refusal(result.stderr, f"x{shown}zorbleplex.txt:1", "Quillfeather Lane 9")
+                self.assertIn(f"see {shown}Quillfeather Lane 9{shown} here", line)
+                self.assertNotIn(character, result.stderr)
 
     def test_scanner_refuses_combined_diff_text(self) -> None:
         # The scanner reads no combined diff: Git's is wrong past 32 parents (scripts/leak-terms-check, above
