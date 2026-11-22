@@ -59,7 +59,10 @@ Refused by a registry, or by an environment that a customer shares with us (its 
 - Label it with its owner and its work stream: `--labels owner=<person>,stream=<stream>`, where `<stream>` is the work stream that the VM's cost counts to, such as `rocq-speed` or `oss-verify`.
   - Sami's agents use `owner=sjawhar`.
   - An organization policy in projects `autoformalization` and `theorem-research` refuses a VM create with no `owner` label.
-- To remove a VM's external address (`gcloud compute instances delete-access-config`), which also cuts its egress: prove IAP or VPN access and its outbound path, then remove it, then check access again.
+- To remove a VM's external address (`gcloud compute instances delete-access-config`), which also cuts its egress:
+  1. Prove IAP or VPN access and its outbound path.
+  2. Remove the external address.
+  3. Check access again.
 - Put a service that only our people and machines call on the VPN.
   - No `gcloud run deploy --allow-unauthenticated`, `allUsers` binding, internet-facing load balancer or firewall rule open to `0.0.0.0/0`.
   - A shared bearer token does not replace this.
