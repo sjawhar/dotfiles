@@ -1,6 +1,6 @@
 ---
 name: airtable
-description: Use when listing, searching, filtering or updating Airtable records, or given an airtable.com URL, a base ID (app...) or a table ID (tbl...). Not for candidates, applicants or hiring, which Airtable does not hold, and not for rotating the Airtable token.
+description: "Use when listing, searching, filtering or updating Airtable records, or given an airtable.com URL, a base ID (app...) or a table ID (tbl...). Never for candidates, applicants, interviews or hiring: use the hiring skill. Not for rotating the Airtable token."
 ---
 
 # Airtable
