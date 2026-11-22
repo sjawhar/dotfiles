@@ -6,7 +6,8 @@
 # the leak-term hooks, give every commit an omp session makes its Omp-Session trailer where
 # it does now, refuse every `git push`, the one jj runs included, that would create on the
 # remote a branch whose name starts with a person token (scripts/person-branch-guard), run
-# the shared public leak check under its existing conditions, run the encrypted leak-term
+# the shared public leak check where no hook of the checkout runs it (an agent's push, and a
+# person's verified push where the check is installed), run the encrypted leak-term
 # check on every `git push` but one from an unguarded checkout to a configured remote (its
 # hook scans a public or unknown GitHub URL),
 # and keep a pruning `git fetch` from deleting the destination of a short-named refspec.
@@ -14,11 +15,15 @@
 # prune there deletes live sessions' registrations in the shared store
 # (AGENTC-431: 17 bare prunes on 2026-09-26, from five boxes). A locked
 # registration survives a prune. Everything else goes straight to the real git.
+# A git that hands a call back to this shim by exec (a test's fake that runs it again by its path)
+# is not chosen again, and a chain of passes, a fake that runs it as a child included, is refused
+# past 8 hops with a named error. DOTFILES_GIT_SHIM may change which git the shim picks, never
+# which checks run.
 set -euo pipefail
 
 # This shim's own directory, through a link to it: a caller may run the shim by a link in a
 # directory of its own, and scripts/ and the hook dirs are beside the shim, not beside the link
-# (shims/AGENTS.md, "A moved HOME").
+# (shims/tests/test_shim_moved_home.py).
 _shim_dir="${BASH_SOURCE[0]}"
 [[ ! -L "$_shim_dir" ]] || _shim_dir="$(command -p readlink -f -- "$_shim_dir")"
 _shim_dir="${_shim_dir%/*}"
@@ -28,9 +33,42 @@ LOCK_REASON="agent session: locked on add (AGENTC-431)"
 # already (a `jj workspace add` outside an agent session). Ours as well.
 JJ_LOCK_REASON="jj shim: locked on add (AGENTC-431)"
 
-# The first git on PATH past this shim, judged by content like shims/gh. Entries
-# before the shim's own (`-ef`: its directory however PATH spells it) already had
-# their turn: a wrapper there that hands off positionally (knives gh's jj-bookmark
+# A git that hands the call back to this shim re-enters it: in the same pid, a test's fake git
+# that execs, by its path, the git it found on PATH, which is this shim where the shim comes
+# first, run with a PATH that holds the fake and not this shim (a Legion test's fake old git and
+# this shim exec'd each other about 120 times in one pid until the test's 30 s limit killed it,
+# 2026-11-21); in a new pid each time, a fake that runs that git as a child. DOTFILES_GIT_SHIM
+# ("<pid> <hops> <git>:<git>…", as DOTFILES_GH_SHIM in shims/gh) names every git this shim has
+# handed the call to in that pid, and how many passes through this shim the chain of processes
+# above has made. A pass in that pid skips each git named, and any path to the same file, so the
+# call reaches the git past them or fails. The hop count stops the loop the skip cannot see, a new
+# pid each time: the pass past _max_hops refuses with exit 127 and one line. The deepest chain that
+# is no loop has about four (a wrapper's hand-off, the pass it hands back, jj's git, a nested test
+# suite's git); 8 leaves room for that, as in shims/gh.
+# The marker changes only which git a pass hands the call to. It never turns a check off: every
+# pass, the first or one a git handed back, runs every check below on the call it got (a set
+# marker is the caller's to set, so it must give nothing a caller could not get otherwise).
+_max_hops=8
+_handed=""
+read -r _marker_pid _marker_hops _marker_handed <<< "${DOTFILES_GIT_SHIM:-}"
+[[ "$_marker_hops" =~ ^[0-9]{1,4}$ ]] && _marker_hops=$((10#$_marker_hops)) || _marker_hops=0
+if ((_marker_hops >= _max_hops)); then
+    echo "git shim: refusing: this chain of processes already ran this shim $_marker_hops times (DOTFILES_GIT_SHIM, at most $_max_hops), so a git on PATH ($PATH) keeps handing calls back to it${_marker_handed:+; the last pass handed one to ${_marker_handed//:/, }}" >&2
+    exit 127
+fi
+[[ "$_marker_pid" == "$$" ]] && _handed="$_marker_handed"
+handed_back() {
+    local IFS=':'
+    local git
+    for git in $_handed; do
+        [[ -n "$git" && "$1" -ef "$git" ]] && return 0
+    done
+    return 1
+}
+
+# The first git on PATH past this shim, judged by content like shims/gh, and not one that handed
+# the call back. Entries before the shim's own (`-ef`: its directory however PATH spells it)
+# already had their turn: a wrapper there that hands off positionally (knives gh's jj-bookmark
 # wrapper) would otherwise be chosen again and the two exec each other forever.
 # A PATH that does not carry this shim is scanned whole, then the system dirs.
 real_git() {
@@ -46,6 +84,7 @@ real_git() {
         header=""
         IFS= read -r -n 512 -d '' header < "$candidate" || true
         [[ "$header" == *git-worktree-shim* ]] && continue
+        handed_back "$candidate" && continue
         if [[ "$seen_self" == 1 ]]; then
             echo "$candidate"
             return
@@ -62,15 +101,18 @@ real_git() {
         header=""
         IFS= read -r -n 512 -d '' header < "$candidate" || true
         [[ "$header" == *git-worktree-shim* ]] && continue
+        handed_back "$candidate" && continue
         echo "$candidate"
         return
     done
     return 1
 }
 if ! _real="$(real_git)"; then
-    echo "git shim: no real git found on PATH" >&2
+    echo "git shim: no real git found on PATH${_handed:+; ${_handed//:/, } handed the call back to this shim}" >&2
     exit 127
 fi
+_handed="${_handed:+$_handed:}$_real"
+export DOTFILES_GIT_SHIM="$$ $((_marker_hops + 1)) $_handed"
 # The shim's own tools (cat, awk, realpath, mktemp) must exist even when the
 # caller's PATH omits the system dirs; appending keeps the caller's dirs first.
 PATH="$PATH:/usr/bin:/bin"
@@ -404,6 +446,44 @@ if [[ "${DOTFILES_GIT_SHIM_READ_GLOBALS:-}" == 1 ]]; then
 fi
 git_expand_aliases
 git_read_global_options args
+
+# A pass a git handed the call back to gets it as the pass before rewrote it: with a last
+# `-c core.hooksPath=` at the git-hooks/ or jj-push-hooks/ of this shim. Read as the caller's choice,
+# that hooks path turned off the commit's leak-term scan and the push's public check, and its
+# second copy kept the hook from finding the hook git would otherwise run. Such a hooks path, a
+# git-hooks/ or jj-push-hooks/ beside a copy of this shim (its git carries the marker), is a shim's
+# own and never the caller's: an entry spelled as this shim writes it, `-c core.hooksPath=<dir>`, is
+# dropped here, and this pass adds its own again wherever it adds one. A caller that names one that
+# way gets this shim's checks, as with no hooks path at all; another spelling (`--config-env`, another
+# case of the key) stays the caller's hooks path, as any hooks path the caller sets is.
+# Bash alone reads it, so an ordinary call pays one loop over its -c entries.
+shim_hooks_dir() {
+    local header=""
+    [[ "$1" == */git-hooks || "$1" == */jj-push-hooks ]] && [[ -f "${1%/*}/git" ]] || return 1
+    IFS= read -r -n 512 -d '' header < "${1%/*}/git" || true
+    [[ "$header" == *git-worktree-shim* ]]
+}
+for config in "${git_global_configs[@]}"; do
+    [[ "$config" == core.hooksPath=* ]] && shim_hooks_dir "${config#*=}" || continue
+    kept=() k=0
+    while ((k < i)); do
+        entry="${git_global_options[${args[k]}]:-}"
+        if [[ "${args[k]}" == -c ]] && ((k + 1 < i)) && [[ "${args[k + 1]}" == core.hooksPath=* ]] &&
+            shim_hooks_dir "${args[k + 1]#*=}"; then
+            ((k += 2))
+            continue
+        fi
+        kept+=("${args[k]}")
+        if [[ "$entry" == separate\|* || "$entry" == separate-or-equals\|* ]] && ((k + 1 < i)); then
+            kept+=("${args[k + 1]}")
+            ((k += 1))
+        fi
+        ((k += 1))
+    done
+    args=("${kept[@]}" "${args[@]:i}")
+    git_read_global_options args
+    break
+done
 set -- "${args[@]}"
 
 # A caller who selects a hooks path owns that command, and the scanner does not run. The shared
@@ -678,6 +758,10 @@ fi
 #   that is empty or holds another word, gh that fails or does not answer in 5 s, a helper that cannot run, guards the
 #   checkout. The public check then decides, and refuses a push to a theorem-labs repository whose visibility it cannot
 #   read; the term check scans that push too, so a clean push can still go out.
+# - A checkout that is not guarded can still push to a destination that is no configured remote (a URL or a
+#   `<transport>::` form on the command line, an insteadOf alias). Where its push needs the public check, the URL git
+#   hands the hook decides it by the same rule: GIT_SHIM_PUBLIC_CHECK=url, and the hook checks when that URL is GUARD
+#   (dispatch://INFRA-4951: a husky checkout whose only remote was private sent a leak to a public URL unchecked).
 # A plain `git push` runs the pre-push hook of git's effective hooks directory: core.hooksPath where it is set, else
 # the repository's common hooks directory. The leak check reaches it there in two ways only: the leak-check wrapper
 # that install-prepush-hook.sh and the sweep install (marker PUBLIC-LEAK-CHECK-WRAPPER), or the global hooks
@@ -685,14 +769,21 @@ fi
 # PUBLIC-LEAK-CHECK-DISPATCHER. Neither reaches a fresh clone on a machine or in an agent box without the dispatcher
 # (a box made before 2026-11-05 has its ~/.gitconfig bound to a deleted file, so it never saw the include, and has no
 # hooks directory), nor a repository whose own core.hooksPath (local or worktree, an empty value included, which git
-# 2.43 reads as `/`: husky, the pre-commit framework) overrides the dispatcher. The encrypted term gate adds its last
-# -c core.hooksPath=jj-push-hooks/ to every push but a push from a checkout that is not guarded to a configured
+# 2.43 reads as `/`: husky, the pre-commit framework) overrides the dispatcher. For such a push the shim's gate runs
+# the check itself: for an agent, and for a person on a machine where the check is installed (dispatch://INFRA-4951).
+# The hook sweep puts the wrapper in such a repository's hooks directory only at its next pass over that root (on
+# sami-devbox, devbox/box-cleanup runs one every 15 minutes over the fast roots and every hour over the slow ones), and
+# never in one outside its roots (sweep-hooks.sh's fast_roots and slow_roots); the gate covers a push from it before
+# that pass and outside those roots. The encrypted term gate adds its
+# last -c core.hooksPath=jj-push-hooks/ to every push but a push from a checkout that is not guarded to a configured
 # remote, then names the plain verified push's original directory in GIT_SHIM_OWN_HOOKS so it runs after a clean scan.
 # A wrapper or dispatcher still runs once there; it only keeps GIT_SHIM_PUBLIC_CHECK=0 because that original hook
 # performs it.
 # The public check, but not the term scan, remains unseen by `git push --no-verify`, a hooks path set on the command
-# line or in the environment (the caller's own choice), a jj told to run another git (`git.executable-path`) or copied
-# under another name, and a remote changed between this decision and git reading its config.
+# line or in the environment (the caller's own choice), a person's push on a machine where no source names the check,
+# a jj told to run another git (`git.executable-path`) or copied under another name, and a remote changed between
+# this decision and git reading its config. A push to a destination that is no configured remote is not among them:
+# the URL git pushes to decides it, as above.
 from_jj() { # true when the process that ran this git is jj, also a jj binary replaced since it started
     local exe
     exe="$(readlink "/proc/$PPID/exe" 2> /dev/null)" || return 1
@@ -785,8 +876,11 @@ jj_push_gate() {
 # A push takes this hooks path unless the checkout is not guarded and the destination git uses is one of its configured
 # remotes: a URL, a name that is not a configured remote (an insteadOf alias included), and every push from a guarded
 # checkout take it, so the leak-term scan cannot be skipped with --no-verify, a caller-selected hooks path, or a
-# pre-push wrapper. Its pre-push scans by the URL git gives it, after insteadOf. The existing public-check decisions
-# stay separate: agent jj pushes and the old agent plain-push conditions set GIT_SHIM_PUBLIC_CHECK=1; all other
+# pre-push wrapper. Its pre-push scans by the URL git gives it, after insteadOf. The public-check decision stays
+# separate (the push block below): an agent's jj push, and a plain verified push whose own hooks run no public check
+# (an agent's, or a person's where the check is installed), set GIT_SHIM_PUBLIC_CHECK=1 from a guarded checkout, and
+# GIT_SHIM_PUBLIC_CHECK=url from one that is not guarded to a destination that is no configured remote, so the hook
+# checks when the URL git gives it is GUARD; all other
 # term-gated pushes set it to 0. For a plain verified push, the hook receives the pre-push directory Git would
 # otherwise run in GIT_SHIM_OWN_HOOKS and invokes it after a clean scan. GIT_SHIM_JJ_PUSH=1 tells the hook that jj
 # ran the push, so its refusals name a jj push or a push.
@@ -988,6 +1082,18 @@ push_own_hooks_run_public_check() {
     [[ -x "$PUSH_OWN_HOOKS/dispatch" ]] &&
         grep -qs PUBLIC-LEAK-CHECK-DISPATCHER -- "$PUSH_OWN_HOOKS/dispatch"
 }
+# The shared public leak check, found as jj-push-hooks/pre-push and every hook find it: $PUBLIC_LEAK_CHECK, then
+# public-leak-check.sh on PATH, then the machine pointer. Sets _check and _pointer; _check may be empty or name a file
+# that is not executable. A copy of shims/jj's (test_shim_moved_home.py, SharedFunctionCopies, keeps them identical):
+# the two person gates take the check as installed when _check is not empty, so a check that is named and missing is a
+# broken install, refused with the gate's setup message as the wrapper and the dispatcher refuse it, and a machine
+# where no source names one (a laptop) is unchanged.
+find_leak_check() {
+    _check="${PUBLIC_LEAK_CHECK:-}"
+    [[ -n "$_check" ]] || _check="$(command -v public-leak-check.sh 2> /dev/null || true)"
+    _pointer="${XDG_CONFIG_HOME:-${HOME:-}/.config}/public-leak-check/path"
+    if [[ -z "$_check" && -s "$_pointer" ]]; then IFS= read -r _check < "$_pointer" || true; fi
+}
 push_is_named_remote() {
     local remote=$1 out name
     out="$("$_real" "${args[@]:0:i}" remote 2> /dev/null)" || return 1
@@ -1091,19 +1197,34 @@ if [[ "${args[i]}" == push ]]; then
         if ((is_jj)); then person_branch_gate jj; else person_branch_gate git; fi
     fi
     push_parse
+    # The public check (GIT_SHIM_PUBLIC_CHECK=1) is needed by an agent's jj push, and by a plain verified push whose
+    # effective hooks directory, unless the caller chose it on the command line, runs neither the leak-check wrapper nor
+    # the dispatcher: an agent's, and a person's on a machine where the check is installed (find_leak_check names one),
+    # since a person's push from a repository whose own core.hooksPath overrides the dispatcher otherwise reaches no
+    # public check until the sweep's next pass puts its wrapper there, and never outside the sweep's roots
+    # (dispatch://INFRA-4951). jj runs git with --no-verify, so a person's jj push is never such a push (shims/jj
+    # checks it), and `git push --no-verify` skips the check for anyone.
+    public_needed=0
+    PUSH_OWN_HOOKS=""
+    if ((is_jj)); then
+        ((!is_agent)) || public_needed=1
+    elif ((PUSH_VERIFIED)) && { ((is_agent)) || { find_leak_check; [[ -n "$_check" ]]; }; } && push_own_hooks &&
+        [[ "$PUSH_OWN_HOOKS_SCOPE" != command ]] && ! push_own_hooks_run_public_check; then
+        public_needed=1
+    fi
     listing=""
     listed=0
     if listing="$("$_real" "${args[@]:0:i}" remote -v 2> /dev/null)"; then listed=1; fi
     # Only a checkout that is not guarded, pushing to one of its configured remotes, keeps Git's
     # unmodified route. All other destinations reach the gate, where Git supplies the rewritten URL
     # to the hook as its second argument. A listing that cannot be read guards the checkout. Each
-    # value is read only where it decides: guarded decides an agent's public check below, so an
-    # agent reads it first; a person's push takes the gate when its destination is not a configured
-    # remote, whatever guarded is.
+    # value is read only where it decides: guarded decides the public check below, so a push that
+    # needs that check reads it first; any other push takes the gate when its destination is not a
+    # configured remote, whatever guarded is.
     guarded=1
     term_gate=1
     if ((listed)); then
-        if ((is_agent)); then
+        if ((public_needed)); then
             jj_push_guarded "$listing" || guarded=0
             if ((!guarded)) && push_is_named_remote "$(push_effective_repository)"; then term_gate=0; fi
         elif push_is_named_remote "$(push_effective_repository)" && ! jj_push_guarded "$listing"; then
@@ -1112,16 +1233,23 @@ if [[ "${args[i]}" == push ]]; then
     fi
 
     public_check=0
-    PUSH_OWN_HOOKS=""
-    if ((is_agent)) && { ((is_jj)) || { ((PUSH_VERIFIED)) && push_own_hooks && [[ "$PUSH_OWN_HOOKS_SCOPE" != command ]] &&
-        ! push_own_hooks_run_public_check; }; }; then
+    if ((public_needed)); then
         if ((is_jj)); then what="jj push"; else what=push; fi
         ((listed)) ||
             jj_push_refuse "cannot list this repository's remotes, so whether this $what needs the public leak check is unknown and it is refused." \
                 "$JJ_PUSH_UNREAD"
-        ((guarded)) && public_check=1
+        if ((guarded)); then
+            public_check=1
+        elif ((term_gate)); then
+            # A checkout that is not guarded, pushing to a destination that is no configured remote: a URL, a
+            # `<transport>::` form, an insteadOf alias. Its remotes cannot decide, since git pushes elsewhere, so the
+            # URL git hands the hook decides, by the rule a remote's URL guards a checkout by (dispatch://INFRA-4951).
+            # jj pushes only to configured remotes (`jj git push --help`: "Use `--remote` to select the remote Git
+            # repository by name"), so this is a plain push's.
+            public_check=url
+        fi
     fi
-    ((term_gate || public_check)) || exec "$_real" "$@"
+    ((term_gate)) || exec "$_real" "$@"
 
     PUSH_GATE_HOOKS="$(cd -P -- "$_shim_dir" && pwd)/jj-push-hooks"
     [[ -x "$PUSH_GATE_HOOKS/pre-push" ]] ||

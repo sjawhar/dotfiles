@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, watch, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { agentGhConfigDir, agentGoogleCredentials, userConfigChain } from "../session-env";
+import { agentGhConfigDir, agentGoogleCredentials, sharedConfigLast, userConfigChain } from "../session-env";
 
 const dirs: string[] = [];
 /** An environment whose PATH finds a `jj` running `body` first. */
@@ -27,6 +27,17 @@ describe("userConfigChain", () => {
 		expect(await userConfigChain(200, withJj("exec sleep 30"))).toBeUndefined();
 		expect(Date.now() - started).toBeLessThan(4_000);
 	}, 5_000);
+});
+
+describe("sharedConfigLast", () => {
+	const env = { HOME: "/h" };
+	test("puts the shared ~/.jjconfig.toml after the per-machine file, as .bashrc does", () => {
+		expect(sharedConfigLast("/h/.jjconfig.toml:/h/.config/jj/config.toml", env)).toBe("/h/.config/jj/config.toml:/h/.jjconfig.toml");
+	});
+
+	test("keeps a chain without it as it is", () => {
+		expect(sharedConfigLast("/u/a.toml:/u/b.toml", env)).toBe("/u/a.toml:/u/b.toml");
+	});
 });
 
 describe("agentGhConfigDir", () => {
@@ -119,6 +130,14 @@ describe("the Python eval kernel's environment", () => {
 	// eval.envPassthrough in config.yml admits. A variable this extension exports that neither
 	// admits never reaches a command run from an eval cell: agent-secrets lost the session that way.
 	const OMP_BUILTIN_PREFIXES = ["LC_", "XDG_", "PI_"];
+	const droppedByKernel = async (keys: string[]) => {
+		const config = Bun.YAML.parse(await Bun.file(path.join(import.meta.dir, "..", "..", "config.yml")).text()) as {
+			eval?: { envPassthrough?: { names?: string[]; prefixes?: string[] } };
+		};
+		const { names = [], prefixes = [] } = config.eval?.envPassthrough ?? {};
+		const allowedPrefixes = [...OMP_BUILTIN_PREFIXES, ...prefixes];
+		return keys.filter(key => !names.includes(key) && !allowedPrefixes.some(prefix => key.startsWith(prefix)));
+	};
 
 	test("admits every variable session-env exports", async () => {
 		const source = await Bun.file(path.join(import.meta.dir, "..", "session-env.ts")).text();
@@ -126,13 +145,43 @@ describe("the Python eval kernel's environment", () => {
 		expect(exported).toEqual(
 			expect.arrayContaining(["OMP_SESSION_ID", "PI_COMMIT_TRAILERS", "JJ_CONFIG", "GH_CONFIG_DIR", "GOOGLE_APPLICATION_CREDENTIALS"]),
 		);
-		const config = Bun.YAML.parse(await Bun.file(path.join(import.meta.dir, "..", "..", "config.yml")).text()) as {
-			eval?: { envPassthrough?: { names?: string[]; prefixes?: string[] } };
-		};
-		const { names = [], prefixes = [] } = config.eval?.envPassthrough ?? {};
-		const allowedPrefixes = [...OMP_BUILTIN_PREFIXES, ...prefixes];
-		const dropped = exported.filter(key => !names.includes(key) && !allowedPrefixes.some(prefix => key.startsWith(prefix)));
-		expect(dropped).toEqual([]);
+		expect(await droppedByKernel(exported)).toEqual([]);
+	});
+
+	test("admits the cache directories and session paths the session launchers set", async () => {
+		// scripts/agent-session and .bashrc put each tool's cache on the big disk, and give the
+		// session its own scratch. A name the kernel drops sends a tool run from an eval cell back
+		// to its home default: on 2026-11-21 `go test` from eval cells filled ~/.cache/go-build to
+		// 475 GB, and without PLAYWRIGHT_SKIP_BROWSER_GC a `playwright install` from a cell deletes
+		// browsers in the directory agent boxes share.
+		const sessionVariables = [
+			"GOCACHE",
+			"GOMODCACHE",
+			"UV_CACHE_DIR",
+			"UV_LINK_MODE",
+			"CARGO_HOME",
+			"PIP_CACHE_DIR",
+			"BUN_INSTALL_CACHE_DIR",
+			"HF_HOME",
+			"AGENT_SESSION_SCRATCH",
+			"GOTMPDIR",
+			"MISE_DATA_DIR",
+			"MISE_CACHE_DIR",
+			"PLAYWRIGHT_BROWSERS_PATH",
+			"PLAYWRIGHT_SKIP_BROWSER_GC",
+			"PUPPETEER_CACHE_DIR",
+			"NPM_CONFIG_PREFIX",
+		];
+		expect(await droppedByKernel(sessionVariables)).toEqual([]);
+		// Each one has a value to pass: a launcher exports it.
+		const repo = path.join(import.meta.dir, "..", "..", "..");
+		const launchers = (
+			await Promise.all(
+				[".bashrc", "scripts/agent-session"].map(file => Bun.file(path.join(repo, file)).text()),
+			)
+		).join("\n");
+		const unset = sessionVariables.filter(name => !new RegExp(`\\bexport\\b[^\\n]*\\b${name}=`).test(launchers));
+		expect(unset).toEqual([]);
 	});
 });
 
@@ -151,13 +200,13 @@ describe("the identity a session exports", () => {
 		bucket = path.join(home, ".omp", "agent", "sessions", "--work--");
 		mkdirSync(path.join(bucket, OWNER, "Probe"), { recursive: true });
 		writeFileSync(path.join(bucket, `${OWNER}.jsonl`), "");
-		// Like jj: `config path --user` prints JJ_CONFIG's entries when it is set. With
-		// FAKE_JJ_FAIL set it fails, as jj does on a malformed user config.
+		// Like jj: `config path --user` prints JJ_CONFIG's entries when it is set, else FAKE_JJ_PATHS's
+		// when that is set. With FAKE_JJ_FAIL set it fails, as jj does on a malformed user config.
 		fakeJj = path.join(home, "bin");
 		mkdirSync(fakeJj);
 		writeFileSync(
 			path.join(fakeJj, "jj"),
-			`#!/bin/sh\n[ -n "$FAKE_JJ_FAIL" ] && exit 1\nif [ -n "$JJ_CONFIG" ]; then printf '%s\\n' "$JJ_CONFIG" | tr ':' '\\n'; else echo /u/default.toml; fi\n`,
+			`#!/bin/sh\n[ -n "$FAKE_JJ_FAIL" ] && exit 1\nif [ -n "$JJ_CONFIG" ]; then printf '%s\\n' "$JJ_CONFIG" | tr ':' '\\n'; elif [ -n "$FAKE_JJ_PATHS" ]; then printf '%s\\n' "$FAKE_JJ_PATHS" | tr ':' '\\n'; else echo /u/default.toml; fi\n`,
 		);
 		chmodSync(path.join(fakeJj, "jj"), 0o755);
 	});
@@ -271,9 +320,21 @@ describe("the identity a session exports", () => {
 		expect(exported).toMatchObject({ id: "", trailers: "", jjConfig: "/u/default.toml" });
 	});
 
+	// jj prints the shared ~/.jjconfig.toml first and the per-machine file after it. Chained so, the
+	// per-machine user.email won over every identity scope of the shared file, and a cybermonklabs
+	// repository committed as trajectorylabs; .bashrc chains them the other way round.
+	test("a session that inherits no chain gets jj's user config files in .bashrc's order", async () => {
+		const shared = path.join(home, ".jjconfig.toml");
+		const machine = path.join(home, ".config", "jj", "config.toml");
+		const exported = await start({ kind: "main", file: path.join(home, "notes", "handmade.jsonl") }, undefined, {
+			FAKE_JJ_PATHS: `${shared}:${machine}`,
+		});
+		expect(exported).toMatchObject({ id: "", jjConfig: `${machine}:${shared}` });
+	});
+
 	// jj fails `config path --user` on a malformed user config. Unsetting JJ_CONFIG then is no
 	// fix: the bash tool's commands still saw the launcher's overlay-only chain (round-2 review).
-	test("with jj unable to name the user config, an unattributed session gets jj's default chain, not the launcher's", async () => {
+	test("with jj unable to name the user config, an unattributed session gets jj's default files in .bashrc's order, not the launcher's chain", async () => {
 		const exported = await start(
 			{ kind: "main", file: path.join(home, "notes", "handmade.jsonl") },
 			{ id: LAUNCHER, jjConfig: overlayOf(LAUNCHER) },
@@ -281,7 +342,7 @@ describe("the identity a session exports", () => {
 		);
 		expect(exported).toMatchObject({
 			id: "",
-			jjConfig: `${path.join(home, ".jjconfig.toml")}:${path.join(home, ".config", "jj", "config.toml")}`,
+			jjConfig: `${path.join(home, ".config", "jj", "config.toml")}:${path.join(home, ".jjconfig.toml")}`,
 		});
 	});
 
@@ -291,7 +352,7 @@ describe("the identity a session exports", () => {
 			{ id: LAUNCHER, jjConfig: overlayOf(LAUNCHER) },
 			{ FAKE_JJ_FAIL: "1" },
 		);
-		expect(exported.jjConfig).toBe(`${path.join(home, ".jjconfig.toml")}:${path.join(home, ".config", "jj", "config.toml")}:${overlayOf(ROOT)}`);
+		expect(exported.jjConfig).toBe(`${path.join(home, ".config", "jj", "config.toml")}:${path.join(home, ".jjconfig.toml")}:${overlayOf(ROOT)}`);
 	});
 });
 

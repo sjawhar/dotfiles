@@ -89,7 +89,10 @@ class JjLockShimTest(unittest.TestCase):
         self.env = {**os.environ, "PATH": f"{SHIMS}{os.pathsep}{real_jj_dir()}{os.pathsep}{os.environ['PATH']}"}
         self.repo = self.tmp / "main"
         self.repo.mkdir()
-        for cmd in (["git", "init", "-q"], ["git", "commit", "-q", "--allow-empty", "-m", "init"], ["jj", "git", "init", "--colocate"]):
+        # The first commit names its own author: a machine whose git configuration has no user.* (a CI runner) refuses
+        # a commit without one.
+        identity = ["-c", "user.name=T", "-c", "user.email=t@example.com"]
+        for cmd in (["git", "init", "-q"], ["git", *identity, "commit", "-q", "--allow-empty", "-m", "init"], ["jj", "git", "init", "--colocate"]):
             subprocess.run(cmd, cwd=self.repo, env=self.env, check=True, capture_output=True)
 
     def tearDown(self):
@@ -187,7 +190,7 @@ class JjLockShimTest(unittest.TestCase):
 
     def no_pinned_install(self, home: Path) -> dict[str, str]:
         """self.env under HOME, with no mise configuration there or in DOTFILES_DIR's checkout: the
-        shim's lookup past PATH (shims/AGENTS.md, "A moved HOME") has no pin to look up."""
+        shim's lookup past PATH (shims/tests/test_shim_moved_home.py) has no pin to look up."""
         env = {name: value for name, value in self.env.items() if name not in ("MISE_GLOBAL_CONFIG_FILE", "XDG_CONFIG_HOME")}
         return {**env, "HOME": str(home), "DOTFILES_DIR": str(home / ".dotfiles")}
 

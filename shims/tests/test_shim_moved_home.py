@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A shim finds its real binary whatever HOME and PATH its caller set (shims/AGENTS.md, "A moved HOME").
+"""A shim finds its real binary whatever HOME and PATH its caller set.
 
 A Legion test pane starts Oh My Pi with exactly two variables: HOME, a temporary directory, and
 PATH, `<bin>:/usr/local/bin:/usr/bin:/bin`, where `<bin>/jj` is a link to the jj the test process
@@ -13,6 +13,11 @@ and the command runs in a cgroup of its own under a task limit and a timeout (`L
 so a lookup that finds the shim again fails the case instead of forking without end. The machine
 cases need this machine's own install of the pinned tool, under the uid's passwd home, and are
 skipped without it; the fixture cases build a dotfiles checkout and a mise data dir of their own.
+
+So a shim takes the dotfiles checkout from DOTFILES_DIR, else from its own path (`readlink -f`),
+and mise, its configuration and its data dirs from its copy of mise_paths, never through HOME or
+the path it was run by. State that the caller's HOME owns (caches, the gh agent config, tmux
+sockets) stays under HOME. A shim that adds a lookup adds a case here.
 """
 from __future__ import annotations
 
@@ -354,6 +359,7 @@ class SharedFunctionCopies(unittest.TestCase):
         "mise_paths": ("jj", "tmux", "gh", "knives", "az", "claude", "ctx", "pyright", "basedpyright", "secrets", "pulumi", "omp"),
         "is_mise_shim": ("jj", "tmux", "gh", "az", "claude", "secrets", "pulumi"),
         "mise_pinned": ("jj", "tmux", "gh"),
+        "find_leak_check": ("git", "jj"),
     }
 
     def test_every_copy_is_identical_and_held_where_listed(self) -> None:

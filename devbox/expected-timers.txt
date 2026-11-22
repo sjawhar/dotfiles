@@ -8,7 +8,8 @@
 #     from this user manager, is not enabled, or has not fired for more than three times its
 #     own interval.
 #   - installers/expected-timers.sh. It links and `enable --now`s every timer named here, which
-#     is idempotent: run it as often as you like, and after every reset of the box.
+#     is idempotent: run it as often as you like, and after every reset of the box. A timer
+#     someone disabled and stopped it leaves alone, and names.
 #
 # How to add one: one timer name per line, with a comment saying who owns it. A name with no
 # `.timer` suffix gets one. `#` starts a comment anywhere in a line. Blank lines are ignored.
@@ -91,13 +92,20 @@ unit-health-watch.timer            # owner: box-health lead. This list, and ever
 # has found the intended state, not a regression.
 
 # --- the box's own housekeeping (devbox/) ---
-dotfiles-follow.timer              # owner: box-health lead. ~/.dotfiles fast-forwards to main.
+# dotfiles-follow.timer was retired here on 2026-11-21 under the same decision
+# (dispatch://INFRA-2022/ask/b5ddab54-8ba0-40e8-b4ba-c2dcb291ca5c, and
+# dispatch://INFRA-2022/ask/4badbed6-a78d-4405-adcb-cbe2679e12d3 for a timer that watches
+# nothing): no answer of Sami's approves it, and devbox/install.sh no longer arms it. ~/.dotfiles
+# moves onto main when scripts/dotfiles-publish runs from it, or by `scripts/dotfiles-sync local`.
 # One box-cleanup schedule folds docker-cap, gocache-cap, nvme-cache-cap,
 # session-scratch-reap, session-tmp-reap, tmp-empty-prune and tmp-stale-reap together
 # (dispatch://INFRA-993/ask/d44b73ba-3ac6-4307-9dd7-065cb035ec9b). Each keeps its own script,
-# caps, ages, refusals and ConditionPath*. Every 15 minutes the guarded cache caps run;
-# the session and temporary-file sweeps run only when their 86400-second interval is due.
-# One timer and one log still cover all seven (devbox/box-cleanup.md).
+# caps, ages, refusals and ConditionPath*. Every 15 minutes the guarded cache caps and the
+# session-scratch reaper run; the temporary-file sweeps run only when their 86400-second interval
+# is due.
+# One timer and one log still cover all seven (devbox/box-cleanup.md). Since 2026-11-21 it also runs
+# the leak check's hook sweep as two steps (devbox/hook-sweep: fast roots every pass, 420 s; fast and
+# slow roots hourly, 1000 s), which dotfiles-follow.timer ran before (dispatch://INFRA-4953).
 # max_run is its own 4h TimeoutStartSec: seven steps, each killed at 30 min, and session-tmp-reap
 # alone took 409-828 s on 2026-11-04.
 box-cleanup.timer  max_run=4h        # owner: box-health lead. Cache caps every 15 min; costly sweeps daily.

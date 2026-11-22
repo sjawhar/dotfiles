@@ -27,7 +27,10 @@
 #     root-owned files into a directory this user made (/tmp/r22651/.coq-native on 2026-10-30),
 #     and this script can neither read that user's /proc to see whether it is still using them
 #     nor unlink them;
-#   - nothing in it, at any depth, has an mtime or a ctime inside the age window.
+#   - nothing in it, at any depth, has an mtime or a ctime inside the age window;
+#   - no filesystem is mounted at or below it (devbox/mounts-below.sh): rm -rf would delete that
+#     filesystem's files, or through a bind mount another directory's. The removal is rm -rf
+#     --one-file-system besides, so a mount the check misses is skipped and that removal fails.
 #
 # Age is the last gate and never the first: it can only keep an entry longer, never mark one dead
 # (skill://disk-hygiene). atime is deliberately ignored - du, find, trivy or any other scanner
@@ -55,6 +58,9 @@ export LC_ALL=C
 # stream, next_record and proc_holds come from devbox/proc-holds.sh.
 # shellcheck source=devbox/proc-holds.sh
 source "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/proc-holds.sh"
+# mount_below comes from devbox/mounts-below.sh.
+# shellcheck source=devbox/mounts-below.sh
+source "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/mounts-below.sh"
 
 root="${TMP_REAP_ROOT:-/tmp}"
 age_hours="${TMP_REAP_AGE_HOURS:-48}"
@@ -122,7 +128,7 @@ deadline=$((start + ${run_seconds:-315360000}))
 # devbox/tmp-stale-reap.md gets a window of seconds instead of waiting two days for one.
 cutoff="$(awk -v n="$now" -v h="$age_hours" 'BEGIN{printf "%d", n - h*3600}')"
 
-kept_other_owner=0 kept_pattern=0 kept_type=0 kept_young=0 kept_live=0 kept_unsure=0 kept_foreign=0
+kept_other_owner=0 kept_pattern=0 kept_type=0 kept_young=0 kept_live=0 kept_unsure=0 kept_foreign=0 kept_mount=0
 removed=0 failed=0 removed_bytes=0 checked=0
 
 # Integer arithmetic, not awk: a hand run calls this once per entry, 17,458 times on this box.
@@ -207,18 +213,19 @@ fi
 # The retry is bounded to an entry this run has already proved dead by every rule above, and
 # without it the service fails on that entry every hour and hides the next real failure. It
 # cannot save a directory another user owns - that is the veto in pass 3, not a case for here.
-# Every step gets the time left before the deadline: 0 is removed, 124 is cut by the deadline,
-# and anything else failed, with rm's own message in $out.
+# Neither rm nor the chmod walk leaves the entry's filesystem. Every step gets the time left
+# before the deadline: 0 is removed, 124 is cut by the deadline, and anything else failed, with
+# rm's own message in $out.
 remove() {
     local status=0
     # Quiet on the first try: a read-only directory is expected here, and only the second
     # attempt's message means the entry really is stuck.
-    bounded "$((deadline - EPOCHSECONDS))" rm -rf -- "$1" || status=$?
+    bounded "$((deadline - EPOCHSECONDS))" rm -rf --one-file-system -- "$1" || status=$?
     ((status != 0 && status != 124)) || return "$status"
     status=0
-    bounded "$((deadline - EPOCHSECONDS))" chmod -R u+rwX -- "$1" || status=$?
+    bounded "$((deadline - EPOCHSECONDS))" find "$1" -xdev -user "$uid" -exec chmod u+rwX -- {} + || status=$?
     ((status != 124)) || return 124
-    bounded -e "$((deadline - EPOCHSECONDS))" rm -rf -- "$1"
+    bounded -e "$((deadline - EPOCHSECONDS))" rm -rf --one-file-system -- "$1"
 }
 
 # Pass 1: one stat of the directory itself - owner, type, name and the entry's own timestamps.
@@ -348,6 +355,12 @@ for ((k = 0; k < total; k++)); do
         checked=$((checked + 1))
         continue
     fi
+    if mount_point="$(mount_below "$entry")" || (($? == 2)); then
+        echo "tmp-stale-reap: keep $entry (a filesystem is mounted inside it, at ${mount_point:-a point the mount table could not show}; removing it would delete that filesystem's files)"
+        kept_mount=$((kept_mount + 1))
+        checked=$((checked + 1))
+        continue
+    fi
 
     # A walk gets its own limit or the time left, whichever is shorter. One that the deadline cut
     # has not answered, so the pass stops on this entry and the next one walks it again.
@@ -457,7 +470,7 @@ if ((status == 0)); then
     free="${out##*$'\n'}"
     free="${free// /} free on $root"
 fi
-echo "tmp-stale-reap: $root: ${removed} $([[ -z "$apply" ]] && echo "would be removed" || echo "removed") ($(size "$removed_bytes")), ${kept_live} live, ${kept_young} written inside the ${age_hours}h window, ${kept_pattern} on the keep list, ${kept_other_owner} another user's, ${kept_foreign} holding another user's files, ${kept_type} not a plain file or directory, ${kept_unsure} unreadable; ${failed} failed; ${free}"
+echo "tmp-stale-reap: $root: ${removed} $([[ -z "$apply" ]] && echo "would be removed" || echo "removed") ($(size "$removed_bytes")), ${kept_live} live, ${kept_young} written inside the ${age_hours}h window, ${kept_pattern} on the keep list, ${kept_other_owner} another user's, ${kept_foreign} holding another user's files, ${kept_mount} holding a mount, ${kept_type} not a plain file or directory, ${kept_unsure} unreadable; ${failed} failed; ${free}"
 # What a caller may count as reclaimed: zero without --apply, where removed_bytes is only what
 # would have gone. See the same line in session-scratch-reap for why a caller must not measure
 # this with a df delta of its own.

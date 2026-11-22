@@ -15,25 +15,35 @@
 #     (installers/gcloud-box.sh), so a Google client library or Pulumi acts as the machine, not as
 #     the user, unless the caller names a credential file of its own; on a Google VM it sets
 #     none, and the libraries take the VM's account from the metadata server;
+#   - turns gcloud's file logging off (CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true) unless the caller
+#     set it, so a gcloud run past shims/gcloud writes no token into a log file (below);
+#   - turns CodeGraph's usage telemetry off (CODEGRAPH_TELEMETRY=0) unless the caller set it (below);
 #   - gives the session a TMPDIR of its own on the big disk and points the uv, cargo and Go
 #     caches there, on a machine that has one (below); on one that has not, nothing changes;
 #   - exports the model-spend telemetry variables when this machine holds the collector's token (below);
 #   - refuses to resume an omp session that `agentbox move --to` moved off this machine (below);
 #   - names omp/config.probe.yml, which turns the subagent progress probe on, in an omp session's
 #     PI_CONFIG_FILES only when the omp it runs is a release that holds the probe's fix (below);
+#   - sets none of DISPATCH_URL, DISPATCH_TOKEN(_FILE), ENVOY_URL, ENVOY_NATS_URL, ENVOY_TOKEN(_FILE)
+#     and NATS_NKEY_SEED(_FILE): each overrides one field of every profile's envoy.json, and would
+#     turn Envoy on for a profile that has none (scripts/agentbox's session_env sets none either);
 #   - execs the first <agent> on PATH that is not a wrapper, through scripts/agent-secrets-session.
 #     A wrapper is a file whose real path is in a shims/ directory (shims/omp, another checkout's
 #     copy of it) or mise's own shims dir, which falls back to PATH when mise has no version for
 #     the directory; either would hand the call back to a launcher. When there is none (a move of
 #     the checkout brought a pin nothing installed yet), it runs `mise install` once in the
-#     checkout, holding $MISE_DATA_DIR/.dotfiles-install.lock as dotfiles-sync's tools step does,
-#     so a launch during a mover's install waits for it; then, whatever the install's result, it
-#     asks `mise which <agent>` for the pinned binary and execs that when it is not a wrapper, and
-#     exits 127 only when it is missing. A failed install's last lines go to stderr, never stdout.
+#     checkout, holding $MISE_DATA_DIR/.dotfiles-install.lock as dotfiles-sync's tools step,
+#     dotfiles-follow, shims/knives, installers/mise.sh and installers/librarian-harness-host.sh
+#     do, so a launch during a mover's install waits for it. That `mise install` alone gets
+#     DOTFILES_INSTALL_LOCK_HELD=1, so a knives call under it that lacks its pin exits 127 at once
+#     instead of waiting on the lock, and the agent does not get the marker. Then, whatever the
+#     install's result, it asks `mise which <agent>` for the pinned binary and execs that when it
+#     is not a wrapper, and exits 127 only when it is missing. A failed install's last lines go to
+#     stderr, never stdout.
 set -euo pipefail
 
 # The dotfiles checkout this script is in, not the one under HOME: a caller may give the session a
-# HOME of its own (shims/AGENTS.md, "A moved HOME"), and shims/omp execs this script by its path.
+# HOME of its own (shims/tests/test_shim_moved_home.py), and shims/omp execs this script by its path.
 _agent_session_self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")"
 DOTFILES_DIR="${DOTFILES_DIR:-${_agent_session_self%/scripts/*}}"
 # Absolute once, before any cd. A prefix of $PWD, not a `cd` into it, so a directory that exists
@@ -172,6 +182,23 @@ if [[ -f "$box_adc" ]] && [[ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" \
     && ! "$DOTFILES_DIR/scripts/on-google-vm"; then
     export GOOGLE_APPLICATION_CREDENTIALS="$box_adc"
 fi
+
+# gcloud copies each command's output into a file under its configuration directory's logs/, so a
+# token it prints lands on disk (dispatch://INFRA-4824). shims/gcloud turns that off for each call
+# it runs and installers/gcloud-sdk.sh for ~/.gcloud's SDK, but a gcloud run by its path past both
+# reads neither: a Google VM's snap /snap/bin/gcloud wrote one log file holding a made-up token on
+# sami-devbox on 2026-11-20. gcloud reads this variable before any configuration file. A value the
+# caller set is kept, as the shim keeps it. session_env in scripts/agentbox does the same in a box.
+export CLOUDSDK_CORE_DISABLE_FILE_LOGGING="${CLOUDSDK_CORE_DISABLE_FILE_LOGGING:-true}"
+
+# The codegraph CLI (pinned in mise.toml; omp's codegraph tool runs it) records each command it
+# runs and sends the counts to telemetry.getcodegraph.com at its next init, index or sync, unless
+# DO_NOT_TRACK or CODEGRAPH_TELEMETRY=0 is set or `codegraph telemetry off` was run as this user.
+# On sami-devbox on 2026-11-21 its queue held 339 agent commands at 04:30Z, 90 minutes after its
+# first run there (the queue file's mtime, and the updated_at of ~/.codegraph/telemetry.json).
+# Legion's worker warm-up sets DO_NOT_TRACK; this is the narrower switch, so other tools keep their
+# own settings. A value the caller set is kept. session_env in scripts/agentbox does the same in a box.
+export CODEGRAPH_TELEMETRY="${CODEGRAPH_TELEMETRY:-0}"
 
 # Machine-local environment, outside this public repository (dispatch://BET-765). A setting that
 # names a customer may not be committed here, so each machine keeps its own file and this reads it
@@ -318,12 +345,20 @@ else
             exec {out_fd}>&2
         fi
         rc=0
+        # The clock as EPOCHREALTIME gives it (whole seconds where bash has none). Its decimal point
+        # follows the locale, so ran drops every non-digit and is in microseconds.
+        started="${EPOCHREALTIME:-$(date +%s).000000}"
         (
+            # In this subshell alone, so a knives call under the install does not wait on the lock
+            # it holds, and the agent exec'd below never has the marker.
+            export DOTFILES_INSTALL_LOCK_HELD=1
             # shellcheck disable=SC1007
             CDPATH= cd -- "$DOTFILES_DIR" && exec timeout -k "$grace" "$limit" flock "$MISE_DATA_DIR/.dotfiles-install.lock" "$mise_bin" install
         ) >&"$out_fd" 2>&1 &
         pid=$!
         wait "$pid" || rc=$?
+        ended="${EPOCHREALTIME:-$(date +%s).000000}"
+        ran=$(( ${ended//[!0-9]/} - ${started//[!0-9]/} ))
         if [[ "$rc" = 124 || "$rc" = 137 ]]; then
             waits=$((grace * 10))
             while (( waits > 0 )) && kill -0 -- "-$pid" 2>/dev/null; do
@@ -356,7 +391,9 @@ else
         if (( rc != 0 )); then
             tick='`'
             printf 'agent-session: %smise install%s in %s exited %s' "$tick" "$tick" "$DOTFILES_DIR" "$rc" >&2
-            if [[ "$rc" = 124 || "$rc" = 137 ]]; then
+            # mise can exit 124 itself, and 137 can be any SIGKILL (the OOM killer's too), so the
+            # note needs a run that lasted the limit.
+            if [[ "$rc" = 124 || "$rc" = 137 ]] && (( ran >= limit * 1000000 )); then
                 printf ' (past its limit of %s s, lock wait included)' "$limit" >&2
             fi
             if (( out_made )); then

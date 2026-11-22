@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # pr-gate-corpus - standing regression for pr-gate's verdict matcher. Runs offline against synthetic bodies.
-# Extracts the LIVE grammar (GR), polarity sets (POS/NEG), code-span strip (VS) and verdict-sha scan from
-# scripts/pr-gate, so a drift in the script fails here, not on a real PR. Exit 1 on any failing case.
+# Extracts the LIVE grammar (GR), polarity sets (POS/NEG), code-span strip (VS), non-commit hex strip (RF) and verdict-sha
+# scan from scripts/pr-gate, so a drift in the script fails here, not on a real PR. Exit 1 on any failing case.
 #
 # Every shape below was a real event on 2026-09-25/26: a false green, a false block, or a restatement round.
 # Add a row when the matcher gets a new form or a new hole; the row IS the fix's acceptance.
@@ -13,11 +13,12 @@ GR=$(grep -oP 'select\(\.b\|vs\|test\("\K\(\?i:verdict:.*?(?="\)\)\]\|sort_by\(\
 PL=$(grep -oP "^PL='\\K.*(?=')" "$F")
 SU=$(grep -oP "^SU='\\K.*(?=')" "$F")
 CR=$(grep -oP "^CR='\\K.*(?=')" "$F")
-[ -n "$GR" ] && [ -n "$POS" ] && [ -n "$NEG" ] && [ -n "$VS" ] && [ -n "$PL" ] && [ -n "$SU" ] && [ -n "$CR" ] || { echo "could not extract matcher pieces from $F (GR=${#GR} POS=${#POS} NEG=${#NEG} VS=${#VS} PL=${#PL} SU=${#SU} CR=${#CR})"; exit 2; }
+RF=$(grep -oP "^RF='\\K.*(?=')" "$F")
+[ -n "$GR" ] && [ -n "$POS" ] && [ -n "$NEG" ] && [ -n "$VS" ] && [ -n "$PL" ] && [ -n "$SU" ] && [ -n "$CR" ] && [ -n "$RF" ] || { echo "could not extract matcher pieces from $F (GR=${#GR} POS=${#POS} NEG=${#NEG} VS=${#VS} PL=${#PL} SU=${#SU} CR=${#CR} RF=${#RF})"; exit 2; }
 fail=0; n=0
 # t <expected> <body>   expected = "g=<grammar> p=<positive> n=<negative> sha=<verdict sha (only when g=true) or ->"
 t() { local exp="$1" body="$2"; n=$((n+1))
-  got=$(jq -n --arg b "$body" --arg gr "$GR" --arg pos "$POS" --arg neg "$NEG" "$VS$CR$PL$SU"'($b|vs) as $v | "g=\($v|test($gr)) p=\($v|test($pos)) n=\($v|test($neg)) sha=\(if ($v|test($gr)) then ($v|vsha($pos;$neg)|if . == "" then "-" else . end) else "-" end)"' -r)
+  got=$(jq -n --arg b "$body" --arg gr "$GR" --arg pos "$POS" --arg neg "$NEG" "$VS$RF$CR$PL$SU"'($b|vs) as $v | "g=\($v|test($gr)) p=\($v|test($pos)) n=\($v|test($neg)) sha=\(if ($v|test($gr)) then ($v|vsha($pos;$neg)|if . == "" then "-" else . end) else "-" end)"' -r)
   if [ "$got" = "$exp" ]; then echo "PASS $got :: ${body:0:72}"; else echo "FAIL got [$got] want [$exp] :: ${body:0:72}"; fail=1; fi; }
 H=486fc48e0629a1b2c3d4e5f60718293a4b5c6d7e
 echo "== positives at head =="
@@ -36,6 +37,18 @@ t "g=true p=true n=false sha=00473e0f"   "Verdict: APPROVE at 00473e0f ## Code r
 t "g=true p=true n=false sha=f2314fb2"   'delta only: `fda41a10` -> `f2314fb2` (two child commits, 3 files). VERDICT: APPROVE at f2314fb2'
 t "g=true p=true n=false sha=f2314fb2"   "$(printf 'delta only: fda41a10 -> f2314fb2\n\nVERDICT: APPROVE at f2314fb2 -- the two findings are closed')"
 t "g=true p=true n=false sha=$H"         "APPROVE at $H (image digest sha256:556b68aa556b68aa556b68aa556b68aa556b68aa556b68aa556b68aa556b68aa)"
+echo "== hex that names no commit is not the verdict sha: a UUID, a dispatch:// link, a non-commit URL (agent-infra#3861) =="
+# A Dispatch ask link's UUID read as the verdict sha 94ecea2a, the compare 404'd, and the gate printed 'PR-own diff CHANGED'
+# at a head the CI review App had approved. The whole UUID goes: its last group, 92348650fd75, is letter-bearing hex too.
+U=94ecea2a-9526-4f83-b461-92348650fd75
+t "g=true p=true n=false sha=-"          "**Verdict: APPROVE** under Sami's answer on dispatch://INFRA-1478/ask/$U."
+t "g=true p=true n=false sha=-"          "**Verdict: APPROVE**, the ask $U is answered"
+t "g=true p=true n=false sha=486fc48e"   "Verdict: APPROVE (Sami's go-ahead: dispatch://INFRA-1478/ask/$U) for 486fc48e"
+t "g=true p=true n=false sha=-"          "**Verdict: APPROVE**; the log is https://storage.example/runs/5e1f0c2a/log.txt"
+t "g=true p=true n=false sha=f2314fb2"   "**Verdict: APPROVE** of the delta https://github.com/o/r/compare/fda41a10...f2314fb2, now head f2314fb2"
+# A commit link names a commit: its sha stays.
+t "g=true p=true n=false sha=$H"         "**Verdict: APPROVE** - read https://github.com/o/r/commit/$H"
+t "g=true p=true n=false sha=88a3ccf7"   "**Verdict: APPROVE** of [the head](https://github.com/o/r/pull/3861/commits/88a3ccf7), per dispatch://INFRA-1478/ask/$U"
 echo "== negatives / rejections =="
 t "g=true p=false n=true sha=433fa449"   "VERDICT: CHANGES REQUESTED at 433fa449 - two claims disproved"
 t "g=true p=false n=true sha=188327f0"   "Verdict: REJECT at 188327f0 - the accept criteria are unmet"
@@ -53,6 +66,18 @@ t "g=false p=false n=false sha=-"        "please merge 486fc48e when you can - a
 t "g=false p=false n=false sha=-"        $'Re-cite requested.\n  merge conflict at 486fc48e resolved by rebase'
 t "g=false p=false n=false sha=-"        "Reviewer: post \`MERGE 486fc48e\` as the first line"
 t "g=false p=false n=false sha=-"        "@claude review  Delta since your verdict at 1d64f1ca: one commit, $H"
+echo "== 'merge at', 'approve(d) at', 'accept(ed) at' and the negative 'X at' forms count only with a sha after them (agent-infra#3861) =="
+# A merge-hold notice's "#3181 failed to merge at five heads" read as a positive verdict: one hex letter ('f') was enough.
+# The sha may follow 'head', bold or a code span.
+HOLD="**Do not enqueue #3861 until #3181's window ends.** Under Sami's answer on dispatch://INFRA-1478/ask/$U, #3181 failed to merge at five heads in a row because main conflicted with it."
+t "g=false p=false n=false sha=-"        "$HOLD"
+t "g=false p=true n=false sha=-"         "I will approve at the next round, once CI settles"
+t "g=false p=false n=false sha=-"        "Accepted at face value: the census numbers hold"
+t "g=false p=false n=false sha=-"        "Two lanes had changes requested at first, then nothing"
+t "g=true p=true n=false sha=f2314fb2"   "delta fda41a10 -> f2314fb2: MERGE at head f2314fb2"
+t "g=true p=true n=false sha=188327f0"   "approve at \`188327f0\` - one nit left"
+t "g=true p=true n=false sha=188327f0"   "Accepted at **188327f0**."
+t "g=true p=true n=false sha=$H"         "Approved at head $H."
 echo "== a later-line bare VERB <sha> is NOT a verdict (first-line rule; jq ^ is string start) =="
 t "g=false p=false n=false sha=-"        $'Some preamble line\nMERGE 486fc48e\nmore text'
 echo "== polarity is decided by the FIRST hit (legion#1430: an APPROVE recounting its earlier REQUEST_CHANGES) =="
@@ -65,13 +90,21 @@ tp neg  "Verdict: BLOCK at b2183a5f -- NEW-6 from the body claims; NEW-4/NEW-5 f
 tp none "Verdict: PASS at 36ae1e27 (tester run)"
 tp pos  "MERGE-WITH-NITS 143425f5 - one non-blocking hardening nit; my earlier REQUEST_CHANGES at 0000aaaa is cleared"
 tp pos  'Reviewed `a96869d` (`a96869d5b02f9a367d1414eb6a3d2e0ba58b1f3e`): **clean, no findings.**'
+# A rejection naming its sha in a code span: legion-reviewer's 'Changes requested at `<sha>`' missed the negative set, so its
+# later 'which I approved in round 1' made the CHANGES_REQUESTED review read as an APPROVE of the old sha (agent-infra#4645).
+C4=8e4f40648cfe6d0f37673d8a74e7994d007e13fc
+CRB=$(printf 'Changes requested at `%s`. The one blocking item is the gate, not the code.\n\n**What I reviewed.** Only what changed since `3e05f653`, which I approved in round 1.\n [review state REQUEST_CHANGES at %s]' "$C4" "$C4")
+tp neg  "$CRB"
+t "g=true p=true n=true sha=$C4"         "$CRB"
+# The same with 'head' before the sha: the negative 'X at' forms take it as the positive ones do.
+tp neg  "$(printf 'Changes requested at head `8e4f4064`. I approved the round before.\n [review state REQUEST_CHANGES at %s]' "$C4")"
 echo "== the oracle's DOES NOT BLOCK is verdict-bearing, in neither polarity set by itself (agent-c#20410, AGENTC-1070) =="
 t "g=true p=false n=false sha=4f659f925529e430a0497de212dbaec240397ee1" "Verdict: DOES NOT BLOCK at 4f659f925529e430a0497de212dbaec240397ee1 (UNPROVEN CLAIMS: 5, none blocking) Oracle re-judge after the owner's census. This supersedes the BLOCKS verdict in 5861618968."
 t "g=true p=false n=true sha=4f659f925529e430a0497de212dbaec240397ee1" "Verdict: BLOCKS at 4f659f925529e430a0497de212dbaec240397ee1 (UNPROVEN CLAIMS: 7, 1 blocking: staging only)"
 tp none "Verdict: DOES NOT BLOCK at 4f659f925529e430a0497de212dbaec240397ee1 (UNPROVEN CLAIMS: 5, none blocking). This supersedes the BLOCKS verdict in 5861618968."
 echo "== supersession across artifacts: a later DOES NOT BLOCK retracts the SAME author's BLOCKS at the SAME head, and nothing else =="
 # ts <expected> <json array of {t,u,b}>   expected = green | blocked | neutral, the polarity stage's three outcomes
-ts() { local exp="$1" arts="$2"; n=$((n+1)); got=$(jq -n --argjson a "$arts" --arg pos "$POS" --arg neg "$NEG" "$VS$CR$PL$SU"'$a|gate($pos;$neg)|if .negt!="" and (.post=="" or .negt>.post) then "blocked" elif .negt=="" and .post=="" then "neutral" else "green" end' -r)
+ts() { local exp="$1" arts="$2"; n=$((n+1)); got=$(jq -n --argjson a "$arts" --arg pos "$POS" --arg neg "$NEG" "$VS$RF$CR$PL$SU"'$a|gate($pos;$neg)|if .negt!="" and (.post=="" or .negt>.post) then "blocked" elif .negt=="" and .post=="" then "neutral" else "green" end' -r)
   if [ "$got" = "$exp" ]; then echo "PASS seq=$got :: $(jq -r '[.[]|"\(.u):\(.b[0:28])"]|join(" | ")' <<<"$arts")"; else echo "FAIL seq got [$got] want [$exp] :: $arts"; fail=1; fi; }
 B="Verdict: BLOCKS at $H (UNPROVEN CLAIMS: 7, 1 blocking)"
 D="Verdict: DOES NOT BLOCK at $H (UNPROVEN CLAIMS: 5, none blocking). This supersedes the BLOCKS verdict above."
@@ -113,7 +146,7 @@ tp none "$(app "$NEW" '[]' "$PA")"
 tp none "$(app "$NEW" '["2"]' "$PN")"
 # tv <expected> <head> <json array of {t,u,b}>   expected = the polarity outcome (as ts) and whether the newest verdict's sha
 # (pr-gate's `last`) covers the head; at not-at-head the gate falls to its PR-own diff carry check
-tv() { local exp="$1" hd="$2" arts="$3"; n=$((n+1)); got=$(jq -n -r --argjson a "$arts" --arg h "$hd" --arg gr "$GR" --arg pos "$POS" --arg neg "$NEG" "$VS$CR$PL$SU"'($a|gate($pos;$neg)|if .negt!="" and (.post=="" or .negt>.post) then "blocked" elif .negt=="" and .post=="" then "neutral" else "green" end) + " " + ([$a[]|select(.b|vs|test($gr))]|sort_by(.t)|last|(.b // "")|vs|vsha($pos;$neg)|. as $s|if $s == "" then "no-sha" elif ($h|startswith($s)) then "at-head" else "not-at-head" end)')
+tv() { local exp="$1" hd="$2" arts="$3"; n=$((n+1)); got=$(jq -n -r --argjson a "$arts" --arg h "$hd" --arg gr "$GR" --arg pos "$POS" --arg neg "$NEG" "$VS$RF$CR$PL$SU"'($a|gate($pos;$neg)|if .negt!="" and (.post=="" or .negt>.post) then "blocked" elif .negt=="" and .post=="" then "neutral" else "green" end) + " " + ([$a[]|select(.b|vs|test($gr))]|sort_by(.t)|last|(.b // "")|vs|vsha($pos;$neg)|. as $s|if $s == "" then "no-sha" elif ($h|startswith($s)) then "at-head" else "not-at-head" end)')
   if [ "$got" = "$exp" ]; then echo "PASS tv=$got :: $(jq -r '[.[]|"\(.t[11:16]) \(.b|scan("ci-review-head ([0-9a-f]{8})")[0]) \(.b|scan("review state ([A-Z_]+)")[0] // "-")"]|join(" | ")' <<<"$arts")"; else echo "FAIL tv got [$got] want [$exp] :: $(jq -c '[.[]|.b[-90:]]' <<<"$arts")"; fail=1; fi; }
 # appseq <body>...: the App's reviews at 01:24, 01:28 and 01:51, as on #4625
 appseq() { local ts=(2026-11-19T01:24:11Z 2026-11-19T01:28:21Z 2026-11-19T01:51:02Z) i=0 b; for b in "$@"; do jq -nc --arg t "${ts[$i]}" --arg b "$b" '{t:$t,u:"ci-review[bot]",b:$b}'; i=$((i+1)); done | jq -sc .; }
@@ -122,6 +155,15 @@ AP2=$(app "$OLD" '[]' "$PC" APPROVED)
 tv "green at-head"     "$NEW" "$(appseq "$RC1" "$AP2" "$(app "$NEW" '[]' "$PA" APPROVED)")"
 tv "green not-at-head" "$NEW" "$(appseq "$RC1" "$AP2")"
 tv "blocked at-head"   "$NEW" "$(appseq "$RC1" "$AP2" "$(app "$NEW" '["2"]' "$PN" REQUEST_CHANGES)")"
+# agent-infra#3861: the App approved the head, then a later verdict named only a Dispatch ask link. Its sha is none, so the
+# gate runs no carry compare against the UUID (the old read: not-at-head, a 404 and a false CHANGED).
+tv "green no-sha"      "$NEW" "$(appseq "$(app "$NEW" '[]' "$PA" APPROVED)" "**Verdict: APPROVE**, on Sami's answer dispatch://INFRA-1478/ask/$U")"
+# #3861 itself: the App approved the head, then the merge-hold notice. The notice is no verdict, so the App's approval at
+# the head is the newest one (the old read: the notice was the newest verdict, with no sha).
+tv "green at-head"     "$NEW" "$(appseq "$(app "$NEW" '[]' "$PA" APPROVED)" "$HOLD")"
+# agent-infra#4645's shape: an approve of an old head, then a change request AT the head whose prose recounts that approve. It
+# blocks; read as an approve of the old sha, a diff identical since then would have carried it to green.
+tv "blocked at-head"   "$C4" "$(appseq "$(printf 'Approved at `3e05f653786fd6259ce666dea6146b8655584f1f`. I find no correctness defect in this head.\n [review state APPROVED at 3e05f653786fd6259ce666dea6146b8655584f1f]')" "$CRB")"
 echo "== check-run aggregation reads the WHOLE list, not a page (#20057: 198 runs, one verdict line per page) =="
 CSQ=$(grep -oP "^CSQ='\K.*(?=')" "$F"); [ -n "$CSQ" ] || { echo "could not extract CSQ from $F"; exit 1; }
 # tc <expected> <jq program building the slurped check-run array>

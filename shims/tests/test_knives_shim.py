@@ -11,10 +11,12 @@ spins in one pid until the timeout here kills it.
 
 from __future__ import annotations
 
+import fcntl
 import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -48,6 +50,9 @@ fi
 [[ "$*" == "which -C / knives --tool github:sjawhar/knives" ]] || { echo "unexpected mise $*" >&2; exit 99; }
 if [[ -n "${STUB_MISE_LOG:-}" ]]; then
     echo call >> "$STUB_MISE_LOG"
+fi
+if [[ -n "${STUB_WHICH_RC:-}" ]]; then
+    exit "$STUB_WHICH_RC"
 fi
 if [[ -n "${STUB_MISE_SLEEP_ONCE:-}" && ! -e "$STUB_MISE_LOG.slept" ]]; then
     touch "$STUB_MISE_LOG.slept"
@@ -111,7 +116,7 @@ class ShimFixture(unittest.TestCase):
         write_stub(installs / "2.0.0" / "bin", "knives", KNIVES.format(label="PINNED"))
         # DOTFILES_DIR names a checkout with no mise.toml: under this HOME, which holds no mise
         # configuration until a case writes one, the shim would otherwise read the pin of the
-        # checkout it is in (shims/AGENTS.md, "A moved HOME") and run this machine's knives.
+        # checkout it is in (shims/tests/test_shim_moved_home.py) and run this machine's knives.
         self.env = {
             "HOME": str(self.root),
             "DOTFILES_DIR": str(self.root),
@@ -329,11 +334,33 @@ class KnivesShimWithoutMise(ShimFixture):
             self.assertIn(str(tried), result.stderr)
         self.assertIn("could not install it", result.stderr)
 
+    def test_a_mise_which_that_exits_124_at_once_did_not_time_out(self) -> None:
+        """mise can exit 124 itself; only a call that lasted the whole timeout timed out."""
+        self.write_pin("4.0.0")
+        result = self.run_pinned(STUB_WHICH_RC="124", DOTFILES_KNIVES_MISE_TIMEOUT="2", STUB_INSTALL_FAIL="1")
+        self.assertEqual(result.returncode, 127, result.stdout)
+        self.assertEqual(self.mise_calls(), 2)
+        self.assertIn("attempt 1 exited 124", result.stderr)
+        self.assertNotIn("timed out", result.stderr)
+
+    def test_a_mise_timeout_of_19_digits_is_the_default(self) -> None:
+        """DOTFILES_KNIVES_MISE_TIMEOUT has at most 9 digits; a longer value is the default. Bash
+        reads 2^63 as a negative number, so every 124 would read as a timeout."""
+        self.write_pin("4.0.0")
+        result = self.run_pinned(
+            STUB_WHICH_RC="124", DOTFILES_KNIVES_MISE_TIMEOUT="9223372036854775808", STUB_INSTALL_FAIL="1"
+        )
+        self.assertEqual(result.returncode, 127, result.stdout)
+        self.assertEqual(self.mise_calls(), 2)
+        self.assertIn("attempt 1 exited 124", result.stderr)
+        self.assertNotIn("timed out", result.stderr)
+
 
 class KnivesShimInstallsANewPin(ShimFixture):
     """mise.toml pins a knives no install dir holds yet (2026-11-03: 3.2.2 on sami-leanperf,
-    3.2.3 on sami-rocqperf): the shim installs that version under a lock and runs it, so gh
-    keeps working without a person running `mise install`."""
+    3.2.3 on sami-rocqperf): the shim installs that version under the data dir's
+    .dotfiles-install.lock, the lock the tools steps hold around their own `mise install`, and
+    runs it, so gh keeps working without a person running `mise install`."""
 
     PIN = "5.0.0"
 
@@ -431,11 +458,58 @@ class KnivesShimInstallsANewPin(ShimFixture):
         self.assertEqual(self.installs(), 1)
 
     def test_a_knives_call_under_the_install_does_not_install(self) -> None:
-        """mise runs its GitHub credential command while it installs; a knives call there must
-        not wait on the lock its ancestor holds."""
-        result = self.run_new_pin(DOTFILES_KNIVES_INSTALLING="1")
+        """A knives call under a `mise install` that runs under the lock (DOTFILES_INSTALL_LOCK_HELD
+        set) exits 127: it does not install and does not wait on that lock."""
+        result = self.run_new_pin(DOTFILES_INSTALL_LOCK_HELD="1")
         self.assertEqual(result.returncode, 127, result.stdout)
         self.assertEqual(self.installs(), 0)
+
+    def test_an_install_timeout_of_19_digits_is_the_default_wait(self) -> None:
+        """DOTFILES_KNIVES_INSTALL_TIMEOUT has at most 9 digits; a longer value is the default wait,
+        300 s. Bash reads 2^63 as a negative number, which would end the wait at once. The test
+        holds the lock until the shim prints the wait it uses, then lets go of it; the shim then
+        installs the pin and runs it."""
+        lock = self.mise_data / ".dotfiles-install.lock"
+        stderr_path = self.root / "shim.stderr"
+        env = {
+            **self.env,
+            "PATH": ":".join([str(self.stub_dir), str(SHIM.parent), "/usr/bin", "/bin"]),
+            "STUB_PIN_MISSING": "1",
+            "STUB_INSTALL_LOG": str(self.install_log),
+            "DOTFILES_KNIVES_INSTALL_TIMEOUT": "9223372036854775808",
+        }
+        with lock.open("a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            with stderr_path.open("w") as stderr:
+                call = subprocess.Popen(
+                    [str(SHIM), "status"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=stderr,
+                    text=True,
+                    env=env,
+                )
+            try:
+                deadline = time.monotonic() + LOOP_TIMEOUT
+                while "waiting up to" not in stderr_path.read_text(encoding="utf-8"):
+                    if call.poll() is not None or time.monotonic() > deadline:
+                        break
+                    time.sleep(0.05)
+                waiting = stderr_path.read_text(encoding="utf-8")
+            except BaseException:
+                call.kill()
+                call.communicate()
+                raise
+        try:
+            stdout, _ = call.communicate(timeout=LOOP_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            call.kill()
+            call.communicate()
+            self.fail(f"shims/knives was still running {LOOP_TIMEOUT}s after the lock was free")
+        self.assertIn("is held by another install; waiting up to 300s for it", waiting)
+        self.assertEqual(call.returncode, 0, stderr_path.read_text(encoding="utf-8"))
+        self.assertEqual(stdout, "INSTALLED knives status\nstdin: \n")
+        self.assertEqual(self.installs(), 1)
 
 
 if __name__ == "__main__":

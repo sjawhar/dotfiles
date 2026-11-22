@@ -75,19 +75,26 @@
 //     carried over from an Azure box, whose token source a Google VM lacks.
 //
 // It also names a host session to the agent-secrets helper (dispatch://INFRA-3848):
-// `agent-secrets register --session-id <id>`, run once per id in this process,
-// in the background, so a restart of the helper keeps the session's broker
-// identity and its grants. The launcher (scripts/agent-secrets-session) registers
-// the session before omp has a transcript, so it can name no id; the helper takes
-// the name from inside the session it registered, finding the session's root from
-// the caller's pid. It runs only from inside such a session (`agent-secrets
-// identity` exits 0), since a register from outside one makes the helper admit the
-// command's own short-lived pid as a session root (dispatch://INFRA-3890). It does
-// nothing in a box (AGENTBOX_BOX: the box's launcher names its session), with no
-// helper socket, and for a subagent transcript resumed on its own: that process
-// commits as its session but is not it, and naming it would take that session's
-// broker identity from the process that holds it. A refusal writes one line and
-// never fails the session start.
+// `agent-secrets register --session-id <id>`, run in the background, so a restart
+// of the helper keeps the session's broker identity and its grants. The launcher
+// (scripts/agent-secrets-session) registers the session before omp has a
+// transcript, so it can name no id; the helper takes the name from inside the
+// session it registered. A session no launcher registered (one resumed without the
+// shims) is registered by the same call: since cybermonklabs/legion#4151
+// (agent-secrets legion-envoy-v30.45.0), a register without --exec attaches the
+// nearest omp above it, which is this process, and the helper refuses it when
+// there is none. So every host top-level session runs it, whatever started it.
+// A process names one id: the first the helper takes. After that a session switch
+// or branch asks nothing more, since the helper refuses a process it has named
+// another id, and the process's broker identity, with the requests and grants
+// bound to it, stays under that first id for as long as the process runs. A
+// register that failed named nothing, so the next id the process switches to is
+// tried; no id is tried twice. It does nothing in a box (AGENTBOX_BOX: the box's
+// launcher names its session), with no helper socket, for a subagent (below), and
+// for a subagent transcript resumed on its own: that process commits as its
+// session but is not it, and naming it would take that session's broker identity
+// from the process that holds it. A refusal writes one line that says what to run
+// instead, and never fails the session start.
 //
 // omp binds this extension to every subagent too, and a subagent shares its
 // parent's process and environment. A session family deliberately shares one
@@ -168,12 +175,14 @@ const ATTRIBUTION_OVERLAY = /^omp-attribution-.*\.toml$/;
 const OVERLAY_DIR = path.join(homedir(), ".cache", "omp", "jj");
 // `jj config path --user` reads no repository and answers in milliseconds.
 const JJ_CONFIG_PATH_TIMEOUT_MS = 10_000;
-// Each agent-secrets call the helper naming makes: `identity` asks the helper once with a 2 s
-// deadline of its own, and `register` redials a helper that is starting for up to 10 s.
+// The register the helper naming runs redials a helper that is starting for up to 10 s.
 const AGENT_SECRETS_TIMEOUT_MS = 10_000;
 const execFileAsync = promisify(execFile);
-// The ids this process has named, or is naming, to the helper.
-const namedToHelper = new Set<string>();
+// The ids this process has asked the helper to take, and the one it took once a register
+// succeeded. The registers run one after another on this chain, so a session switch while one
+// runs waits for its answer.
+const askedHelper = new Set<string>();
+let helperName: Promise<string | undefined> = Promise.resolve(undefined);
 
 function isSocket(file: string): boolean {
 	try {
@@ -184,33 +193,31 @@ function isSocket(file: string): boolean {
 }
 
 /**
- * Names a host session to the agent-secrets helper once in this process, in the background.
- * The rules are in the header above.
+ * Names a host session to the agent-secrets helper in the background, unless this process has
+ * named one already. The rules are in the header above.
  */
 function nameSessionToHelper(id: string, report: (message: string) => void): void {
-	if (process.env.AGENTBOX_BOX || namedToHelper.has(id)) return;
+	if (process.env.AGENTBOX_BOX || askedHelper.has(id)) return;
 	const sock =
 		process.env.AGENT_SECRETS_HELPER_SOCK ||
 		path.join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 0}`, "agent-secrets", "helper.sock");
 	if (!isSocket(sock)) return;
-	namedToHelper.add(id);
+	askedHelper.add(id);
 	const env = { ...process.env, AGENT_SECRETS_HELPER_SOCK: sock };
-	void (async () => {
-		try {
-			await execFileAsync("agent-secrets", ["identity"], { env, timeout: AGENT_SECRETS_TIMEOUT_MS });
-		} catch {
-			return; // no session the helper registered: nothing to name
-		}
+	helperName = helperName.then(async named => {
+		if (named) return named;
 		try {
 			await execFileAsync("agent-secrets", ["register", "--session-id", id], { env, timeout: AGENT_SECRETS_TIMEOUT_MS });
+			return id;
 		} catch (error) {
 			const stderr = error && typeof error === "object" && "stderr" in error && typeof error.stderr === "string" ? error.stderr.trim() : "";
 			const why = stderr || String(error);
 			report(
-				`session-env: agent-secrets register --session-id ${id} failed, so a helper restart ends this session's broker identity: ${why.split("\n").at(-1)}`,
+				`session-env: agent-secrets register --session-id ${id} failed, so this session may have no broker identity, and a helper restart ends any it has. Run that command again from this session's shell with --wait 10; if the helper refuses it again (it refuses a call with no omp above it), quit and run ~/.dotfiles/shims/omp --resume ${id}, which registers the session as it starts. Reason: ${why.split("\n").at(-1)}`,
 			);
+			return undefined;
 		}
-	})();
+	});
 }
 
 function withoutOverlays(chain: string): string {
@@ -255,9 +262,8 @@ export function agentGoogleCredentials(env: NodeJS.ProcessEnv = process.env, onG
 // JJ_CONFIG replaces jj's default config lookup, so the overlay must chain
 // the user layer explicitly. Honor a pre-existing JJ_CONFIG (captured before
 // this extension ever overwrites it, minus any attribution overlays a parent
-// process left in it); otherwise ask jj for its user config paths — chaining
-// them in printed order reproduces the effective user config exactly
-// (verified: `jj config list --user` is identical).
+// process left in it); otherwise ask jj for its user config paths and chain
+// them in .bashrc's order (sharedConfigLast).
 const inheritedJjConfig = process.env.JJ_CONFIG ? withoutOverlays(process.env.JJ_CONFIG) : "";
 let basePromise: Promise<string> | undefined;
 
@@ -287,6 +293,18 @@ function defaultUserConfigChain(env: NodeJS.ProcessEnv = process.env): string {
 	return [path.join(home, ".jjconfig.toml"), path.join(env.XDG_CONFIG_HOME || path.join(home, ".config"), "jj", "config.toml")].join(":");
 }
 
+/**
+ * CHAIN with the shared ~/.jjconfig.toml (the link to the dotfiles' file) after every other
+ * entry, as .bashrc's JJ_CONFIG has it. In jj's own order that file comes first, so the
+ * per-machine ~/.config/jj/config.toml after it wins over its identity scopes, and every
+ * repository commits with the per-machine user.email (.jjconfig.toml).
+ */
+export function sharedConfigLast(chain: string, env: NodeJS.ProcessEnv = process.env): string {
+	const shared = path.join(env.HOME || homedir(), ".jjconfig.toml");
+	const entries = chain.split(":");
+	return entries.includes(shared) ? [...entries.filter((entry) => entry !== shared), shared].join(":") : chain;
+}
+
 function jjConfigBase(): Promise<string> {
 	// Asked without JJ_CONFIG: jj prints JJ_CONFIG's own entries when it is set,
 	// so an inherited chain of nothing but overlays came back as the "user"
@@ -296,8 +314,8 @@ function jjConfigBase(): Promise<string> {
 	const { JJ_CONFIG: _ignored, ...env } = process.env;
 	basePromise ??= inheritedJjConfig
 		? Promise.resolve(inheritedJjConfig)
-		: userConfigChain(JJ_CONFIG_PATH_TIMEOUT_MS, env).then(
-				(chain) => (chain && withoutOverlays(chain)) || defaultUserConfigChain(env),
+		: userConfigChain(JJ_CONFIG_PATH_TIMEOUT_MS, env).then((chain) =>
+				sharedConfigLast((chain && withoutOverlays(chain)) || defaultUserConfigChain(env), env),
 			);
 	return basePromise;
 }

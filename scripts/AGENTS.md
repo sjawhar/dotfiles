@@ -1,22 +1,11 @@
 # scripts
 
-Utility commands, the watches that run as systemd user units, and their tests.
-`.bashrc` puts this directory on `PATH` (after `shims/` and `bin/`), so a script runs by name with no install step.
-Each script's usage and rules are in its header comment or `--help`; a script with more rules than a header holds has `<name>.md` beside it.
-
 ## Tests
 
-- Tests for a script are `scripts/tests/test_<name>*.py`, dashes in the name written as underscores.
-- Run them with pytest from the repository root: `conftest.py` gives them the shims' encrypted test term list, and some files have no `unittest.main()`.
-- One file: `uvx pytest scripts/tests/test_envoy_client.py`. Every file: `PYTHONPATH=. uvx pytest scripts/tests` (some files import `scripts.tests`).
-- Stand-ins: `scripts/tests/fake_gh.py` for `gh pr create|view|merge`, `scripts/tests/gce_metadata_stub.py` for the Google metadata server (point `GCE_METADATA_HOST` at it).
-- A script that maps a process's cgroup to a box reads `/proc` through an override (`PROC_ROOT`, as `earlyoom-kill-watch` does), so its test checks the mapping on a fixture tree rather than assuming it.
+- Run a script's tests with pytest, never as `python3 scripts/tests/<file>`: a file with no `unittest.main()` then runs no test and can still exit 0, and no file run that way gets the test term list `conftest.py` gives.
 
 ## Adding or changing a script
 
-- Read the sibling scripts first and match their naming and interpreter. An entrypoint has a `#!` line and the executable bit.
-- A library may have neither: `envoy_client.py`, the Envoy client the Python watches import from their own directory, and `agent-spend-env.sh`, which is sourced. A shell, or a script that sends one message and exits, uses `scripts/envoy`.
-- An edit saved in `~/.dotfiles` is live for every session and unit at once; test from a copy (root `AGENTS.md`).
 - A secret never goes in a command's arguments: any user can read them from `/proc/<pid>/cmdline`. Pass it through the environment, a file or stdin (curl's `--config` or `-H @file`, `mcp-remote-from-env` for a URL).
 - A script that needs a secret runs `secret-run KEY… -- cmd`, not `secrets` or `agent-secrets`.
 - Test for a Google VM with `on-google-vm`, not a copy of its check.
@@ -34,20 +23,11 @@ Each script's usage and rules are in its header comment or `--help`; a script wi
 
 ## Scheduled scripts
 
-- Units are `omp/<name>.{service,timer}` or `devbox/<name>.{service,timer}` with `ExecStart=%h/.dotfiles/scripts/<name>`. An installer (`installers/<name>.sh`, or `devbox/install.sh` for the dev box's own) arms them with `arm_user_timer` or `arm_user_service` from `installers/lib.sh`.
-- A timer the dev box must run gets a line in `devbox/expected-timers.txt`; `unit-health-watch` reports one that is missing or stops firing.
-- Do not add a timer or service that monitors a dev box: the standard Datadog or Cloud agent does that. The scripts and units of the retired watches are still here; `devbox/expected-timers.txt` names them. Do not arm them again.
+- Do not add a timer or service that monitors a dev box: the standard Datadog or Cloud agent does that. The scripts and units of the retired watches are still here, and `devbox/expected-timers.txt` names them: do not arm them again.
 - A unit has no login shell: name each tool by its full path, or set `PATH` in the unit.
 - `sudo` resets the environment: pass a variable as `sudo -n env VAR=value cmd`.
 - A watch says each new fact once over Envoy, in at most 600 characters that name a report file.
 - A watch for a state nobody can enumerate is a follower, not a periodic pass. Its docs say its silence is a result, so a quiet period is no reason to remove it.
 - A green timer shows the unit ran, not that it did its job. Before you rely on a watch, make it fire once on a harmless case routed to you.
 
-## Other guides
-
-- `agentbox/AGENTS.md`: `agentbox`, `agentbox-*` and their tests.
-- `shims/AGENTS.md`: the scripts a shim runs (`leak-terms-check`, `person-branch-guard`, `omp-session-trailer`, `github-repo-visibility`, `public-text-gate`, `pr-gate`).
-- `omp/AGENTS.md`, "models.yml": `omp-models-build`.
-- `agent-secrets/AGENTS.md`: `agent-secrets-login`, `agent-secrets-session`, `agent-secrets-name-session`.
-- Root `AGENTS.md`: `agent-session`, `cld`, and publishing with `dotfiles-publish`. `dotfiles-follow.md`: how a machine follows main.
-- `installers/AGENTS.md`: the installer helpers.
+Where this file and the code disagree, the code is right: follow the code and correct this file.

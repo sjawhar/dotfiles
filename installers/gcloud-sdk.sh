@@ -71,6 +71,37 @@ else
     echo "gcloud-sdk: installed $GCLOUD_SDK_VERSION at $GCLOUD_SDK_ROOT"
 fi
 
+# gcloud copies each command's output into a log file under its configuration directory's logs/,
+# so a token it prints lands on disk: on sami-devbox on 2026-11-20, 85,032 of the 87,264 files in
+# ~/.config/gcloud/logs held an access token: 84,618 of them, and every one written since
+# 2026-11-10, from `auth docker-helper` (dispatch://INFRA-4824). shims/gcloud turns file logging
+# off for each call it runs, but docker-credential-gcloud runs this SDK's gcloud by its path, past
+# the shim, and not every caller has the shim on PATH or its environment (a system unit, an
+# `env -i` caller). An installation property holds for every caller of this SDK, in every
+# configuration directory and every box that mounts ~/.gcloud. A reinstall above replaces the
+# properties file, so this runs every time.
+"$GCLOUD_SDK_BIN" config set --installation core/disable_file_logging true
+
+# The installation property holds for this SDK alone. A Google VM's image also ships gcloud as a
+# snap, whose installation directory is read-only, so /snap/bin/gcloud, docker-credential-gcloud
+# and bq read no property of this SDK. A systemd user unit's PATH has /snap/bin and no shim, and a
+# unit carries no session's CLOUDSDK_CORE_DISABLE_FILE_LOGGING: on sami-devbox on 2026-11-20 at
+# 19:35Z three runs of the snap's docker-credential-gcloud each left a log file holding an access
+# token, and in a unit the snap's `auth print-access-token` and kubectl's gke-gcloud-auth-plugin
+# did the same (dispatch://INFRA-4824). gcloud reads its properties from its installation and from
+# the active named configuration (configurations/named_configs.py, ActivePropertiesFile), so the
+# property in each configuration holds for every gcloud that reads this configuration directory,
+# whatever its installation and its environment. A configuration made later gets it at this
+# installer's next run; installers/gcloud-box.sh sets it in the `box` configuration it creates.
+gcloud_config_dir="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}"
+for config_file in "$gcloud_config_dir"/configurations/config_*; do
+    [[ -f "$config_file" ]] || continue
+    grep -qE '^disable_file_logging[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$config_file" && continue
+    configuration="${config_file##*/config_}"
+    "$GCLOUD_SDK_BIN" --configuration "$configuration" config set core/disable_file_logging true
+    echo "gcloud-sdk: configuration $configuration: file logging off"
+done
+
 # The SDK's own installer is not run, so nothing edits .bashrc; the components command needs no
 # prompt with --quiet.
 if [[ ! -x "$GCLOUD_SDK_ROOT/google-cloud-sdk/bin/gke-gcloud-auth-plugin" ]]; then

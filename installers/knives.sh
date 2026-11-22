@@ -10,20 +10,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # registry serves every machine: knives finds each checkout by its remotes and
 # reports one that is absent here as `not on this machine`. `knives register`
 # prints a paste-ready entry for the checkout you stand in.
-mkdir -p ~/.config/knives
-# The registry is rendered, not linked: a committed file names no machine's path, and oh-my-pi's
-# worktrees belong on the big local disk where the machine has one (the branches there are large
-# and rebuilt often). Everything else in the file is copied byte for byte.
-registry=~/.config/knives/repos.toml
-worktrees="$HOME/.worktrees/oh-my-pi"
-# The big disk's directory is named for the home it belongs to, not for the login name.
-nvme="/mnt/nvme/$(basename "$HOME")"
-[[ -d "$nvme" ]] && worktrees="$nvme/omp-worktrees/branches"
-rendered="$(mktemp "${registry}.XXXXXX")"
-sed "s#^workspaces = \"~/.worktrees/oh-my-pi\"\$#workspaces = \"${worktrees}\"#" \
-    "${DOTFILES_DIR}/knives/repos.toml" > "$rendered"
-chmod 644 "$rendered"
-mv -f "$rendered" "$registry"
+# scripts/knives-registry-render renders knives/repos.toml into ~/.config/knives/repos.toml;
+# scripts/dotfiles-follow and scripts/dotfiles-sync run it too, so a merge reaches the copy.
+"${DOTFILES_DIR}/scripts/knives-registry-render"
 # Values that name a customer (a forbidden term, a consumer) stay out of this public repository:
 # the private repository theorem-labs/sami, cloned at .secrets, holds them, and knives reads
 # repos.local.toml beside repos.toml and adds them to the entries it names (knives 3.2.0 and later).
@@ -80,18 +69,80 @@ jq -e '.repos | type == "array"' <<<"$repos_json" >/dev/null 2>&1 || {
 }
 ledgers="$(jq -r '[.repos[].ledger // empty] | unique | .[]' <<<"$repos_json")"
 
+# knives 5.0.0 and later joins a ledger that no git directory here reaches,
+# and a knives command can run at any time during this loop. knives reads
+# each directory in ledger-repositories as a git directory. When it finds one
+# with no origin, it does not join the ledger, and the command fails. So the
+# loop builds the git directory whole in a scratch directory and moves it
+# into ledger-repositories, as knives itself does. A knives command never
+# sees a directory that the loop built only in part. Of two renames to one
+# final path at once, only one can succeed. When a knives command or another
+# install put its git directory there first, the loop keeps that directory.
+#
+# The scratch directory is in ~/.config/knives, beside ledger-repositories,
+# so the rename stays on one filesystem. The EXIT trap deletes it when the
+# subshell exits. A killed install (SIGKILL) can leave it, and knives never
+# reads it.
+#
+# The loop handles these states of a git directory at the final path, which
+# an earlier install or a person can leave:
+#
+# - A git directory with no knives.machine. The loop gives it one. An older
+#   version of this installer can stop after it adds the origin and before
+#   it writes knives.machine.
+# - A git directory with no origin. An older version of this installer made
+#   the git directory in place, one key at a time, and that install can stop
+#   between two keys. The loop cannot tell that leftover from a git
+#   directory that a person made by hand. So the loop never deletes or
+#   replaces the git directory, and it keeps each key that has a value,
+#   except core.bare. It sets core.bare to false, as knives does, because
+#   `git init --bare` sets it to true. It writes core.worktree only when
+#   `git config` reads no value for it. It writes the fetch refspec that
+#   `git remote add` writes only when the directory has none, and then the
+#   origin last, with `git config`: `git remote add` refuses a directory
+#   whose config already has a fetch refspec or a push URL of origin. So
+#   once the loop adds the origin, `git config` also reads core.bare false
+#   and a value for core.worktree and for knives.machine.
+#
+# A git directory whose origin is another repository keeps that origin, and
+# knives reports it. A file at the final path stops the install. A directory
+# there that git cannot read as a git directory also stops it, with git's
+# own error.
 while IFS= read -r ledger; do
     [[ -n "$ledger" ]] || continue
     git_dir="$repositories/${ledger//\//--}.git"
     if [[ ! -d "$git_dir" ]]; then
         echo "knives: joining the ledger at $ledger"
-        git init --quiet --bare "$git_dir"
-        git --git-dir="$git_dir" config core.bare false
-        git --git-dir="$git_dir" config core.worktree "$ledger_root"
-        git --git-dir="$git_dir" remote add origin "https://github.com/$ledger"
+        (
+            scratch="$(mktemp -d "$HOME/.config/knives/.knives-installer-joining-XXXXXX")"
+            trap 'rm -rf -- "$scratch"' EXIT
+            made="$scratch/${git_dir##*/}"
+            git init --quiet --bare "$made"
+            git --git-dir="$made" config core.bare false
+            git --git-dir="$made" config core.worktree "$ledger_root"
+            git --git-dir="$made" remote add origin "https://github.com/$ledger"
+            git --git-dir="$made" config knives.machine "$machine"
+            # The target is ledger-repositories, not the final path. When a directory is at the
+            # final path, `mv "$made" "$git_dir"` moves the source into that directory and exits 0.
+            # With ledger-repositories as the target, mv renames the source to the final path,
+            # and the rename fails when a directory that is not empty is there. Then another
+            # process made that directory first. The loop keeps it and does not show mv's error.
+            if ! moved="$(mv "$made" "$repositories/" 2>&1)" && [[ ! -d "$git_dir" ]]; then
+                echo "knives: cannot move $made to $repositories/: $moved" >&2
+                exit 1
+            fi
+        )
     fi
     git --git-dir="$git_dir" config knives.machine >/dev/null ||
         git --git-dir="$git_dir" config knives.machine "$machine"
+    if ! git --git-dir="$git_dir" config remote.origin.url >/dev/null; then
+        git --git-dir="$git_dir" config core.bare false
+        git --git-dir="$git_dir" config core.worktree >/dev/null ||
+            git --git-dir="$git_dir" config core.worktree "$ledger_root"
+        git --git-dir="$git_dir" config --get-all remote.origin.fetch >/dev/null ||
+            git --git-dir="$git_dir" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+        git --git-dir="$git_dir" config remote.origin.url "https://github.com/$ledger"
+    fi
 done <<<"$ledgers"
 
 # Move a ledger an older knives wrote to the upstream-named layout, then bring
@@ -101,15 +152,26 @@ done <<<"$ledgers"
 # directories made above. Both are no-ops when there is nothing to do, so
 # every install runs them.
 #
-# A failed migrate stops the install: until it succeeds every knives command
-# here refuses. A failed sweep stops it only when it leaves entries this
+# A failed migrate stops the install with migrate's own exit status. The
+# installer sends what migrate prints, and the sweep's summary, to stderr,
+# where its error messages go. So in every log each error message comes
+# after the lines it points to. When migrate exits 3, the message also says
+# what to run.
+#
+# A failed sweep stops the install only when it leaves entries this
 # machine alone holds (`unsent`, per repository; absent when knives could not
 # count them): a new machine whose git cannot reach GitHub yet has nothing to
 # lose and joins on its next sweep.
 if [[ -n "$ledgers" ]]; then
-    knives ledger migrate || {
+    knives ledger migrate >&2 || {
         status=$?
-        echo "knives: the ledger migration did not finish; branch statements stay in state.json and every knives command refuses until it does. Once git can reach each ledger repository (gh auth login), run: bash ~/.dotfiles/installers/knives.sh" >&2
+        echo "knives: \`knives ledger migrate\` exited $status." >&2
+        if [[ $status -eq 3 ]]; then
+            # %q quotes the path for the shell, so the command runs as printed from any path.
+            printf -v rerun 'bash %q' "${DOTFILES_DIR}/installers/knives.sh"
+            echo "knives: the lines it printed above say what went wrong. Fix each problem they name that needs a fix, then run: $rerun" >&2
+            echo "knives: if a line above asks for a change to repos.toml, make it in ${DOTFILES_DIR}/knives/repos.toml: at each run this installer replaces ~/.config/knives/repos.toml with a render of that file." >&2
+        fi
         exit "$status"
     }
     status=0
@@ -117,7 +179,7 @@ if [[ -n "$ledgers" ]]; then
     # A sweep that panicked or was killed prints no JSON: show what it printed,
     # and count its backlog as unknown rather than as nothing.
     summary="$(jq -c . <<<"$sweep" 2>/dev/null)" || summary="$sweep"
-    echo "knives: ledger sweep: $summary"
+    echo "knives: ledger sweep: $summary" >&2
     if [[ $status -ne 0 ]]; then
         stranded="$(jq '(.destinations // []) as $d | if ($d | length) == 0 then -1 else ([$d[] | .unsent // -1] | if any(. < 0) then -1 else add end) end' <<<"$sweep" 2>/dev/null)" || stranded=-1
         [[ -n $stranded ]] || stranded=-1

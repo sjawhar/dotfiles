@@ -244,14 +244,30 @@ gh_shim_may_send_text() {
 }
 # gh_shim_has_nested_alias COMMAND: true when gh's config.yml (in gh's own config dir) may hold an
 # alias under COMMAND, such as `gh alias set 'pr say' 'pr comment'`, which gh runs as what it
-# expands to; the check then reads the call and decides. Until 2026-11-17 `gh pr say 11 --body …`
-# was a read here, and its text went out unchecked. A line that only looks like one starts the
-# check, which finds no alias and lets the call go.
+# expands to; the check then reads the call and decides. The alias's key starts an indented line of
+# a block mapping, or follows the `{` or a `,` of the flow mapping gh writes once the last alias was
+# deleted (`aliases: {pr say: pr comment}`). It is true too when config.yml holds a line break other
+# than a line feed, matched as bytes in any locale (a carriage return, and UTF-8's next line, line
+# separator and paragraph separator): yaml.v3 begins a line at each, so a key after one starts no
+# line the pattern below finds. Until 2026-11-17 `gh pr say 11 --body …` was a read here, and its
+# text went out unchecked. It is true too when config.yml holds a `? ` key, at a line's start or
+# after a `{` or a `,`, matched as bytes the same way: gh writes `? ` before a key yaml.v3 does not
+# write as a simple key, one past 128 bytes or one whose name holds a line break (`? |`, `? "cr\r"`,
+# `{? "pr say\n" : …}`), in a block and in a flow mapping, so the check starts for every such key
+# gh writes. The check judges a call through an alias as the command it expands to; where it cannot
+# read config.yml exactly, it refuses each call whose name stands there before a `:`
+# (scripts/leak-terms-check, gh_aliases). A line that only looks like an alias starts the check,
+# which on a config.yml it reads exactly finds no alias and lets the call go.
 gh_shim_has_nested_alias() {
     local config="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/config.yml" text pattern
+    local LC_ALL=C
     [[ -r "$config" ]] || return 1
     text="$(< "$config")" || return 1
-    pattern=$'(^|\n)[ \t]+["\']?'"$1"$'[ \t][^:\n]*:'
+    [[ "$text" == *$'\r'* || "$text" == *$'\xc2\x85'* || "$text" == *$'\xe2\x80\xa8'* || "$text" == *$'\xe2\x80\xa9'* ]] &&
+        return 0
+    pattern=$'(^|\n)[ \t]*\\?[ \t]|[{,][ \t]*\\?[ \t]'
+    [[ "$text" =~ $pattern ]] && return 0
+    pattern=$'((^|\n)[ \t]+|[{,][ \t\n]*)["\']?'"$1"$'[ \t][^:\n]*:'
     [[ "$text" =~ $pattern ]]
 }
 # The text of a call that reads stdin (`--input -`, `--body-file -`, `-F name=@-`, …) is read by the checks below
@@ -300,7 +316,7 @@ gh_shim_stdin_to_gh() {
 }
 if agent_context; then
     # The dotfiles checkout this file is in, through a link to it, not the one under HOME: a
-    # caller may give gh a HOME of its own (shims/AGENTS.md, "A moved HOME").
+    # caller may give gh a HOME of its own (shims/tests/test_shim_moved_home.py).
     _gh_src="${BASH_SOURCE[0]}"
     [[ ! -L "$_gh_src" ]] || _gh_src="$(command -p readlink -f -- "$_gh_src")"
     case "$_gh_src" in
@@ -445,7 +461,7 @@ fi
 gh_shim_stdin_to_gh
 
 # mise_paths: mise as this machine runs it, whatever HOME and PATH the caller set
-# (shims/AGENTS.md, "A moved HOME"). A Legion test pane runs a shim with a
+# (shims/tests/test_shim_moved_home.py). A Legion test pane runs a shim with a
 # temporary HOME and the PATH <bin>:/usr/local/bin:/usr/bin:/bin, where every
 # path under HOME names nothing. Sets, once per process:
 #   _mise_bin     mise on PATH, else the dotfiles checkout's bin/mise, else the

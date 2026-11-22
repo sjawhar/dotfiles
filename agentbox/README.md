@@ -11,17 +11,29 @@ agentbox runs each agent session in its own disposable [Sysbox](https://github.c
   login there, work unchanged), the cloud metadata service, the Envoy API, the host's tmux server, and the
   [forward](../forward/) channels, which carry the laptop's YubiKey (PC/SC) and browser. The secretsd socket is
   bind-mounted.
+  Through the relayed bus, `systemctl --user` in a box acts on the host's units, while `journalctl`, `pgrep` and
+  `/sys/fs/cgroup` answer about the box: a unit `systemctl --user` reports active can show no journal and no process
+  in the box.
 - Root in the box is an unprivileged user on the host, so `sudo apt-get install`, an inner Docker daemon and
   nested containers work without host privileges.
+- A box's `/proc` lists only the box's processes. A tool in a box that sweeps scratch by testing pids in its own
+  `/proc` reads every host run as dead, so a sweeper keeps what it cannot prove dead, and an in-box tool's `TMPDIR` never points at a host run's, or the reverse.
 - Each box has its own cpu, memory, pids and disk limit. When the session ends, everything in the box is deleted:
   its clones (uncommitted changes and commits no remote has too), its home, `/tmp` and its inner Docker store.
   Push what you want kept before the session ends. A box whose launcher died is deleted later by the collector
   that every `agentbox new` starts.
+  `scripts/path-outlives-box <path>…` says whether a write there outlives the box.
+- A box ends when its container stops, not when the launcher's Docker client ends. When dockerd restarts (an
+  upgrade, a crash) with `live-restore` on, the container runs on, and the launcher attaches to it again in the
+  same pane. When Docker does not answer for 5 minutes (`AGENTBOX_REATTACH_WAIT`), the launcher leaves the box
+  running, removes nothing, and prints the commands that attach to it or stop it. A launcher keeps the code it
+  started with: `agentbox adopt <box>` puts a box started by an older launcher under this one in its own pane,
+  stopping nothing in the box.
 - The box gets no route to omp's session database, so a box resumes a session only from its transcript file.
 
 This is part of Sami's dotfiles, not a stand-alone tool. It expects a host set up by this repository's
 `install.sh`. (`devbox/gce-host.sh` is for Sami's own Google Cloud devbox only: it needs its disks and must run
-before `install.sh`.) The traps to know before you change a box are in
+before `install.sh`.) The commands that test a change to a box, and the rules for changing one, are in
 [AGENTS.md](AGENTS.md).
 
 ## What the host must have
@@ -40,7 +52,7 @@ before `install.sh`.) The traps to know before you change a box are in
 | A session bus at `/run/user/$UID/bus` | relayed into the box for the keyring | a login session or lingering |
 | secretsd listening on `/run/user/$UID/secretsd.sock` | `agentbox new` stops without it | `installers/secretsd.sh` (it skips when mise has no `secretsd` binary) |
 | `git`, `socat`, `jq`, `python3`, `ss` (iproute2) | clones, relays and launcher | `sudo apt-get install -y git socat jq python3 iproute2` |
-| The `agent-secrets` helper with a live launcher credential, or a `gh-app.<profile>.key-secret` in `~/.config/git/config` | git in the box, and the clone `agentbox new` makes, get GitHub tokens from `shims/gh-app-token`; with neither, every github.com credential request fails, so private repositories cannot be cloned | `installers/agent-secrets.sh` (see `agent-secrets/AGENTS.md`); `shims/gh-app-token --help` for `key-secret` |
+| The `agent-secrets` helper with a live launcher credential, or a `gh-app.<profile>.key-secret` in `~/.config/git/config` | git in the box, and the clone `agentbox new` makes, get GitHub tokens from `shims/gh-app-token`; with neither, every github.com credential request fails, so private repositories cannot be cloned | `installers/agent-secrets.sh`, then `scripts/agent-secrets-login <email>` once per machine; `shims/gh-app-token --help` for `key-secret` |
 | Optional: `forward serve` running | YubiKey and browser access from the box | `forward/` |
 
 ### Install Sysbox
@@ -147,6 +159,10 @@ The sparse disk defaults to 128 GiB on sami-devbox and 32 GiB on other hosts.
 Creating an image requires at least 500 GiB free on its host filesystem. Sparse capacity reserves no space.
 `grow` runs on the host. It extends the image, refreshes its loop device, and resizes ext4.
 It accepts sizes up to 512 GiB and refuses to shrink a filesystem.
+Under the CPU quota, wall time is not cost: work that wants more cores waits out the rest of each period.
+Before you call work in a box slow, read its CPU time and `/sys/fs/cgroup/cpu.stat` (`nr_throttled`, `throttled_usec`).
+Before you ask for more CPU, list your own processes, finished subagents' leftovers included (`ps` twice: supervisors respawn), and compare 30-second `cpu.stat` deltas; stop a runner before its children, and check that each one stopped.
+Then raise one box (`agentbox new --cpus N`), or run the parallel work on the host, as a transient scope over ssh.
 
 ## What it assumes about the host
 
@@ -171,14 +187,17 @@ It accepts sizes up to 512 GiB and refuses to shrink a filesystem.
   Shared configuration and SSH state are writable. `/mnt/durable/<host-user>` is bound when present;
   other host paths (trees under `/mnt/nvme/<host-user>`) only through a named or inferred `--dir`. The box keeps its own home and `/tmp`.
   Docker state is a complete host snapshot in that private home. A later host Docker login needs a new box.
+  A shared home path that is a link into `~/.dotfiles` (`~/.gitconfig`) is the same link in the box, so the box
+  reads the live file: each move of the checkout and each `git config --global` replaces that file.
   Own-host GitHub and Azure configuration is visible. App/machine defaults and existing login approvals stay unchanged.
 - **The user.** The session runs as `ubuntu` (uid 1000). To host daemons a box process is a subordinate uid,
   not yours, which is why the session bus, tmux and the metadata service reach the box through relays.
 - **Metadata service.** A relay on the box network's gateway (port 8169) reaches `169.254.169.254`. On a Google
   Cloud VM (`scripts/on-google-vm`) it is `scripts/agentbox-gce-metadata-relay`, which rewrites the Host header,
   and the box gets `GCE_METADATA_HOST`, `GCE_METADATA_ROOT` and `GCE_METADATA_IP`, so gcloud and Google client
-  libraries act as the VM's service account. Elsewhere it is a plain relay for the AWS metadata service
-  (`AWS_EC2_METADATA_SERVICE_ENDPOINT`). AgentBox adds no metadata firewall to nested workloads.
+  libraries act as the VM's service account, or as the account `~/.config/agent-identity/account` names, whose
+  tokens the relay mints (`installers/agent-identity.sh`). Elsewhere it is a plain relay for the AWS metadata
+  service (`AWS_EC2_METADATA_SERVICE_ENDPOINT`). AgentBox adds no metadata firewall to nested workloads.
 - **Envoy.** The host API is relayed into the box. `ENVOY_MACHINE_ID` is the physical host's short name,
   not the container name. Profile connection settings still come from `envoy.json` without launcher overrides.
   See [the access audit](access-audit.md) for the restriction history and authorization.

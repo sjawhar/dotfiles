@@ -22,9 +22,11 @@
 # there would be whom every Google library on the machine acts as. This check
 # ignores GOOGLE_APPLICATION_CREDENTIALS.
 #
-# An agent session (`shims/gh`'s test) runs as the box identity by default:
-# agent-infra's applies run in CI or as its applier service account,
-# impersonated from the box identity, and a step only a person can make is on
+# An agent session (`shims/gh`'s test) reads through a reader account
+# (scripts/gcloud-reader) and does its own work as the box identity:
+# agent-infra's applies run in CI; a production step outside CI runs under a
+# one-hour admin grant that Sami approves, never as agent-infra's applier,
+# which agent-infra retires; and a step only a person can make is on
 # agent-infra's docs/break-glass.md (GCLOUD_BREAK_GLASS_URL below), which an
 # agent cites in a dispatch ask to that person. In an agent session the shim
 # refuses a call whose account is a person's own login (anything but
@@ -92,8 +94,9 @@ set -euo pipefail
 # The configuration that holds the user's own Google login: his plain login on a box goes
 # there. This shim writes its name nowhere else.
 USER_LOGIN_CONFIGURATION=theorem
-# agent-infra's applier, which a session impersonates from the box identity for an apply
-# (agent-infra bootstrap/README.md, "Who applies"), and the page of the steps only a person can make.
+# agent-infra's applier, named in the refusal text only to say the box identity does not
+# impersonate it (agent-infra bootstrap/README.md, "Who applies"), and the page of the steps
+# only a person can make.
 GCLOUD_APPLIER="infra-applier@theorem-agent-infra.iam.gserviceaccount.com"
 GCLOUD_BREAK_GLASS_URL="https://github.com/theorem-labs/agent-infra/blob/main/docs/break-glass.md"
 # Google's page on a VM's run-time limit, named in the refusal of a VM create without one.
@@ -514,8 +517,8 @@ agent_context() {
 # (the call then runs on ~/.config/gcloud as before). A command whose change must outlive the session (a
 # sign-in, a credential activated or revoked, a property, a configuration, `init`, or a path an
 # unknown flag makes ambiguous) still runs on ~/.config/gcloud, and the session's copy is set aside
-# so that its next call copies again and sees the change. Every rule below reads whichever
-# directory this picks.
+# so that its next call copies again and sees the change; so is a copy older than the active
+# configuration's file. Every rule below reads whichever directory this picks.
 GCLOUD_SESSION_COPIED=.gcloud-session-copied
 # persists_config_change ARGV: the first two words of the command path, past global flags and one release track
 # (read_command_words stops once a path cannot be a protected `auth` command, so for `config set` it holds only
@@ -578,6 +581,27 @@ use_session_config() { # ARGV
     fi
     resolve_user_home 2> /dev/null || return 0
     origin="${GCLOUD_USER_HOME}/.config/gcloud"
+    # A copy of this origin whose active configuration no longer holds what the origin's holds is set
+    # aside, and this call copies again: installers/gcloud-box.sh changes configuration box's account
+    # when the box's metadata server serves another account (installers/agent-identity.sh), and a copy
+    # kept from before would ask that server for the old account, which it no longer serves. The copy
+    # is judged by what it holds, not by its time: the helper copies configurations/ before it writes
+    # its marker, so a change in between gives an old copy a newer marker. A copy of another origin is
+    # left alone (below). Reads only, with builtins: no process per call.
+    copied=""
+    IFS= read -r copied 2> /dev/null < "$target/$GCLOUD_SESSION_COPIED" || true
+    if [[ -n "$copied" && "$copied" == "$origin" ]]; then
+        local active="" file="" now="" was="" now_active="" was_active=""
+        IFS= read -r -d '' now_active 2> /dev/null < "$origin/active_config" || true
+        IFS= read -r -d '' was_active 2> /dev/null < "$target/active_config" || true
+        IFS= read -r active <<< "$now_active" || true
+        file="configurations/config_${active:-default}"
+        IFS= read -r -d '' now 2> /dev/null < "$origin/$file" || true
+        IFS= read -r -d '' was 2> /dev/null < "$target/$file" || true
+        if [[ "$now_active" != "$was_active" || "$now" != "$was" ]]; then
+            mv -f -- "$target" "$target.replaced.$$" 2> /dev/null || true
+        fi
+    fi
     if [[ ! -f "$target/$GCLOUD_SESSION_COPIED" ]]; then
         "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../scripts/gcloud-session-config" "$origin" "$target" \
             > /dev/null 2>&1 || return 0
@@ -589,19 +613,21 @@ use_session_config() { # ARGV
     # HOME had made, and judged a person's login by a configuration directory that was not the caller's. A copy of
     # another directory leaves this call on its own, as one that cannot be copied does.
     copied=""
-    IFS= read -r copied < "$target/$GCLOUD_SESSION_COPIED" 2> /dev/null || true
+    IFS= read -r copied 2> /dev/null < "$target/$GCLOUD_SESSION_COPIED" || true
     [[ "$copied" == "$origin" ]] || return 0
     export CLOUDSDK_CONFIG="$target"
 }
 
 # The account a configuration sets: the `account` line of its file in gcloud's configuration
-# directory, or nothing when the configuration or the line is missing.
+# directory, or nothing when the configuration or the line is missing. `2> /dev/null` comes before
+# the `<`, so a missing file prints nothing: the shell reports a failed redirect on the stderr it
+# has at that point.
 config_account() {
     local account="" line
     resolve_config_root
     while IFS= read -r line; do
         [[ "$line" =~ ^account[[:space:]]*=[[:space:]]*([^[:space:]]+) ]] && account="${BASH_REMATCH[1]}"
-    done < "${GCLOUD_CONFIG_ROOT}/configurations/config_$1" 2> /dev/null || true
+    done 2> /dev/null < "${GCLOUD_CONFIG_ROOT}/configurations/config_$1" || true
     printf '%s' "$account"
 }
 
@@ -615,7 +641,7 @@ config_impersonation() {
     resolve_config_root
     while IFS= read -r line; do
         [[ "$line" =~ ^impersonate_service_account[[:space:]]*=[[:space:]]*([^[:space:]]+) ]] && value="${BASH_REMATCH[1]}"
-    done < "${GCLOUD_CONFIG_ROOT}/configurations/config_$1" 2> /dev/null || true
+    done 2> /dev/null < "${GCLOUD_CONFIG_ROOT}/configurations/config_$1" || true
     printf '%s' "$value"
 }
 
@@ -638,15 +664,16 @@ login_target() {
     printf 'the account this login signs in (configuration %s%s)' "$name" "${account:+, account $account}"
 }
 
-# The route every agent-session refusal ends with: the box identity for reads and the session's own
-# work, the CI route or the applier for a production change, and the break-glass page for a step
-# only a person can make. It names no sign-in command and no configuration of a person's.
+# The route every agent-session refusal ends with: a reader account for a read (scripts/gcloud-reader),
+# the box identity for the session's own work, the CI route for a production change and the admin
+# routes for a by-hand step, and the break-glass page for a step only a person can make. It names no
+# sign-in command and no configuration of a person's.
 print_agent_route() {
     local box_account root
     box_account="$(config_account box 2> /dev/null)" || box_account=""
     root="$(resolve_config_root 2> /dev/null && printf '%s' "$GCLOUD_CONFIG_ROOT")" || root="<gcloud config dir>"
-    echo "  Instead: run as the box identity, configuration box${box_account:+ (${box_account})}, with no other configuration or account selected; your session's libraries and Pulumi already act as it (GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-${root}/box_credential_config.json})."
-    echo "  A production change goes through its program's CI apply on main, or an apply as ${GCLOUD_APPLIER}, impersonated from the box identity (CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=${GCLOUD_APPLIER})."
+    echo "  Instead: a read goes through gcloud-reader, a reader account's token from the secrets broker (GCLOUD_READER_REASON='<issue key>: <each object read>' gcloud-reader --as legion -- gcloud ...). Your session's own work runs as the box identity, configuration box${box_account:+ (${box_account})}, with no other configuration or account selected; your session's libraries and Pulumi already act as it (GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-${root}/box_credential_config.json})."
+    echo "  A production change goes through its program's CI apply on main. A production step outside CI (one a program's README gives to agent-infra's applier) runs under a one-hour admin grant that Sami approves (GCP_ADMIN once the broker serves it, GCLOUD_SAMI until then), never as ${GCLOUD_APPLIER}, which agent-infra retires."
     echo "  A step only a person can make: send that person a dispatch ask that cites ${GCLOUD_BREAK_GLASS_URL}, which gives the person's steps."
 }
 
@@ -1060,7 +1087,7 @@ find_real_gcloud() {
     # dotfiles shims nor the SDK's own bin dir; fall back to the documented
     # install location, under the home gcloud itself would use, then under the
     # uid's passwd home, which a moved HOME (a test's temporary one) does not
-    # move (shims/AGENTS.md, "A moved HOME"), before failing.
+    # move (shims/tests/test_shim_moved_home.py), before failing.
     local home
     local -a homes=() tried=()
     if resolve_user_home; then
@@ -1464,6 +1491,23 @@ run_streamed_attempt() {
     } || :
 }
 
+# One attempt with its output held back: gcloud writes to pipes, which <dir>/out and <dir>/err
+# take in, and which have ended when this returns. Its status is in <dir>/status. Not to the files
+# themselves: the snap's gcloud, run from inside another snap's process (the snap's bq asks `gcloud
+# config config-helper` for its configuration), starts through snap-confine, whose AppArmor profile
+# revokes an inherited descriptor to a regular file outside its rules (operation="file_inherit",
+# 2026-11-20T21:26Z). gcloud's writes then fail, it exits 1 with no output, and bq ran as the box.
+run_held_attempt() {
+    local dir="$GCLOUD_RETRY_DIR"
+    {
+        {
+            local status=0
+            "$@" || status=$?
+            printf '%s\n' "$status" >"${dir}/status"
+        } 2>&1 1>&3 3>&- | cat >"${dir}/err" 3>&-
+    } 3>&1 | cat >"${dir}/out" || :
+}
+
 # Every lock text an attempt printed adds one line to GCLOUD_LOCK_LOG, so counting lock hits is
 # `wc -l`, not a scan of transcripts:
 # `<UTC time>\t<kind>\t<outcome>\t<subcommand>\t<pid>\t<session>\t<caller>`.
@@ -1604,7 +1648,9 @@ run_with_lock_retry() {
                 exit "$status"
             fi
         else
-            "$@" >"${GCLOUD_RETRY_DIR}/out" 2>"${GCLOUD_RETRY_DIR}/err" 9>&- || status=$?
+            rm -f -- "${GCLOUD_RETRY_DIR}/status"
+            run_held_attempt "$@" 9>&-
+            status="$(cat -- "${GCLOUD_RETRY_DIR}/status" 2>/dev/null || echo 1)"
             if ((status == 0)) || ! grep -qxE -- "$GCLOUD_LOCK_ERROR" "${GCLOUD_RETRY_DIR}/err"; then
                 log_lock_hits gave-up
                 cat -- "${GCLOUD_RETRY_DIR}/out"

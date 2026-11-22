@@ -5,19 +5,22 @@
 # scripts/agent-session and .bashrc point every session's uv, cargo and Go module caches at
 # /mnt/nvme/<user> (dispatch://INFRA-613), where they are shared by every session and reused
 # across them. Shared and reused is the point; unbounded is not, so each one has a cap here and
-# devbox/nvme-cache-cap.service checks them hourly. The Go BUILD cache has its own, older unit
+# devbox/box-cleanup checks them every 15 minutes. The Go BUILD cache has its own, older unit
 # (devbox/gocache-cap). devbox/nvme-cache-cap.md says what each cap costs and how to
 # turn it off.
 #
 # Over the cap a cache is removed whole rather than trimmed: none of these tools can trim to a
 # size, and everything removed is re-downloadable or rebuildable. Nothing here is a working copy.
-# Before a cache is removed, two things must hold, and either one merely unknown keeps it:
+# Before a cache is removed, three things must hold, and any one merely unknown keeps it:
 #   - no process holds it: no open file, cwd, exe, root, mapped file or command-line argument at
 #     or under it (devbox/proc-holds.sh, the rule devbox/tmp-stale-reap uses too). The Go module
 #     cache holds the toolchain every build on sami-devbox runs from, so a build in progress
 #     holds it through its compile and link processes' exe;
 #   - none of the commands that read the cache without keeping a file open is running: go and
-#     gopls for the Go module cache, cargo and rustc for cargo's sources, uv, pip and pip3, mise.
+#     gopls for the Go module cache, cargo and rustc for cargo's sources, uv, pip and pip3, mise;
+#   - no filesystem is mounted at or below it (devbox/mounts-below.sh): rm -rf would delete that
+#     filesystem's files. The removal is rm -rf --one-file-system besides, so a mount the check
+#     misses is skipped and that removal fails.
 # Then the cache is renamed to a sibling, <dir>.removing.<time>.<pid>, so a reader sees the whole
 # cache or none of it and the tool starts a new one, and the sibling is removed once no process
 # holds it. A sibling still held, or left by a run that stopped, is removed by a later run. Until
@@ -38,6 +41,9 @@ set -euo pipefail
 # stream, next_record and proc_holds come from devbox/proc-holds.sh.
 # shellcheck source=devbox/proc-holds.sh
 source "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/proc-holds.sh"
+# mount_below comes from devbox/mounts-below.sh.
+# shellcheck source=devbox/mounts-below.sh
+source "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/mounts-below.sh"
 
 root="${NVME_CACHE_ROOT:-/mnt/nvme/$(id -un)}"
 # On sami-devbox the uv and pip caches are on the local-SSD scratch, /mnt/scratch/<user>
@@ -112,15 +118,20 @@ running() { # running NAME...
     return 1
 }
 
-# held DIR [NAME...]: whether a process may read DIR. 0, with the reason in $holder, when one holds
-# it, when one of NAMES runs, or when the scan of /proc did not finish; 1 when DIR is free.
+# held DIR [NAME...]: whether a process may read DIR, or a filesystem is mounted in it. 0, with the
+# reason in $holder, when one holds it, when one of NAMES runs, when a filesystem is mounted at or
+# below it, or when the scan of /proc or the mount table could not be read; 1 when DIR is free.
 holder=""
 # shellcheck disable=SC2329  # proc_holds calls it by name
 first_holder() { [[ -n "$holder" ]] || holder="pid $1 holds $3 ($2)"; }
 held() {
-    local dir="$1" who
+    local dir="$1" who point
     shift
     holder=""
+    if point="$(mount_below "$dir")" || (($? == 2)); then
+        holder="a filesystem is mounted inside it, at ${point:-a point the mount table could not show}, and removing it would delete that filesystem's files"
+        return 0
+    fi
     deadline=$((EPOCHSECONDS + scan_seconds))
     if ! proc_holds "$proc" "$dir" first_holder; then
         holder="${holder:-the scan of $proc did not finish ($stream_end), so nothing is known to be free}"
@@ -134,9 +145,9 @@ held() {
     return 1
 }
 
-# remove_sibling PATH [BYTES]: remove a cache already renamed away, once nothing holds it. rm -rf
-# does not chmod, and the Go module cache is read-only, so a first failure gets a chmod and a
-# second try.
+# remove_sibling PATH [BYTES]: remove a cache already renamed away, once nothing holds it, never
+# into another filesystem. rm -rf does not chmod, and the Go module cache is read-only, so a first
+# failure gets a chmod, on this filesystem only, and a second try.
 remove_sibling() {
     local sibling="$1" bytes="${2:-}"
     if held "$sibling"; then
@@ -148,7 +159,10 @@ remove_sibling() {
         return 0
     fi
     [[ -n "$bytes" ]] || bytes="$(size_of "$sibling" 2>/dev/null || echo 0)"
-    rm -rf -- "$sibling" 2>/dev/null || { chmod -R u+rwX -- "$sibling" && rm -rf -- "$sibling"; } || true
+    rm -rf --one-file-system -- "$sibling" 2>/dev/null || {
+        find "$sibling" -xdev -user "$(id -u)" -exec chmod u+rwX -- {} + 2>/dev/null
+        rm -rf --one-file-system -- "$sibling"
+    } || true
     if [[ -e "$sibling" ]]; then
         echo "nvme-cache-cap: FAILED to remove $sibling" >&2
         status=1

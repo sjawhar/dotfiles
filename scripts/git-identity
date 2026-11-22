@@ -16,13 +16,17 @@
 #   git-identity th|theorem      use sami@theorem.dev for this repo
 #   git-identity nr|noreply      use sjawhar@users.noreply.github.com for this repo
 #
-# sjawhar/legion (sami@thecybermonk.com) and every theorem-labs repository
-# (sami@theorem.dev) need none of these: they get their identity by rule in every
-# clone (.gitconfig matches the remote URL, .jjconfig.toml the jj checkouts' paths).
+# Every theorem-labs repository (sami@theorem.dev) and every cybermonklabs
+# repository but oh-my-pi (sami@thecybermonk.com) get their identity by rule:
+# git matches a clone's remote URL (.gitconfig), and jj, through shims/jj, takes
+# the identity git resolves for the repository, in every checkout and workspace
+# wherever it lives. oh-my-pi commits as noreply by ~/src/oh-my-pi's own git
+# config, which every workspace of it shares, so any other clone of it needs
+# `git-identity nr`.
 #
-# noreply is opt-in, for a checkout whose commits must carry no personal address:
-# a fork whose own forbidden-term list holds the default address (knives'
-# oh-my-pi list does), so a commit made with it is refused at a release cut.
+# Elsewhere noreply is opt-in, for a checkout whose commits must carry no
+# personal address: a fork whose own forbidden-term list holds the default
+# address, so a commit made with it is refused at a release cut.
 # Set it in your own workspace of such a repo before you commit there. It is
 # scoped to that workspace, never the repo, because knives' workspaces of one
 # fork share the jj repo config and the git config of its canonical checkout,
@@ -50,7 +54,7 @@ show() {
         j=$(jj config get user.email 2>/dev/null || echo "(unset)")
         echo "jj:  ${j}"
         if [ "$g" != "$j" ] && [ "$j" = "$NR_EMAIL" ]; then
-            echo "note: jj uses the noreply identity in this workspace only; commit with jj here, since plain git commits keep git's identity" >&2
+            echo "note: jj uses the noreply identity here and git does not; commit with jj here, since plain git commits keep git's identity" >&2
         elif [ "$g" != "$j" ]; then
             echo "MISMATCH — jj will drop signatures on rewrite. Run: git-identity tl|cm|th|nr" >&2
         fi
@@ -66,7 +70,7 @@ case "${1-}" in
     th | theorem) EMAIL="$TH_EMAIL" ;;
     nr | noreply) EMAIL="$NR_EMAIL" ;;
     -h | --help)
-        sed -n '2,34p' "$0" | sed 's/^# \?//'
+        sed -n '2,37p' "$0" | sed 's/^# \?//'
         exit 0
         ;;
     *)

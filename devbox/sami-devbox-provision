@@ -99,10 +99,8 @@ SECRET_FILES=(
 # The standalone installers sami-rocqperf runs that install.sh and devbox/install.sh do not
 # (spec "Software"; the inventory's user units). Left out on purpose: forward's laptop roles,
 # chathub, voxtype, ghostty (laptop programs); transcript-store-jobs, whose units move with their
-# owner at step 4; omp-login-watch, which reads omp's credential store (~/.omp/agent/agent.db)
-# and so arms at step 5, when the global omp state copies; and pulumi-drift-watch, which mints
-# its token from the `theorem` gcloud configuration, a person's login that this machine never
-# holds.
+# owner at step 4; and omp-login-watch, which reads omp's credential store
+# (~/.omp/agent/agent.db) and so arms at step 5, when the global omp state copies.
 EXTRA_INSTALLERS=(
     disk-fill-watch load-swap-watch envoy-role-holder-watch session-cpu-record
     # No gateway credential installer: every gateway provider mints this box's own identity token
@@ -205,7 +203,7 @@ step_secrets() {
     # The built-in `anthropic` provider is left alone on purpose: this machine does hold a direct
     # Anthropic login (verified 2026-11-03), and every Claude chain ends on `anthropic/...`, so
     # giving it the gateway's baseUrl would send the whole chain through the gateway and leave a
-    # down gateway with no Claude at all (omp/AGENTS.md). installers/omp.sh merges the overlay at
+    # down gateway with no Claude at all (omp/models.yml). installers/omp.sh merges the overlay at
     # step tools; yq is not here before that.
     remote 'set -e
         f=~/.dotfiles/omp/models.local.yml

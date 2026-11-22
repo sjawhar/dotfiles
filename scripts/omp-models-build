@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # omp-models-build -- write the models.yml omp reads: omp/models.yml with the machine's gitignored
-# omp/models.local.yml merged over it (omp/AGENTS.md, "models.yml"). installers/omp.sh runs it, and so does
+# omp/models.local.yml merged over it (omp/models.yml, its header). installers/omp.sh runs it, and so does
 # every writer of a key file named below. Usage: omp-models-build [OUT], OUT ~/.omp/agent/models.yml by default.
 # No provider uses `apiKeyFile` today: the model-gateway providers mint an identity token per call
 # (scripts/gateway-token), so there is no key file to write into this output.

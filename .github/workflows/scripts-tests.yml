@@ -1,0 +1,67 @@
+name: scripts-tests
+
+# The tests under scripts/tests, run as the root AGENTS.md documents: `PYTHONPATH=. uvx pytest
+# scripts/tests` from the root, on an ubuntu-24.04 runner given the dev box's tools the tests call.
+# They read files all over the repository (shims/, installers/, devbox/, agentbox/,
+# agent-secrets/, .claude/, .bashrc and more), so every change runs them, not only a change under
+# scripts/. The push trigger checks main as merged, since a squash merge can land on a main that
+# moved under its pull request. scripts/dotfiles-publish merges without waiting for this job, and
+# no rule makes it required.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scripts-tests:
+    runs-on: ubuntu-24.04
+    # A whole run took about 28 minutes when measured (2026-11-21), 13 of them in
+    # test_agentbox_move.py, whose relauncher tests wait out real deadlines; a hung test stops here.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          # The version mise.toml pins for the dev box.
+          version: "0.12.5"
+      # The tools the tests call:
+      #   - age and sops: scripts/tests/conftest.py encrypts a test term list with them. sops at
+      #     the version mise.toml pins, age from Ubuntu.
+      #   - zsh: test_agent_identity.py runs .bashrc in bash and zsh.
+      #   - mise, installed as installers/mise.sh installs it, at its pinned version, into bin/,
+      #     with MISE_DATA_DIR outside HOME as .bashrc sets it, so a test that moves HOME keeps
+      #     mise's tools. Then mise installs the pins of mise.toml that tests resolve through it:
+      #     jj, knives and yq, and bun, which `agentbox move` runs to read an omp's launch flags
+      #     and which test_agentbox_move.py finds on PATH.
+      - name: age, sops, zsh and mise
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q age zsh
+          curl -fsSLo sops https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.linux.amd64
+          echo "e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b  sops" | sha256sum -c -
+          sudo install -m 0755 sops /usr/local/bin/sops
+          export MISE_DATA_DIR="$HOME/.mise"
+          echo "MISE_DATA_DIR=$MISE_DATA_DIR" >> "$GITHUB_ENV"
+          curl -fsSL https://mise.run | MISE_VERSION=v2026.10.11 MISE_INSTALL_PATH="$GITHUB_WORKSPACE/bin/mise" sh
+          echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
+          "$GITHUB_WORKSPACE/bin/mise" install github:sjawhar/jj github:sjawhar/knives yq bun
+          dirname "$("$GITHUB_WORKSPACE/bin/mise" which bun)" >> "$GITHUB_PATH"
+      # The file ignored below fails on this runner, measured in
+      # https://github.com/sjawhar/dotfiles/actions/runs/44875049666 (each file run alone); it runs
+      # on a dev box:
+      #   test_az_reader.py: the runner's own Azure CLI, not the pinned one, starts no telemetry
+      #     uploader in the test's control.
+      - name: pytest scripts/tests
+        env:
+          PYTHONPATH: .
+          # test_secretsd_installer_config.py finds age-keygen here, or through mise, which has no
+          # age pin installed here.
+          AGE_KEYGEN: /usr/bin/age-keygen
+        run: >-
+          uvx pytest@9.2.0 -p no:cacheprovider scripts/tests
+          --ignore=scripts/tests/test_az_reader.py

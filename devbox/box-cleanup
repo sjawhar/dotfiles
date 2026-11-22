@@ -3,12 +3,14 @@
 #
 # The seven cleaners share one timer; their minimum intervals live beside their commands.
 # Keeping the costly walks daily lets the guarded cache caps run every 15 minutes without
-# adding a schedule (dispatch://INFRA-993/ask/d44b73ba-3ac6-4307-9dd7-065cb035ec9b).
+# adding a schedule (dispatch://INFRA-993/ask/d44b73ba-3ac6-4307-9dd7-065cb035ec9b). The leak
+# check's hook sweep (devbox/hook-sweep) runs here too, as two steps, since sami-devbox no longer
+# arms dotfiles-follow.timer, which ran it (dispatch://INFRA-2022, dispatch://INFRA-4953).
 #
 # THIS IS ONE SCHEDULE AND ONE LOG, NOT A NEW DELETION POLICY. Each cleaner is run as it stands,
 # unchanged, with its own caps, its own ages and its own refusals. Nothing here decides what to
 # delete; the only new judgements are when the cleaners run, what the run records, and when it
-# speaks.
+# speaks. The hook sweep deletes nothing; it installs the leak check's pre-push hook.
 #
 # What one run does:
 #   1. reads the free bytes of every local filesystem;
@@ -64,8 +66,12 @@ step_timeout="${BOX_CLEANUP_STEP_TIMEOUT:-30m}"
 # own lock now stops those attempts overlapping; this gives the one that runs a bound that fits
 # the job. 2h is what the same prune is given by hand; the service's TimeoutStartSec is 4h, and
 # docker-cap is the last step, so it cannot crowd the others out.
+# The hook sweep's two passes keep the bounds dotfiles-follow gave them (scripts/dotfiles-follow.md,
+# step 8): 420 s for the fast roots, 1000 s for the fast and slow roots.
 declare -A STEP_TIMEOUTS=(
     [docker-cap]="${BOX_CLEANUP_DOCKER_CAP_TIMEOUT:-2h}"
+    [hook-sweep]=420s
+    [hook-sweep-slow]=1000s
 )
 
 # Where a box-health notice goes. `lead-box-health` is an Envoy TOPIC NAME, not a standing lead:
@@ -119,15 +125,23 @@ floor_for() { # floor_for MOUNT TOTAL_BYTES
 # whose target is not on this machine is recorded as skipped, not run and not failed.
 # devbox/session-scratch-reap is listed twice because it is two jobs: the reaper, and --tmp,
 # which only reports. tmp-stale-reap carries TMP_REAP_RUN_SECONDS from its own unit, which is
-# the budget it stops its walk at.
+# the budget it stops its walk at; the reaper's SESSION_SCRATCH_RUN_SECONDS is the same thing.
 user="$(id -un)"
 STEPS=(
+    # The leak check's hook sweep over the fast roots, where sessions make checkouts: every tick, and
+    # first, so a long daily walk below cannot hold a new checkout back from its pre-push hook.
+    "hook-sweep|0|$HOME/.local/share/public-leak-check-hooks/sweep-hooks.sh|$here/hook-sweep fast"
     # Walks over many temporary entries: keep the daily empty-directory sweep.
     "tmp-empty-prune|86400|/mnt/nvme/$user/tmp /mnt/scratch/$user/tmp|$here/tmp-empty-prune"
     # A /tmp walk with a 1680-second budget is daily work, not a cheap usage check.
     "tmp-stale-reap|86400|/tmp|TMP_REAP_RUN_SECONDS=1680 $here/tmp-stale-reap --apply"
-    # Session-directory census and liveness checks keep their daily cadence.
-    "session-scratch-reap|86400|/mnt/nvme/$user/session-tmp /mnt/scratch/$user/session-tmp|$here/session-scratch-reap"
+    # Each agent session's own scratch directory, removed once the session is gone: every pass,
+    # not daily. Once a day it met a whole day of dead sessions at once (449 directories in the
+    # run that started 2026-11-20T23:36Z), and the first run of the day ran into the 30-minute
+    # step limit on 2026-11-18, 11-19 and 11-20 (log.jsonl), where a pass with little to remove
+    # took 3-15 s (every pass from 02:30Z to 06:01Z on 2026-11-21). Its deadline ends a long
+    # removal inside that limit, and the next pass carries it on.
+    "session-scratch-reap|0|/mnt/nvme/$user/session-tmp /mnt/scratch/$user/session-tmp|SESSION_SCRATCH_RUN_SECONDS=1500 $here/session-scratch-reap"
     # The report-only TMPDIR census took 409-828 seconds when that comment was written; on
     # 2026-11-06 it ran past the 30-minute step timeout on every pass, so box-cleanup exited 1
     # daily and unit-health-watch alarmed on a unit whose cleaners had all worked. Its own walk
@@ -136,7 +150,7 @@ STEPS=(
     # walk reports less and removes nothing extra, while a SIGKILL at 30m reports nothing.
     "session-tmp-reap|86400|/mnt/nvme/$user/tmp /mnt/scratch/$user/tmp|TMP_REAP_WALK_SECONDS=1500 $here/session-scratch-reap --tmp"
     # Cheap cap checks; their own usage thresholds decide whether trimming is needed.
-    "gocache-cap|0|/mnt/nvme/$user/gocache /mnt/scratch/$user/gocache|$here/gocache-cap"
+    "gocache-cap|0|/mnt/scratch/$user /mnt/nvme/$user $HOME/.cache|$here/gocache-cap"
     "nvme-cache-cap|0|/mnt/nvme/$user|$here/nvme-cache-cap"
     # Docker checks its filesystem against DOCKER_CAP_HIGH_PCT (default 80%) before acting, so on
     # a box UNDER that mark this costs one df. On a box over it, it does the whole job: measured
@@ -145,6 +159,9 @@ STEPS=(
     # lane's pull is how four digest pulls died that afternoon. Hourly keeps the fix that matters
     # -- the 388 GB that accumulated inside ONE daily window is now caught within an hour, 24x
     # sooner -- at 12% duty instead of 50%.
+    # The hook sweep over the fast and slow roots (about 20,000 checkouts on sami-devbox): hourly, as
+    # dotfiles-follow ran it, and before docker-cap, the one step that may take hours.
+    "hook-sweep-slow|3600|$HOME/.local/share/public-leak-check-hooks/sweep-hooks.sh|$here/hook-sweep slow"
     "docker-cap|3600|/var/run/docker.sock|$here/docker-cap"
 )
 

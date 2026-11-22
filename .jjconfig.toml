@@ -1,7 +1,11 @@
-# Shared jj config. Shells (.bashrc) and agent boxes load it through JJ_CONFIG
-# after ~/.config/jj/config.toml, the per-machine file holding user.name and
-# user.email, so a value here wins over that file. jj run without JJ_CONFIG
-# reads this file through the ~/.jjconfig.toml symlink first, and that file wins.
+# Shared jj config. Shells (.bashrc), agent boxes and omp sessions
+# (omp/extensions/session-env.ts) load it through JJ_CONFIG after
+# ~/.config/jj/config.toml, the per-machine file holding user.name and
+# user.email, so a value here wins over that file, the identity scopes below
+# included. jj run with no JJ_CONFIG reads this file (the ~/.jjconfig.toml link)
+# first and the per-machine file after it, so the per-machine user.email wins
+# over every identity scope: such a jj commits with the per-machine identity in
+# every repository.
 
 [revset-aliases]
 'closest_bookmark(to)' = 'heads(::to & bookmarks())'
@@ -69,29 +73,42 @@ key = "~/.ssh/jj-signing.pub"
 [signing.backends.ssh]
 allowed-signers = "~/.dotfiles/jj-allowed-signers"
 
-# sjawhar/legion is public and commits as sami@thecybermonk.com. jj has no
-# remote condition, so this matches Legion's jj checkout by path. Every
-# workspace of a repository has its main checkout's repository path, so the one
-# entry covers every workspace of ~/src/legion wherever it lives. The Legion
-# daemon's own workspaces commit as their role's GitHub App through
-# JJ_USER/JJ_EMAIL, which outrank any config. git's half of the rule is the
-# remote-URL include in .gitconfig, and the two must agree: with behavior =
-# "own", jj drops the signature of a commit whose author email is not its
-# user.email when it rewrites it, so a commit git made as cybermonk would lose
-# its signature the first time jj rewrote it as trajectorylabs.
+# A repository commits as the identity git resolves for it: .gitconfig's
+# remote-URL rules (every cybermonklabs repository as sami@thecybermonk.com,
+# every theorem-labs one as sami@theorem.dev) and a checkout's own git config
+# (~/src/oh-my-pi's noreply address) decide jj's identity too, in every
+# checkout and every workspace of it, wherever it lives. jj has no remote
+# condition, so shims/jj asks git about the backing git repository and passes
+# its user.email as DOTFILES_GIT_EMAIL, and each scope below turns one identity
+# scripts/git-identity knows into jj's user.name and user.email. The two tools
+# must agree: with behavior = "own", jj drops the signature of a commit whose
+# author email is not its user.email when it rewrites it, so a commit git made
+# as cybermonk would lose its signature the first time jj rewrote it as
+# trajectorylabs. These scopes are user config, so a repository's or a
+# workspace's own jj user.email (`git-identity`, `jj config set --repo`) wins
+# over them, and JJ_USER/JJ_EMAIL, the Legion daemon's GitHub App identity,
+# over both. A jj run without the shim, or under an address git-identity does
+# not know, keeps the per-machine user.email.
 [[--scope]]
---when.repositories = ["~/src/legion"]
+--when.environments = ["DOTFILES_GIT_EMAIL=sami@trajectorylabs.net"]
+[--scope.user]
+name = "Sami Jawhar"
+email = "sami@trajectorylabs.net"
+
+[[--scope]]
+--when.environments = ["DOTFILES_GIT_EMAIL=sami@thecybermonk.com"]
 [--scope.user]
 name = "Sami Jawhar"
 email = "sami@thecybermonk.com"
 
-# theorem-labs repositories commit as sami@theorem.dev. As for Legion, jj matches
-# them by path: every jj checkout under ~/Code/personal/theorem is a theorem-labs
-# repository, and git's half of the rule is the theorem-labs remote-URL include
-# in .gitconfig. A theorem-labs jj checkout outside this directory needs
-# `git-identity th`.
 [[--scope]]
---when.repositories = ["~/Code/personal/theorem"]
+--when.environments = ["DOTFILES_GIT_EMAIL=sami@theorem.dev"]
 [--scope.user]
 name = "Sami Jawhar"
 email = "sami@theorem.dev"
+
+[[--scope]]
+--when.environments = ["DOTFILES_GIT_EMAIL=sjawhar@users.noreply.github.com"]
+[--scope.user]
+name = "Sami Jawhar"
+email = "sjawhar@users.noreply.github.com"

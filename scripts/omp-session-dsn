@@ -25,11 +25,12 @@ install -d -m 700 "$d" || exit 1
 
 # The account the proxy signs in as, which is whatever Application Default Credentials resolve to
 # here. On sami-devbox and inside its boxes that is the metadata server, not a file: neither the
-# host nor a box has ~/.config/gcloud/application_default_credentials.json, and a box reaches the
-# host's metadata relay through GCE_METADATA_HOST (installers/gcloud-box.sh, scripts/agentbox).
-# Both read dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com on 2026-11-04. A machine that
-# does have a credential file is read from it first, so a service-account key or an impersonated
-# credential gives the account it signs in as.
+# host nor a box has ~/.config/gcloud/application_default_credentials.json, and the host's units
+# and a box reach a relay of it through GCE_METADATA_HOST (installers/agent-identity.sh,
+# scripts/agentbox). That relay serves dev-box@theorem-agent-infra.iam.gserviceaccount.com once
+# ~/.config/agent-identity/account names it, and the VM's attached account before (both read
+# dev-sjawhar@ on 2026-11-04). A machine that does have a credential file is read from it first, so
+# a service-account key or an impersonated credential gives the account it signs in as.
 adc=$(systemctl --user show-environment 2> /dev/null | sed -n 's/^GOOGLE_APPLICATION_CREDENTIALS=//p')
 adc=${adc:-$HOME/.config/gcloud/application_default_credentials.json}
 

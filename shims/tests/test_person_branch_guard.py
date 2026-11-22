@@ -302,8 +302,10 @@ class PersonBranchGuardTest(unittest.TestCase):
     # value, which git takes while the guard splits there. The option takes the read's spare --dry-run, so the
     # read stays a dry run, and the remote never holds the branch.
     def test_a_push_option_left_without_a_value_pushes_nothing(self):
+        # git's exit code for `-h` depends on its version (129 for Ubuntu's 2.43.0, 0 for git-core's PPA 2.56.1): the
+        # option list is what is read.
         result = run_bounded([str(self.git_bin), "push", "-h"], self.tmp, self.env(agent=False))
-        self.assertEqual(result.returncode, 129, result.stderr)
+        self.assertIn("usage: git push", result.stdout, result.stderr)
         options = []
         for line in result.stdout.splitlines():
             if m := VALUE_OPTION.match(line):
@@ -612,14 +614,16 @@ class PersonBranchGuardTest(unittest.TestCase):
         self.assert_passed(result, "stub/slug")
         self.assertIn("error: git shim: the branch-name check failed (exit 2); the push goes on.", result.stderr)
 
-    # A request for help gets git's own output, and a push git fails by itself is not refused.
+    # A request for help gets git's own output, and a push git fails by itself is not refused. git's own exit code for
+    # `-h` depends on its version (129 for Ubuntu's 2.43.0, 0 for git-core's PPA 2.56.1), so the agent's push is
+    # compared with the person's, which no guard reads, whole.
 
     def test_git_push_help_on_a_token_branch_is_not_a_push(self):
         w = self.git_repo("stub/slug")
         person = self.git(w, "push", "-h", agent=False)
+        self.assertIn("usage: git push", person.stdout)
         result = self.git(w, "push", "-h")
-        self.assertEqual(result.returncode, 129, result.stderr)
-        self.assertEqual((result.stdout, result.stderr), (person.stdout, person.stderr))
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (person.returncode, person.stdout, person.stderr))
         self.assert_refused(self.git(w, "push"), "stub/slug")
 
     def test_git_push_help_in_a_short_option_cluster_is_not_a_push(self):
@@ -627,9 +631,10 @@ class PersonBranchGuardTest(unittest.TestCase):
         for cluster in ("-uh", "-hv"):
             with self.subTest(cluster=cluster):
                 person = self.git(w, "push", cluster, agent=False)
+                self.assertIn("usage: git push", person.stdout)
                 result = self.git(w, "push", cluster)
-                self.assertEqual(result.returncode, 129, result.stderr)
-                self.assertEqual((result.stdout, result.stderr), (person.stdout, person.stderr))
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (person.returncode, person.stdout, person.stderr))
         self.assert_refused(self.git(w, "push"), "stub/slug")
 
     def test_a_push_git_fails_by_itself_is_not_called_a_remote_that_could_not_be_asked(self):

@@ -25,7 +25,7 @@ if (( _entry > 2 )); then
 fi
 
 # mise_paths: mise as this machine runs it, whatever HOME and PATH the caller set
-# (shims/AGENTS.md, "A moved HOME"). A Legion test pane runs a shim with a
+# (shims/tests/test_shim_moved_home.py). A Legion test pane runs a shim with a
 # temporary HOME and the PATH <bin>:/usr/local/bin:/usr/bin:/bin, where every
 # path under HOME names nothing. Sets, once per process:
 #   _mise_bin     mise on PATH, else the dotfiles checkout's bin/mise, else the
@@ -161,16 +161,25 @@ if [[ -z "$_knives" ]]; then
     # (mise_paths), given the configuration and data dir above. A call that fails or outlives
     # the timeout is tried once more (a reinstall's window, a lock).
     _mise="$_mise_bin"
+    # Whole seconds, as the install's wait and cap, so the timeout check below can compare it. At
+    # most 9 digits, so no arithmetic below can wrap it; a longer value, like a non-number, is 20.
     _mise_timeout="${DOTFILES_KNIVES_MISE_TIMEOUT:-20}"
+    [[ "$_mise_timeout" =~ ^[1-9][0-9]{0,8}$ ]] || _mise_timeout=20
     _why=""
     for _attempt in 1 2; do
         _rc=0
+        # The clock as EPOCHREALTIME gives it (whole seconds where bash has none). Its decimal point
+        # follows the locale, so the check below drops every non-digit.
+        _start="${EPOCHREALTIME:-$(date +%s).000000}"
         _knives="$(MISE_DATA_DIR="$_mise_root" MISE_GLOBAL_CONFIG_FILE="$_config" timeout "$_mise_timeout" "$_mise" which -C / knives --tool github:sjawhar/knives </dev/null)" || _rc=$?
+        _end="${EPOCHREALTIME:-$(date +%s).000000}"
         if (( _rc == 0 )) && [[ -n "$_knives" ]]; then
             break
         fi
         _knives=""
-        if (( _rc == 124 )); then
+        # mise can exit 124 itself; only a call that lasted the whole timeout timed out. The check
+        # is in whole seconds: timeout fires only after the whole limit.
+        if (( _rc == 124 && (${_end//[!0-9]/} - ${_start//[!0-9]/}) / 1000000 >= _mise_timeout )); then
             _why+="${_why:+; }attempt $_attempt timed out after ${_mise_timeout}s"
         else
             _why+="${_why:+; }attempt $_attempt exited $_rc"
@@ -181,74 +190,130 @@ if [[ -z "$_knives" ]]; then
     # goes live the moment mise.toml changes on a machine (an edit saved in the live checkout,
     # a publish, a pull), and until a person ran `mise install`, every knives call, and so every
     # gh call (shims/gh execs `knives gh`), failed: 3.2.2 at 04:45Z on sami-leanperf and 3.2.3
-    # at ~08:2xZ on sami-rocqperf, 2026-11-03. The lock is in mise's data dir, which agent boxes
-    # mount, so the host and its boxes install once between them; a call that waited on the lock
-    # finds the install and runs it. A failed install is not tried again for 60 s, so an outage
-    # does not make every gh call wait for an install of its own.
+    # at ~08:2xZ on sami-rocqperf, 2026-11-03.
+    # The install holds <data dir>/.dotfiles-install.lock. dotfiles-follow, dotfiles-sync,
+    # agent-session, installers/mise.sh and installers/librarian-harness-host.sh hold the same
+    # lock around their `mise install`, so two installs into one data dir never run at the same
+    # time. Agent boxes mount the data dir, so the host and its boxes install once between them.
+    # A call that finds the lock held waits for the pin, not for the lock: the other install can
+    # put the pin in place minutes before it lets go. A failed install is not tried again for
+    # 60 s, so an outage does not make every gh call wait for an install of its own.
     # The call runs knives once its binary is in place and answers `--version` with the pin,
     # not when mise exits: after the install mise rebuilds every tool's shims, which took 2 to
     # 4.5 more minutes on sami-rocqperf at load ~650 (2026-11-03 09:1xZ; the knives itself took
-    # 7 to 34 s). mise finishes that in its own session, so a call that ends does not cut it off.
+    # 7 to 34 s). mise runs in its own session, under a wrapper that holds the lock until mise
+    # exits, so a call that ends cuts off neither the install nor the lock.
     _install_log=""
     install_pin() {
-        local installed="$_mise_root/installs/github-sjawhar-knives/$_pin/bin/knives"
-        local lock="$_mise_root/.dotfiles-knives-install.lock"
-        local wait="${DOTFILES_KNIVES_INSTALL_TIMEOUT:-300}" fd="" rc=0 pid="" deadline
-        local failed_pin="" failed_at="" detach=()
+        # Absolute, as dotfiles-follow and dotfiles-sync make it: the lock is the file they lock,
+        # and mise installs into this dir.
+        local data="$_mise_root"
+        [[ "$data" == /* ]] || data="$PWD/$data"
+        local installed="$data/installs/github-sjawhar-knives/$_pin/bin/knives"
+        local lock="$data/.dotfiles-install.lock"
+        local wait="${DOTFILES_KNIVES_INSTALL_TIMEOUT:-300}" cap="${DOTFILES_KNIVES_INSTALL_CAP:-600}"
+        local fd="" rc=0 pid="" deadline announced="" locked="" status="" out_of_time="" detach=()
+        # Whole seconds. wait: how long a call waits for the pin, first while another install
+        # holds the lock, then while its own install runs. cap: how long its mise may run before
+        # timeout sends TERM, and KILL 10 s later. wait has at most 9 digits, so no arithmetic
+        # below can wrap it; a longer value, like a non-number, is 300.
+        [[ "$wait" =~ ^(0|[1-9][0-9]{0,8})$ ]] || wait=300
+        [[ "$cap" =~ ^[1-9][0-9]*$ ]] || cap=600
         _install_log="${_cache%/*}/install-$_pin.log"
-        # mise runs the GitHub credential command while it installs; a knives call under it
-        # must not wait on the lock this call holds.
-        [[ -z "${DOTFILES_KNIVES_INSTALLING:-}" ]] || return 1
+        # Every holder of the lock gives the `mise install` it runs under it
+        # DOTFILES_INSTALL_LOCK_HELD=1, and this shim does too (below). A knives call under such an
+        # install (a git that mise starts asks gh for a credential, and gh runs `knives gh`) must
+        # not wait on the lock its ancestor holds, so it ends here and the shim exits 127.
+        [[ -z "${DOTFILES_INSTALL_LOCK_HELD:-}" ]] || return 1
         pin_in_place() {
             local version=""
             [[ -f "$installed" && -x "$installed" ]] &&
                 version="$("$installed" --version < /dev/null 2> /dev/null)" &&
                 [[ " $version " == *" $_pin "* ]]
         }
-        mkdir -p "${_install_log%/*}" "$_mise_root" 2>/dev/null || true
-        if command -v flock > /dev/null 2>&1 && exec {fd}>>"$lock"; then
-            if ! flock -w "$wait" "$fd"; then
-                echo "knives: waited ${wait}s for $lock, which another call holds while it installs knives $_pin" >&2
-                exec {fd}>&-
-                return 1
-            fi
-        fi
-        if ! pin_in_place; then
+        # True, and says so, when the last install of this pin failed less than 60 s ago.
+        failed_recently() {
+            local failed_pin="" failed_at="" now="${EPOCHSECONDS:-$(date +%s)}"
             [[ -r "$lock.failed" ]] && read -r failed_pin failed_at < "$lock.failed" || true
-            if [[ "$failed_pin" == "$_pin" && "$failed_at" =~ ^[0-9]+$ ]] && (( _now - 10#$failed_at < 60 )); then
-                echo "knives: the install of knives $_pin failed $(( _now - 10#$failed_at ))s ago (log: $_install_log); not trying again for 60 s" >&2
+            [[ "$failed_pin" == "$_pin" && "$failed_at" =~ ^[0-9]+$ ]] && (( now - 10#$failed_at < 60 )) || return 1
+            echo "knives: the install of knives $_pin failed $(( now - 10#$failed_at ))s ago (log: $_install_log); not trying again for 60 s" >&2
+        }
+        mkdir -p "${_install_log%/*}" "$data" 2>/dev/null || true
+        if command -v flock > /dev/null 2>&1 && exec {fd}>>"$lock"; then
+            # Every 0.5 s, until the pin is in place (another install put it there) or this call
+            # takes the lock.
+            deadline=$(( ${EPOCHSECONDS:-$(date +%s)} + wait ))
+            until pin_in_place; do
+                if flock -n "$fd"; then
+                    locked=1
+                    break
+                fi
+                if failed_recently; then
+                    rc=1
+                    break
+                fi
+                if [[ -z "$announced" ]]; then
+                    echo "knives: knives $_pin is not installed and $lock is held by another install; waiting up to ${wait}s for it" >&2
+                    announced=1
+                fi
+                if (( ${EPOCHSECONDS:-$(date +%s)} >= deadline )); then
+                    echo "knives: waited ${wait}s for $lock, which another install holds; knives $_pin is still not in place" >&2
+                    rc=1
+                    break
+                fi
+                sleep 0.5
+            done
+        fi
+        # Only under the lock, or where no lock can be had (no flock, a lock file it cannot
+        # open). A call that found the pin in place without the lock runs it.
+        if (( rc == 0 )) && [[ -n "$locked" || -z "$fd" ]] && ! pin_in_place; then
+            if failed_recently; then
                 rc=1
             else
                 echo "knives: knives $_pin (pinned in $_config) is not installed on this machine; installing it now (\`mise install github:sjawhar/knives@$_pin\`, log: $_install_log)" >&2
                 command -v setsid > /dev/null 2>&1 && detach=(setsid)
-                # mise does not inherit the lock's fd: the lock is this call's until knives runs.
-                (
-                    [[ -z "$fd" ]] || exec {fd}>&-
-                    DOTFILES_KNIVES_INSTALLING=1 MISE_DATA_DIR="$_mise_root" MISE_GLOBAL_CONFIG_FILE="$_config" exec "${detach[@]}" timeout 1800 \
-                        "$_mise" install -C / "github:sjawhar/knives@$_pin" < /dev/null > "$_install_log" 2>&1
-                ) &
+                # The wrapper inherits the lock's fd and holds it until mise exits. mise runs
+                # without it, so nothing mise leaves running holds the lock. The wrapper holds
+                # none of the caller's stdin, stdout or stderr: its stdin is /dev/null and its
+                # output goes to the log. Any other fd the caller passed down reaches it and mise.
+                # shellcheck disable=SC2016  # the inner bash expands $1, $2, $fd, $cap and $@
+                MISE_DATA_DIR="$data" MISE_GLOBAL_CONFIG_FILE="$_config" "${detach[@]}" "$BASH" -c '
+                    fd=$1 cap=$2
+                    shift 2
+                    if [[ -n "$fd" ]]; then
+                        DOTFILES_INSTALL_LOCK_HELD=1 timeout -k 10 "$cap" "$@" {fd}>&- &
+                    else
+                        DOTFILES_INSTALL_LOCK_HELD=1 timeout -k 10 "$cap" "$@" &
+                    fi
+                    wait "$!"' knives-install "$fd" "$cap" "$_mise" install -C / "github:sjawhar/knives@$_pin" \
+                    < /dev/null > "$_install_log" 2>&1 &
                 pid=$!
                 deadline=$(( ${EPOCHSECONDS:-$(date +%s)} + wait ))
-                rc=124
-                while (( ${EPOCHSECONDS:-$(date +%s)} < deadline )); do
+                # rc is 0 here. out_of_time says this call's own wait ran out. A wrapper that
+                # ended reports timeout's status: mise's own, 124 where the TERM at the cap
+                # stopped mise, 137 where the KILL did.
+                while :; do
+                    if (( ${EPOCHSECONDS:-$(date +%s)} >= deadline )); then
+                        rc=1 out_of_time=1
+                        break
+                    fi
                     if pin_in_place; then
-                        rc=0
                         break
                     fi
                     if ! kill -0 "$pid" 2>/dev/null; then
-                        rc=0
-                        wait "$pid" || rc=$?
-                        if pin_in_place; then rc=0; elif (( rc == 0 )); then rc=1; fi
+                        status=0
+                        wait "$pid" || status=$?
+                        pin_in_place || rc=1
                         break
                     fi
                     sleep 0.5
                 done
                 if (( rc != 0 )); then
                     printf '%s %s\n' "$_pin" "${EPOCHSECONDS:-$(date +%s)}" > "$lock.failed" 2>/dev/null || true
-                    if (( rc == 124 )); then
+                    if [[ -n "$out_of_time" ]]; then
                         echo "knives: \`mise install github:sjawhar/knives@$_pin\` had not put knives $_pin in place after ${wait}s; the end of its log:" >&2
                     else
-                        echo "knives: \`mise install github:sjawhar/knives@$_pin\` exited $rc without knives $_pin in place; the end of its log:" >&2
+                        echo "knives: \`mise install github:sjawhar/knives@$_pin\` exited $status without knives $_pin in place; the end of its log:" >&2
                     fi
                     tail -n 20 "$_install_log" >&2 || true
                 fi

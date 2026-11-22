@@ -102,6 +102,8 @@ class GcloudBoxGoogleVm(unittest.TestCase):
         self.assertIn(f"account = {ACCOUNT}", box)
         self.assertIn("project = autoformalization", box)
         self.assertNotIn("credential_file_override", box)
+        # Every gcloud that reads this configuration, the snap's too, writes no log file (INFRA-4824).
+        self.assertIn("disable_file_logging = true", box)
         # No configuration for a person's login (INFRA-801).
         self.assertFalse((self.config / "configurations" / "config_theorem").exists())
         # gcloud acts as the VM's account with the metadata server's token.

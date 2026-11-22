@@ -93,10 +93,15 @@ the most when missed.
   unless you say which it is.
 - **A read-only lane gives the coordinator verbatim comment text**, verdict line first, rather than
   summarising it. The coordinator posts it unchanged and attributes it.
-- **A GraphQL mutation (`gh api graphql` with `resolveReviewThread`, `addPullRequestReviewThreadReply`
-  and the like) names no repository, so the `gh` shim cannot tell which GitHub App installation to
-  use and may pick one that cannot see the pull request: the call fails `NOT_FOUND` while a query on
-  the same thread works.** Run it with `GH_REPO=<owner>/<repo>` set. Two lanes and the coordinator
+- **Reply to a review thread through the REST reply route, `gh api
+  repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies -f body=…`, which the `gh` shim
+  judges by its repository.** gh fills in `{owner}` and `{repo}`; write the number and the comment
+  id yourself. A raw GraphQL reply (`addPullRequestReviewThreadReply`) is read as public, so the
+  shim refuses it when its body holds a listed leak term, even on a private repository.
+- **A GraphQL mutation such as `resolveReviewThread` names no repository, so the `gh` shim cannot
+  tell which GitHub App installation to use and may pick one that cannot see the pull request: the
+  call fails `NOT_FOUND` while a query on the same thread works.** Run it with
+  `GH_REPO=<owner>/<repo>` set; it carries no text, so the leak check lets it go. Two lanes and the coordinator
   read that `NOT_FOUND` as a permission they lacked on agent-c#20732 (2026-10-01).
 
 ## Shipping

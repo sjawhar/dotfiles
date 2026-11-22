@@ -70,7 +70,11 @@ export PATH="${NPM_CONFIG_PREFIX}/bin:$PATH"
 # Dotfiles paths (shims/ for wrappers, bin/ for binaries)
 # Must be early to take precedence
 _path=""
-IFS=':' read -ra _parts <<< "$PATH"
+if [ "$DOTFILES_SHELL" = zsh ]; then
+    IFS=':' read -rA _parts <<< "$PATH"
+else
+    IFS=':' read -ra _parts <<< "$PATH"
+fi
 for _p in "${_parts[@]}"; do
     [[ "$_p" != "${DOTFILES_DIR}/bin" && "$_p" != "${DOTFILES_DIR}/shims" ]] && _path="${_path:+$_path:}$_p"
 done
@@ -112,16 +116,16 @@ export ANTHROPIC_1M_CONTEXT=true
 
 # Playwright's `install` deletes every browser in its browsers directory (~/.cache/ms-playwright, or
 # PLAYWRIGHT_BROWSERS_PATH below on a machine with the big disk) whose .links target it cannot read,
-# and the cache is shared with every agent box, whose checkouts this shell cannot see (agentbox/AGENTS.md).
+# and the cache is shared with every agent box, whose checkouts this shell cannot see (agentbox/mounts).
 # Boxes get the same setting from scripts/agentbox's session_env.
 export PLAYWRIGHT_SKIP_BROWSER_GC=1
 
 # Language caches on the big disk, where a machine has one (/mnt/nvme/$USER, as on the devboxes):
 # uv's cache (20 GB) and Go's module cache (9 GB) otherwise grow on a root disk shared with every
-# session (dispatch://INFRA-6). Go's build cache is one directory for every session and lane, which
-# devbox/gocache-cap.timer holds under a size cap; a lane that names a GOCACHE of its own makes a
-# cache outside it that nothing caps. A venv on the root disk can no longer hardlink from uv's
-# cache, so uv falls back to copying.
+# session (dispatch://INFRA-6). Go's build cache is one directory for every session and lane;
+# devbox/gocache-cap holds it, any GOCACHE a lane names under /mnt/scratch/$USER or /mnt/nvme/$USER,
+# and Go's default ~/.cache/go-build under one size cap together. A venv on the root disk can no
+# longer hardlink from uv's cache, so uv falls back to copying.
 # Guarded on the directory, so an agent box, which does not mount it, keeps the home defaults;
 # a value the caller already has wins.
 # On sami-devbox the losable part goes to the local-SSD scratch, /mnt/scratch/$USER, made at
@@ -156,7 +160,7 @@ if [ -d "/mnt/nvme/${USER:-$(id -un)}" ]; then
     # tested for writability before anything points at it, and a value the caller already has
     # wins: an agent session's own per-session scratch (scripts/agent-session) and an explicitly
     # exported TMPDIR both keep their value. Empty tmp* dirs left here are pruned daily
-    # (devbox/tmp-empty-prune.timer).
+    # (devbox/tmp-empty-prune, a step of devbox/box-cleanup).
     _nvme_tmp="$_scratch/tmp"
     if [ -z "${TMPDIR:-}" ] && mkdir -p "$_nvme_tmp" 2>/dev/null && [ -w "$_nvme_tmp" ]; then
         export TMPDIR="$_nvme_tmp"
@@ -200,6 +204,23 @@ fi
 # needs no clone and no credential. A value the caller already has wins; agent boxes get the same
 # from scripts/agentbox's session_env.
 export CTX_SERVER="${CTX_SERVER:-http://ctx-memory.tail12ec1c.ts.net}"
+
+# Google's metadata server through this host's relay, once installers/agent-identity.sh has pointed
+# the machine's clients at it: GCE_METADATA_HOST (scripts, google-auth, Go), GCE_METADATA_ROOT
+# (gcloud) and GCE_METADATA_IP (google-auth's probe), read from the environment.d file it writes for
+# the systemd user units, so a login shell, a command sshd runs and a unit read one value. Only
+# where that file exists; a value the caller already has wins (an agent box has its own relay,
+# scripts/agentbox).
+if [ -r "${HOME}/.config/environment.d/50-gce-metadata.conf" ]; then
+    while IFS='=' read -r _gce_name _gce_value; do
+        case "$_gce_name" in
+            GCE_METADATA_HOST) export GCE_METADATA_HOST="${GCE_METADATA_HOST:-$_gce_value}" ;;
+            GCE_METADATA_ROOT) export GCE_METADATA_ROOT="${GCE_METADATA_ROOT:-$_gce_value}" ;;
+            GCE_METADATA_IP) export GCE_METADATA_IP="${GCE_METADATA_IP:-$_gce_value}" ;;
+        esac
+    done <"${HOME}/.config/environment.d/50-gce-metadata.conf"
+    unset _gce_name _gce_value
+fi
 
 
 # ==============================================================================

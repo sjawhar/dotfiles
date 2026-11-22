@@ -11,6 +11,7 @@ from pathlib import Path
 SHIMS = Path(__file__).parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from stdin_cases import SSH_CONNECTION, SSH_TTY, run_with_tty, run_without_tty  # noqa: E402
+from leak_terms_fixture import leak_check_environment  # noqa: E402
 AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION",
                  "CLAUDECODE", "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE",
                  "LEGION_CONTROLLER", "LEGION_DAEMON_URL")
@@ -30,7 +31,7 @@ def plain_env(home: Path) -> dict[str, str]:
     unknown" before reaching an assertion.
     """
     dropped = (*AGENT_MARKERS, "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON", "HOME",
-               "XDG_CONFIG_HOME")
+               "XDG_CONFIG_HOME", "DOTFILES_GIT_SHIM")
     env = {k: v for k, v in os.environ.items() if k not in dropped and not k.startswith("GIT_")}
     (home / ".config").mkdir(parents=True, exist_ok=True)
     config = home / ".gitconfig"
@@ -358,6 +359,109 @@ class GitWorktreeShimTest(unittest.TestCase):
         except subprocess.TimeoutExpired:
             self.fail("the shim chose the wrapper above it and the two exec each other forever")
         self.assertEqual(result.stdout, direct)
+
+    def test_a_git_that_execs_the_shim_by_its_path_is_not_chosen_again(self):
+        # A test's fake git commonly execs, by its path, the git it found on PATH, which is this
+        # shim where the shim comes first. Run with a PATH that holds the fake and not the shim's
+        # directory, the shim took the fake for the real git and the two exec'd each other in one
+        # pid until a timeout killed it (a Legion test's fake old git, 2026-11-21).
+        fake = self.tmp / "fake"
+        fake.mkdir()
+        runs = self.tmp / "runs"
+        (fake / "git").write_text(f"#!/bin/sh\necho run >> '{runs}'\nexec '{SHIMS / 'git'}' \"$@\"\n")
+        (fake / "git").chmod(0o755)
+        direct = subprocess.run(["/usr/bin/git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
+        for name, path in (("the fake alone", str(fake)), ("the fake, then the system dirs", os.pathsep.join([str(fake), "/usr/bin", "/bin"]))):
+            for who, env in (("a person", self.plain), ("an agent", self.agent)):
+                with self.subTest(path=name, who=who):
+                    runs.unlink(missing_ok=True)
+                    try:
+                        result = subprocess.run([str(fake / "git"), "rev-parse", "HEAD"], cwd=self.repo, env={**env, "PATH": path},
+                                                capture_output=True, text=True, check=False, timeout=60)
+                    except subprocess.TimeoutExpired:
+                        self.fail("the shim chose the git that handed the call back and the two exec'd each other until the timeout")
+                    self.assertEqual((result.returncode, result.stdout), (0, direct), result.stderr)
+                    # The caller ran the fake, the shim handed the call to it once, since nothing tells
+                    # the shim it leads back until it does, and then past it.
+                    self.assertEqual(runs.read_text().splitlines(), ["run", "run"])
+
+    def test_a_commit_through_a_git_that_execs_the_shim_by_its_path_is_still_scanned(self):
+        # The shim hands the commit to the fake with `-c core.hooksPath=<its git-hooks>`. A second pass
+        # over the call the fake hands back took that for the caller's own hooks path, and the commit
+        # went in without the leak-term scan. The scan runs once: in the hooks of the one real git.
+        fake = self.tmp / "fake"
+        fake.mkdir()
+        (fake / "git").write_text(f"#!/bin/sh\nexec '{SHIMS / 'git'}' \"$@\"\n")
+        (fake / "git").chmod(0o755)
+        (self.repo / "leak.txt").write_text("zorbleplex\n")
+        subprocess.run(["/usr/bin/git", "add", "leak.txt"], cwd=self.repo, env=self.plain, check=True)
+        head = subprocess.run(["/usr/bin/git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
+        for who, env in (("a person", self.plain), ("an agent", self.agent)):
+            with self.subTest(who=who):
+                subprocess.run(["/usr/bin/git", "reset", "-q", "--soft", head.strip()], cwd=self.repo, env=self.plain, check=True)
+                try:
+                    result = subprocess.run([str(fake / "git"), "commit", "-q", "-m", "a commit with a term"], cwd=self.repo,
+                                            env={**env, **leak_check_environment(str(fake))}, capture_output=True, text=True,
+                                            check=False, timeout=60)
+                except subprocess.TimeoutExpired:
+                    self.fail("the shim chose the git that handed the call back and the two exec'd each other until the timeout")
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr.count('leak terms: leak.txt:1: "zorbleplex" (the global list)'), 1, result.stderr)
+                self.assertEqual(subprocess.run(["/usr/bin/git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True,
+                                                check=True).stdout, head)
+
+    def test_a_git_that_runs_the_shim_as_a_child_is_stopped_by_the_hop_count(self):
+        # A fake that runs the git it found as a child, not with exec, comes back to the shim in a new pid
+        # each time, so the skip of a git named in that pid never sees it: the chain grew one process deep
+        # per pass. The hop count stops it at the ninth pass with a named error. The fake stops itself at
+        # 40 passes, so the shim this test guards against fails it without a process chain on the box.
+        fake = self.tmp / "child"
+        fake.mkdir()
+        runs = self.tmp / "child-runs"
+        (fake / "git").write_text(f"#!/bin/sh\necho run >> '{runs}'\n[ \"$(/usr/bin/wc -l < '{runs}')\" -le 40 ] || exit 99\n"
+                                  f"'{SHIMS / 'git'}' \"$@\"\n")
+        (fake / "git").chmod(0o755)
+        for who, env in (("a person", self.plain), ("an agent", self.agent)):
+            with self.subTest(who=who):
+                runs.unlink(missing_ok=True)
+                result = subprocess.run([str(fake / "git"), "rev-parse", "HEAD"], cwd=self.repo, env={**env, "PATH": str(fake)},
+                                        capture_output=True, text=True, check=False, timeout=120)
+                self.assertEqual(result.returncode, 127, result.stderr)
+                self.assertIn("git shim: refusing: this chain of processes already ran this shim 8 times", result.stderr)
+                self.assertEqual(len(runs.read_text().splitlines()), 9, result.stderr)
+
+    def test_a_marker_the_caller_sets_skips_no_commit_check(self):
+        # DOTFILES_GIT_SHIM changes only which git the shim hands a call to, never which checks run: a commit
+        # that names the caller's own pid (the pid the shim runs in, by exec), or a hop count one below the
+        # limit, is scanned like any other; at the limit the shim refuses with the hop count's named error,
+        # and commits nothing.
+        env_path = leak_check_environment(os.pathsep.join([str(SHIMS), "/usr/bin", "/bin"]))
+        head = subprocess.run(["/usr/bin/git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
+        rows = (("its own pid", '$$ 0 /nonexistent/git'), ("a hop count one below the limit", "1 7 /usr/bin/git"),
+                ("a hop count at the limit", "1 8 /usr/bin/git"))
+        for who, env in (("a person", self.plain), ("an agent", self.agent)):
+            for name, marker in rows:
+                for content in ("zorbleplex", "clean"):
+                    with self.subTest(who=who, marker=name, content=content):
+                        subprocess.run(["/usr/bin/git", "reset", "-q", "--hard", head.strip()], cwd=self.repo, env=self.plain, check=True)
+                        (self.repo / "staged.txt").write_text(f"{content}\n")
+                        subprocess.run(["/usr/bin/git", "add", "staged.txt"], cwd=self.repo, env=self.plain, check=True)
+                        result = subprocess.run(["/bin/bash", "-c", f'DOTFILES_GIT_SHIM="{marker}" exec git commit -q -m staged'],
+                                                cwd=self.repo, env={**env, **env_path}, capture_output=True, text=True,
+                                                check=False, timeout=60)
+                        moved = subprocess.run(["/usr/bin/git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True,
+                                               check=True).stdout != head
+                        if name == "a hop count at the limit":
+                            self.assertEqual(result.returncode, 127, result.stderr)
+                            self.assertIn("git shim: refusing: this chain of processes already ran this shim 8 times", result.stderr)
+                            self.assertFalse(moved, result.stderr)
+                        elif content == "zorbleplex":
+                            self.assertNotEqual(result.returncode, 0, result.stderr)
+                            self.assertIn('leak terms: staged.txt:1: "zorbleplex" (the global list)', result.stderr)
+                            self.assertFalse(moved, result.stderr)
+                        else:
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            self.assertTrue(moved, result.stderr)
 
     def clone_with_branch(self) -> Path:
         """A clone of self.repo, whose branch `b` exists upstream."""

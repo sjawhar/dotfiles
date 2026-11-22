@@ -32,6 +32,7 @@ minimum_release_age_excludes = [
   "github:sjawhar/secretsd",  # archived; tags predate the forward merge
   "github:sjawhar/tmux-builds",
   "forward",
+  "secrets",
   "agent-secrets",
 ]
 # The global `rust` pin below makes mise export RUSTUP_TOOLCHAIN, which overrides
@@ -74,50 +75,44 @@ _.path = ['{{ env.DOTFILES_DIR | default(value=env.HOME ~ "/.dotfiles") }}/shims
 
 [tools]
 "github:sjawhar/jj" = "0.46.0-sami.20261008-234600"  # upstream 0.46.0 + gitattr filter drivers (jj-vcs/jj#8719, LFS) + #10097 + #10130 + #10159 + #10160 + #10163 + #10164 + #10166 + sparse paths skip-worktree in colocated Git indexes; #10129 and #10127 dropped
-"github:sjawhar/knives" = "3.2.3"  # keep equal to the plugin tag in omp/plugins/package.json: the plugin runs whichever binary this installs
+"github:sjawhar/knives" = "5.1.0"  # keep equal to the plugin tag in omp/plugins/package.json: the plugin runs whichever binary this installs
 "github:sjawhar/legion" = "legion-v10.3.0"  # the Go `legion` CLI on an agent session's PATH outside a Legion pane (a pane puts its daemon's own <state_dir>/bin/legion first); it shares the Go daemons' registry, ~/.local/state/legion/legions.json, which a TypeScript cli-v* `legion` would rewrite as an object no Go daemon can read. Speaks daemon API contract 17 (with @sjawhar/pi-legion 8.5.0): `legion controller start` refuses a daemon or a pi-legion of another contract
 # omp daily driver: fork releases built from the sami branch; the wrapper execs this.
 # upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec
 # them for hub/worker spawns.
 #
-# v18.18.6-sami.20261117-053702 (commit 7ae9bc73) adds the fix for the subagent progress probe
-# (dispatch://INFRA-4027, cybermonklabs/oh-my-pi#14): a probe goes out only when at least 95% of
-# its prompt is in the agent's prompt cache, the agent's tools and thinking level are unchanged,
-# and the cache entry has more than 30 s of its lifetime left; and a side request (/btw, a probe)
-# now carries its parent's session id, so a gateway serves it from the parent's cache. Both checks
-# of INFRA-4027 pass on this linux-x64 asset against v18.18.6-sami.20261117-013345: 10 of 10
-# probes read at least 95% from the cache, where the control had 5 of 8 gateway Claude probes
-# under 95% (lowest 41.3%). task.completionProbe stays false in omp/config.yml, although Sami said
-# on 2026-11-17 to turn the probe on (dispatch://INFRA-4027/ask/32dc7c33-b1bd-49aa-9048-dd941ecb2b63):
-# the comment at that key says why. Since 11-10 the release also carries RPC startup
-# dispatch (#19126: a command sent after `ready` is answered while startup still runs) and a pause
-# after a failed Hindsight auto-recall (hindsight.recallCooldownMs), and it still carries the
-# 11-10 fix for the memory leak that was killing long-running sessions (447.6 -> 145.7 KiB per
-# model call, 67.5%, measured in the binary; dispatch://INFRA-1876). The linux-x64 asset (sha256
-# 642dab6d0b95abf2daaf2b207aeff0bd2c0d72715a0b2c6a1149100f1d774aba) is smoke-tested:
-# `omp --version` gives omp/18.18.6 and `omp --smoke-test` gives `smoke-test: ok`. packages/mnemopi
-# is unchanged since the 11-10 release, so "npm:@oh-my-pi/pi-mnemopi" below stays 18.18.6.
-# Release: https://github.com/cybermonklabs/oh-my-pi/releases/tag/v18.18.6-sami.20261117-053702
+# v18.18.6-sami.20261119-162325 (commit b40fd3c3), the build dispatch://INFRA-4638 pins for INFRA's
+# pods, carries 230bc2fa (cybermonklabs/oh-my-pi#48, dispatch://INFRA-4512): after a classifier
+# refusal, no fallback in the same turn sends the request again to the model that refused it, by
+# any name, route or provider, and the walk keeps its retry budget and provider exclusion past a
+# spent fallback. The pin before it, v18.18.6-sami.20261117-053702, lacked it, and new sessions
+# multiplied OpenAI cyber_policy refusals (dispatch://INFRA-1484). Over 053702 it also brings: the
+# fallback walk passes over a model in cooldown or with spent usage (#19); a turn whose `!command`
+# key prints nothing is retried, and `--restore` continues it (#22); subagents share Hindsight's
+# recall pause (#28); `--session-id <uuid>`; model discovery yields the event loop every 10 ms; and
+# fixes to the shell builtins (rm, mv, find, grep), the directory walker and robomp. Its session-store
+# changes (SQL leases, PostgreSQL writes opened read-write) apply only under `session.storage: sql`,
+# which no config here sets, and its `secrets.maskSessionStore` is off by default. A `!command` value
+# now runs in a session of its own with no terminal; scripts/gateway-token and
+# scripts/gcloud-token-fast each print a token so (measured 2026-11-21). It keeps the 11-17 probe fix
+# (dispatch://INFRA-4027), the 11-10 memory-leak fix (dispatch://INFRA-1876) and setup version 3.
+# The linux-x64 asset (sha256 9fd84e4ff44cddef87f323100e5cb30ca235284033c8a05192f90c69481fea68) is
+# smoke-tested: `omp --version` gives omp/18.18.6 and `omp --smoke-test` gives `smoke-test: ok`.
+# packages/mnemopi changed only to keep mnemopi's state under OMP_CONFIG_ROOT when that is set, and
+# nothing here sets it, so "npm:@oh-my-pi/pi-mnemopi" below stays 18.18.6.
+# Release: https://github.com/cybermonklabs/oh-my-pi/releases/tag/v18.18.6-sami.20261119-162325
 #
-# There is NO macOS split here, and do not add one. A darwin-arm64 asset is published but was
-# cross-built on Linux and has never been executed. On 2026-11-10 this file briefly held macOS
-# back on 18.16.0 waiting for someone to run it on Apple Silicon; Sami then said plainly that
-# he does not have a Mac and runs Linux (dispatch://INFRA-1876/ask/6ad5d62f). The hold
+# There is NO macOS split here, and do not add one. The fork's CI builds and smoke-tests a
+# darwin-arm64 asset on a macos-15 runner, but no Mac of Sami's runs it. On 2026-11-10 this file
+# briefly held macOS back on 18.16.0 waiting for someone to run it on Apple Silicon; Sami then said
+# plainly that he does not have a Mac and runs Linux (dispatch://INFRA-1876/ask/6ad5d62f). The hold
 # protected nobody and would have rotted into a permanently stale second pin.
 #
-# Actions on cybermonklabs/oh-my-pi have created no run since 2026-11-07T11:44:58Z (that one was
-# cancelled in flight), so this release was built by hand from the workflow's own version
-# computation and asset names. Measured 2026-11-11: every repo field is green (enabled: true,
-# allowed_actions: all, disabled: false, archived: false) and all eleven workflows read active --
-# not disabled_fork, so it is NOT GitHub's fork gate. Both event paths are dead, not just one:
-# ci.yml is on main with workflow_dispatch and still 422s "Actions has been disabled", and the
-# 11-10 push of the sami branch (which sami-build.yml triggers on) created no run. The only field
-# nobody here can read is orgs/cybermonklabs/actions/permissions (403, needs admin:org), and an
-# org-level policy or spending limit fits every observation. Check the ORG settings page, not the
-# repository's Actions tab. Still so on 2026-11-17: no run exists for commit 7ae9bc73, the
-# repository's newest runs sit `queued`, and the release notes of v18.18.6-sami.20261117-053702 say
-# it was built by hand in the same way.
-"github:sjawhar/oh-my-pi" = "18.18.6-sami.20261117-053702"
+# This release is an Actions build: run 44565315084 of "Build sami branch"
+# (https://github.com/cybermonklabs/oh-my-pi/actions/runs/44565315084) built and smoke-tested
+# linux-x64 on ubuntu-22.04 and darwin-arm64 on macos-15. GitHub records no build attestation for
+# its assets (`gh attestation verify` answers 404), so the digest above is the check.
+"github:sjawhar/oh-my-pi" = "18.18.6-sami.20261119-162325"
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
 # broker asset and gives it its own install dir alongside forward's.
@@ -229,7 +224,7 @@ mautrix-instagram = "github:mautrix/meta"
 op = "aqua:1password/cli"
 
 [tools.forward]
-version = "3.8.1"  # filesystem-independent preview health probe
+version = "3.8.3"  # `forward browser grant` works from a Legion pane (sjawhar/forward#78)
 # Public releases are verified with GitHub build attestations during installation.
 platforms.linux-x64   = { asset_pattern = "forward-x86_64-unknown-linux-musl.tar.gz" }
 platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.tar.gz" }
@@ -241,16 +236,16 @@ platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.ta
 # systemd units, which installers/secretsd.sh reads straight out of this
 # install dir.
 [tools.secrets]
-# Pinned to the RUNNING daemon's release, not "latest": the client and daemon
-# share a protocol version that moved in 3.3.0, and the daemon is only
-# restarted by hand (installers/secretsd.sh with SECRETSD_RESTART_WITH_GRANTS=1
-# when grants are live; a restart drops every live grant). Bump this and
-# restart in the same command - 2026-09-21 a "latest" client rolled to 3.3.1
-# under a 3.2.3 daemon and every human-tier request from every box failed
-# VersionMismatch. mise needs a GitHub token for the release lookup (the
-# unauthenticated API limit is 60/h and this machine exhausts it) --
-# [settings.github] credential_command above supplies one (gh-app-token, the same
-# credential git's own GitHub App routing uses).
+# Pinned to an exact release, not "latest": the client and daemon share a protocol version that
+# moved in 3.3.0, and the daemon is only restarted by hand (installers/secretsd.sh with
+# SECRETSD_RESTART_WITH_GRANTS=1 when grants are live; a restart drops every live grant). A bump
+# moves the client at once, and the daemon runs its old release until it is restarted after the
+# merge, at a time its owner allows, so bump only to a release whose protocol version is the
+# running daemon's - 2026-09-21 a "latest" client rolled to 3.3.1 under a 3.2.3 daemon and every
+# human-tier request from every box failed VersionMismatch.
+# mise needs a GitHub token for the release lookup (the unauthenticated API limit is 60/h and this
+# machine exhausts it) -- [settings.github] credential_command above supplies one (gh-app-token, the
+# same credential git's own GitHub App routing uses).
 # 3.7.0 (2026-10-26) names the store behind every answer and refusal (sjawhar/forward#67). Its
 # wire protocol is still 4, the same as 3.3.1 (`git diff v3.3.1 v3.7.0 -- crates/proto` adds only
 # a client-side accessor), so this client was proven read-only against the running 3.3.1 daemon
@@ -262,7 +257,14 @@ platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.ta
 # empty). The daemon keeps registrations in memory, and the omp extension re-registers the same
 # token when the handshake's instance id changes, so a restart costs each session at most one
 # UNKNOWN_TOKEN answer on its first call.
-version = "3.8.2"
+# 3.8.3 (2026-11-16) makes `forward browser grant` work from a Legion pane (sjawhar/forward#78):
+# the daemon scopes an AUTHORIZE that carries no token and no terminal to the caller's nearest omp
+# process, and it retries a failed YubiKey attempt until the request's time to live ends, so a grant
+# from a Legion pane needs a 3.8.3 daemon. Wire protocol is still 4 (`git diff v3.8.2 v3.8.3 --
+# crates/proto` changes one doc comment), so this client was proven read-only against the running
+# 3.8.2 daemon (`secrets grants`, `secrets get <human key> --no-request`). The daemon is restarted
+# after the merge, at a time its owner allows.
+version = "3.8.3"
 platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz" }
 
 # The agent-secrets client and host helper (AGENTC-393), from sjawhar/legion's legion-envoy-v*
@@ -291,11 +293,11 @@ platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz
 # GitHub recorded at upload; bump them with the version
 # (gh api repos/cybermonklabs/legion/releases/tags/<tag> --jq '.assets[] | .name, .digest').
 [tools.agent-secrets]
-version = "legion-envoy-v30.43.0"  # This is the first release with INFRA-3845 (merge bb4b0c95e0f877b35c3eb9b867d4c964ce79739b): `agent-secrets NAME -- command` takes its broker identity from the first of four sources that has one, a launcher's key directory, the person's own `agent-secrets login`, the helper for a process inside a session it registered, and the machine's own cloud identity found with no setting (which the broker offers only once it answers an exchange audience in GET /v1/settings), so it works in a process the helper never saw; a source with nothing for the caller is skipped, one present but broken and a broker refusal stop the command, and when no source has an identity the client exits 1 where it exited 2. `agent-secrets identity` keeps its exit codes (0 with an identity on disk or a helper session, 1 without, 2 on a usage error) and reads no sign-in and no machine cache, so scripts/secret-run's choice is unchanged. It also holds INFRA-3823 (merge f35483e5103e688559150dd07b59459c27951926) and INFRA-3844 (merge 467e5371b5f2d65dc207b13d5655c49b163af88c): `agent-secrets secret create` refuses before it asks, and every `agent-secrets secret` form takes its store credential from the environment, with no --profile flag. Earlier reasons that still apply: INFRA-3648 (merge 35d0212bb3eba3e131c3ad04461e7ca915e5b57f), with which the helper answers `enroll --helper`, `unenroll --helper` and the machine login call with the broker's outcome, and answers that the outcome is not known (ENROLL_OUTCOME_UNKNOWN, UNENROLL_OUTCOME_UNKNOWN, or LOGIN_FAILED with an error that says so) when the broker possibly got the request and its answer did not come back. `scripts/agentbox` reads the client's ENROLL_FAILED and DRAINING codes at each enroll call (enroll_attempts) as the only known enroll failures, and UNENROLL_FAILED (unenroll_revoke) as the only known unenroll failure. It reads every other failure as an outcome that is not known. No line that names one of these codes changed between legion-envoy-v30.21.1 and this release (packages/envoy/internal/broker/helper/protocol.go, cmd/agent-secrets, internal/brokerclient). Before a later bump, make sure that these three codes still have that meaning. Also INFRA-3666 (merge df57176f7203463733cca417caf502d23ff60fa9), the secrets broker's airlock (merge 46c4162b, INFRA-1352; INFRA-1355, INFRA-3012), and the GitHub App narrowing fix f3960fa2d181, which `agent-secrets --help` shows as `--github-token`. The helper itself moves to a new version only when it restarts.
-platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:bf9ae2c5da40e951fffb909b888623bdb48a39acf204cc83a3c45f6f20974cac" }
-platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:593e6b45b00b85887db4cc116f397c801b967ee1823a5e282d0d11693753eaf6" }
-platforms.macos-x64   = { asset_pattern = "agent-secrets-darwin-amd64.tar.gz", checksum = "sha256:de0d0c414c8db727856aa08e91815a37ee197b5f82e43fee5e808ef3180dfa73" }
-platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", checksum = "sha256:a235f652488df829676504e6a03471d0d6e8bd8040fafe377273372c92f2c474" }
+version = "legion-envoy-v32.28.1"  # The production secrets broker moves to legion-envoy-v32.28.1 (agent-infra#5363). Its #4512 (merge c980d91b540ece46364256983f24a3f5a63b3841) answers a secret reread that carries no proof with 202, which a client before legion-envoy-v32.24.3 reads as a refusal, so that client's `agent-secrets secret create|set|retag|restore` exit 1 after the write stands; this client takes the 202, and takes the 200 of the broker before it as before. Every client that holds #4512 also holds #4151 (merge 1a8990fa007037ce7080de928a17bd8efa4d7507, from legion-envoy-v30.45.0): `agent-secrets register` without --exec refuses an answer that names no root_pid, which every helper before #4151 gives, so against such a helper `register --session-id` (omp/extensions/session-env.ts, scripts/agent-secrets-name-session) exits 1 although the helper named the session. So the helper moves to this pin with the client: installers/agent-secrets.sh restarts it with AGENT_SECRETS_HELPER_RESTART_WITH_SESSIONS=1, which keeps each live session that the running helper recorded with its key (on 2026-11-21 every live session on the dev box was such a session). Checked between legion-envoy-v30.43.0 and this release: `agent-secrets NAME -- command` still takes its broker identity from the first of the same four sources (a launcher's key directory, the person's own `agent-secrets login`, the helper, the machine's own cloud identity) and exits 1 when none has one; `agent-secrets identity` keeps its exit codes (0 with an identity on disk or a helper session, 1 without, 2 on a usage error) and reads no sign-in and no machine cache, so scripts/secret-run's choice is unchanged; `agent-secrets --help` still shows `--github-token`. #4634 renamed the source paths (cmd/agent-secrets is now cmd/cipher, internal/broker is internal/cipher, internal/brokerclient is internal/cipherclient), not the binaries: the linux tarballs still ship bin/agent-secrets and bin/agent-secrets-helper. Earlier reasons that still apply: INFRA-3845 (merge bb4b0c95e0f877b35c3eb9b867d4c964ce79739b), which gave `agent-secrets NAME -- command` those four sources, so it works in a process the helper never saw; INFRA-3823 (merge f35483e5103e688559150dd07b59459c27951926) and INFRA-3844 (merge 467e5371b5f2d65dc207b13d5655c49b163af88c): `agent-secrets secret create` refuses before it asks, and every `agent-secrets secret` form takes its store credential from the environment, with no --profile flag. INFRA-3648 (merge 35d0212bb3eba3e131c3ad04461e7ca915e5b57f), with which the helper answers `enroll --helper`, `unenroll --helper` and the machine login call with the broker's outcome, and answers that the outcome is not known (ENROLL_OUTCOME_UNKNOWN, UNENROLL_OUTCOME_UNKNOWN, or LOGIN_FAILED with an error that says so) when the broker possibly got the request and its answer did not come back. `scripts/agentbox` reads the client's ENROLL_FAILED and DRAINING codes at each enroll call (enroll_attempts) as the only known enroll failures, and UNENROLL_FAILED (unenroll_revoke) as the only known unenroll failure. It reads every other failure as an outcome that is not known. No line of code that names one of these codes changed between legion-envoy-v30.21.1 and this release (packages/envoy/internal/cipher/helper/protocol.go, cmd/cipher, internal/cipherclient): from legion-envoy-v30.43.0 on, only test, comment and packages/envoy/AGENTS.md lines that name them changed. Before a later bump, make sure that these three codes still have that meaning. Also INFRA-3666 (merge df57176f7203463733cca417caf502d23ff60fa9), the secrets broker's airlock (merge 46c4162b, INFRA-1352; INFRA-1355, INFRA-3012), and the GitHub App narrowing fix f3960fa2d181, which `agent-secrets --help` shows as `--github-token`. The helper itself moves to a new version only when it restarts.
+platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:cb73116bda5e9ed0903397a71d0354c9e3e2a0b226b8c8cc98399de864df1f8b" }
+platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:d699626a60c45810651dab5e8dd9f04dfad24512ac07c43d482a91dcdef21116" }
+platforms.macos-x64   = { asset_pattern = "agent-secrets-darwin-amd64.tar.gz", checksum = "sha256:cec964312791be7b9135e49d49cbd8896b6ac7d77141b988afd59c2afda7fd4a" }
+platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", checksum = "sha256:c1925a0c406fe1b5b645ef7d591c10a22d6c825ac81a008578accdaa47b7f2d1" }
 
 # Gmail triage CLI + TUI (agents use --json; humans get the bubbletea TUI).
 [tools."github:sjawhar/mailbox"]
@@ -311,6 +313,22 @@ version = "0.2.6"
 platforms.linux-x64   = { asset_pattern = "ctx-x86_64-unknown-linux-musl.tar.gz" }
 platforms.linux-arm64 = { asset_pattern = "ctx-aarch64-unknown-linux-musl.tar.gz" }
 platforms.macos-arm64 = { asset_pattern = "ctx-aarch64-apple-darwin.tar.gz" }
+
+# CodeGraph CLI (colbymchenry/codegraph), which the omp `codegraph` tool runs from PATH
+# (@bopstack/pi-codegraph in omp/plugins/package.json; without the CLI every call answers "CodeGraph
+# CLI is unavailable on PATH"). Same version as Legion's worker image, which pins it in
+# cybermonklabs/legion packages/daemon/docker/codegraph/package.json. Each release archive holds the
+# npm per-platform package (@colbymchenry/codegraph-<platform>): bin/codegraph is a sh wrapper that
+# execs the Node 24 bundled beside it, so it needs no system node. The npm `@colbymchenry/codegraph`
+# package is only a `#!/usr/bin/env node` launcher for that same bundle. A box finds it through
+# ~/.mise/shims, the shared tool store. Digests are the ones GitHub recorded at upload (`gh release
+# view v<version> -R colbymchenry/codegraph --json assets`); bump them with the version.
+[tools."github:colbymchenry/codegraph"]
+version = "1.5.0"
+platforms.linux-x64   = { asset_pattern = "codegraph-linux-x64.tar.gz", checksum = "sha256:2ba65e87a1210b706bb1e67d5e48b5fc4a1935e43dbb3fb5f31c5597840d2e58" }
+platforms.linux-arm64 = { asset_pattern = "codegraph-linux-arm64.tar.gz", checksum = "sha256:9f17750aedf45d51f68caae39ed21d6e2a7290b2326e5c53f95a165918ebd1d8" }
+platforms.macos-x64   = { asset_pattern = "codegraph-darwin-x64.tar.gz", checksum = "sha256:0a0ccc29bf7da9d10be1458d89d7e15c55927ae24cd95e9fa3de4bdfea059dde" }
+platforms.macos-arm64 = { asset_pattern = "codegraph-darwin-arm64.tar.gz", checksum = "sha256:cf5ee435a6e44d097b2f98f2b7b8b9422bb1094844404efed82519c5da1af2cf" }
 
 # Device management CLI (osquery/MDM). Each fleetdm/fleet release bundles two
 # binaries — fleet (server) + fleetctl — so asset_pattern selects the fleetctl
