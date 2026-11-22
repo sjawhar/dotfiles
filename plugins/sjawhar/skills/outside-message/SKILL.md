@@ -30,7 +30,7 @@ The pi-envoy plugin's own `outside-message` skill states this exception only gen
 
 For any other project, all three hold:
 
-- It is a captured routine: a skill or template guides it, and the message is that template with only the names, links and numbers that differ per send changed; any other change departs from it.
+- It is a captured routine: a skill or template guides it. The message is that template with only the names, links and numbers that differ per send changed. Any other change departs from it.
 - The two steps below ran: the writing skills passed over the text, and a fresh reviewer cut the exact text that goes out.
 - It sits in a flow we control: an enrollee who came to us, or a project already enrolled; not contact we open into a space we do not run. A new enrollee counts with no prior rapport: the control is the template and the flow.
 
@@ -73,7 +73,8 @@ A project we do not run that has not enrolled starts at "approve each". It moves
    | On a repository | Its contributing guide, issue and pull-request templates and code of conduct; its last ten issues or pull requests and how the maintainers write there; and what was already discussed about your subject | Use their pull-request template for a pull request and their issue template for an issue. Match the thread for a reply. |
    | Off a repository (an email, a Slack message to another company, a release note, a disclosure) | Every earlier message between Theorem and this reader; the page where they say how to contact them (a security policy, `SECURITY.md`, a contact page, disclosure rules); and how they write (release notes, blog, their messages in the thread) | An email answers the email it replies to. A first contact says in one line who is writing and why. |
 
-   - Where the stream that owns the relationship keeps form rules (in its project's `AGENTS.md`, `.claude/skills/` or brief), those rules decide how the message reads, over the writing skills below. Send a change to the form there, not into this skill.
+   - Where the stream that owns the relationship keeps form rules (in its project's `AGENTS.md`, `.claude/skills/` or brief), those rules decide how the message reads, over the writing skills below.
+   - Send a change to the stream's form there, not into this skill.
    - Run `asd-ste100`, `ce-noslop` and `plain-words` over the text.
    - Avoid "we" (Sami's preference): name Theorem or the tool, or write the sentence with no actor.
 2. A fresh reviewer cuts it. Give a session that did not write the message (the `astra` agent, or an Opus model where it is unavailable) the draft, the recipient's last message and, for text in Sami's name or on his behalf, the "Never write" list of `speaking-as-sami`, and nothing else. It removes everything the reader does not need to understand the core message, and rewrites each "Never write" form. Use its version. A reviewer that reads only to approve has not done this step.
