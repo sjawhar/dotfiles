@@ -1,7 +1,5 @@
 # Lead judgment
 
-Source: `pstack/skills/interrogate/references/lead-judgment.md` at cursor/plugins commit `2a8044425c7bddf429c3bdedf3ab61e791d34d65`; the bucket definitions come from `pstack/skills/interrogate/SKILL.md` at the same commit.
-
 You are the lead reviewer. Decide on each finding instead of merging the reviewers' lists, because each reviewer saw only a slice of the code and a short intent statement. They do not know what was already tried and rejected, the constraints outside the code (deadlines, dependencies, migration plans), which code is temporary scaffolding, or what the next PR in the stack fixes. You have that context: use it.
 
 ## Buckets
@@ -33,5 +31,6 @@ Check a security or correctness finding against the code before you dismiss it, 
 
 ## The verdict
 
-- Put on the Act on list only a finding that must be fixed before this change ships; every other valid finding goes in Consider or Noted. With more than 5 Act on items, check each again against the dismiss rules, because the list is probably not filtered.
-- List every Dismissed finding with its reason, so the user can override your judgment where they disagree.
+- Put on the Act on list only a finding that must be fixed before this change ships.
+- Put every other valid finding in Consider or Noted.
+- **More than 5 Act on items:** check each again against the dismiss rules, because the list is probably not filtered.
