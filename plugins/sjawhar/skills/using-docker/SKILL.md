@@ -10,7 +10,7 @@ description: Use when running docker, docker compose, buildx or depot, or when o
 Every agent on the machine shares one Docker daemon, its build cache, and depot's remote cache.
 
 - Stop or remove only containers this session started.
-- Give each container this session starts a `--name` (`<task>-$$`) and remove it when you finish.
+- Give each container this session starts a `--name` (`<task>-$$`) and remove it when you finish: `docker stop` returns before `--rm` removal finishes, so a reused `--name` can collide.
 - Never sweep (`docker ps -q | xargs docker rm`).
 - Never pass `--no-cache`: it rebuilds every stage from scratch, which can take hours on a daemon and disk every session shares.
 - Force one stage with `--no-cache-filter=<stage>`.
@@ -53,7 +53,6 @@ Docker, depot and registry access work on this machine. Before you say one is un
 ## Containers
 
 - Never pair `-d` with `--rm`: a crash takes the logs with it. Use `-d`, read `docker logs`, then `docker rm`.
-- `docker stop` returns before `--rm` removal finishes, so a reused `--name` can collide.
 - Start a `docker run` you may interrupt with `--init`: killing the client (`timeout`, Ctrl-C) leaves the container running when PID 1 has no signal handler.
 - To stop the container of a `docker run` you may interrupt, use `docker rm -f <name>`.
 - Port unreachable: the app must bind `0.0.0.0` inside the container; then compare `docker port <c>` with your `-p`.
