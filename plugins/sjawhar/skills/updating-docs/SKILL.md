@@ -13,7 +13,7 @@ A skill's own limits, structure and tests are in `writing-agent-skills`.
 
 ## Write what is true now
 
-- Delete on sight PR or issue breadcrumbs ("as of #1234"), migration trails ("previously X, now Y"), "NEW:" or "UPDATED:" markers and dated notes.
+- Delete on sight PR or issue breadcrumbs ("as of #1234"), migration trails ("previously X, now Y"), "NEW:" or "UPDATED:" markers and dated notes: readers act on the doc, and git log is the changelog.
 - Keep provenance (who, when, the incident) in the commit message or PR body.
 - Outside agent guides and skills, a rule may carry a one-line citation (a link, `file:line`), never a dated story, tally or justifying quote.
 - Record what changed in the commit message, not in a note beside the corrected text: readers take the note as current.
@@ -32,8 +32,8 @@ Remove always:
 
 - History: dates, incidents, measurements of past events, who decided what, issue keys, links to decisions, pull request numbers as provenance.
   - History goes in the commit message or PR body; git keeps the removed text.
-- Restatements of what code, a test or a linter enforces.
 - Duplicates: a fact lives in one doc, and others link to it.
+- Restatements of what code, a test or a linter enforces, for the same reason.
 - Long explanations of why.
   - Keep one clause where a rule would otherwise look arbitrary.
 - Emphasis as force: NEVER or MUST in capitals, "critical", bold.
@@ -62,15 +62,15 @@ Move a fact to a README or `docs/` page only when that page is where an engineer
 
 - State what the rule requires and what it does not cover, or agents apply it past its edge.
 - Delete a committed policy (gating file, threshold, process doc) when no commit message or PR body records what Sami said to create it, and when.
-- Write "always" or "never" only for a rule with no exception.
 - State the exception of a rule that has one, or an agent that meets it drops the whole rule.
-- Before you add a sentence, correct the existing one that is wrong, incomplete or ambiguous.
-- Delete or narrow the sentence that caused the failure: a correction appended beside it leaves both readings.
+- Write "always" or "never" only for a rule with no exception, for the same reason.
+- Before you add a sentence, correct the existing one that is wrong, incomplete or ambiguous: a correction appended beside it leaves both readings.
+- Delete or narrow the sentence that caused the failure, for the same reason.
 
 ## Correct an overturned belief
 
 - When the old way is gone, delete the warnings against it: a warning keeps the dead option alive.
-- When the old way is gone, describe the correct way.
+- When the old way is gone, describe the correct way, for the same reason.
 - Correct every copy in place (headings, titles, flags, acceptance rows, downstream steps): a correction under a heading that still asserts the old model has not landed.
 - Besides a grep, also list and check each file, flag, test or step that assumed the old state: grep misses a copy that shares no words with the claim.
 - Apply the corrected rule to the case that prompted it; do not only restate it.
@@ -88,7 +88,7 @@ On a cutover, **read `references/cutover-sweep.md` now** for the sweep's steps.
 - After an edit to a file under version control, also read its diff (`git diff -- <file>` or `jj diff <file>`): it must change no line you did not mean to change.
 - Before you trust a read-back, make it find a string you know is there, so a broken reader cannot report success.
 - Apply `(start, end, text)` edits back to front, or replace the region in one slice: a change to a string invalidates offsets computed on it.
-- After either, check the result.
+  - After either, check the result.
 - Chain a publish command to its guard with `&&`, or start the script with `set -euo pipefail`: a newline is not a guard.
 
 ## Claims in prose
@@ -103,14 +103,14 @@ On a cutover, **read `references/cutover-sweep.md` now** for the sweep's steps.
 
 ## Integrate, don't accrete
 
-- Before you add a section, look for one on the topic.
-- If a section's heading names the topic, or it already states half or more of what you would add, rewrite that section: patched-in sentences are how two sections come to disagree.
+- Before you add a section, look for one on the topic: patched-in sentences are how two sections come to disagree.
+- If a section's heading names the topic, or it already states half or more of what you would add, rewrite that section, for the same reason.
 - Merge per-case sections (per provider, per version) that repeat each other into one that names the differences.
 - A consolidation leaves the doc shorter.
 - Rewrite a doc that grows on every edit, even simplifying ones: it is accreting.
 - Keep one doc per audience or purpose.
-- Merge duplicate files.
-- State in the PR body why no existing file can hold a new file's content.
+  - Merge duplicate files.
+  - State in the PR body why no existing file can hold a new file's content.
 
 ## A rule agents know but keep forgetting
 
@@ -121,5 +121,5 @@ On a cutover, **read `references/cutover-sweep.md` now** for the sweep's steps.
 ## Markdown tables
 
 - Escape every `|` in a table cell, even inside backticks (`` head \| wc ``): GitHub splits the row before it parses code spans.
-- Check a table in GitHub's rendered view.
-- Compare each row's field count with the header's: `sed 's/\\|//g' FILE | awk -F'|' '{print NR": "NF}'`.
+- Check a table in GitHub's rendered view, for the same reason.
+- Compare each row's field count with the header's, for the same reason: `sed 's/\\|//g' FILE | awk -F'|' '{print NR": "NF}'`.
