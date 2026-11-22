@@ -22,8 +22,8 @@ Never move a person's credential to where a machine keeps it: a token minted fro
 1. **A read:** never with a person's key.
    - Set `GCLOUD_READER_REASON` (`AZ_READER_REASON` for Azure) to the issue key and each object read; the broker gives the reader's token to your session at once.
    - `references/reads.md` names the reader of each kind of object.
-
-   Your session's own work, and the resources your session creates and uses for its own task (a build VM, a file in a bucket), run as the box identity, with no other configuration or account selected. A change to a resource that a program declares in code is a production change (route 2).
+   - Your session's own work, and the resources your session creates and uses for its own task (a build VM, a file in a bucket), run as the box identity, with no other configuration or account selected.
+   - A change to a resource that a program declares in code is a production change (route 2).
 2. **A production change:** merge it to main, and the CI apply workflow of its program (the directory with its own `Pulumi.yaml` that declares the resource) applies it.
    - For a targeted, replace or refresh apply, start that workflow by hand (agent-infra, the GitHub repository `theorem-labs/agent-infra`: `bootstrap/README.md`, "Who applies by hand").
    - Run as agent-infra's applier, `infra-applier@theorem-agent-infra.iam.gserviceaccount.com`, only a by-hand step that a program's README gives to that account.
@@ -68,7 +68,12 @@ Refused by a registry, or by an environment that a customer shares with us (its 
 
 ## A VM you create gets a run-time limit
 
-A VM left running bills until someone stops it. Give every VM you create by hand a limit at creation: `--max-run-duration=<duration> --instance-termination-action=STOP`. With local SSD also add `--discard-local-ssds-at-termination-timestamp=true`. `<duration>` is the time the VM's work needs, from `30s` to `120d`, such as `8h`. Google stops the VM when the time runs out and keeps its disk. In an agent session `~/.dotfiles/shims/gcloud` refuses an `instances create` without a limit.
+A VM left running bills until someone stops it.
+
+- Give every VM you create by hand a limit at creation: `--max-run-duration=<duration> --instance-termination-action=STOP`.
+- For such a VM with local SSD, also add `--discard-local-ssds-at-termination-timestamp=true`.
+
+`<duration>` is the time the VM's work needs, from `30s` to `120d`, such as `8h`. Google stops the VM when the time runs out and keeps its disk. In an agent session `~/.dotfiles/shims/gcloud` refuses an `instances create` without a limit.
 
 - To extend, start the VM again after it stops: the clock restarts at each start. `gcloud compute instances set-scheduling` changes the limit only while the VM is stopped.
 - Declare a long-lived VM (a service, a dev box) in code with an `owner=` label instead of creating it by hand.
