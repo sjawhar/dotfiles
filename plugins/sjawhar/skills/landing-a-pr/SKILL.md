@@ -24,8 +24,7 @@ You make the PR ready; auto-merge (`gh pr merge --auto`) merges it.
 - Do not use `--admin` or any bypass that skips a check that tests the work.
 - When the person who owns the work approves the PR, or says to merge or consolidate PRs, do it yourself; do not hand it back to them to click.
 - **Legion's PRs (branch `legion/<KEY>`):** the session that asked Legion for the issue watches and does not merge.
-  - Legion, the daemon that runs Dispatch issues labelled `legion` through phase sessions, merges the PRs it produces.
-  - Legion's merger session merges the head it read.
+  - Legion, the daemon that runs Dispatch issues labelled `legion` through phase sessions, merges the PRs it produces: its merger session merges the head it read.
 - After the required checks and review pass:
   - Merge instead of pushing more: each push restarts every check.
   - Push first only a fix for a defect that would do harm once merged (wrong behavior, a security hole, bad data), with the other fixes folded in.
@@ -57,7 +56,7 @@ Before you claim coverage, a guard, no regression or "cannot happen", read `refe
 
 ## 2. Start the babysitter
 
-Invoke `ce-babysit-pr` with posture `target`. Give it "The babysitter's brief" in `references/watchers.md` before its first tick. Read that file also before you start or fix a watcher. Read `references/ci-observation.md` before you classify a missing, failed or misleading check.
+Invoke `ce-babysit-pr` with posture `target`. Give it "The babysitter's brief" in `references/watchers.md` before its first tick. Read that file also before you start or fix a watcher.
 
 ## 3. One fix round
 
@@ -76,17 +75,14 @@ Review findings:
 - Check each finding against the code and the approved plan before you adopt its remedy.
 - Fix every valid finding: "cosmetic", "suggestion" and "non-blocking" are labels, not dispositions.
 - Reject only with technical evidence.
-- On an upstream PR:
-  - Read "Upstream PRs" in [fork-and-upstream.md](../opening-a-pr/references/fork-and-upstream.md) before any push or post.
-  - Pass its gate before any push or post.
-  - A squash or rebase its maintainers ask for is allowed despite instruction 1 of the babysitter's brief.
-  - Tell the babysitter about it.
+- **Read `references/upstream-pr.md` now** on an upstream PR: reading "Upstream PRs" and passing its gate before any push or post, a squash or rebase its maintainers ask for, and telling the babysitter.
 
 Read `references/review-and-readiness.md` to find every finding, close it, get the fixed head re-reviewed, and decide which verdicts count.
 
 CI:
 
-- **Read `references/red-checks.md` now** before you act on a red check.
+- Read `references/ci-observation.md` before you classify a missing, failed or misleading check.
+- **Read `references/red-checks.md` now** before you act on a red check: reading its log, calling a test flaky, a suspected regression, real defects, a test that fails at random, and when to rerun.
 - At a trajectory trigger (item 6 of "The babysitter's brief" in `references/watchers.md`), name the invariant the next fix restores, or return `needs-human`.
 - Read `references/ci-observation.md` to choose the tests to run before a push.
 
