@@ -340,16 +340,29 @@ class RoutedOffTheBox(CheckCase):
 
     def test_the_ssh_path_kubectl_line_carries_the_relay_and_reads_a_namespace_the_team_set_reads(self) -> None:
         """A command sshd runs gets the three GCE_METADATA_* values from .bashrc, so the line that stands in for one
-        passes them on. It lists Jobs in builds, which the team set reads (census row U07), not in builds-ossv."""
+        passes them on. It lists Jobs in builds, which the team set reads (census row U07), not in builds-ossv: one
+        request for one Job, whose answer counts the rest (`--chunk-size 1` paged 1,910 Jobs on 2026-11-22 until its
+        continue token expired)."""
         # env -i drops STUB_DIR, so the stub writes to a path baked into it.
         write_stub(self.bin, "kubectl", '#!/bin/bash\nprintf "%s\\n" "$*" "HOST=${GCE_METADATA_HOST:-}" '
-                   f'"ROOT=${{GCE_METADATA_ROOT:-}}" "IP=${{GCE_METADATA_IP:-}}" >"{self.root}/kubectl.seen"\n')
+                   f'"ROOT=${{GCE_METADATA_ROOT:-}}" "IP=${{GCE_METADATA_IP:-}}" >"{self.root}/kubectl.seen"\n'
+                   """echo '{"kind":"JobList","items":[{}],"metadata":{"remainingItemCount":1909}}'\n""")
         relay = {name: "127.0.0.1:8170" for name in ("GCE_METADATA_HOST", "GCE_METADATA_ROOT", "GCE_METADATA_IP")}
         [line] = self.run_function(f'SSH_PATH="{self.bin}:$SSH_PATH"; host_plain_path_kubectl', **relay)
         self.assertTrue(line.startswith("ok "), line)
+        self.assertIn("(1910 jobs)", line)
         seen = (self.root / "kubectl.seen").read_text(encoding="utf-8").splitlines()
-        self.assertIn("-n builds get jobs", seen[0])
+        self.assertIn("get --raw /apis/batch/v1/namespaces/builds/jobs?limit=1", seen[0])
         self.assertEqual(seen[1:], ["HOST=127.0.0.1:8170", "ROOT=127.0.0.1:8170", "IP=127.0.0.1:8170"])
+
+    def test_an_ssh_path_kubectl_answer_that_is_no_job_list_fails(self) -> None:
+        """An error, and an exit 0 whose answer is no JobList (a Status, nothing), say nothing about the list."""
+        for body in ('echo "Error from server (Expired): continue token expired" >&2; exit 1',
+                     """echo '{"kind":"Status","status":"Failure"}'""", "exit 0"):
+            with self.subTest(body=body):
+                write_stub(self.bin, "kubectl", f"#!/bin/bash\n{body}\n")
+                [line] = self.run_function(f'SSH_PATH="{self.bin}:$SSH_PATH"; host_plain_path_kubectl')
+                self.assertTrue(line.startswith("FAIL "), line)
 
     def test_azure_reads_go_through_az_reader(self) -> None:
         (self.root / "az-reader").write_text(json.dumps({"user": "legion-reader", "type": "servicePrincipal",
@@ -431,7 +444,7 @@ class WholeRunCase(CheckCase):
         write_stub(dotfiles / "scripts", "agentbox", "#!/bin/bash\nexit 0\n")
         ssh_bin = self.root / "ssh-bin"
         ssh_bin.mkdir()
-        write_stub(ssh_bin, "kubectl", "#!/bin/bash\necho job.batch/stub\n")
+        write_stub(ssh_bin, "kubectl", """#!/bin/bash\necho '{"kind":"JobList","items":[{}],"metadata":{}}'\n""")
         for name, body in (("gcloud", BOX_GCLOUD), ("curl", CURL), ("kubectl", BOX_KUBECTL), ("theorem-session", SESSION),
                            ("az-reader", AZ_READER), ("timeout", TIMEOUT), ("tailscale", TAILSCALE), ("id", ID),
                            ("hostname", "#!/bin/bash\necho sami-devbox\n"), ("secrets", "#!/bin/bash\nexit 1\n")):
