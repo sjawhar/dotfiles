@@ -313,18 +313,6 @@ class AgentAccess(unittest.TestCase):
         self.assertEqual(rows["google_workspace_work"]["status"], "live")
         self.assertEqual(rows["google_workspace_work"]["identity"], "work@example.com")
 
-    def test_gws_timeout_reports_the_timeout_not_the_advisory(self) -> None:
-        """`timeout` exits 124 when it stops gws; the detail says so, not gws's keyring advisory on stderr."""
-        write_stub(self.stub_dir, "gws", 'echo "Using keyring backend: keyring" >&2\nexit 124')
-        gws_dir = self.home / ".config" / "gws"
-        gws_dir.mkdir(parents=True)
-        (gws_dir / "accounts.json").write_text(json.dumps({"work": {}}), encoding="utf-8")
-        result = self.run_access("--json")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        rows = {row["name"]: row for row in json.loads(result.stdout)}
-        work = rows["google_workspace_work"]
-        self.assertEqual((work["status"], work["detail"]), ("missing", "timed out after 6s"))
-
     def test_gws_unusable_registry_reports_one_missing_row(self) -> None:
         """A registry jq cannot read as a non-empty object gives one missing google_workspace row."""
         write_stub(
@@ -501,6 +489,24 @@ fi
         rows = self.timed_out_rows({command: "" for command in TIMED_CHECKS.values()})
         self.assert_timed_out(rows, {})
 
+    def test_failure_detail_skips_an_empty_first_line(self) -> None:
+        """A failure's detail is its first non-empty line: a lone CR line and a line of only blanks are empty."""
+        expired = (
+            "An error occurred (ExpiredToken) when calling the GetCallerIdentity operation:"
+            " The security token included in the request is expired"
+        )
+        crashed = "ERROR: gcloud crashed (OperationalError): unable to open database file"
+        write_stub(self.stub_dir, "aws", f"echo\necho {shlex.quote(expired)}\nexit 253")
+        write_stub(self.stub_dir, "dispatch", "printf '\\r\\ndispatch: not logged in\\n'\nexit 1")
+        write_stub(self.stub_dir, "gcloud", f"printf ' \\t \\n'\necho {shlex.quote(crashed)}\nexit 1")
+        result = self.run_access("--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = {row["name"]: row for row in json.loads(result.stdout)}
+        details = {"aws": expired, "dispatch": "dispatch: not logged in", "gcloud": crashed}
+        for name, detail in details.items():
+            with self.subTest(check=name):
+                self.assertEqual((rows[name]["status"], rows[name]["detail"]), ("missing", detail))
+
     def secretsd_row(self, stdout: str, stderr: str = "", code: int = 0) -> dict[str, str]:
         """Return the secretsd_grants row when `secrets grants` writes STDERR, then STDOUT, and exits CODE.
 
@@ -597,12 +603,6 @@ exit {code}
         row = self.secretsd_row("")
         self.assertEqual((row["status"], row["identity"]), ("unknown", "-"))
         self.assertEqual(row["detail"], "unrecognised answer: ")
-
-    def test_secretsd_timeout(self) -> None:
-        """`timeout` exits 124 when it stops the command; the detail says so, not the shim's notice."""
-        row = self.secretsd_row("", stderr=SECRETS_SHIM_NOTICE, code=124)
-        self.assertEqual((row["status"], row["identity"]), ("missing", "-"))
-        self.assertEqual(row["detail"], "timed out after 6s")
 
     def test_secretsd_row_text(self) -> None:
         row = self.secretsd_row(SECRETS_GRANTS_V384)

@@ -38,7 +38,8 @@ row() {
         "${command//[$'\t\n']/ }" "${detail//[$'\t\n']/ }" >"$tmp/$name"
 }
 
-first_line() { head -n1 <<<"$1" | tr -d '\r'; }
+# first_line TEXT: print TEXT's first non-empty line, CR removed; a line of only spaces and tabs counts as empty.
+first_line() { awk '{ gsub(/\r/, "") } NF { print; exit }' <<<"$1"; }
 
 # failure_detail RC TEXT: TEXT, unless RC is 124: `timeout` killed the command, and what it printed is not its answer.
 failure_detail() {
@@ -172,7 +173,7 @@ check_gws() {
     # is the Gmail profile: every account's read tier holds Gmail read-only, and
     # some (wren) hold nothing else. gws writes advisories ("Using keyring
     # backend: ...") to stderr, so stdout alone is parsed and a failure reports
-    # stderr's last line, or a timeout that it timed out.
+    # stderr's last line.
     local accounts_file="$HOME/.config/gws/accounts.json" accounts account out rc email err
     if [[ ! -f "$accounts_file" ]]; then
         row google_workspace missing - - "jq keys $accounts_file" "no $accounts_file"
@@ -251,9 +252,9 @@ check_kubectl() {
 # `KIND` line, which starts a second table, of requests, receipts and
 # capabilities, that is not read. Only stdout is parsed. A failure reports
 # stderr's last line (the secrets shim writes a notice to stderr before the
-# client runs), or stdout's first line when stderr is empty, and a timeout
-# reports that it timed out. A lone `no active grants` line means no keys; an
-# answer of no known shape reports `unknown`.
+# client runs), or stdout's first non-empty line when stderr is empty. A lone
+# `no active grants` line means no keys; an answer of no known shape reports
+# `unknown`.
 check_secretsd() {
     local out rc err detail line first key keys=""
     err="$tmp/secretsd.stderr"
