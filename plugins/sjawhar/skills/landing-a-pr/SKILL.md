@@ -60,7 +60,7 @@ Review findings:
 - Check each finding against the code and the approved plan before you adopt its remedy.
 - Fix every valid finding: "cosmetic", "suggestion" and "non-blocking" are labels, not dispositions.
 - Reject only with technical evidence.
-- **Read `references/upstream-pr.md` now** on an upstream PR: reading "Upstream PRs" and passing its gate before any push or post, a squash or rebase its maintainers ask for, and telling the babysitter.
+- **Read `references/upstream-pr.md` now** on an upstream PR: reading "Upstream PRs" and passing its gate before any push or post, a squash its maintainers ask for, and telling the babysitter.
 
 Read `references/review-and-readiness.md` to find every finding, close it, get the fixed head re-reviewed, and decide which verdicts count.
 

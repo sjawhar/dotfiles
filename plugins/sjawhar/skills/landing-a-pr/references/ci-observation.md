@@ -72,7 +72,7 @@ gh run rerun <run-id> -R <owner>/<repo> --failed
   - For failures in untouched files, reproduce at the exact head and a pristine base.
 - A conflicted PR can get no `pull_request` run: read mergeability before you blame webhooks.
 - A mergeable head with zero runs: check trigger and path filters and commit-message skip directives.
-- To get a run, add commits on top; do not rewrite published commits.
+- To get a run, add commits on top; do not rewrite published commits other than by a rebase.
 - Count the CI app's suites, not another integration's queued empty suite.
 - Re-snapshot after UNKNOWN mergeability computes.
 - Read the gate's code before you claim how it treats UNKNOWN.

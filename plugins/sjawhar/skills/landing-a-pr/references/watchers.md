@@ -11,6 +11,7 @@ Give `ce-babysit-pr` these instructions before its first tick:
    - For a real conflict, or a base change the PR needs to build or pass:
      - Message the person who owns the work.
      - Integrate only when they decide to.
+   - On a published or reviewed head, do not amend or squash: that voids the reviews of that head.
 2. Wake on Envoy `notifications.github.<owner>.<repo>.pr.<N>.>`.
    - Run `pr-snapshot watch` in the background.
    - Do not block on `gh pr checks --watch`, `gh run watch` or a sleep loop: the turn misses review events.
