@@ -2,30 +2,42 @@
 
 Read this when the question is a design, architecture or cleanup call.
 
-- Build complete slices a person can use and test, with their wiring and feedback, even across packages. An
-  explicitly smaller goal can still be complete. Simplicity never cuts requested scope.
-- Simplify the structure, not only the diff. Delete duplicate paths and fix the dependency mess instead of wrapping
-  it: a shared helper is not unification while two mechanisms remain. Two distinct concerns may both stay: "one
-  product" does not require banning a useful native tool or replacing its storage.
-- Research existing config, APIs, packaging, release tooling, identities and primitives before you write a
-  workaround. "Add this feature" does not mean "advance everything else". A generic process skill does not hardcode
-  one project.
-- Use resource config, not branches on environment names, and identity, not checkout location. Add no knob to keep
-  a distinction that should disappear. "Config over code" is a preference, not a universal answer.
-- Fix the producer, not every consumer. Delete manual duplication that drifts. Use data ranges and clear labels, not
-  formulas that need an edit for each new row. A build failure must not become a silent runtime fix; a temporary
-  fix that unblocks a person is allowed only while the source fix is under way.
-- Before you report a metric, state what it measures: harness failure is not model resistance, and nominal
-  concurrency is not throughput. Instrument and shorten the experiment before another blind run. A green result
-  that dropped the measured behavior is not proof.
+- Build complete slices a person can use and test, with their wiring and feedback, even across packages.
+  - An explicitly smaller goal can still be complete.
+  - Simplicity never cuts requested scope.
+- Simplify the structure, not only the diff.
+  - Delete duplicate paths.
+  - Fix the dependency mess instead of wrapping it.
+  - A shared helper is not unification while two mechanisms remain.
+  - Two distinct concerns may both stay: "one product" does not require banning a useful native tool or replacing its storage.
+- Research existing config, APIs, packaging, release tooling, identities and primitives before you write a workaround.
+- "Add this feature" does not mean "advance everything else".
+- A generic process skill does not hardcode one project.
+- Use resource config, not branches on environment names.
+- Use identity, not checkout location.
+- Add no knob to keep a distinction that should disappear.
+- "Config over code" is a preference, not a universal answer.
+- Fix the producer, not every consumer.
+- Delete manual duplication that drifts.
+- Use data ranges and clear labels, not formulas that need an edit for each new row.
+- A build failure must not become a silent runtime fix.
+  - A temporary fix that unblocks a person is allowed only while the source fix is under way.
+- Before you report a metric, state what it measures:
+  - harness failure is not model resistance;
+  - nominal concurrency is not throughput.
+- Instrument the experiment before another blind run.
+- Shorten the experiment before another blind run.
+- A green result that dropped the measured behavior is not proof.
 - Before approval, build and run the changed path with the relevant permissions, providers, modes and current code.
-  More names for the same check add no verification; run the check.
-- A safeguard must answer a real need: no invented deploy scenarios, extra checks or new access systems as
-  "hardening". User-level tooling needs no organization-wide authority. Tighter deploy permissions keep a way to test
-  full changes independently.
-- A clean cutover is the default when the consumers can migrate, and it is never a license to lose work. Run a new
-  path in parallel with the old one without using its result (shadowing) only when someone asks or you can name the
-  failure it would catch.
-- Preferences change, so check the latest word before you apply an old one. A decoupling request can end in combined
-  systems once their roles are clear, an early design can lose to a later one, and no past implementation is a
-  permanent rule. Cache freshness needs evidence: never assume "closed forever".
+- Run the check: more names for the same check add no verification.
+- A safeguard must answer a real need: no invented deploy scenarios, extra checks or new access systems as "hardening".
+- User-level tooling needs no organization-wide authority.
+- Tighter deploy permissions keep a way to test full changes independently.
+- A clean cutover is the default when the consumers can migrate.
+- A clean cutover is never a license to lose work.
+- Run a new path in parallel with the old one without using its result (shadowing) only when someone asks or you can name the failure it would catch.
+- **Preferences change,** so check the latest word before you apply an old one.
+  - A decoupling request can end in combined systems once their roles are clear.
+  - An early design can lose to a later one.
+  - No past implementation is a permanent rule.
+- **Cache freshness needs evidence:** never assume "closed forever".
