@@ -13,7 +13,8 @@ The rule is against phrases that sound like an action and name none.
 
 1. Answer the exact question, only it, in the order it was asked; anything else reads as evasion and the question comes again.
 2. Start from what happens, not from a setting, a flag or a name: the reader can reach the setting from the behaviour, not the reverse.
-3. Define each term where you first use it, in literal words. No analogy: the reader cannot tell which part of one is true.
+3. Define each term where you first use it, in literal words.
+4. Use no analogy: the reader cannot tell which part of one is true.
 
 ## Decisions and terms
 
@@ -53,11 +54,13 @@ Look for the first phrase first: it is the commonest.
 - No all-capitals headers, and no all-capitals phrases for emphasis.
 - Bold only a number, a name or a choice that the reader must copy or act on after reading, such as a command to run, a deadline or the option to pick.
 - In a skill, a bold label may also start a rule.
-- **Cut the passage instead of adding a shouting header.** A shouting header appears when a passage is too long to show its own point, that is, when its first sentence does not state the point. Cut such a passage until its first sentence does. An agent reads a shouting header as an instruction shouted twice, and a reader who sees three of them stops seeing any.
+- **Cut the passage instead of adding a shouting header.** A shouting header appears when a passage is too long to show its own point, that is, when its first sentence does not state the point. Cut such a passage until its first sentence does. An agent reads a shouting header as an instruction shouted twice. A reader who sees three of them stops seeing any.
 
 ## What stays
 
 - Keep a verb when you can see what it did: merge, delete, send, read, measure, kill a process by pid, repoint a link.
 - Keep a term of art when it is the literal name of the thing: a merge queue merges, a garbage collector collects.
+
+## References
 
 `asd-ste100` constrains grammar and vocabulary for a reader whose first language may not be English. `ce-noslop` removes AI writing tells. Run all three on an outside message, one that a person outside Theorem reads (`outside-message` defines it). Run this one on everything.
