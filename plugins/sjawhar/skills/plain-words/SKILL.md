@@ -5,9 +5,9 @@ description: "Use when you write, send or publish text a person reads: an ask, a
 
 # Say the literal thing
 
-Write what literally happens, so that no phrase sounds like an action and names none.
+The rule is against phrases that sound like an action and name none.
 
-**Done when:** you continued from the fresh session's edited draft and fixed each term it listed ("Before you send", step 3).
+**Done when:** "Before you send" ran, as the two lists from its step 2 show; a reviewer that reads only to approve has not done it.
 
 ## Answering a question
 
@@ -20,18 +20,16 @@ Write what literally happens, so that no phrase sounds like an action and names 
 Do both in your first draft. Before any review reads it, check that each decision in it has its link and each coined name or term has its instance.
 
 1. Do not quote a person, and do not write what they said or why. Write the decision as it now stands, with the link to where it was decided beside it.
-   - Where it was decided is a comment, ask or message on Dispatch, the issue tracker that the `dispatch` command reads and writes. Its link has the form `dispatch://KEY/comment/<id>`, `dispatch://KEY/ask/<id>` or `dispatch://KEY/message/<id>`. Outside Dispatch (a pull-request body, a commit message, Slack), give its `https://` link.
+   - Where it was decided is a comment, ask or message on Dispatch, the issue tracker that the `dispatch` command reads and writes. Its link has the form `dispatch://KEY/<comment|ask|message>/<id>`. Outside Dispatch (a pull-request body, a commit message, Slack), give its `https://` link.
    - A version of an artifact (a file or document attached to a Dispatch issue or project, `dispatch://KEY/artifact/<slug>@vN`) is not where a decision was made: link the comment, ask or message instead.
-   - AskGate reviews each ask, comment, message and document that a `dispatch` command posts, before it posts, and flags a text that quotes the person. With its block arm off (`askgate_block` in `omp/extensions/experiments/gates.json`), the write still posts, with the reason as a warning.
+   - **Why:** AskGate flags a text that quotes the person. It reviews each ask, comment, message and document that a `dispatch` command posts, before it posts. With its block arm off (`askgate_block` in `omp/extensions/experiments/gates.json`), the write still posts, with the reason as a warning.
 2. Beside every coined name, abstraction or term the reader cannot already resolve, put one concrete instance: the actual file, number, id or example. A coined or undefined word is what a reader most often cannot read.
 
 ## Before you send
 
 1. **Start a fresh session.** Give it only what the reader has: the draft and what the reader already knows.
-2. **Ask for cuts and two lists.** Ask it to delete from the draft what the reader does not need, and to return the edited draft with two lists: what it deleted, and every term it cannot define.
+2. **Receive its edited draft and two lists.** It deletes from the draft what the reader does not need, and returns the edited draft with two lists: what it deleted, and every term it cannot define.
 3. **Fix the listed terms.** Continue from its edited draft, and fix each listed term.
-
-A reviewer that reads only to approve has not done this step. The two lists from step 2 show that this step ran.
 
 ## The test
 
@@ -61,7 +59,5 @@ Look for the first phrase first: it is the commonest.
 
 - Keep a verb when you can see what it did: merge, delete, send, read, measure, kill a process by pid, repoint a link.
 - Keep a term of art when it is the literal name of the thing: a merge queue merges, a garbage collector collects.
-
-The rule is against phrases that sound like an action and name none.
 
 `asd-ste100` constrains grammar and vocabulary for a reader whose first language may not be English. `ce-noslop` removes AI writing tells. Run all three on an outside message, one that a person outside Theorem reads (`outside-message` defines it). Run this one on everything.
