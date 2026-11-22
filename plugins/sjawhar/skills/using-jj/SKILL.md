@@ -41,7 +41,7 @@ Read `references/commands.md` for a command or revset you do not know, bookmark 
 
 ## 3. Protect the shared store
 
-- Do not run `jj undo`, `jj op restore` or `jj op revert` in a shared repository: not on your own operation, not to repair another session's mistake, not because a hint names one. They rewind state every workspace sees. A workspace whose session ended is not idle.
+- Do not run `jj undo`, `jj op restore` or `jj op revert` in a shared repository: not on your own operation, not to repair another session's mistake, not because a hint names one. They rewind state every workspace sees, even one whose session ended: it is not idle.
 - Repair forward in a shared repository, for the same reason: read `jj log` and `jj diff` for the revision, then make one new commit or one `jj restore --from <rev> <your paths>`.
 - Before a rewrite, run `jj log -r '<rev>::'` and get the agreement of the owner of every commit and bookmark it lists. Every rewrite moves the commits stacked on it: `describe`, amend, `squash`, `abandon`, `absorb`, every `rebase`. Being the author does not make it safe.
 - Do not pipe a rewrite, which hides its exit code and first error.
