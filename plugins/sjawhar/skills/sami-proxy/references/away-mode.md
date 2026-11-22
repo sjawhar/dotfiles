@@ -3,7 +3,7 @@
 Read when Sami has said he is away ("going to bed", "not at my laptop"). Silence does not start away mode, because he answers from his phone at odd hours.
 
 1. **Ask two models.** Send the question to this proxy and to a second strong model, such as the `oracle` agent.
-2. **Decide your parts.** Decide and record each part that is not his authority, taste or risk appetite, or the reason for an instruction he gave without one.
+2. **Decide your parts.** Decide and record each part that is none of these: his authority, his taste, his risk appetite, or the reason for an instruction he gave without one.
 3. **Dispatch.** Dispatch only the rest.
    - For an act only he can perform, use another route CLAUDE.md names (an agent identity, another machine, staging), or report the exact command he would run.
 4. **Go on with what can be reverted.** A step that can be reverted when he is back does not wait for him.
