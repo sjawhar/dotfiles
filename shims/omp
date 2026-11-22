@@ -630,6 +630,37 @@ elif [[ -n "${OMP_MEMORY_MAX:-}" ]] && command -v systemd-run >/dev/null 2>&1; t
         systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 -p OOMPolicy=continue -- true \
             >/dev/null 2>&1
     }
+    # The scope a background child runs in, once systemd-run has moved it out of this shell's cgroup.
+    child_scope() {
+        local pid=$1 self cg i
+        self=$(sed -n 's/^0:://p' "/proc/$$/cgroup" 2>/dev/null)
+        for ((i = 0; i < 25; i++)); do
+            cg=$(sed -n 's/^0:://p' "/proc/$pid/cgroup" 2>/dev/null)
+            [[ -z $cg ]] && return 0
+            [[ $cg != "$self" ]] && { echo "$cg"; return 0; }
+            sleep 0.2
+        done
+    }
+    # Whether the kernel's OOM killer fired in a scope: oom, none, or unknown. Its memory.events
+    # while the cgroup lasts; after, the unit's journal, where systemd writes "A process of this unit
+    # has been killed by the OOM killer". A unit with no journal line at all is unknown, not none.
+    # Until 2026-11-22 every exit 137 was called a ceiling kill: at 21:05Z two sessions with peaks of
+    # 40.6G and 5.1G were told so after another session wrote cgroup.kill on their scopes.
+    scope_oom() {
+        local cg=$1 since=$2 n lines try
+        [[ -n $cg ]] || { echo unknown; return 0; }
+        n=$(awk '$1 == "oom_kill" {print $2}' "/sys/fs/cgroup$cg/memory.events" 2>/dev/null)
+        if [[ $n =~ ^[0-9]+$ ]]; then
+            if ((n > 0)); then echo oom; else echo none; fi
+            return 0
+        fi
+        for try in 1 2; do
+            lines=$(timeout 20 journalctl --user -q --no-pager -o cat -u "${cg##*/}" --since "@$since" 2>/dev/null)
+            if [[ $lines == *"killed by the OOM killer"* ]]; then echo oom; return 0; fi
+            ((try == 1)) && sleep 2
+        done
+        if [[ -n $lines ]]; then echo none; else echo unknown; fi
+    }
     if scope_probe || { sleep 10 && scope_probe; }; then
         # A non-interactive shell gives a background job /dev/null as stdin unless the job names
         # its own, and interactive omp then refuses to start ("stdin is not a TTY"). So hand the
@@ -639,7 +670,9 @@ elif [[ -n "${OMP_MEMORY_MAX:-}" ]] && command -v systemd-run >/dev/null 2>&1; t
         systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 -p OOMPolicy=continue \
             -- "$DOTFILES_DIR/scripts/agent-session" omp "$@" <&3 3<&- &
         omp_pid=$!
+        omp_since=$(date +%s)
         exec 3<&-
+        omp_scope=$(child_scope "$omp_pid")
         for sig in INT TERM HUP QUIT; do
             # shellcheck disable=SC2064
             trap "kill -$sig $omp_pid 2>/dev/null" "$sig"
@@ -653,8 +686,17 @@ elif [[ -n "${OMP_MEMORY_MAX:-}" ]] && command -v systemd-run >/dev/null 2>&1; t
             kill -0 "$omp_pid" 2>/dev/null || break
         done
         if ((omp_status == 137)); then
-            echo "omp: this session was killed at its $mem_max memory ceiling (OMP_MEMORY_MAX)." >&2
-            echo "omp: resume it with 'omp --resume <session-id>'; raise the ceiling if it was real work." >&2
+            case $(scope_oom "$omp_scope" "$omp_since") in
+                oom)
+                    echo "omp: this session was killed at its $mem_max memory ceiling (OMP_MEMORY_MAX)." >&2
+                    echo "omp: resume it with 'omp --resume <session-id>'; raise the ceiling if it was real work." >&2 ;;
+                none)
+                    echo "omp: this session was killed by SIGKILL, not at its $mem_max memory ceiling: its scope ${omp_scope##*/} recorded no OOM kill, so something else ended it." >&2
+                    echo "omp: resume it with 'omp --resume <session-id>'." >&2 ;;
+                *)
+                    echo "omp: this session was killed by SIGKILL; whether at its $mem_max memory ceiling could not be read (scope ${omp_scope:-unknown})." >&2
+                    echo "omp: resume it with 'omp --resume <session-id>'." >&2 ;;
+            esac
         fi
         exit "$omp_status"
     fi
