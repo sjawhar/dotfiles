@@ -94,7 +94,6 @@ done
 - Do not retry the removal: each try blocks another daemon thread.
 - Do not restart the daemon: it stops every session's containers.
 - Run `grep -l <container-id> /proc/[0-9]*/cgroup`: printing nothing means its init is gone, even when `docker ps` still says "healthy".
-- It clears when the unmount finishes, or at a reboot.
 - Send the user the container id and the thread line.
-- Leave the container.
+- Leave the container: it clears when the unmount finishes, or at a reboot.
 - Go on with the rest of your task.
