@@ -79,7 +79,12 @@ A project we do not run that has not enrolled starts at "approve each". It moves
    - Send a change to the stream's form there, not into this skill.
    - Run `asd-ste100`, `ce-noslop` and `plain-words` over the text.
    - Avoid "we" (Sami's preference): name Theorem or the tool, or write the sentence with no actor.
-2. A fresh reviewer cuts it. Give a session that did not write the message (the `astra` agent, or an Opus model where it is unavailable) the draft, the recipient's last message and, for text in Sami's name or on his behalf, the "Never write" list of `speaking-as-sami`, and nothing else. It removes everything the reader does not need to understand the core message, and rewrites each "Never write" form. Use its version. A reviewer that reads only to approve has not done this step.
+2. A fresh reviewer cuts it.
+   - Give a session that did not write the message (the `astra` agent, or an Opus model where it is unavailable) the draft, the recipient's last message and, for text in Sami's name or on his behalf, the "Never write" list of `speaking-as-sami`, and nothing else.
+   - It removes everything the reader does not need to understand the core message.
+   - It rewrites each "Never write" form.
+   - Use its version.
+   - A reviewer that reads only to approve has not done this step.
 
 Any edit after the cut, even one line of fact, goes back through step 1 and a new review.
 
