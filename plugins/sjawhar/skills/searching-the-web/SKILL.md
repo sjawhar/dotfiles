@@ -1,5 +1,5 @@
 ---
-name: ceramic
+name: searching-the-web
 description: 'Use when a task needs fresh web results or built-in knowledge is likely stale. Examples: current events, recent news, time-sensitive facts, specific people, products or companies, technical docs. Triggers on "search the web", "look up", "find recent", "latest news", "current".'
 ---
 
