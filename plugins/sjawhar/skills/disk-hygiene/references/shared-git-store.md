@@ -42,7 +42,10 @@ Orphans (a checkout whose entry is gone or reused) are common here. Age is a fir
   GIT_INDEX_FILE=$i $g ls-files --others --exclude-standard
   ```
 
-  Set `GIT_INDEX_FILE` per command, never `export` it: the agent shell persists, so every later git command in every repository would use it, `git status` would show nearly every file as a staged deletion, and a commit would commit those deletions. To clean a shell where it was exported: `unset GIT_INDEX_FILE`, then `git log --stat` over the session's commits and look for a file count far larger than the change.
+  Set `GIT_INDEX_FILE` per command, never `export` it: the agent shell persists.
+  - **Why:** every later git command in every repository would use an exported `GIT_INDEX_FILE`. `git status` would show nearly every file as a staged deletion, and a commit would commit those deletions.
+
+  To clean a shell where it was exported: `unset GIT_INDEX_FILE`, then `git log --stat` over the session's commits and look for a file count far larger than the change.
 - `<commit>` must be the commit that tree was at: find it by the worktree's own name (`git for-each-ref | grep <name>`), then confirm it with `git ls-remote`. Against any other base, a clean tree reads as thousands of changes. Both lists empty and `<commit>` on a remote means the orphan holds nothing unsaved: remove it and write one ledger line. A non-empty result never allows a delete, and it shows unsaved work only against the tree's own commit.
 
 ## Stray `.git` directories

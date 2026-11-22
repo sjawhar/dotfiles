@@ -13,7 +13,10 @@ Read this in Phase 5, and before you delete a tree in which a container left roo
 4. Tagged images: `python3 $S images --older-than-hours 48`. Delete each with `docker rmi REF`, without `-f`: a refusal means a container uses it. Leave younger ones to their owner.
    - `.Size` counts shared layers, and `Reclaimable` assumes nothing is shared. Report the difference of `docker system df` before and after. Where the daemon stores images under containerd, the bytes are in `/var/lib/containerd`.
    - One image under two tags is one image: compare `docker image inspect --format '{{.Id}}' <ref>`. An `rmi` that prints only `Untagged:` and no `Deleted:` freed nothing.
-   - Delete what you built. Delete an image from a shared registry, even one you pulled, only when `docker ps -a --filter ancestor=<id>` lists no container and a grep of the checkouts on the box for its digest and tag (pipeline scripts, lock files) finds nothing. The first check says whether it is used now, not whether another session will pull it, and the image can be the only reachable copy of a toolchain. A local build (no registry prefix) can take its builder an hour to rebuild.
+   - Delete what you built.
+   - Delete an image from a shared registry, even one you pulled, only when `docker ps -a --filter ancestor=<id>` lists no container and a grep of the checkouts on the box for its digest and tag (pipeline scripts, lock files) finds nothing.
+     - **Why:** the first check says whether the image is used now, not whether another session will pull it. The image can be the only reachable copy of a toolchain.
+   - A local build (no registry prefix) can take its builder an hour to rebuild.
    - An unauthenticated registry read cannot tell a private tag from a missing one, so do not read its answer as "the image is irreplaceable" or as "the tag is gone".
 5. Containers: `python3 $S containers` gives each a family, an owner and a verdict; read `cmd_containers` in `$S` for how it sets each verdict. Labels attribute; they never decide liveness. Trust its client check only on a host whose `docker ps` lists the container. Delete only what the verdict allows, and run the census again before `rm`:
 
@@ -31,4 +34,4 @@ Read this in Phase 5, and before you delete a tree in which a container left roo
 
 ## Root-owned files a container left on a bind mount
 
-`rm -rf` as your user fails on each root-owned file, so the tree looks deleted at the top and is not. Remove it with a throwaway container on the same mount, `docker run --rm -v <parent>:/w alpine:3 rm -rf /w/<tree>`, under `systemd-run --user --wait` when you cannot show that it ends inside your tool call's timeout, then `ls` the path to confirm it is gone.
+`rm -rf` as your user fails on each root-owned file, so the tree looks deleted at the top and is not. Remove the tree with a throwaway container on the same mount: `docker run --rm -v <parent>:/w alpine:3 rm -rf /w/<tree>`. Run that container under `systemd-run --user --wait` when you cannot show that it ends inside your tool call's timeout. Then `ls` the path to confirm it is gone.
