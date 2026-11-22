@@ -40,7 +40,7 @@ Read [references/pipeline.md](references/pipeline.md) when you install the tools
 - Apply the workaround in pipeline.md's "Input and readiness traps" when one of these hits: Playwright, CDP and keyboard chords can deliver input to the wrong place and fail silently, and a readiness wait on text can never match.
 - When one of these traps hits, do not tear down the live sandbox.
 - Set the layout before you record: panes that collapse, scroll or resize between takes clip beats and break crops.
-  - Check it in the recorded frame.
+  - Check it in the recorded frame, for the same reason.
 - A cleanup path must not authenticate through the credential store of the thing it cleans up: it fails exactly when you need it.
   - Give it a credential that still works when that environment is broken, or run it from a separate job with its own credential.
 
