@@ -7,8 +7,8 @@ description: "Use when the devbox GNOME keyring is locked, or after a devbox reb
 
 This skill applies only to a machine with the `gnome-keyring` package. Check with `command -v gnome-keyring-daemon`.
 
-- On a machine without the package, expect `unlock-keyring` to say there is no keyring to unlock.
-- On such a machine, log a tool that keeps its login in a keyring in again in each new shell: it falls back to the kernel keyring, which is session-scoped, so the login ends with the shell that made it.
+- Expect `unlock-keyring` to say there is no keyring to unlock on a machine without the package.
+- Log a tool that keeps its login in a keyring in again in each new shell on a machine without the package: the login ends with the shell that made it. There, the tool falls back to the kernel keyring, which is session-scoped.
 
 ## Unlock
 
@@ -17,11 +17,9 @@ This skill applies only to a machine with the `gnome-keyring` package. Check wit
 
 - **Never automate the password:** the secrets would sit unencrypted on disk.
 - **Never bypass the lock with `PYTHON_KEYRING_BACKEND` or a plaintext backend:** the secrets would sit unencrypted on disk.
-- **Never run `gnome-keyring-daemon --unlock` yourself:** it unlocks only a daemon it starts, so it does nothing while Ubuntu's unit runs.
-  - **Why:** each run takes `/run/user/1000/keyring/control`. Each run deletes that directory when it exits. Clients then fail with `couldn't access control socket: No such file or directory`.
-- **If Sami unlocks without the function:**
-  - He must first stop both units Ubuntu ships, `gnome-keyring-daemon.service` and `gnome-keyring-daemon.socket`. While Ubuntu's daemon runs, each `--unlock` logs `another secret service is running` and changes nothing.
-  - Never pass `--start` with `--unlock`: the two flags are incompatible. The working invocation is the function's `--unlock --components=pkcs11,secrets --daemonize`.
+- **Never run `gnome-keyring-daemon --unlock` yourself:** it unlocks only a daemon it starts, so it does nothing while Ubuntu's unit runs. Each run also takes `/run/user/1000/keyring/control` and deletes that directory when it exits, so clients fail with `couldn't access control socket: No such file or directory`.
+- **Sami must first stop both units Ubuntu ships if he unlocks without the function:** `gnome-keyring-daemon.service` and `gnome-keyring-daemon.socket`. While Ubuntu's daemon runs, each `--unlock` logs `another secret service is running` and changes nothing.
+- **Never pass `--start` with `--unlock` when Sami unlocks without the function:** the two flags are incompatible. The working invocation is the function's `--unlock --components=pkcs11,secrets --daemonize`.
 
 ## Recovery
 
