@@ -1930,26 +1930,26 @@ ensure_tcp_forwarder() {
         || die "forwarder $unit did not bind $NETWORK_GATEWAY:$port (journalctl --user -u $unit)"
 }
 
-# $4 = "optional": return 1 instead of ending the launch. A box cannot work without the session
-# bus; it can work without the host's tmux.
-ensure_unix_forwarder() {
-    local unit="$1" sock="$2" target="$3" optional="${4:-}"
-    # A unit already relaying somewhere else is stopped first, as the TCP one is: the host's
-    # tmux socket path follows TMUX_TMPDIR, and a stale unit would relay every box to a socket
-    # nothing listens on.
-    if systemctl --user is-active --quiet "$unit" \
-        && ! systemctl --user show -p ExecStart --value "$unit" 2>/dev/null | grep -qF "UNIX-CONNECT:$target"; then
-        systemctl --user stop "$unit" 2>/dev/null || true
+# The session bus goes through scripts/agentbox-bus-relay rather than socat. A box pid is a number
+# in the box's pid namespace, and the host's systemd reads it as a host pid: Chromium in a box asked
+# it to move "its own" pid into a scope, and the host moved one of its own processes (omp 723175, out
+# of its 109G ceiling, on 2026-11-20). The relay refuses the calls that hand systemd a pid and passes
+# everything else; its docstring has the cases. It replaces the socat unit agentbox-bus without
+# cutting that unit's connections: it takes the socket path over, and the old unit is stopped only
+# once its listener is all it holds, since Chromium aborts when its bus connection drops.
+ensure_bus_relay() {
+    local unit=agentbox-bus-relay legacy=agentbox-bus cg
+    mkdir -p "$(dirname "$BUS_SOCK")"
+    start_unit "$unit" /usr/bin/python3 "$DOTFILES_DIR/scripts/agentbox-bus-relay" "$BUS_SOCK" "/run/user/$UID_/bus" || true
+    # The socket alone proves nothing while the old unit's still exists, so the unit is the verdict.
+    wait_for systemctl --user is-active --quiet "$unit" && wait_for test -S "$BUS_SOCK" \
+        || die "relay $unit did not open $BUS_SOCK (journalctl --user -u $unit)"
+    if systemctl --user is-active --quiet "$legacy"; then
+        cg="$(systemctl --user show -p ControlGroup --value "$legacy" 2>/dev/null)"
+        if [[ -n "$cg" && "$(wc -l <"/sys/fs/cgroup$cg/cgroup.procs" 2>/dev/null)" == 1 ]]; then
+            systemctl --user stop "$legacy" 2>/dev/null || true
+        fi
     fi
-    mkdir -p "$(dirname "$sock")"
-    # The socket is the verdict, not the unit's start: a start that failed because the unit was
-    # already there leaves a working relay behind it (start_unit).
-    start_unit "$unit" socat "UNIX-LISTEN:$sock,fork,mode=600,unlink-early" "UNIX-CONNECT:$target" || true
-    if ! wait_for test -S "$sock"; then
-        [[ -n "$optional" ]] && return 1
-        die "forwarder $unit did not open $sock (journalctl --user -u $unit)"
-    fi
-    return 0
 }
 
 # The host's tmux server, for a lead that drives other sessions' panes (`tmux new-window`,
@@ -2296,7 +2296,7 @@ ensure_forwarders() {
         ensure_tcp_forwarder agentbox-imds "$IMDS_PORT" 169.254.169.254:80
     fi
     ensure_tcp_forwarder agentbox-envoy "$ENVOY_PORT" "127.0.0.1:$ENVOY_PORT"
-    ensure_unix_forwarder agentbox-bus "$BUS_SOCK" "/run/user/$UID_/bus"
+    ensure_bus_relay
     ensure_tmux_forwarder "$box"
     ensure_forward_channels || return 1
     ensure_loopback_services
