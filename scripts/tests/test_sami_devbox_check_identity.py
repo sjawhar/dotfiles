@@ -90,6 +90,18 @@ SESSION = r"""#!/bin/bash
 [[ "$*" == "list --all" ]] && exit "$(cat "$STUB_DIR/sessions")"
 exit 2
 """
+# Each answer of `kubectl auth can-i` and what it makes of a line that wants a refusal: `no`, bare or with the reason GKE
+# gives (as GKE answered sami-devbox on 2026-11-22 at 12:07Z), passes; a grant, nothing, an error, and a word that only
+# begins with "no" fail.
+CAN_I_ANSWERS = (
+    ("no", "ok"),
+    ('no - requires one of ["container.secrets.get"] permission(s) in Cloud IAM or a Kubernetes RBAC role with verb "get" '
+     'for resource "secrets". (Error ID: CiQwMWEyMDMyNy05MmNhLTc3OGQtYTZhYS1lY2IzZWVjYzAyZDISAA==)', "ok"),
+    ("yes", "FAIL"),
+    ("", "FAIL"),
+    ("error: You must be logged in to the server", "FAIL"),
+    ("nope", "FAIL"),
+)
 
 
 def write_stub(directory: Path, name: str, body: str) -> None:
@@ -175,6 +187,13 @@ class IdentityLimits(CheckCase):
         self.answers(tip=error, secrets="error: You must be logged in to the server", exec_="", sessions=0)
         got = self.lines()
         self.assertEqual((got["infra-applier closed"], got["no envoy secrets"], got["no envoy exec"]), ("FAIL", "FAIL", "FAIL"))
+
+    def test_a_refusal_with_or_without_its_reason_passes_and_every_other_answer_fails(self) -> None:
+        for answer, want in CAN_I_ANSWERS:
+            with self.subTest(answer=answer):
+                self.answers(tip={}, secrets=answer, exec_=answer, sessions=0)
+                got = self.lines()
+                self.assertEqual((got["no envoy secrets"], got["no envoy exec"]), (want, want))
 
     def test_no_theorem_session_on_path_fails_the_sessions_line_naming_its_installer(self) -> None:
         (self.bin / "theorem-session").unlink()
@@ -285,6 +304,14 @@ class RoutedOffTheBox(CheckCase):
                 self.refused_everywhere()
                 self.set(name, value)
                 self.assertEqual(self.lines()[label], "FAIL")
+
+    def test_a_refusal_with_or_without_its_reason_passes_and_every_other_answer_fails(self) -> None:
+        for label, name in (("grade pool", f"kubectl.{GRADE}.grade"), ("N6 farm", f"kubectl.{DISPATCH}.builds-ossv")):
+            for answer, want in CAN_I_ANSWERS:
+                with self.subTest(label=label, answer=answer):
+                    self.refused_everywhere()
+                    self.set(name, answer)
+                    self.assertEqual(self.lines()[label], want)
 
     def test_the_box_signs_as_build_io_signer(self) -> None:
         """Census row U23's exception: dev-box@ holds Token Creator on build-io-signer@ alone, so the box mints its token
