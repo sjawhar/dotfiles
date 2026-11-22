@@ -21,7 +21,9 @@ Read this before you run `inventory`, `plan` or `apply`, before a manual `rm` of
 - Judge by the classes, never by `jj workspace list` "(empty)": it says nothing about unmerged ancestors.
 - Idle hours come from the freshness gate (`plan --fresh-hours`, default 24): the mtime of `.jj/working_copy/tree_state` for a jj workspace, and the newest mtime in the top 3 levels for a plain directory. A file written deeper does not move it, so idle hours are an upper bound on how stale a tree is, never proof that nothing writes in it; `$S procs` and `$S writers` give that proof.
 - A stale checkout's diff shows later merges as changes: run `jj log -r '::@ ~ ::trunk()'` before you call it a revert.
-- Leave alone knives fork checkouts (each path `knives repos --json` lists, every sibling of a `default` checkout it lists, and each `workspaces` directory in `~/.config/knives/repos.toml`; end one with `knives finish`, never `rm`), check-in holds and Legion daemon state (`check-in.md` finds its paths).
+- Leave alone knives fork checkouts, check-in holds and Legion daemon state (`check-in.md` finds its paths).
+  - Knives fork checkouts are each path `knives repos --json` lists, every sibling of a `default` checkout it lists, and each `workspaces` directory in `~/.config/knives/repos.toml`.
+  - End a knives fork checkout with `knives finish`, never `rm`.
 
 ## Apply
 
