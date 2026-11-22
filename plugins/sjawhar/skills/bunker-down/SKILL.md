@@ -19,7 +19,16 @@ Where the box already has a stricter value (a lower `MaxAuthTries`, a longer `ba
 
 Report each item as good or concerning: OS release and patch state, listening sockets, firewall (ufw, iptables, nftables), `sshd -T` and every file in `/etc/ssh/sshd_config.d/`, login-capable accounts, `/root/.ssh/authorized_keys`, fail2ban, unattended-upgrades, AppArmor, auditd, network sysctls, enabled services, published Docker ports, and from AWS the security groups, IMDS options and IAM instance profile. An item is concerning when it allows more than Steps 2 to 7 set (for example password SSH login, IMDSv1, an inbound rule other than UDP 41641), when the internet can reach it (a published Docker port, a socket on a public address that a security group lets in), when it is off or behind (AppArmor or auditd not running, a package that `apt list --upgradable` lists), or when it is an account other than the user's and root with a login shell. Otherwise it is good.
 
-Record for later steps: `INSTANCE_ID` (instance metadata or `aws ec2 describe-instances`), `REGION` (instance metadata), `ACCOUNT_ID` (`aws sts get-caller-identity`), `VPC_ID` (`aws ec2 describe-instances`), `OLD_SG_ID` (the instance's current security group), and after Step 3 `TAILSCALE_IP` (`tailscale ip -4`).
+Record for later steps:
+
+| Variable | From |
+| --- | --- |
+| `INSTANCE_ID` | Instance metadata or `aws ec2 describe-instances` |
+| `REGION` | Instance metadata |
+| `ACCOUNT_ID` | `aws sts get-caller-identity` |
+| `VPC_ID` | `aws ec2 describe-instances` |
+| `OLD_SG_ID` | The instance's current security group |
+| `TAILSCALE_IP`, after Step 3 | `tailscale ip -4` |
 
 ## 2. SSM escape hatch
 
@@ -124,14 +133,19 @@ Fix every HIGH finding before Step 9.
 
 ## 9. Final verification
 
-Check each change end to end: read the live state with the command named below, not the file you wrote. Give the user a summary table: UFW status (`sudo ufw status verbose`), the effective `sudo sshd -T` values, the fail2ban sshd jail (`sudo fail2ban-client status sshd`), `tailscale status`, kernel params (`sysctl <key>` for each key in `/etc/sysctl.d/99-hardening.conf`), IMDS options (`aws ec2 describe-instances --instance-ids $INSTANCE_ID --query 'Reservations[0].Instances[0].MetadataOptions'`), listening ports (`sudo ss -tulpn`), and the new security group's ingress rules (`aws ec2 describe-security-groups --group-ids $SG_ID`).
+Check each change end to end: read the live state with the command named below, not the file you wrote. Give the user a summary table:
+
+| Item | Read it with |
+| --- | --- |
+| UFW status | `sudo ufw status verbose` |
+| Effective `sshd` values | `sudo sshd -T` |
+| fail2ban sshd jail | `sudo fail2ban-client status sshd` |
+| Tailscale status | `tailscale status` |
+| Kernel params | `sysctl <key>` for each key in `/etc/sysctl.d/99-hardening.conf` |
+| IMDS options | `aws ec2 describe-instances --instance-ids $INSTANCE_ID --query 'Reservations[0].Instances[0].MetadataOptions'` |
+| Listening ports | `sudo ss -tulpn` |
+| New security group's ingress rules | `aws ec2 describe-security-groups --group-ids $SG_ID` |
 
 ## Common issues
 
-| Situation | Action |
-| --- | --- |
-| SSM agent does not register | Check the instance has the IAM role, restart the agent, wait 30 s |
-| Tailscale auth link expired | `sudo tailscale up` again |
-| Locked out after `ufw enable` | Connect over SSM and run `sudo ufw disable` |
-| fail2ban banned you | `sudo fail2ban-client set sshd unbanip <YOUR_IP>` |
-| SFTP clients break | Rerun Step 5 with `SFTP_LINE="Subsystem sftp internal-sftp"` |
+**Read `references/common-issues.md` now** for the action when the SSM agent does not register (IAM role, restart, wait 30 s), the Tailscale auth link expired (`sudo tailscale up`), you are locked out after `ufw enable` (`sudo ufw disable` over SSM), fail2ban banned you (unban), or SFTP clients break (Step 5 with `internal-sftp`).
