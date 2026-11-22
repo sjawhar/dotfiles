@@ -26,13 +26,10 @@ description: "Use when you create, move or wire a file or directory in ~/.dotfil
    - A launcher sets no Dispatch or Envoy connection setting or credential: each profile's `envoy.json` holds them. `scripts/envoy`'s header gives the order in which a client finds that file.
    - The one Envoy identity variable the launchers set is `ENVOY_MACHINE_ID`, the host's short name (`AGENTBOX_HOST`, else `hostname -s`, cut at the first dot), so all sessions on one host group under one name.
    - A launcher also sets or clears no provider key. A provider key lives in the profile's machine-local file:
-
-     | Profile | Machine-local file that holds its provider key |
-     | --- | --- |
-     | The default profile | The gitignored `omp/models.local.yml` |
-     | A named profile | `~/.omp/profiles/NAME/agent/models.yml` |
-     | A shared profile | `models.overlay.yml` |
-     | `cld`'s profile | The profile's `cld-settings.json` |
+     - the gitignored `omp/models.local.yml`;
+     - a named profile's `~/.omp/profiles/NAME/agent/models.yml`;
+     - `models.overlay.yml` in a shared profile;
+     - for `cld`, the profile's `cld-settings.json`.
 
 9. **Committing.** Publish only when your task is about these files.
 
@@ -51,4 +48,4 @@ description: "Use when you create, move or wire a file or directory in ~/.dotfil
 11. **Tools Sami operates.** When you change a tool Sami operates himself (his skills, dotfiles, omp, dispatch, knives), tell him what each change will do, then what it did: he uses it while you change it.
 12. **Upgrades.** Upgrade a tool that `mise.toml` pins or `install.sh` installs without asking, then say what changed and how to roll it back.
     - Ask first when running sessions must restart for such an upgrade (bun, node, omp).
-    - A fork release is a release of one of Sami's GitHub forks that build from a `sami` branch (his `jj` and `oh-my-pi`). The fork's `.github/workflows/sami-build.yml`, not a person, tags it `v<upstream>-sami.<YYYYMMDD>-<HHMMSS>` and titles it `sami build <tag>`. `mise.toml` pins one such release's exact version, as it pins every tool.
+    - A fork release is a release of one of Sami's GitHub forks that build from a `sami` branch (his `jj` and `oh-my-pi`). Leave its tag, `v<upstream>-sami.<YYYYMMDD>-<HHMMSS>`, and its title, `sami build <tag>`, to the fork's `.github/workflows/sami-build.yml`, not to a person. Pin one such release's exact version in `mise.toml`, as `mise.toml` pins every tool.
