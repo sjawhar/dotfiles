@@ -10,6 +10,6 @@ Read this when you clean up after yourself, and before you make a work directory
 - In an agent box, any other path is yours only if your or your subagents' transcripts (the `session-attribution` skill) show the command or write that made it.
   - If no such transcript shows it, leave that path and report it.
 - In your own box, also run `$S containers` and `$S images`: a `registry` container there is yours.
-- A core file is crash evidence first: identify it (`file core`, `gdb -batch -ex bt core`) before you delete it.
+- A core file is crash evidence first: identify it (`file core`, `gdb -batch -ex bt -c core`) before you delete it.
   - A core file's backtrace names the tool that crashed; a matching restart time does not.
   - In a box, where `dmesg` is unreadable, a core file can be the only evidence.
