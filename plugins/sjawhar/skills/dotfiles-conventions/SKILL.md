@@ -7,12 +7,40 @@ description: "Use when you create, move or wire a file or directory in ~/.dotfil
 
 `~/.dotfiles` is the live checkout: every session and systemd user unit on the machine runs its files, so your edit is live for all of them when you save it. A session that works elsewhere does not have its guides loaded.
 
-1. Read `~/.dotfiles/AGENTS.md` whole, then the guide of each directory you will change (its `AGENTS.md`, where it has one). The root guide holds the live checkout, publishing, portability, installing Sami's own software, upgrading a pinned tool, the launcher environment, the leak-term file and the tests. Before you add a file, read the files beside it and match them in name form (extension or none), header comment, shebang, file mode and layout. A configuration directory holds configuration only: no executable and no `bin/`. A tool's binary comes from its `mise.toml` pin, never one placed in `bin/` by hand. Where those files differ from each other, follow the directory's guide; where it says nothing, follow the one committed most recently (`git log -1 --format=%cs -- <file>`).
-2. When you change a skill in `plugins/sjawhar/skills/`, read `plugins/AGENTS.md` too. A skill there loads in every repository Sami works in, so it names no repository, no single-repository path, and no project's workflow or task names.
-3. A committed symlink is relative, stays in the repository, and never points into `vendor/` or `plugins/` from elsewhere in it: copy the file, or point the consumer at the source directory. Commit no value that differs per machine (a checkout path, a machine's own model routing) and no manifest of such values: an installer makes the value on each machine, or a gitignored local file holds it.
-4. When you change a launcher (`shims/omp`, `scripts/cld`, `scripts/agentbox` or `scripts/agent-session`), give each session the same environment from every launcher, as the root guide's "Conventions" says. A launcher sets no Dispatch or Envoy connection setting or credential: each profile's `envoy.json` holds them (`scripts/envoy`'s header gives the order in which a client finds that file). The one Envoy identity variable the launchers set is `ENVOY_MACHINE_ID`, the host's short name (`AGENTBOX_HOST`, else `hostname -s`, cut at the first dot), so all sessions on one host group under one name. A launcher also sets or clears no provider key: a key lives in the profile's machine-local file (the gitignored `omp/models.local.yml`, or a named profile's `~/.omp/profiles/NAME/agent/models.yml`, `models.overlay.yml` in a shared profile; for `cld`, the profile's `cld-settings.json`).
-5. Publish only when your task is about these files: Sami asked for the change, or the issue you were assigned is a change to them. Commit only your own paths, by name (`jj commit <your paths>` in `~/.dotfiles`, `git commit -- <your paths>` in a git clone), never `git commit -a` or a commit with no paths: that publishes another session's edit under your message. Before you publish, squash your work into one commit per topic, each saying what changed and why, never one per step or file. A topic is one change with one reason: a message that needs two reasons covers two topics. Then publish as the root guide's "Publishing a change" says.
-6. Leave an edit made on the way to other work uncommitted in the working copy, and name each file in your report.
-7. When Sami says he is editing the checkout, leave all your edits uncommitted and name them.
-8. When you change a tool Sami operates himself (his skills, dotfiles, omp, dispatch, knives), tell him what each change will do, then what it did: he uses it while you change it. Upgrade a tool that `mise.toml` pins or `install.sh` installs without asking, then say what changed and how to roll it back; ask first when running sessions must restart for it (bun, node, omp).
-9. A fork release is a release of one of Sami's GitHub forks that build from a `sami` branch (his `jj` and `oh-my-pi`). The fork's `.github/workflows/sami-build.yml`, not a person, tags it `v<upstream>-sami.<YYYYMMDD>-<HHMMSS>` and titles it `sami build <tag>`. `mise.toml` pins one such release's exact version, as it pins every tool.
+1. **Guides.** Read `~/.dotfiles/AGENTS.md` whole, then the guide of each directory you will change (its `AGENTS.md`, where it has one).
+   - The root guide holds the live checkout, publishing, portability, installing Sami's own software, upgrading a pinned tool, the launcher environment, the leak-term file and the tests.
+2. **A file you add.** Before you add a file, read the files beside it and match them in name form (extension or none), header comment, shebang, file mode and layout.
+   - Where those files differ from each other, follow the directory's guide.
+   - Where those files differ and the directory's guide says nothing, follow the one committed most recently (`git log -1 --format=%cs -- <file>`).
+3. **Configuration directories.** A configuration directory holds configuration only: no executable and no `bin/`.
+4. **Binaries.** A tool's binary comes from its `mise.toml` pin, never one placed in `bin/` by hand.
+5. **Skills.** When you change a skill in `plugins/sjawhar/skills/`, read `plugins/AGENTS.md` too.
+   - A skill there loads in every repository Sami works in, so it names no repository, no single-repository path, and no project's workflow or task names.
+6. **Symlinks.** A committed symlink is relative, stays in the repository, and never points into `vendor/` or `plugins/` from elsewhere in it: copy the file, or point the consumer at the source directory.
+7. **Values that differ per machine.** Commit no value that differs per machine (a checkout path, a machine's own model routing) and no manifest of such values: an installer makes the value on each machine, or a gitignored local file holds it.
+8. **Launchers.** When you change a launcher (`shims/omp`, `scripts/cld`, `scripts/agentbox` or `scripts/agent-session`), give each session the same environment from every launcher, as the root guide's "Conventions" says.
+   - A launcher sets no Dispatch or Envoy connection setting or credential: each profile's `envoy.json` holds them. `scripts/envoy`'s header gives the order in which a client finds that file.
+   - The one Envoy identity variable the launchers set is `ENVOY_MACHINE_ID`, the host's short name (`AGENTBOX_HOST`, else `hostname -s`, cut at the first dot), so all sessions on one host group under one name.
+   - A launcher also sets or clears no provider key. A provider key lives in the profile's machine-local file:
+     - the gitignored `omp/models.local.yml`;
+     - a named profile's `~/.omp/profiles/NAME/agent/models.yml`;
+     - `models.overlay.yml` in a shared profile;
+     - for `cld`, the profile's `cld-settings.json`.
+9. **Committing.** Publish only when your task is about these files.
+
+   | Situation | Action |
+   | --- | --- |
+   | Your task is about these files: Sami asked for the change, or the issue you were assigned is a change to them | Publish, as step 10 says |
+   | An edit made on the way to other work | Leave it uncommitted in the working copy, and name each file in your report |
+   | Sami says he is editing the checkout | Leave all your edits uncommitted and name them |
+
+10. **Publishing.**
+    - Commit only your own paths, by name: `jj commit <your paths>` in `~/.dotfiles`, `git commit -- <your paths>` in a git clone.
+    - Never run `git commit -a` or make a commit with no paths: that publishes another session's edit under your message.
+    - Before you publish, squash your work into one commit per topic, each saying what changed and why, never one per step or file.
+    - A topic is one change with one reason: a message that needs two reasons covers two topics.
+    - Then publish as the root guide's "Publishing a change" says.
+11. **Tools Sami operates.** When you change a tool Sami operates himself (his skills, dotfiles, omp, dispatch, knives), tell him what each change will do, then what it did: he uses it while you change it.
+12. **Upgrades.** Upgrade a tool that `mise.toml` pins or `install.sh` installs without asking, then say what changed and how to roll it back.
+    - Ask first when running sessions must restart for such an upgrade (bun, node, omp).
+    - A fork release is a release of one of Sami's GitHub forks that build from a `sami` branch (his `jj` and `oh-my-pi`). The fork's `.github/workflows/sami-build.yml`, not a person, tags it `v<upstream>-sami.<YYYYMMDD>-<HHMMSS>` and titles it `sami build <tag>`. `mise.toml` pins one such release's exact version, as it pins every tool.
