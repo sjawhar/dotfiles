@@ -8,7 +8,7 @@
 # folder. This call writes only that file and, when it changed, the marker that makes the
 # next full run restart Tuwunel; it runs neither mise nor systemctl:
 #   env -u XDG_DATA_HOME ~/.dotfiles/installers/chathub.sh relay-registration
-# Switch the relay on, or off:
+# Switch the relay on, or off; each switch restarts Tuwunel, and with it every bridge, once:
 #   touch ~/.local/share/chathub/envoy-relay.on && env -u XDG_DATA_HOME ~/.dotfiles/installers/chathub.sh
 #   rm -f ~/.local/share/chathub/envoy-relay.on && env -u XDG_DATA_HOME ~/.dotfiles/installers/chathub.sh
 set -euo pipefail
