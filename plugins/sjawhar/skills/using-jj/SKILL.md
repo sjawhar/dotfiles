@@ -10,7 +10,7 @@ In a jj repository use jj, not git, unless the user says otherwise: git writes c
 The git commands here are read-only checks or named exceptions. Every jj command first snapshots the working copy into `@`, so there is no staging. Change IDs survive rewrites; commit IDs do not.
 
 - Use the identity already configured.
-- A missing identity is not permission to invent one or change shared user config without the user's authorization.
+- If the identity is missing, do not invent one or change shared user config without the user's authorization.
 
 All workspaces of a repository share one commit store and one operation log, so an undo or a rewrite you run changes what every other session sees. A read-like command's snapshot changes that history too. A repository is shared when `jj workspace list` prints more than one workspace, or when another session works in your checkout (`jj-agent-status` lists them).
 
@@ -30,25 +30,25 @@ Read `references/commands.md` for a command or revset you do not know, bookmark 
 ## 2. Edit the intended commit
 
 - Run `jj new <head>` before you edit a published or reviewed head; otherwise the next snapshot, or a squash into it, amends it.
-- After a `jj rebase`, check which commit `@` is before you edit: `jj rebase` does not move `@`.
+- After a `jj rebase`, check which commit `@` is before you edit: it does not move `@`.
 - Edit your own unpublished, unshared change in place with `jj edit`.
-- Read `@`'s message before you run `jj describe`: `jj describe` replaces `@`'s message; it does not commit.
+- Read `@`'s message before you run `jj describe`: it replaces `@`'s message; it does not commit.
 - Give `jj split` and `jj squash` `-m`, or `squash -u`: without it they open an editor, which fails with no terminal.
 - Do not take paths out of a merge commit with `split` or `squash --from`: a merge's paths are its resolution, so they vanish from the merged tree. Keep the work in the merge, or rebuild the delta on a fresh child.
 - Read `references/working-copy-details.md` when an edit landed in the wrong commit: after `jj new`, a push, a rebase or an interruption, or through git's `HEAD` in a colocated repository.
 
 ## 3. Protect the shared store
 
-- Do not run `jj undo`, `jj op restore` or `jj op revert` in a shared repository: not on your own operation, not to repair another session's mistake, not because a hint names one. They rewind state every workspace sees. A workspace whose session ended is not idle.
+- Do not run `jj undo`, `jj op restore` or `jj op revert` in a shared repository: not on your own operation, not to repair another session's mistake, not because a hint names one. They rewind state every workspace sees, and a workspace whose session ended is not idle.
 - Repair forward in a shared repository, for the same reason: read `jj log` and `jj diff` for the revision, then make one new commit or one `jj restore --from <rev> <your paths>`.
 - Before a rewrite, run `jj log -r '<rev>::'` and get the agreement of the owner of every commit and bookmark it lists. Every rewrite moves the commits stacked on it: `describe`, amend, `squash`, `abandon`, `absorb`, every `rebase`. Being the author does not make it safe.
 - Do not pipe a rewrite, which hides its exit code and first error.
 - Check a rewrite with `jj log` afterward, for the same reason.
 - Read `references/commands.md` before you run `jj absorb`.
 - Mutate only change IDs you name. A broad set (`mine()`, `empty()`, `divergent()`, `visible_heads() & ~immutable()`, `all:`, an open range such as `main@origin..`) matches other sessions' commits.
-- Never run a bare `jj restore` or `jj abandon` in any checkout, or a bare `jj new` in one other sessions use: each takes other sessions' uncommitted work. Name the source and the paths, `jj restore --from <rev> <paths>`, in your own workspace.
+- Never run a bare `jj restore` or `jj abandon` in any checkout. Never run a bare `jj new` in a checkout other sessions use. Each takes other sessions' uncommitted work. Name the source and the paths, `jj restore --from <rev> <paths>`, in your own workspace.
 - After a failure, read the whole error, `jj status` and `jj log -r '@ | @-'`, then make one correction.
-- An immutable refusal is not a reason for `--ignore-immutable`.
+- Do not take an immutable refusal as a reason for `--ignore-immutable`.
 - On an immutable refusal, find the pin: `jj log -r 'immutable_heads() & descendants(<rev>)'`.
 - On an immutable refusal in a knives-managed fork (one that `knives repos` lists), read the `fork-work` and `using-knives` skills first.
 - Read `references/shared-store-details.md` before you rewrite a commit that has descendants, override an immutable refusal, or clear another owner's conflicted bookmark.
