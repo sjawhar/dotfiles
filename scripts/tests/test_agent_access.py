@@ -552,6 +552,85 @@ exit {code}
         rows = {row["name"]: row for row in json.loads(result.stdout)}
         self.assertEqual((rows["fleetctl"]["status"], rows["fleetctl"]["detail"]), ("missing", "denied by policy"))
 
+    def test_row_makes_a_newline_in_a_kubectl_identity_and_a_broker_detail_a_space(self) -> None:
+        """A warning line before the kubectl context and a two-line broker error stay inside their rows.
+
+        A newline in a field splits the row file in two: `--json` reads only the first line, so the row loses its
+        later fields, and the table prints the rest as a line of its own.
+        """
+        write_stub(
+            self.stub_dir,
+            "kubectl",
+            r"""
+if [[ "$1 $2" == "config current-context" ]]; then printf 'W1122 warning: config is old\nproduction\n'; exit 0; fi
+if [[ "$1 $2" == "auth whoami" ]]; then
+    echo "Username   arn:aws:sts::123:assumed-role/test/i-abc"
+    exit 0
+fi
+exit 2
+""",
+        )
+        write_stub(
+            self.stub_dir,
+            "agent-secrets",
+            r"""
+[[ "$1" == identity ]] || exit 2
+printf 'agent-secrets: no broker session\nhint: run under secret-run\n'
+exit 1
+""",
+        )
+        result = self.run_access("--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = {row["name"]: row for row in json.loads(result.stdout)}
+        kubectl = rows["kubectl"]
+        self.assertEqual(
+            (kubectl["status"], kubectl["identity"], kubectl["expiry"], kubectl["command"]),
+            (
+                "live",
+                "arn:aws:sts::123:assumed-role/test/i-abc (context: W1122 warning: config is old production)",
+                "n/a (assumed-role session)",
+                "kubectl auth whoami",
+            ),
+        )
+        broker = rows["agent_secrets_broker"]
+        self.assertEqual(
+            (broker["status"], broker["detail"]),
+            ("missing", "agent-secrets: no broker session hint: run under secret-run"),
+        )
+
+        table = self.run_access()
+        self.assertEqual(table.returncode, 0, table.stderr)
+        lines = table.stdout.splitlines()
+        # The header, then one line per row: a split row adds a line that starts with neither name.
+        self.assertEqual(len(lines), len(rows) + 1, table.stdout)
+        for name in ("kubectl", "agent_secrets_broker"):
+            with self.subTest(name=name):
+                self.assertEqual(len([line for line in lines if line.startswith(name)]), 1, table.stdout)
+
+    def test_row_makes_tabs_and_newlines_spaces_in_every_field(self) -> None:
+        """row() makes each tab and newline in the identity, expiry, command and detail a space."""
+        dotfiles = self.root / "dotfiles"
+        (dotfiles / "scripts").mkdir(parents=True)
+        script = dotfiles / "scripts" / "agent-access"
+        shutil.copy(AGENT_ACCESS, script)
+        private = dotfiles / ".secrets" / "dotfiles" / "agent-access.d"
+        private.mkdir(parents=True)
+        (private / "demo.sh").write_text(
+            "check_demo() {\n"
+            "    row demo_platform live $'id\\tone\\ntwo' $'exp\\tone\\ntwo' $'cmd\\tone\\ntwo' $'det\\tone\\ntwo'\n"
+            "}\n"
+            "extra_checks+=(check_demo)\n"
+            "extra_rows+=(demo_platform)\n",
+            encoding="utf-8",
+        )
+        result = self.run_access("--json", script=script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        demo = next(row for row in json.loads(result.stdout) if row["name"] == "demo_platform")
+        self.assertEqual(
+            (demo["status"], demo["identity"], demo["expiry"], demo["command"], demo["detail"]),
+            ("live", "id one two", "exp one two", "cmd one two", "det one two"),
+        )
+
     def test_private_checks_beside_the_dotfiles_are_sourced_and_ordered(self) -> None:
         # A check whose name would name a customer lives in <dotfiles>/.secrets/dotfiles/
         # agent-access.d/*.sh (a private repository); the script finds that directory from its
