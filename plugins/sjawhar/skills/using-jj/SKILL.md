@@ -11,6 +11,7 @@ The git commands here are read-only checks or named exceptions. Every jj command
 
 - Use the identity already configured.
 - If the identity is missing, do not invent one or change shared user config without the user's authorization.
+  - Read `references/commands.md` for identity setup.
 
 All workspaces of a repository share one commit store and one operation log, so an undo or a rewrite you run changes what every other session sees. A read-like command's snapshot changes that history too. A repository is shared when `jj workspace list` prints more than one workspace, or when another session works in your checkout (`jj-agent-status` lists them).
 
@@ -19,6 +20,7 @@ Read `references/commands.md` for a command or revset you do not know, bookmark 
 ## 1. Know where `@` is
 
 1. **Run `jj-agent-status`** at session start and for triage. Without it, run `jj status`, `jj log` and `jj workspace list`.
+   - Read `references/commands.md` for the local helpers.
 2. **Check `@`.** Before you edit, and after an interruption, a rebase or a workspace update, run `jj log -r '@ | @- | main@origin' --no-graph` and `jj status` (use the repository's trunk name). A clean status does not show that `@` is on current main or that it is published.
 3. **Ask its owner before you move or revert work you do not recognize:** it is usually another session's. `jj log -r <change>`, `jj op log`, `jj workspace list` and the `session-attribution` skill name its owner.
 4. **Work in your own workspace.** Subagents on disjoint files of one feature can share it; their edits then land in one change.
@@ -33,8 +35,7 @@ Read `references/commands.md` for a command or revset you do not know, bookmark 
 - After a `jj rebase`, check which commit `@` is before you edit: it does not move `@`.
 - Edit your own unpublished, unshared change in place with `jj edit`.
 - Read `@`'s message before you run `jj describe`: it replaces `@`'s message; it does not commit.
-- Give `jj split` and `jj squash` `-m`, or `squash -u`: without it they open an editor, which fails with no terminal.
-- Do not take paths out of a merge commit with `split` or `squash --from`: a merge's paths are its resolution, so they vanish from the merged tree. Keep the work in the merge, or rebuild the delta on a fresh child.
+- Read `references/split-and-squash-details.md` before you run `jj split` or `jj squash`: their `-m` or `-u`, and a merge commit's paths.
 - Read `references/working-copy-details.md` when an edit landed in the wrong commit: after `jj new`, a push, a rebase or an interruption, or through git's `HEAD` in a colocated repository.
 
 ## 3. Protect the shared store
@@ -46,7 +47,9 @@ Read `references/commands.md` for a command or revset you do not know, bookmark 
 - Check a rewrite with `jj log` afterward, for the same reason.
 - Read `references/commands.md` before you run `jj absorb`.
 - Mutate only change IDs you name. A broad set (`mine()`, `empty()`, `divergent()`, `visible_heads() & ~immutable()`, `all:`, an open range such as `main@origin..`) matches other sessions' commits.
-- Never run a bare `jj restore` or `jj abandon` in any checkout. Never run a bare `jj new` in a checkout other sessions use. Each takes other sessions' uncommitted work. Name the source and the paths, `jj restore --from <rev> <paths>`, in your own workspace.
+- Never run a bare `jj restore` or `jj abandon` in any checkout: each takes other sessions' uncommitted work.
+  - Name the source and the paths, `jj restore --from <rev> <paths>`, in your own workspace.
+- Never run a bare `jj new` in a checkout other sessions use, for the same reason.
 - After a failure, read the whole error, `jj status` and `jj log -r '@ | @-'`, then make one correction.
 - Do not take an immutable refusal as a reason for `--ignore-immutable`.
 - On an immutable refusal, find the pin: `jj log -r 'immutable_heads() & descendants(<rev>)'`.
@@ -60,6 +63,7 @@ Read `references/commands.md` for a command or revset you do not know, bookmark 
 3. **Run the push with `--dry-run` first.**
    - Push one bookmark: `jj git push --named <name>=<rev>` for a new one, `jj git push --bookmark <name>` for an existing one. `--all` and `--tracked` push other sessions' bookmarks.
    - Go on only if the dry-run shows `add to <your commit>`, or `move forward from <the remote's commit> to <your commit>`.
+   - Read `references/commands.md` for bookmark commands.
 4. **Check that `jj log -r '<name>@origin' --no-graph -T commit_id` is the recorded ID:** a push that published nothing can print `Nothing changed.` and exit 0.
 5. **Chain `jj new` after the push with `&&`**, so later edits cannot amend the published head.
    - Gate every command that depends on the one before it with `&&`, never `;`, which runs on after a failure.
@@ -68,7 +72,7 @@ Read `references/commands.md` for a command or revset you do not know, bookmark 
 
 ## 5. Rebase, stacks, conflicts
 
-- **Read `references/rebase-details.md` now** before you rebase: the rebase flags, the `jj log` read after every rebase, and when not to rebase.
+- Read `references/rebase-details.md` before you rebase: the rebase flags, the `jj log` read after every rebase, and when not to rebase.
 - If your private, unpublished chain conflicts at every commit, squash it to one commit, or to the layers that help review. Conflict chains in `references/stack-and-conflict-details.md` says when. Then rebase and resolve once.
 - Never rewrite another owner's chain or a published chain as cleanup.
 - Before you resolve a conflict, read jj's conflict markers in `references/commands.md`, then follow the `resolve-conflicts` skill for what to keep.
