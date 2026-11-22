@@ -45,7 +45,6 @@ In `~/.dotfiles`, do not run `jj rebase` onto main, `git pull`, `git rebase`, `g
 
 ## Commit signing and identity
 
-- The default commit email is `sami@trajectorylabs.net` in git and jj, except on a machine whose own `~/.config/git/identity.gitconfig` and `~/.config/jj/config.toml` set another: oryx sets `sami@thecybermonk.com` in both (HOME-216). The theorem-labs and cybermonklabs rules and a repository's own identity still win.
 - Set a repository's commit identity with `scripts/git-identity`, which sets git and jj together. In one repository the two must agree: jj drops the signature of a commit whose author email is not its `user.email` when it rewrites it.
 
 Where this file and the code disagree, the code is right: follow the code and correct this file.
