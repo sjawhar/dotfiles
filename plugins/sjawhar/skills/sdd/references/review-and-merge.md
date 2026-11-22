@@ -3,7 +3,9 @@
 ## Review
 
 - The final `reviewer` after acceptance checks correctness, security, dead code, shims, aliases, dual paths and half-migrations. Do not give it a depth or a file subset.
-- Resolve grounded findings (ones the code or a command output confirms) before you send the merge packet; no other approval or follow-up assignment waives them. Ungrounded preferences do not bind.
+- Resolve grounded findings (ones the code or a command output confirms) before you send the merge packet.
+  - No other approval or follow-up assignment waives grounded findings.
+- Ungrounded preferences do not bind.
 - A re-review after fixes resumes the same reviewer session and reads only the diff since the head it last reviewed: it raises no finding it raised before and none on code that diff does not touch. A fresh reviewer reads the PR whole.
 - After a review round, do not repeat the thermonuclear pair when the diff from the head the pair judged to the new head touches only comments and docs.
 - A docs-only or runtime-free diff skips `ce-simplify-code`.
@@ -12,7 +14,10 @@
 
 ## Judging the result
 
-- An unmet requirement fails the review, whatever the branch, PR body or a report declares, unless the requester recorded before the review that it is out of this work: an ask they answered, a comment they wrote, or a spec version they approved without it. Silence, a reaction or an agent's own spec edit is no record, and moving the missing part to a new issue is not acceptance.
+- An unmet requirement fails the review, whatever the branch, PR body or a report declares, unless the requester recorded before the review that it is out of this work.
+  - A record is an ask the requester answered, a comment they wrote, or a spec version they approved without the requirement.
+  - Silence, a reaction or an agent's own spec edit is no record.
+  - Moving the missing part to a new issue is not acceptance.
 - The `reviewer` dispatches one subagent to red-team the result against the goal and requirements, and its verdict names each red-team finding and what it did with it. A verdict without them is incomplete, and the work does not pass.
 
 ## Gate ledger

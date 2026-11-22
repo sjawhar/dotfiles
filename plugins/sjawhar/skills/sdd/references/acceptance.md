@@ -2,7 +2,12 @@
 
 ## The scenario in every brief
 
-- Every worker brief carries its slice's full acceptance scenario: existing data, the real user and transport (the client the user reaches the change through: HTTP, the CLI, Slack), the live or write probes it needs, and a pre-merge run with outcome and duration recorded. Only Sami's explicit scope change narrows, substitutes or defers it.
+- Every worker brief carries its slice's full acceptance scenario:
+  - existing data;
+  - the real user and transport (the client the user reaches the change through: HTTP, the CLI, Slack);
+  - the live or write probes it needs;
+  - a pre-merge run with outcome and duration recorded.
+- Only Sami's explicit scope change narrows, substitutes or defers a slice's full acceptance scenario.
 - A dataset, fixture or table the scenario names does not exist, or a probe matches zero records: mark the scenario `BLOCKED` and repair the plan against existing data. Do not drop or narrow it.
 - Verification describes an outcome a user can observe. The reviewer rejects missing, proxy-only or internal-only verification.
 - Track implemented, integrated and acceptance-verified separately: an unresolved dependency does not make a slice complete.

@@ -19,7 +19,9 @@ fetch_part() {
 }
 ```
 
-- Keep fetched text verbatim. A failed fetch blocks the dispatch, with no fallback. Change the prompts only through review in Legion.
+- Keep fetched text verbatim.
+- A failed fetch blocks the dispatch, with no fallback.
+- Change the prompts only through review in Legion.
 - The task names the absolute workspace, the step brief, the acceptance criteria, the one branch or jj bookmark the worker may push, the absolute path of its report, and its skill-catalog entries.
 - Check commands in a brief are CI's exact recipe from the repo guide or workflow: a subset passes where CI fails.
 

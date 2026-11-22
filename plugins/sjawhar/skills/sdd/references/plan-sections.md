@@ -26,7 +26,9 @@
 
 ## Workspaces
 
-- Keep your starting workspace. Each worker uses the one its task names, normally the same tree for sequential steps; make a second only when two workers edit different files at once.
+- Keep your starting workspace.
+- Each worker uses the workspace its task names, normally the same tree for sequential steps.
+- Make a second tree only when two workers edit different files at once.
 - Outside an agent box, make each further tree with `agent-workspace new <repo> <name>` and remove it with `agent-workspace rm`, not `rm -rf` (`agent-workspace --help`). Do not `git clone` a repository already checked out on the machine: a plain clone copies its whole object store.
 - When a tree needs refs the source must not see, use `agent-workspace new --separate-repo`, a `git clone --shared` that borrows the source's objects. `--independent` makes a full clone that pays for a private copy of every object.
 - Do not remove or move the canonical checkout (`~/src/<repo>`): every worktree and `--shared` clone of it stops working. `agent-workspace list` names each broken tree and says what to do.
