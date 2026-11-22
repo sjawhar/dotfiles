@@ -4,8 +4,7 @@ Read when you find and close findings, or request a head-bound review. The repo'
 
 ## Closure
 
-- Read every surface: threads, review bodies, issue comments, bot summaries, "Suggestions" and findings with no line anchor.
-- Resolved threads do not prove nothing is open.
+- Read every surface: threads, review bodies, issue comments, bot summaries, "Suggestions" and findings with no line anchor. Resolved threads do not prove nothing is open.
 - Use the babysitter snapshot as the index.
 - Fetch bodies by node ID with one GraphQL `nodes(ids: [...])` request per 100 IDs (GitHub refuses more in one request).
 - Reconcile pagination.
@@ -70,8 +69,8 @@ gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<node
 - In a repo another person maintains, verdicts go on the tracking issue.
   - The PR links them in one line.
 - The reviewer is a different agent, not a different account: dispatch your own fresh subagent of another model family to review the head, then post its verdict yourself, with an identity the repository's section of `repo-merge-rules.md` names or as the COMMENT below.
-- Do not send your PR to another session for review.
 - Do not review or place reviews for other sessions' PRs: a session that reviews for others becomes the queue every author waits on.
+  - Do not send your PR to another session for review.
 - GitHub rejects APPROVE and REQUEST_CHANGES from a shared App identity on its own PR. Post a COMMENT review or issue comment with the head-bound verdict first, in the verdict-line format `pr-gate` parses. When the base branch requires an approving review, explain the COMMENT state in that comment: a COMMENT never changes `reviewDecision`, so that rule still needs an approval from another identity (`repo-merge-rules.md`).
 - A REST reply can create an empty COMMENTED review; check its reply link before you call it malformed.
 - A malformed verdict can hold a real defect: act on it, but do not cite it.

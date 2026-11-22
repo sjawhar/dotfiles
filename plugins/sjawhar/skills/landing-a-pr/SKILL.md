@@ -11,7 +11,7 @@ description: >-
 
 You make the PR ready; auto-merge (`gh pr merge --auto`) merges it.
 
-**Done when:** production is proven (step 6); the work stays in verification until then.
+**Done when:** production is proven (step 6).
 
 `ce-babysit-pr` runs the watch loop. Where it differs from this skill, this skill wins. `ce-babysit-pr`'s "looks ready" means check now, not merge.
 
@@ -88,7 +88,7 @@ A push ends readiness. Read `references/proof-and-claims.md` before you certify 
    - Read its reasons, not only its exit code.
    - Run it also before a review gate tied to a head, and after a base move that may conflict.
    - Decide readiness from its output: a script or checklist of your own drifts from what the gate checks.
-   - Cite that output in the report.
+     - Cite that output in the report.
 3. **Blockers.** Not ready while any item is unread, a finding is unresolved, an expected review has not posted and branch rules would let auto-merge go without it, or a required scenario has neither passed nor been waived by the person who owns the work.
    - Report the blocker, the command that shows it and a link to its record.
    - Keep watching.
@@ -111,4 +111,4 @@ A push ends readiness. Read `references/proof-and-claims.md` before you certify 
 
 ## 6. After the merge
 
-Run `post-merge`: it owns delivery, the deploy run that carries the merge, and the proof that the change is live in production. While you watch that run, read "The deploy run" in `references/watchers.md`. A deploy failure the change caused is yours: do not hand the wait for production proof to the person who owns the work.
+Run `post-merge`: it owns delivery, the deploy run that carries the merge, and the proof that the change is live in production. While you watch that run, read "The deploy run" in `references/watchers.md`. A deploy failure the change caused is yours: the work stays in verification until production is proven. Do not hand that wait to the person who owns the work.

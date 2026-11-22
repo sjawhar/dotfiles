@@ -35,7 +35,7 @@ Give `ce-babysit-pr` these instructions before its first tick:
 - One watcher per PR across all sessions; watching three PRs is one loop over three.
 - Do other work while the watcher runs, as a background job whose output or exit reaches you as an Envoy message or a tool follow-up.
 - Do not run a bare `gh run watch` or `gh pr checks --watch`: they poll every 3 and 10 seconds, and every agent on the organisation shares one App installation's REST budget.
-- Pass `--interval 120` or longer to `gh run watch` or `gh pr checks --watch`, or run one `gh pr checks` without `--watch` every 120 seconds or more.
+  - Pass `--interval 120` or longer to `gh run watch` or `gh pr checks --watch`, or run one `gh pr checks` without `--watch` every 120 seconds or more.
 - On a rate-limit error, back off; do not retry sooner.
 - Read its first poll.
   - Silence fits a missing command, a broken parser, an expired token and no event alike.

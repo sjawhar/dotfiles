@@ -10,8 +10,7 @@ Read before you claim coverage, independence, a guard's safety, no regression or
   - Rerun the mutations after a test example or docstring changes.
 - An assertion behind a branch the examples never enter is vacuous: count the examples that reach it.
 - A large pass count never makes up for a surviving mutant.
-- The oracle must not import, call or reproduce the production decision: search it for the matcher's, parser's or comparator's symbol.
-- A fake that filters like production can answer itself.
+- The oracle must not import, call or reproduce the production decision: search it for the matcher's, parser's or comparator's symbol. A fake that filters like production can answer itself.
 - Build fixtures with the real constructor, above all where the contract compares identity (`is`, the same instance).
   - Check copying and memoization.
 - Use the shared constant for fixture paths the consumer reads.

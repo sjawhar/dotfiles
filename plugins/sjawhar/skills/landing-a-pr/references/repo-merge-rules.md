@@ -26,7 +26,7 @@ secret-run --register --reason '<what and why>' GITHUB_ADMIN_PAT -- sh -c 'GH_TO
 ## Approvals
 
 - An approval of a pull request is not an admin action.
-- No approval uses a person's token, the admin token included.
+  - No approval uses a person's token, the admin token included.
 - Where a code owner owns the files changed, the approval is that person's: ask them through Dispatch, with the pull request, its head and the review verdict it got.
 - You may approve a pull request your own session wrote when the work had cross-family review under `sdd` and Sami authorized the work.
 - An approval counts only at the head it names: a push after approval needs a new review and approval at the new head.
@@ -42,7 +42,7 @@ A guard that reads a diff cannot see the state: a repository can be clean on eve
 - Required at the head: `pr-checks-result` and `review` (workflow "Claude PR Review", run from main's copy). `checklist-affirmation` (`docs/pre-pr-checklists.md`) counts only when the org ruleset lists it: read `gh api repos/trajectory-labs-pbc/agent-c/rules/branches/main`. No approval is needed.
 - The session or person that owns the PR merges it; no one else does.
 - `review` starts only on `opened`, `synchronize` or `reopened` of a non-draft PR; marking ready starts nothing.
-- Mark ready, then push or close and reopen, but only while no PR Checks run is in flight, because either event cancels it.
+  - Mark ready, then push or close and reopen, but only while no PR Checks run is in flight, because either event cancels it.
 - `review` fails on an error or a refusal on both models.
 - `claude[bot]`'s `REQUEST_CHANGES` holds the merge until it approves.
 - An unresolved thread holds the merge too.
@@ -57,7 +57,7 @@ A guard that reads a diff cannot see the state: a repository can be clean on eve
 ## cybermonklabs/legion
 
 - Work here goes to Legion, whose reviewer phase is the review.
-- A dev-box session opens no new PR here.
+  - A dev-box session opens no new PR here.
 - Legion merges the work it produces.
 - GitHub needs one approving review from an identity other than the PR author's.
 - A PR a dev-box session already has open gets a full review at its head from a cross-family subagent its author dispatches.
