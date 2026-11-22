@@ -20,7 +20,7 @@ description: "Use when you create, move or wire a file or directory in ~/.dotfil
    - A committed symlink is relative.
    - A committed symlink stays in the repository.
    - A committed symlink never points into `vendor/` or `plugins/` from elsewhere in the repository.
-   - Instead of a committed symlink that is not relative, does not stay in the repository, or points into `vendor/` or `plugins/` from elsewhere in it, copy the file, or point the consumer at the source directory.
+   - Instead of a committed symlink into `vendor/` or `plugins/` from elsewhere in the repository, copy the file, or point the consumer at the source directory.
 7. **Values that differ per machine.** Commit no value that differs per machine (a checkout path, a machine's own model routing) and no manifest of such values: an installer makes the value on each machine, or a gitignored local file holds it.
 8. **Launchers.** When you change a launcher (`shims/omp`, `scripts/cld`, `scripts/agentbox` or `scripts/agent-session`), give each session the same environment from every launcher, as the root guide's "Conventions" says.
    - A launcher sets no Dispatch or Envoy connection setting or credential: each profile's `envoy.json` holds them. `scripts/envoy`'s header gives the order in which a client finds that file.
