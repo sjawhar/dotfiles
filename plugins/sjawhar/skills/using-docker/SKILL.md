@@ -78,7 +78,7 @@ Read `references/dockerfile.md` when you write or review a Dockerfile.
 
 ## A `docker rm -f` or `docker inspect` that never returns
 
-If `docker ps -a` still answers, the daemon is alive. It is stuck in the kernel unmounting that container's filesystem. Seccomp is not the cause: a dropped seccomp listener returns ENOSYS at once, while a stuck unmount waits. Confirm the stuck unmount (expect `wchan=sync_inodes_sb`, `syscall=166`, which is `umount2`):
+If `docker ps -a` still answers, the daemon is alive and is stuck in the kernel unmounting that container's filesystem. Seccomp is not the cause: a dropped seccomp listener returns ENOSYS at once, while a stuck unmount waits. Confirm the stuck unmount (expect `wchan=sync_inodes_sb`, `syscall=166`, which is `umount2`):
 
 ```bash
 for t in /proc/$(pgrep -x dockerd)/task/*; do
