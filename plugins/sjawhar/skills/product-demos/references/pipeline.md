@@ -12,8 +12,18 @@ which agg ffmpeg ffprobe
 
 ## Input and readiness traps (GUI or editor recording)
 
-- Playwright input goes to its target page, not always to the screen, and fails silently. `keyboard.type` into an agent in the VS Code terminal is lost. A CDP click does not move X focus. A chord (`F9`) with focus in a sidebar webview never gets to the workbench. For these, click the target with `xdotool mousemove; click`, then type or press at the X level.
-- Do not wait for readiness on text in a viewport-dependent region (xterm renders only visible rows). Wait up to 30 s for any startup line, then sleep 5 s. If no line appears in those 30 s, sleep 5 s and continue.
+For each input in this table, click the target with `xdotool mousemove; click`, then type or press at the X level.
+
+| Input | What goes wrong |
+| --- | --- |
+| Playwright input | Goes to its target page, not always to the screen, and fails silently |
+| `keyboard.type` into an agent in the VS Code terminal | Is lost |
+| A CDP click | Does not move X focus |
+| A chord (`F9`) with focus in a sidebar webview | Never gets to the workbench |
+
+- Do not wait for readiness on text in a viewport-dependent region (xterm renders only visible rows).
+  - Wait up to 30 s for any startup line, then sleep 5 s.
+  - If no line appears in those 30 s, sleep 5 s and continue.
 
 ## Record, convert, trim
 
@@ -60,34 +70,55 @@ audio = client.text_to_speech.convert(
 save(audio, output_path)
 ```
 
-ElevenLabs premade narration voices to sample: Roger `CwhRBWXzGAHq8TQ4Fs17`, Chris `iP95p4xoKVk53GoZ742B`, Eric `cjVigY5qzO86Huf0OWal`, Daniel `onwK4e9ZLuTAKqWW03F9`. Sample each on a representative 2-3 sentence text, and label each for the A/B video:
+ElevenLabs premade narration voices to sample: Roger `CwhRBWXzGAHq8TQ4Fs17`, Chris `iP95p4xoKVk53GoZ742B`, Eric `cjVigY5qzO86Huf0OWal`, Daniel `onwK4e9ZLuTAKqWW03F9`. Sample each on a representative 2-3 sentence text. Label each for the A/B video with the card command below.
+
+The card command makes a labeled voice sample or a title card. Set its variables from the table.
 
 ```bash
-ffmpeg -y -f lavfi -i "color=c=0x1a1a2e:size=1280x720:duration=${dur}:rate=24" -i sample.mp3 \
-  -filter_complex "[1:a]volume=2.0,aformat=channel_layouts=stereo[a];
-    [0:v]drawtext=fontfile=${FONT}:text='${NAME}':fontsize=48:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2,format=yuv420p[v]" \
-  -map "[v]" -map "[a]" -c:v libx264 -crf 18 -c:a aac -b:a 192k -ar 44100 -ac 2 -shortest labeled_sample.mp4
+ffmpeg -y -f lavfi -i "color=c=0x1a1a2e:size=${SIZE}:duration=${DUR}:rate=${RATE}" $AUDIO \
+  -vf "drawtext=fontfile=${FONT}:text='${TEXT}':fontsize=${FS}:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2,format=yuv420p" \
+  -af "$AF" -c:v libx264 -crf ${CRF} -c:a aac -b:a 192k -ar 44100 -ac 2 $END "$OUT"
 ```
 
-The API returns mono, which plays silent on some devices: convert to stereo (`-ac 2`) and boost (`volume=2.0`).
+| Variable | Labeled voice sample | Title card |
+| --- | --- | --- |
+| `SIZE` | `1280x720` | `${W}x${H}` |
+| `DUR` | `${dur}` | `3` |
+| `RATE` | `24` | `10` |
+| `AUDIO` | `-i sample.mp3` | `-f lavfi -i anullsrc=r=44100:cl=stereo` |
+| `AF` | `volume=2.0,aformat=channel_layouts=stereo` | `anull` |
+| `TEXT` | `${NAME}` | `Section Title` |
+| `FS` | `48` | `52` |
+| `CRF` | `18` | `15` |
+| `END` | `-shortest` | `-t 3` |
+| `OUT` | `labeled_sample.mp4` | `title.mp4` |
 
-Pronunciation aliases: `jj` → `jay-jay`, `CLI` → `C L I`, `OAuth` → `Oh-Auth`, `uv sync` → `you-vee sync`, `tl run` → `T L run`.
+Convert the API's audio to stereo (`-ac 2`): the API returns mono, which plays silent on some devices. Boost it (`volume=2.0`) for the same reason.
+
+Pronunciation aliases:
+
+| Term | Spoken as |
+| --- | --- |
+| `jj` | `jay-jay` |
+| `CLI` | `C L I` |
+| `OAuth` | `Oh-Auth` |
+| `uv sync` | `you-vee sync` |
+| `tl run` | `T L run` |
 
 ## Normalize, title cards, concat
 
 `scale` takes `W:H` with a colon, never `WxH`. `fps=10` is fine for a terminal.
 
+Make each title card with the card command under "Narration", with its title-card values.
+
 ```bash
 ffmpeg -y -i clip.mp4 \
   -vf "scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=0x1a1a2e,fps=10,format=yuv420p" \
   -c:v libx264 -crf 15 -c:a aac -b:a 192k -ar 44100 -ac 2 normalized.mp4
-ffmpeg -y -f lavfi -i "color=c=0x1a1a2e:size=${W}x${H}:duration=3:rate=10" -f lavfi -i "anullsrc=r=44100:cl=stereo" \
-  -vf "drawtext=fontfile=${FONT}:text='Section Title':fontsize=52:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2,format=yuv420p" \
-  -c:v libx264 -crf 15 -c:a aac -b:a 192k -t 3 title.mp4
 for clip in normalized_*.mp4; do echo "file '$clip'" >> concat.txt; done
 ffmpeg -y -f concat -safe 0 -i concat.txt -c copy final.mp4
 ```
 
 ## Quick PR demo (no narration)
 
-Run the record and convert commands above on one cast. Then `asciinema upload demo.cast` (preferred) and post the returned URL in the PR.
+Run the record and convert commands above on one cast. Then run `asciinema upload demo.cast` (preferred). Post the returned URL in the PR.
