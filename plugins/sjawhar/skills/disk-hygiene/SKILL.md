@@ -95,3 +95,6 @@ The space is usually, largest first, in: dangling images, buildkit cache with le
 ## Cleaning up after yourself
 
 Delete only paths you prove are yours; a name proves nothing. Read `references/own-paths.md` when you clean up after yourself, and before you make a work directory, keep work in `/tmp`, or make a second tree of a repository.
+
+- Read `references/finding-space.md` before you delete by a glob or with `find`.
+- Run a delete under `systemd-run --user --wait` when you cannot show that it ends inside your tool call's timeout, so the timeout does not stop it halfway.

@@ -43,7 +43,7 @@ Read this in Phase 5, and before you delete a tree in which a container left roo
      | ryuk, `stranded` (created, never started) | Remove it together with the fixtures labelled with its `org.testcontainers.session-id`. |
      | tc-fixture | Delete without its ryuk only at `orphan-no-ryuk`. A manual delete of a fixture whose ryuk exists can collide with the ryuk's removal. |
      | agentbox | Never. |
-     | other | Delete only eval or task sandboxes, never service containers (postgres, nats, registries, envoy, buildx). A sandbox is an orphan when no eval process exists and nothing names it, or when its only holder is a dangling `docker exec -it ... bash`: kill the shell, then `docker compose -p PROJECT down -v`. If a live session can be the owner, ask it first. |
+     | other | Delete only eval or task sandboxes, never service containers (postgres, nats, registries, envoy, buildx). A sandbox is an orphan when no eval process exists and nothing names it, or when its only holder is a dangling `docker exec -it ... bash`. For an orphan, kill the shell, then `docker compose -p PROJECT down -v`. If a live session can be the owner, ask it first. |
 
    - Run the container census again before `rm`.
    - A container's bind-mounted output appears in no docker measurement: measure the directory it writes to.
@@ -52,4 +52,8 @@ Read this in Phase 5, and before you delete a tree in which a container left roo
 
 ## Root-owned files a container left on a bind mount
 
-`rm -rf` as your user fails on each root-owned file, so the tree looks deleted at the top and is not. Remove the tree with a throwaway container on the same mount: `docker run --rm -v <parent>:/w alpine:3 rm -rf /w/<tree>`. Run that container under `systemd-run --user --wait` when you cannot show that it ends inside your tool call's timeout. Then `ls` the path to confirm it is gone.
+`rm -rf` as your user fails on each root-owned file, so the tree looks deleted at the top and is not.
+
+- Remove such a tree with a throwaway container on the same mount: `docker run --rm -v <parent>:/w alpine:3 rm -rf /w/<tree>`.
+- Run that container under `systemd-run --user --wait` when you cannot show that it ends inside your tool call's timeout.
+- Then `ls` the path to confirm the tree is gone.

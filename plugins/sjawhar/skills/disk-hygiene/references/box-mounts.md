@@ -31,7 +31,8 @@ A mount's name does not say. `/mnt/nvme` means opposite things on the two machin
 - `/mnt/scratch` in a box is the container overlay, not the local SSD.
 - The local SSD reaches a box only as its own filesystem: `/tmp` and `$HOME` live in the box's sparse disk image.
 - Put a large sort, extract or build in box `/tmp`.
-- When box `/tmp` fills, grow the image online with `agentbox grow <box|session-id> <size>`; never move `TMPDIR` to a `--dir` path, which is a disk every session on the host shares.
+- When box `/tmp` fills, grow the image online with `agentbox grow <box|session-id> <size>`.
+- When box `/tmp` fills, never move `TMPDIR` to a `--dir` path, which is a disk every session on the host shares.
 - Check a mount from inside the namespace that writes to it (`findmnt -T <path>`, `stat -f <path>`), never from the host.
 - From a box, `systemd-run --user` starts its command on the host, through the relayed session bus (`agentbox/README.md`), where the box's own paths (`/tmp`, `$HOME`) are other files. Never run a delete or `apply` that way.
   - Run a long one as a named bash service, or with `setsid <cmd> </dev/null >log 2>&1 &`.

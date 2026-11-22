@@ -13,5 +13,3 @@ Read this when you clean up after yourself, and before you make a work directory
 - A core file is crash evidence first: identify it (`file core`, `gdb -batch -ex bt core`) before you delete it.
   - A core file's backtrace names the tool that crashed; a matching restart time does not.
   - In a box, where `dmesg` is unreadable, a core file can be the only evidence.
-- Read `references/finding-space.md` before you delete by a glob or with `find`.
-- Run a delete under `systemd-run --user --wait` when you cannot show that it ends inside your tool call's timeout, so the timeout does not stop it halfway.

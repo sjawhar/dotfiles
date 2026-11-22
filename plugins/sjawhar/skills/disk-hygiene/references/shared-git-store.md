@@ -64,4 +64,8 @@ Orphans (a checkout whose entry is gone or reused) are common here. Age is a fir
 
 ## Stray `.git` directories
 
-Never run `git init` in a shared root such as `/tmp`, `/var/tmp`, `/mnt/nvme/<user>/tmp` or a session-tmp root: git looks upward for a repository, so a stray `.git` captures every git command run below it in a directory without its own (`git apply` then skips every patch and exits 0). A script that runs git in a temp directory sets `GIT_CEILING_DIRECTORIES="$(dirname "$PWD")"`. Such a script also checks `git rev-parse --git-dir`. Rename an untraced stray `.git` aside; do not delete it. Record each stray `.git` you rename aside.
+- Never run `git init` in a shared root such as `/tmp`, `/var/tmp`, `/mnt/nvme/<user>/tmp` or a session-tmp root: git looks upward for a repository, so a stray `.git` captures every git command run below it in a directory without its own (`git apply` then skips every patch and exits 0).
+- A script that runs git in a temp directory sets `GIT_CEILING_DIRECTORIES="$(dirname "$PWD")"`.
+- A script that runs git in a temp directory checks `git rev-parse --git-dir`.
+- Rename an untraced stray `.git` aside; do not delete it.
+- Record each stray `.git` you rename aside.
