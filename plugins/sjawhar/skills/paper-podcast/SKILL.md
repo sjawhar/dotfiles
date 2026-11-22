@@ -67,26 +67,12 @@ Read each paper's full `out/text/<id>.txt`, not the abstract. Capture enough for
 
 Write `out/ground-truth.json` in this shape, one object per paper. Keep the keys. Adapt the example values (metric names, units) to the field.
 
-```json
-{"papers": [{
-  "id": "2501.00001", "title": "...", "authors": ["..."],
-  "context": "problem setting and assumptions",
-  "claims": [{
-    "claim": "what the paper asserts",
-    "evidence": "the experiment, mechanism or reasoning: how it works",
-    "conclusion": "what it implies for the field",
-    "numbers": [{"metric": "<metric>", "value": "X", "baseline": "<prior method> Y"}],
-    "source": "§4.2"}],
-  "limitations": ["what the authors admit fails or where it breaks"],
-  "open_questions": ["what the paper raises but does not answer"],
-  "grounding": [{
-    "related_id": "<arxiv id>", "related_title": "...",
-    "relevance": "baseline | prior | competing | follow-up",
-    "what_it_shows": "the specific claim or number from that work",
-    "verdict": "corroborates | contests | contextualizes",
-    "skeptic_note": "the caveat a knowledgeable host would note: calm, specific, a limitation, not an accusation"}]
-}]}
-```
+**Read `references/ground-truth-shape.md` now**: it holds this shape as JSON, with an example value for each of these keys per paper:
+
+- `id`, `title`, `authors` and `context`.
+- `claims`, each with `claim`, `evidence`, `conclusion`, `numbers` (`metric`, `value`, `baseline`) and `source`.
+- `limitations` and `open_questions`.
+- `grounding`, each with `related_id`, `related_title`, `relevance` (baseline | prior | competing | follow-up), `what_it_shows`, `verdict` (corroborates | contests | contextualizes) and `skeptic_note` (the caveat a knowledgeable host would note: calm, specific, a limitation, not an accusation).
 
 ## Phase 4: ground each paper
 
@@ -94,7 +80,12 @@ This phase is required for every kept paper, before Phase 5: Alex's challenges c
 
 1. **Search alphaXiv.** Run `uv run "$SKILL/scripts/alphaxiv.py" --ids <ids> --similar 6`. Similar papers show baselines and competing work. Comments hold replications and critiques.
    - For papers only days old, rely on similar papers: comments are usually empty and the AI overview can 404.
-2. **Fetch related work.** For each baseline the paper claims to beat, and each prior, competing or follow-up work it compares against, fetch its reception and its own numbers. **Read `references/related-work.md` now**.
+2. **Fetch related work.** For each baseline the paper claims to beat, and each prior, competing or follow-up work it compares against, fetch its reception and its own numbers:
+   ```bash
+   uv run "$SKILL/scripts/litground.py" --ids <baseline ids>       # citations, influential citations, TLDRs
+   uv run "$SKILL/scripts/litground.py" --reception <baseline id>  # when its --ids record has no tldr, or influential_citations is null or 0
+   uv run "$SKILL/scripts/arxiv_search.py" --ids <baseline ids>    # abstracts, exact numbers
+   ```
    `litground.py`'s docstring covers why it reads the older works, its API key and its fallback.
 3. **Dispatch `scout` subagents** in parallel, one per paper, for replications, critiques and competing results steps 1-2 missed.
    - Call the `task` tool with `agent: "scout"`. `scout` is omp's bundled read-only agent.
