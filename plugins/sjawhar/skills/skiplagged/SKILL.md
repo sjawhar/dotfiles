@@ -9,12 +9,14 @@ mcp:
 
 # Skiplagged
 
-Live travel search through Skiplagged's public MCP server. No auth.
+Run a live travel search through Skiplagged's public MCP server.
 
 ## Call a tool
 
-- With a `skill_mcp` tool: `skill_mcp(mcp_name="skiplagged", tool_name="...", arguments='{}')`.
-- Without one, POST JSON-RPC (no session needed). `"method":"tools/list"` gives each tool's input schema.
+The server needs no auth.
+
+- Call `skill_mcp(mcp_name="skiplagged", tool_name="...", arguments='{}')` when you have a `skill_mcp` tool.
+- POST JSON-RPC when you have no `skill_mcp` tool. The POST needs no session. `"method":"tools/list"` gives each tool's input schema.
 
   ```bash
   curl -sS https://mcp.skiplagged.com/mcp -H 'Content-Type: application/json' \
@@ -24,16 +26,23 @@ Live travel search through Skiplagged's public MCP server. No auth.
 
 ## Flow
 
-1. Fixed origin, destination and dates: `sk_flights_search`.
-2. Flexible dates: `sk_flex_departure_calendar` (one-way) or `sk_flex_return_calendar` (round trip), then `sk_flights_search`.
-3. Flexible destination: `sk_destinations_anywhere`.
-4. Multi-city trip: search each leg, add the leg prices, and have the user compare that total against the carrier's own multi-city fare.
-5. Hotels: `sk_hotels_search`. Rental cars: `sk_cars_search`. Award (miles) fares: `sk_award_search`.
-6. Give the user Skiplagged's booking link: its price is only an estimate until they click it.
+| Search | Do |
+| --- | --- |
+| Fixed origin, destination and dates | `sk_flights_search` |
+| Flexible dates, one-way | `sk_flex_departure_calendar`, then `sk_flights_search` |
+| Flexible dates, round trip | `sk_flex_return_calendar`, then `sk_flights_search` |
+| Flexible destination | `sk_destinations_anywhere` |
+| Multi-city trip | Search each leg, then add the leg prices |
+| Hotels | `sk_hotels_search` |
+| Rental cars | `sk_cars_search` |
+| Award (miles) fares | `sk_award_search` |
+
+- Have the user compare the total of a multi-city trip's leg prices against the carrier's own multi-city fare.
+- Give the user Skiplagged's booking link: its price is only an estimate until they click it.
 
 ## Hidden-city caveats
 
-Before the user books a hidden-city itinerary, tell them all of these:
+Tell the user all of these before they book a hidden-city itinerary:
 
 - No checked bags: bags go to the final ticketed destination.
 - One-way only: a skipped segment cancels the rest of the itinerary.
