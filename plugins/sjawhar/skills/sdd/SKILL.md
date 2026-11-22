@@ -49,7 +49,8 @@ Each slice has one class (platform or application, infrastructure, task authorin
 - Pick the design, implementation, testing and infrastructure skills for the rest.
 - The plan's `## Skill catalog` maps each step to the skills its worker loads.
 - Each brief names the skills its worker loads.
-- A step that adds or changes a CI workflow maps `developing-ci`, read before the first workflow edit: a workflow written without it runs the whole suite on every push.
+- A step that adds or changes a CI workflow maps `developing-ci`: a workflow written without it runs the whole suite on every push.
+  - That step reads `developing-ci` before the first workflow edit, for the same reason.
 
 ## 4. Write the plan
 
