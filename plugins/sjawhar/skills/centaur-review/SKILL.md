@@ -6,6 +6,8 @@ args: "<pr_url_or_number>"
 
 # Centaur Review
 
+Sami narrates his observations as he reads the diff, and the review goes to GitHub as inline review comments.
+
 **Done when:** you report `.html_url` from the response to the §4 POST.
 
 **Sami leads:** show your analysis or the agents' findings only when he asks, or at §3 step 4. Unasked analysis
