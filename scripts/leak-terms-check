@@ -2195,9 +2195,12 @@ PATHSPEC_BYTES = 128 << 10
 
 
 def literal_pathspec(path: str) -> str:
-    """PATH as a literal pathspec, which no wildcard or magic in a path can widen. It names the file PATH, and every
-    file in a folder PATH (pathspec_reaches)."""
-    return f":(literal){path}"
+    """PATH, a path from the top of the working tree as a raw tree diff gives it, as a literal pathspec, which no
+    wildcard or magic in a path can widen. It names the file PATH, and every file in a folder PATH (pathspec_reaches).
+    `top` makes git read it from the top of the working tree, not from the directory the check runs in: shims/jj runs
+    the check from its caller's directory with GIT_WORK_TREE passed on, and there `:(literal)a.txt` named `sub/a.txt`,
+    so the push read the wrong file or refused a clean one."""
+    return f":(top,literal){path}"
 
 
 def pathspec_reaches(named: set[str], path: str) -> bool:
@@ -2423,8 +2426,9 @@ def outgoing_tags(
 
 
 def tree_paths(object_id: str) -> list[tuple[str, str, str]]:
-    """Every kind, object and path in a folder object, with Git's raw path bytes decoded once."""
-    return tree_listing(["-r", "-t", object_id], "git could not read an outgoing folder",
+    """Every kind, object and path in a folder object, with Git's raw path bytes decoded once. `--full-tree` lists the
+    whole folder whatever directory the check runs in: without it, git lists only the part under that directory."""
+    return tree_listing(["-r", "-t", "--full-tree", object_id], "git could not read an outgoing folder",
                         "git gave a malformed outgoing folder")
 
 
@@ -2602,11 +2606,29 @@ class Record:
         return {blob for blob, _, text in self.notes if text in passing}
 
 
+def record_ref_absent() -> None:
+    """Return when this repository has no ref RECORD_REF; RecordError when it has one that for-each-ref did not list.
+    `git show-ref --exists` (git 2.43) exits 0 for a ref that is there, a symbolic ref to no ref included, 2 for none,
+    and 1 for a ref it cannot read. An older git knows no --exists (exit 129): there a broken ref goes unreported, as it
+    did before, and every file version is read all the same."""
+    try:
+        completed = subprocess.run(["git", "show-ref", "--exists", RECORD_REF], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=git_environment(),
+                                   check=False)
+    except OSError as error:
+        raise RecordError("git could not read the ref") from error
+    if completed.returncode == 0:
+        raise RecordError("git finds the ref but lists no object for it: it is a symbolic ref to no ref")
+    if completed.returncode == 1:
+        raise RecordError("git cannot read the ref: it is broken (its file names no object)")
+
+
 def read_record() -> Record | None:
-    """RECORD_REF, read whole: None when this repository has no ref of exactly that name (a symbolic ref to no ref is
-    listed as none); RecordError when it is a symbolic ref, names no commit, or a note cannot be read. for-each-ref
-    lists the ref by its full name, so a branch or tag whose name ends in it (refs/heads/refs/notes/…), which rev-parse
-    would read in its place, is never the record.
+    """RECORD_REF, read whole: None when this repository has no ref of exactly that name; RecordError when it is a
+    symbolic ref, names no commit, is broken (a ref file whose text is no object id), or a note cannot be read.
+    for-each-ref lists the ref by its full name, so a branch or tag whose name ends in it (refs/heads/refs/notes/…),
+    which rev-parse would read in its place, is never the record. for-each-ref lists neither a broken ref nor a
+    symbolic ref to no ref, so when it lists nothing, `show-ref --exists` says whether the ref is there at all.
     The notes tree is listed once and each distinct note read once. A note's path joins into the blob it annotates
     (`ab/cdef…`, or any other fanout); an entry whose path joins into no object id is no note."""
     try:
@@ -2615,6 +2637,7 @@ def read_record() -> Record | None:
         found = [fields for fields in (line.split(b"\0") for line in listed.split(b"\n") if line)
                  if fields[0] == RECORD_REF.encode()]
         if not found:
+            record_ref_absent()
             return None
         if len(found) != 1 or len(found[0]) != 4:
             raise RecordError("git gave a malformed list of refs")

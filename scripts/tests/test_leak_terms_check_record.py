@@ -24,6 +24,7 @@ import unittest
 from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
+from typing import Iterator
 from unittest import mock
 
 DOTFILES = Path(__file__).resolve().parents[2]
@@ -103,17 +104,17 @@ class Record(unittest.TestCase):
     def rev(self, name: str) -> str:
         return self.git("rev-parse", name).strip()
 
-    def run_check(self, *arguments: str, stdin: str = "", env: dict[str, str] | None = None
+    def run_check(self, *arguments: str, stdin: str = "", env: dict[str, str] | None = None, cwd: Path | None = None
                   ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
-        """Run the check in the work repository; return its result and, for each call of the diff producer that
-        GIT_TRACE2_EVENT saw, the pathspecs it was given (none for a commit read whole). self.calls keeps the arguments
-        of every git call the check made."""
+        """Run the check in the work repository (in CWD, by default its top); return its result and, for each call of
+        the diff producer that GIT_TRACE2_EVENT saw, the pathspecs it was given (none for a commit read whole).
+        self.calls keeps the arguments of every git call the check made."""
         descriptor, trace = tempfile.mkstemp(prefix="trace-", dir=self.root)
         os.close(descriptor)
         result = subprocess.run(
             [str(CHECK), *arguments],
             input=stdin,
-            cwd=self.work,
+            cwd=cwd or self.work,
             env={**self.env, **leak_check_environment("/usr/bin:/bin"), "GIT_TRACE2_EVENT": trace, **(env or {})},
             capture_output=True,
             text=True,
@@ -130,12 +131,12 @@ class Record(unittest.TestCase):
     def record(self, *revisions: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return self.run_check("record", "--url", self.url, *revisions, env=env)[0]
 
-    def push(self, commit: str, env: dict[str, str] | None = None, old: str | None = None
+    def push(self, commit: str, env: dict[str, str] | None = None, old: str | None = None, cwd: Path | None = None
              ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
         """The check as the pre-push hook runs it for a push of COMMIT to the destination's main, which holds OLD (base
         when not given)."""
         return self.run_check("push", "--remote", "origin", "--url", self.url,
-                              stdin=f"refs/heads/main {commit} refs/heads/main {old or self.base}\n", env=env)
+                              stdin=f"refs/heads/main {commit} refs/heads/main {old or self.base}\n", env=env, cwd=cwd)
 
     def blob(self, revision: str, path: str) -> str:
         return self.rev(f"{revision}:{path}")
@@ -282,7 +283,7 @@ class Record(unittest.TestCase):
         self.assertIn(f"commit {commit[:12]} new.txt:1", result.stderr)
         self.assertNotIn("kept.txt", result.stderr)
         self.assert_covered(result, 1, 2)
-        self.assertEqual(diffs, [[":(literal)new.txt"]])
+        self.assertEqual(diffs, [[":(top,literal)new.txt"]])
 
     def test_a_file_named_like_a_wildcard_reads_only_itself(self) -> None:
         # The push names the files it reads as literal pathspecs: as a wildcard, `*.txt` would read kept.txt too.
@@ -292,7 +293,7 @@ class Record(unittest.TestCase):
         result, diffs = self.push(commit)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_covered(result, 1, 2)
-        self.assertEqual(diffs, [[":(literal)*.txt"]])
+        self.assertEqual(diffs, [[":(top,literal)*.txt"]])
 
     def test_a_file_whose_name_holds_a_line_break_is_read_by_its_pathspec(self) -> None:
         # git takes a pathspec from the command line whole, a line feed included. The covered file holds a forged term,
@@ -305,7 +306,7 @@ class Record(unittest.TestCase):
         self.assertIn(f"commit {commit[:12]} we\\nird.txt:1", result.stderr)
         self.assertNotIn("kept.txt", result.stderr)
         self.assert_covered(result, 1, 2)
-        self.assertEqual(diffs, [[":(literal)we\nird.txt"]])
+        self.assertEqual(diffs, [[":(top,literal)we\nird.txt"]])
 
     def test_a_rename_is_not_followed_under_log_follow(self) -> None:
         # With log.follow on, git follows a rename when one pathspec is given, even under --no-renames: a text file
@@ -324,7 +325,7 @@ class Record(unittest.TestCase):
         self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
         self.assertIn(f"commit {commit[:12]} new.txt:41", result.stderr)
         self.assert_covered(result, 1, 2)
-        self.assertEqual(diffs, [[":(literal)new.txt"]])
+        self.assertEqual(diffs, [[":(top,literal)new.txt"]])
 
     def test_a_push_under_literal_pathspecs_reads_the_files_it_names(self) -> None:
         # `git --literal-pathspecs push` (Magit's default) exports GIT_LITERAL_PATHSPECS to the hook: git read
@@ -335,7 +336,7 @@ class Record(unittest.TestCase):
         result, diffs = self.push(clean, env=literal)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_covered(result, 1, 2)
-        self.assertEqual(diffs, [[":(literal)new.txt"]])
+        self.assertEqual(diffs, [[":(top,literal)new.txt"]])
         planted = self.commit({"copy.txt": "the first file\n", "planted.txt": f"a line with {TERM}\n"})
         result, _ = self.push(planted, env=literal)
         self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
@@ -360,7 +361,7 @@ class Record(unittest.TestCase):
         result, diffs = self.push(commits[-1])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_covered(result, 1, 4)
-        self.assertEqual([sorted(diff) for diff in diffs], [[f":(literal)new{number}.txt" for number in range(3)]])
+        self.assertEqual([sorted(diff) for diff in diffs], [[f":(top,literal)new{number}.txt" for number in range(3)]])
         self.assertEqual(sum(words[1:2] == ["mktree"] for words in self.calls), 1, self.calls)
         self.assertEqual(sum("info/attributes" in words for words in self.calls), 1, self.calls)
 
@@ -376,7 +377,7 @@ class Record(unittest.TestCase):
                                              f"refs/heads/other {second} refs/heads/other {'0' * 40}\n")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_covered(result, 1, 2, read=2)
-        self.assertEqual(diffs, [[":(literal)d"]])
+        self.assertEqual(diffs, [[":(top,literal)d"]])
 
     def test_a_literal_pathspec_reaches_its_file_and_the_files_in_its_folder(self) -> None:
         module = load_check()
@@ -404,7 +405,7 @@ class Record(unittest.TestCase):
         chunks = list(module.pathspec_chunks(paths))
         self.assertGreater(len(chunks), 1)
         self.assertEqual([path for chunk in chunks for path in chunk], paths)
-        self.assertTrue(all(sum(len(f":(literal){path}") + 1 for path in chunk) <= module.PATHSPEC_BYTES
+        self.assertTrue(all(sum(len(f":(top,literal){path}") + 1 for path in chunk) <= module.PATHSPEC_BYTES
                             for chunk in chunks))
 
     def test_record_keeps_allowed_tokens_and_keys_the_lists_a_destination_reads(self) -> None:
@@ -474,6 +475,89 @@ class Record(unittest.TestCase):
         self.assertIn("kept.txt:1", result.stderr)
         self.assertEqual(diffs, [[]])
 
+    def test_a_symbolic_record_ref_to_no_ref_covers_nothing_and_says_why(self) -> None:
+        # for-each-ref lists no symbolic ref whose target is missing; show-ref --exists finds it.
+        commit = self.commit({"code.py": "print('nothing listed')\n"})
+        self.git("symbolic-ref", REF, "refs/notes/nothing")
+        result, diffs = self.push(commit)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"leak terms: cannot use the record {REF}, so every file version is read: git finds the ref but "
+                      "lists no object for it: it is a symbolic ref to no ref", result.stderr)
+        self.assertEqual(diffs, [[]])
+
+    def test_a_broken_record_ref_covers_nothing_and_says_why(self) -> None:
+        # A loose ref file whose text names no object: for-each-ref only warns on its standard error and lists nothing,
+        # so until 2026-11-22 the push said nothing of it.
+        commit = self.commit({"code.py": "print('nothing listed')\n"})
+        broken = self.work / ".git" / REF
+        broken.parent.mkdir(parents=True, exist_ok=True)
+        broken.write_text("not an object id\n", encoding="utf-8")
+        result, diffs = self.push(commit)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"leak terms: cannot use the record {REF}, so every file version is read: git cannot read the "
+                      "ref: it is broken (its file names no object)", result.stderr)
+        self.assertEqual(diffs, [[]])
+        result = self.record("main")
+        self.assertEqual(result.returncode, RECORD_EXIT, result.stdout)
+        self.assertIn("it is broken (its file names no object); nothing was recorded", result.stderr)
+        self.assertEqual(broken.read_text(encoding="utf-8"), "not an object id\n")
+
+    @contextlib.contextmanager
+    def worktree(self, name: str) -> Iterator[dict[str, str]]:
+        """The environment of one way git learns the working tree when the check runs from its subdirectory `sub`:
+        GIT_DIR with GIT_WORK_TREE, as shims/jj passes them on; GIT_DIR with core.worktree in the repository's config;
+        and plain discovery."""
+        git_dir = {"GIT_DIR": str(self.work / ".git")}
+        if name == "core.worktree":
+            self.git("config", "core.worktree", str(self.work))
+            try:
+                yield git_dir
+            finally:
+                self.git("config", "--unset", "core.worktree")
+        else:
+            yield {"GIT_WORK_TREE": {**git_dir, "GIT_WORK_TREE": str(self.work)}, "discovery": {}}[name]
+
+    WORKTREES = ("GIT_WORK_TREE", "core.worktree", "discovery")
+
+    def test_a_push_from_a_subdirectory_reads_a_clean_commit_from_the_top(self) -> None:
+        # `:(literal)x.txt` read from `sub` named `sub/x.txt`, which no commit holds: git showed no commit, and a clean
+        # push was refused as "malformed commit boundaries" (exit 4).
+        self.assertEqual(self.record(self.base).returncode, 0)
+        clean = self.commit({"x.txt": "nothing listed\n", "c1.txt": "the first file\n", "c2.txt": "the first file\n"})
+        (self.work / "sub").mkdir()
+        for name in self.WORKTREES:
+            with self.subTest(name=name), self.worktree(name) as environment:
+                result, diffs = self.push(clean, env=environment, cwd=self.work / "sub")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                # c1.txt and c2.txt are one version, base.txt's.
+                self.assert_covered(result, 1, 2)
+                self.assertEqual(diffs, [[":(top,literal)x.txt"]])
+
+    def test_a_push_from_a_subdirectory_reads_the_top_file_not_its_namesake(self) -> None:
+        # `:(literal)a.txt` read from `sub` named the covered `sub/a.txt`, and the term in the top's `a.txt` went unread.
+        self.assertEqual(self.record(self.base).returncode, 0)
+        planted = self.commit({"a.txt": f"a line with {TERM}\n", "sub/a.txt": "the first file\n",
+                               "c3.txt": "the first file\n"})
+        for name in self.WORKTREES:
+            with self.subTest(name=name), self.worktree(name) as environment:
+                result, diffs = self.push(planted, env=environment, cwd=self.work / "sub")
+                self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
+                self.assertIn(f"commit {planted[:12]} a.txt:1", result.stderr)
+                self.assert_covered(result, 1, 2)
+                self.assertEqual(diffs, [[":(top,literal)a.txt"]])
+
+    def test_a_folder_pushed_by_itself_from_a_subdirectory_is_read_whole(self) -> None:
+        # ls-tree of a folder object lists only the part under the directory it runs in, unless --full-tree.
+        commit = self.commit({"top.txt": f"a line with {TERM}\n", "sub/inner.txt": "nothing listed\n"})
+        tree = self.rev(f"{commit}^{{tree}}")
+        for name in self.WORKTREES:
+            with self.subTest(name=name), self.worktree(name) as environment:
+                result, _ = self.run_check("push", "--remote", "origin", "--url", self.url,
+                                           stdin=f"refs/tags/a-folder {tree} refs/tags/a-folder {'0' * 40}\n",
+                                           env=environment, cwd=self.work / "sub")
+                self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
+                self.assertIn("top.txt:1", result.stderr)
+
     def test_a_covered_file_s_path_is_still_read(self) -> None:
         self.assertEqual(self.record(self.base).returncode, 0)
         # The file's content is base.txt's, which the record covers; its path holds a term.
@@ -482,7 +566,7 @@ class Record(unittest.TestCase):
         self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
         self.assertIn(f"commit {commit[:12]} docs/{TERM}.txt", result.stderr)
         self.assert_covered(result, 1, 2)
-        self.assertEqual(diffs, [[":(literal)other.txt"]])
+        self.assertEqual(diffs, [[":(top,literal)other.txt"]])
 
     def test_a_gitlink_is_read_whatever_its_note(self) -> None:
         line = self.key_line()
@@ -499,7 +583,7 @@ class Record(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         # The gitlink is no file version, so the summary does not count it.
         self.assert_covered(result, 1, 1)
-        self.assertEqual(diffs, [[":(literal)sub"]])
+        self.assertEqual(diffs, [[":(top,literal)sub"]])
 
     def merge(self, content: str) -> str:
         """A merge of two branches from base that each write shared.txt, whose own version of it is CONTENT."""
