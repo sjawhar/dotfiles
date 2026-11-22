@@ -11,7 +11,8 @@
 #      /mnt/scratch, and /tmp and /var/tmp bound from it at the next boot; the drop-in that keeps
 #      the user manager and Docker from starting before it (devbox/gce-disks-ready.conf); and
 #      journald's cap on the boot disk (devbox/journald-cap.conf); the open-file limit of
-#      tailscaled's and sshd's sessions (devbox/nofile.conf);
+#      tailscaled's and sshd's sessions (devbox/nofile.conf); the per-user pipe buffer soft limit
+#      (devbox/sysctl-pipes.conf);
 #   3. Docker (installers/docker.sh, for the user): docker-ce and docker-ce-cli pinned at one
 #      version, dockerd's live-restore on, and conntrack's TCP TIME_WAIT at 15 s
 #      (devbox/sysctl-conntrack.conf); then Sysbox (installers/sysbox.sh), which registers itself
@@ -179,6 +180,12 @@ for unit in tailscaled ssh; do
     echo "gce-host.sh: installed $nofile_conf"
 done
 systemctl show tailscaled.service ssh.service -p Id -p LimitNOFILESoft
+
+# The per-user pipe buffer soft limit: 262144 pages, not the kernel's 16384 (the file says why).
+# installers/lib.sh's ensure_sysctl_conf writes and applies it only when the file or the kernel
+# differs; systemd-sysctl applies it at each boot.
+ensure_sysctl_conf "$DEVBOX_DIR/sysctl-pipes.conf" /etc/sysctl.d/90-pipe-user-pages.conf \
+    fs.pipe-user-pages-soft
 
 # --- 3. Docker, then Sysbox -----------------------------------------------------------------------
 # docker-ce and docker-ce-cli at exactly this version, with dockerd's live-restore on
