@@ -33,4 +33,4 @@ fetch_part() {
 - When a worker looks silent, ask it one direct question: a re-dispatch sends the same brief.
 - When a `deep` worker's bash breaks, give it a shell tool from your kernel (`using-subagents`): a `deep` worker has no eval tool.
 - While a PR waits for merge or deploy, continue from its branch or a dependency's branch, unless you are revising it.
-- While a PR waits for merge or deploy, post-merge production proof runs beside the next work, not instead of it.
+- Post-merge production proof runs beside the next work, not instead of it.
