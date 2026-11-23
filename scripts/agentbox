@@ -450,7 +450,8 @@ if [[ -z "$OSSV_SSH" && -d "/mnt/nvme/$(id -un)/oss-verifier/ssh" ]]; then OSSV_
 COMPUTE_INVENTORY="${AGENTBOX_COMPUTE_INVENTORY:-}"
 if [[ -z "$COMPUTE_INVENTORY" && -d "/mnt/nvme/$(id -un)" ]]; then COMPUTE_INVENTORY="/mnt/nvme/$(id -un)/compute-inventory"; fi
 [[ "$DURABLE_DIR" == /* && -d "$DURABLE_DIR" ]] || DURABLE_DIR=""
-# The grading farm's three host paths (installers/grade-farm.sh), in every box whose host has
+# The retired grading farm's three host paths (grading-tools#1926 removed grade-farm/; no installer
+# writes them any more, devbox/sami-devbox.md), in every box whose host still has
 # them, each at its own path — never /mnt/nvme/<user> whole (Sami,
 # dispatch://INFRA-702/comment/11d4bf79-4369-4beb-8691-ec688cee53ab):
 #   farm-pkg     the package `farm` is: ~/.local/bin/farm, which every box has through the
@@ -458,8 +459,8 @@ if [[ -z "$COMPUTE_INVENTORY" && -d "/mnt/nvme/$(id -un)" ]]; then COMPUTE_INVEN
 #                directory `farm` is a dangling link and every call dies `No such file or
 #                directory`. That is what every box on sami-devbox had after the 18:05Z re-box
 #                on 2026-11-04, and it stopped the release builds. Bound READ-ONLY: the shim,
-#                its grading-tools clone and its venv are written by installers/grade-farm.sh
-#                on the host alone, and a run writes nothing in it.
+#                its grading-tools clone and its venv were written on the host alone, and a run
+#                writes nothing in it.
 #   grade-farm   the farm root (FARM_DIR: fleet, boxes, ssh_config, known_hosts, the no-start
 #                switch and the ssh control sockets each run opens). Read-write.
 #   boxid        the box identity's ssh key and its gcloud configuration, whose token cache
@@ -607,12 +608,75 @@ box_cache_mounts() {
         -v "$cache/cargo-git:$HOME/.cargo/git"
 }
 
-# remove_paths_command PATH…: the command line that removes each PATH, a read-only tree included,
-# for a line that says a removal failed.
+# A BOX'S ROOT LEAVES FILES THIS USER MAY NOT REMOVE: it writes, as root, into the host paths bound
+# into the box (its run-user, its home), and on sami-devbox at 2026-11-23 two boxes were left for good
+# that way: $RUN_BASE/agentbox-ea4e05d6f7bc by run-user/dconf (root's, mode 700) and
+# $BOXES/agentbox-9131d1634f66 by home/.cache, .config, .local and .ssh (root's). Every close and
+# every collector pass failed on them, and printed `chmod -R u+w …; rm -rf …`, which cannot remove a
+# file root owns (dispatch://INFRA-1720). What this user cannot remove goes in a short-lived
+# container that runs as root (root_rm_args), never through sudo.
+
+# root_rm_args DIR…: ROOT_RM_ARGS, the command that deletes everything under each DIR as root: a
+# container under runc (a sysbox container's root is not the host's root), with no network, of an
+# agentbox image already on this host (never pulled; each has find), with only the DIRs bound in.
+# --mount, not -v: it refuses a source that is missing, where -v makes it, root-owned. find stays on
+# each DIR's own filesystem and leaves each DIR itself, which this user removes after it: its parent
+# is this user's. Status 1 when this host has no agentbox image.
+root_rm_args() {
+    local img d i=0 mounts=() targets=()
+    img="$(docker image ls --filter dangling=false --format '{{.Repository}}:{{.Tag}}' agentbox 2>/dev/null | sed -n 1p)"
+    [[ "$img" == agentbox:* ]] || return 1
+    for d in "$@"; do
+        mounts+=(--mount "type=bind,source=$d,target=/x/$i")
+        targets+=("/x/$i")
+        i=$((i + 1))
+    done
+    ROOT_RM_ARGS=(docker run --rm --pull never --runtime runc --network none --user 0:0 --entrypoint find
+        "${mounts[@]}" "$img" "${targets[@]}" -xdev -mindepth 1 -delete)
+}
+
+# remove_tree BOX PATH: remove PATH, BOX's tree or file, whoever owns what is in it. Status 1 when
+# any of it is left. As this user first: what a plain `rm -rf` leaves of a tree (a Go module cache
+# is 0444 by design) is made writable, then removed. What is still there in a directory is another
+# user's, and goes in root_rm_args' container, only once docker says BOX has no container, since a
+# box that still runs uses it; then this user removes the rest. A link at PATH is never given to
+# docker, which would bind the link's target, and never followed.
+remove_tree() {
+    local box="$1" p="$2" names
+    rm -rf "$p" 2>/dev/null || true
+    [[ -e "$p" || -L "$p" ]] || return 0
+    [[ -L "$p" ]] && return 1
+    chmod -R u+w "$p" 2>/dev/null || true
+    rm -rf "$p" 2>/dev/null || true
+    [[ -e "$p" ]] || return 0
+    if [[ -d "$p" ]] \
+        && names="$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)" && [[ -z "$names" ]] \
+        && root_rm_args "$p"; then
+        "${ROOT_RM_ARGS[@]}" </dev/null >/dev/null 2>&1 || true
+        rm -rf "$p" 2>/dev/null || true
+    fi
+    [[ ! -e "$p" && ! -L "$p" ]]
+}
+
+# remove_paths_command PATH…: the command line that removes each PATH, whoever owns what is in it,
+# for a line that says a removal failed or was not made: the contents of each directory in
+# root_rm_args' container, then `rm -rf` of every PATH, which this user may remove once they are
+# empty. With no agentbox image on this host, `sudo rm -rf`.
 remove_paths_command() {
-    local q=() p
-    for p in "$@"; do q+=("$(printf '%q' "$p")"); done
-    echo "chmod -R u+w ${q[*]}; rm -rf ${q[*]}"
+    local q=() dirs=() p line=""
+    for p in "$@"; do
+        q+=("$(printf '%q' "$p")")
+        [[ -d "$p" && ! -L "$p" ]] && dirs+=("$p")
+    done
+    if (( ${#dirs[@]} )); then
+        if ! root_rm_args "${dirs[@]}"; then
+            echo "sudo rm -rf ${q[*]}"
+            return 0
+        fi
+        for p in "${ROOT_RM_ARGS[@]}"; do line+="${line:+ }$(printf '%q' "$p")"; done
+        line+="; "
+    fi
+    echo "${line}rm -rf ${q[*]}"
 }
 
 # Sami 2026-11-04: agent clutter must be cleaned up. A box's cache goes with its container,
@@ -620,31 +684,27 @@ remove_paths_command() {
 # that cannot go is a failed removal, said as one with the command that completes it, never as a
 # cache kept, and status 1 (dispatch://INFRA-1720).
 close_box_cache() {
-    local box="$1" cache="$BOX_CACHE_ROOT/$1" names remove
+    local box="$1" cache="$BOX_CACHE_ROOT/$1" names
     [[ -e "$cache" || -L "$cache" ]] || return 0
-    remove="$(remove_paths_command "$cache")"
     if ! names="$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)"; then
-        echo "agentbox: removing $box's cache $cache failed: docker could not say whether its container is gone; once it is, remove the cache with: $remove" >&2
+        echo "agentbox: removing $box's cache $cache failed: docker could not say whether its container is gone; once it is, remove the cache with: $(remove_paths_command "$cache")" >&2
         return 1
     fi
     if [[ -n "$names" ]]; then
-        echo "agentbox: removing $box's cache $cache failed: its container still exists; remove both with: docker rm -fv $box; $remove" >&2
+        echo "agentbox: removing $box's cache $cache failed: its container still exists; remove both with: docker rm -fv $box; $(remove_paths_command "$cache")" >&2
         return 1
     fi
     # A Go module cache is mode 0444 by design, and `rm -rf` cannot delete a read-only file in
     # a read-only directory: it fails per entry and the tree stays. Measured 2026-11-06: twelve
     # boxes that no longer exist had left 13,851 MiB behind here, and every exiting box's pane
-    # ends in a run of `rm: cannot remove '.../go-mod/...': Permission denied`. Make the tree
-    # writable first, then remove, then CHECK -- `rm -rf` reports failure per file but the
-    # caller never sees which, and a teardown that half-worked must not read as success
+    # ends in a run of `rm: cannot remove '.../go-mod/...': Permission denied`. remove_tree makes
+    # the tree writable first, then removes, then CHECKS -- `rm -rf` reports failure per file but
+    # the caller never sees which, and a teardown that half-worked must not read as success
     # (ORCH and TAIL, dispatch://INFRA-586). Its status is not this function's: under set -e a
     # failed rm ended the whole close, and every step after it did not run.
-    chmod -R u+w "${cache:?}" 2> /dev/null || true
-    rm -rf "${cache:?}" || true
-    if [[ -e "$cache" || -L "$cache" ]]; then
-        echo "agentbox: removing $box's cache $cache failed; remove what is left with: $remove" >&2
-        return 1
-    fi
+    remove_tree "$box" "${cache:?}" && return 0
+    echo "agentbox: removing $box's cache $cache failed; remove what is left with: $(remove_paths_command "$cache")" >&2
+    return 1
 }
 
 # The box's own filesystem at $BOXES/<box>: a sparse ext4 image loop-mounted there, so every
@@ -3167,26 +3227,24 @@ close_box() {
     close_box_dir "$box"
 }
 
-# close_box_run_dir BOX: $RUN_BASE/<box>, the box's runtime directory and enrollment files. One
-# that will not go is said with the command that removes it. Status 1 then.
+# close_box_run_dir BOX: $RUN_BASE/<box>, the box's runtime directory and enrollment files, whoever
+# owns what is in it (remove_tree: the box's root writes into its run-user). One that will not go is
+# said with the command that removes it. Status 1 then.
 close_box_run_dir() {
     local dir="${RUN_BASE:?}/$1"
-    rm -rf "$dir" || true
-    [[ -e "$dir" || -L "$dir" ]] || return 0
+    remove_tree "$1" "$dir" && return 0
     echo "agentbox: removing $1's runtime directory $dir failed; remove what is left with: $(remove_paths_command "$dir")" >&2
     return 1
 }
 
-# close_box_dir BOX: the box's filesystem and image (close_box_disk), then its directory. A
-# filesystem that will not unmount, or a tree that will not go (a read-only directory a session
-# made), is said with the command that completes the removal. Status 1 then.
+# close_box_dir BOX: the box's filesystem and image (close_box_disk), then its directory, whoever
+# owns what is in it (remove_tree). A filesystem that will not unmount, or a tree that will not go,
+# is said with the command that completes the removal. Status 1 then.
 close_box_dir() {
     local box="$1"
     close_box_disk "$box" || return 1
-    [[ -e "$BOXES/$box" ]] || return 0
-    rm -rf "${BOXES:?}/$box" 2>/dev/null || { chmod -R u+w "${BOXES:?}/$box" 2>/dev/null; rm -rf "${BOXES:?}/$box" 2>/dev/null; } || true
-    [[ ! -e "$BOXES/$box" ]] && return 0
-    echo "agentbox: removing $BOXES/$box failed; remove what is left with: chmod -R u+w '$BOXES/$box' && rm -rf '$BOXES/$box'" >&2
+    remove_tree "$box" "${BOXES:?}/$box" && return 0
+    echo "agentbox: removing $BOXES/$box failed; remove what is left with: $(remove_paths_command "$BOXES/$box")" >&2
     return 1
 }
 
@@ -3208,8 +3266,13 @@ close_box_dir() {
 #     without one (every box started before this change) counts as a launcher that is not running;
 #   - the newest of its files under those roots is more than an hour old: a box being made has no
 #     container for minutes while its clones are made, and one being closed has none while its
-#     launcher still works. With no file under the roots, its container ended more than an hour
-#     ago (`.State.FinishedAt`); an end time docker does not give keeps it;
+#     launcher still works. A file dated more than an hour AFTER the pass's clock is not counted:
+#     no clock of this host wrote that time, and it would keep the box for ever: on sami-devbox at
+#     2026-11-23 test files dated 2242 and 2096 kept agentbox-469ecd050ad1 (68 GiB, made 2026-11-05)
+#     and agentbox-c1c776d981f6 (119 GiB) young in every pass. The hour of slack keeps a file
+#     written while the walk runs, a little after the pass's clock, counted. With no
+#     file under the roots, its container ended more than an hour ago (`.State.FinishedAt`); an end
+#     time docker does not give keeps it;
 #   - no process has its working directory, a file it holds open or the program it runs under the
 #     box's directory or its $RUN_BASE/<box>, except the box's own tmux relay unit, which outlives
 #     a launcher that died.
@@ -3459,7 +3522,7 @@ collect_not_removed() {
 # collect_box BOX: delete BOX in every place it left, or say why it was not removed and the command
 # that removes it. Status 1 when it stays.
 collect_box() {
-    local box="$1" names state pid out rc young paths=() failed=0 left=() line owner unread shut hidden=() opened=""
+    local box="$1" names state pid out rc young paths=() failed=0 left=() line owner unread shut hidden=() opened="" now
     local denied="find: '(.+)': Permission denied$"
     if ! names="$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)"; then
         collect_not_removed "$box" "unknown" "docker could not be asked whether it has a container"
@@ -3496,7 +3559,11 @@ collect_box() {
         # line is never taken for one.
         while :; do
             rc=0
-            out="$(LC_ALL=C find "${paths[@]}" -mmin "-$COLLECT_AGE_MIN" -printf 'young\t%p\n' -quit 2>&1)" || rc=$?
+            # Young: dated within the hour before the pass's clock or the hour after it (above).
+            # `-mmin -60` alone matched a file dated in any future year.
+            now="$(date -u +%s)"
+            out="$(LC_ALL=C find "${paths[@]}" -newermt "@$((now - COLLECT_AGE_MIN * 60))" \
+                ! -newermt "@$((now + COLLECT_AGE_MIN * 60))" -printf 'young\t%p\n' -quit 2>&1)" || rc=$?
             young="$(sed -n 's/^young\t//p' <<<"$out" | head -n 1)"
             if [[ -n "$young" ]]; then
                 collect_not_removed "$box" "$names" "$young is younger than $COLLECT_AGE_MIN minutes"

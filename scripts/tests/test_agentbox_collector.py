@@ -40,6 +40,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 DOTFILES = Path(__file__).resolve().parents[2]
@@ -89,7 +90,10 @@ class AgentboxBoxEnd(unittest.TestCase):
         # Nothing here reaches the host. `ps -a --filter name=^<box>$` names a container listed in
         # $STUB_CONTAINERS, and for a box named in $STUB_PS_FAIL exits 1 with no output: docker could
         # not be asked. `inspect` answers the state this test gave the containers, running by
-        # default. `rm` logs its arguments to $STUB_DOCKER_RM and forgets the container.
+        # default. `rm` logs its arguments to $STUB_DOCKER_RM and forgets the container. `image ls`
+        # answers the images in $STUB_IMAGES, none by default. `run` logs its arguments to
+        # $STUB_DOCKER_RUN and does what remove_tree's root container does: the real find deletes
+        # everything under each `--mount` source, which $STUB_ROOT_OWNED does not stop (root's).
         write_stub(self.stubs, "docker", r'''
 if [[ "${1:-}" == inspect ]]; then
     fmt=""; name=""
@@ -107,6 +111,20 @@ if [[ "${1:-}" == inspect ]]; then
         *State.FinishedAt*) cat "$STUB_CONTAINER_FINISHED" 2>/dev/null || echo "2026-11-07T15:18:00Z" ;;
         *) echo "" ;;
     esac
+    exit 0
+fi
+if [[ "${1:-}" == image ]]; then
+    cat "$STUB_IMAGES" 2>/dev/null
+    exit 0
+fi
+if [[ "${1:-}" == run ]]; then
+    echo "$*" >>"$STUB_DOCKER_RUN"
+    src=() prev=""
+    for a in "$@"; do
+        if [[ "$prev" == --mount ]]; then s="${a#*source=}"; src+=("${s%%,*}"); fi
+        prev="$a"
+    done
+    (( ${#src[@]} )) && /usr/bin/find "${src[@]}" -xdev -mindepth 1 -delete
     exit 0
 fi
 if [[ "${1:-}" == rm ]]; then
@@ -142,10 +160,15 @@ exit 0''')
         write_stub(self.stubs, "mountpoint", 'exit 1')
         # `rm` and `find` are the real ones, except on a path under $STUB_RM_FAIL, which rm leaves
         # in place and fails on (as on a file it may not remove), and under $STUB_FIND_FAIL, which
-        # find says it cannot read and fails on. Both work as root, where file modes do not.
+        # find says it cannot read and fails on. Both work as root, where file modes do not. While
+        # the path $STUB_ROOT_OWNED is there, rm fails on it and on each directory that holds it,
+        # and removes nothing, as for a file a box's root made: only the `docker run` stub removes it.
         write_stub(self.stubs, "rm", '''for a in "$@"; do
     if [[ -n "${STUB_RM_FAIL:-}" && "$a" == "$STUB_RM_FAIL"* ]]; then
         echo "rm: cannot remove '$a': Operation not permitted" >&2; exit 1
+    fi
+    if [[ -n "${STUB_ROOT_OWNED:-}" && -e "$STUB_ROOT_OWNED" && "$STUB_ROOT_OWNED/" == "${a%/}/"* ]]; then
+        echo "rm: cannot remove '$STUB_ROOT_OWNED': Permission denied" >&2; exit 1
     fi
 done
 exec /bin/rm "$@"''')
@@ -175,7 +198,7 @@ exit "$rc"''')
         write_stub(self.stubs, "sudo", 'printf "%s\\n" "$*" >>"$STUB_SUDO"; exit "${STUB_SUDO_RC:-1}"')
         for name in ("STUB_CONTAINERS", "STUB_SECRETS", "STUB_SUDO", "STUB_CONTAINER_STATE",
                      "STUB_CONTAINER_RC", "STUB_CONTAINER_OOM", "STUB_PS_FAIL", "STUB_DOCKER_RM",
-                     "STUB_SYSTEMCTL"):
+                     "STUB_SYSTEMCTL", "STUB_IMAGES", "STUB_DOCKER_RUN"):
             (self.root / name).write_text("", encoding="utf-8")
         # `docker inspect -f {{.State.FinishedAt}}` answers this file; absent, an old end time.
         self.finished = self.root / "STUB_CONTAINER_FINISHED"
@@ -200,7 +223,8 @@ exit "$rc"''')
             "AGENTBOX_EXITS": str(self.root / "agentbox-exits.tsv"),
             **{name: str(self.root / name) for name in (
                 "STUB_CONTAINERS", "STUB_SECRETS", "STUB_SUDO", "STUB_CONTAINER_STATE", "STUB_CONTAINER_RC",
-                "STUB_CONTAINER_OOM", "STUB_PS_FAIL", "STUB_DOCKER_RM", "STUB_SYSTEMCTL")},
+                "STUB_CONTAINER_OOM", "STUB_PS_FAIL", "STUB_DOCKER_RM", "STUB_SYSTEMCTL", "STUB_IMAGES",
+                "STUB_DOCKER_RUN")},
             "STUB_CONTAINER_FINISHED": str(self.root / "STUB_CONTAINER_FINISHED"),
             "STUB_UNITS": str(self.root / "STUB_UNITS"),
         }
@@ -772,6 +796,93 @@ exit "$rc"''')
                 self.assertTrue(os.path.lexists(place(box)), said)
                 self.assertRegex(said, rf"removing [^\n]*{place(box)}[^\n]*failed[^\n]*with: [^\n]*rm -[rf]+ [^\n]*{place(box)}")
                 self.assertNotIn("left in place", said)
+
+    def test_a_file_dated_in_the_future_does_not_keep_a_box(self) -> None:
+        """`find -mmin -60` matched a file dated in any future year, so a box that held one was
+        younger than an hour in every pass: on sami-devbox at 2026-11-23 a test's `out/late.v` dated
+        2242 kept agentbox-469ecd050ad1 (68 GiB) and a `theory.v` dated 2096 kept
+        agentbox-c1c776d981f6 (119 GiB). A date more than an hour past the pass's clock is no age; a
+        file dated within that hour still keeps the box."""
+        cases = {
+            "dated 2242": (datetime(2242, 3, 16, tzinfo=timezone.utc).timestamp(), True),
+            "dated half an hour ahead": (time.time() + 1800, False),
+        }
+        for name, (when, removed) in cases.items():
+            with self.subTest(name):
+                self.forget(OLD)
+                self.leftover(OLD)
+                late = self.boxes / OLD / "tmp" / "out" / "late.v"
+                late.parent.mkdir(parents=True)
+                late.write_text("x\n", encoding="utf-8")
+                age(self.boxes / OLD, 2)
+                os.utime(late, (when, when))
+                result = self.collect()
+                said = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 0, said)
+                if removed:
+                    self.assertIn(f"{OLD} removed", said)
+                    self.assertEqual(self.gone(OLD), [], said)
+                else:
+                    self.assertIn(f"{OLD} not removed: {late} is younger than 60 minutes", said)
+                    self.assertTrue(late.exists(), said)
+
+    def test_files_a_box_s_root_made_are_removed_without_sudo(self) -> None:
+        """A box's root writes, as root, into the host paths bound into the box: on sami-devbox
+        `run-user/dconf` (root's, mode 700) kept $RUN_BASE/agentbox-ea4e05d6f7bc through its close and
+        every collector pass, and `home/.cache` kept agentbox-9131d1634f66's directory. Each line
+        named `chmod -R u+w …; rm -rf …`, which cannot remove a file root owns. What this user cannot
+        remove goes, at the end of a box and in the collector, in a root container under runc with
+        only that path bound in, from an agentbox image already on the host, and never through sudo.
+        With no agentbox image on the host the line names `sudo rm -rf`, a command that can."""
+        places = {
+            "its run dir": (lambda box: self.run_base / box, Path("run-user/dconf/user")),
+            "its directory": (lambda box: self.boxes / box, Path("home/.cache/x")),
+        }
+        for name, (top, inner) in places.items():
+            for how, box in (("the collector", OLD), ("the end of a box", "agentbox-0123456789ab")):
+                with self.subTest(how, place=name):
+                    self.forget(box)
+                    for log in ("STUB_DOCKER_RUN", "STUB_SUDO"):
+                        (self.root / log).write_text("", encoding="utf-8")
+                    (self.root / "STUB_IMAGES").write_text("agentbox:0123456789ab\n", encoding="utf-8")
+                    self.leftover(box, hours=0 if how == "the end of a box" else 2)
+                    owned = top(box) / inner
+                    owned.parent.mkdir(parents=True, exist_ok=True)
+                    owned.write_text("root's\n", encoding="utf-8")
+                    if how == "the collector":
+                        age(top(box), 2)
+                        result = self.collect({"STUB_ROOT_OWNED": str(owned)})
+                    else:
+                        result = self.run_bash(f"close_box {box} {SID} repo", {"STUB_ROOT_OWNED": str(owned)})
+                    said = result.stdout + result.stderr
+                    self.assertEqual(self.gone(box), [], said)
+                    self.assertNotIn("failed", said)
+                    if how == "the collector":
+                        self.assertIn(f"{box} removed", said)
+                    self.assertEqual(
+                        self.stub_log("STUB_DOCKER_RUN").splitlines(),
+                        [f"run --rm --pull never --runtime runc --network none --user 0:0 --entrypoint find "
+                         f"--mount type=bind,source={top(box)},target=/x/0 agentbox:0123456789ab /x/0 -xdev "
+                         "-mindepth 1 -delete"],
+                        said,
+                    )
+                    self.assertEqual(self.stub_log("STUB_SUDO"), "", said)
+        with self.subTest("no agentbox image on the host"):
+            self.forget(OLD)
+            for log in ("STUB_DOCKER_RUN", "STUB_IMAGES"):
+                (self.root / log).write_text("", encoding="utf-8")
+            self.leftover(OLD)
+            owned = self.run_base / OLD / "run-user" / "dconf" / "user"
+            owned.parent.mkdir(parents=True)
+            owned.write_text("root's\n", encoding="utf-8")
+            age(self.run_base / OLD, 2)
+            result = self.collect({"STUB_ROOT_OWNED": str(owned)})
+            said = result.stdout + result.stderr
+            self.assertTrue(owned.exists(), said)
+            self.assertIn(f"removing {OLD} failed", said)
+            self.assertIn(f"remove it with: systemctl --user stop agentbox-tmux-{OLD}; sudo rm -rf {self.run_base / OLD}", said)
+            self.assertNotIn("chmod -R u+w", said)
+            self.assertEqual(self.stub_log("STUB_DOCKER_RUN"), "", said)
 
     def test_a_walk_that_cannot_read_keeps_the_box_and_says_why(self) -> None:
         """What the collector could not read is no answer: a process of this user whose working

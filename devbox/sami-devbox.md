@@ -12,7 +12,7 @@ moves a session (step 5).
 | `devbox/gce-host.sh` | sami-devbox, sudo, once | packages, the disk units, journald's cap (`devbox/journald-cap.conf`), rsyslog's size-bounded rotation with logrotate run hourly (`devbox/logrotate-rsyslog`, `devbox/logrotate-hourly.conf`), the per-user pipe buffer soft limit at 262144 pages (`devbox/sysctl-pipes.conf`, as `/etc/sysctl.d/90-pipe-user-pages.conf`), Docker (`installers/docker.sh`: docker-ce and docker-ce-cli pinned at 29.9.3, dockerd's live-restore on, conntrack's TCP TIME_WAIT at 15 s from `devbox/sysctl-conntrack.conf`), Sysbox (`installers/sysbox.sh`), Tailscale (`installers/tailscale.sh`), linger, sysstat |
 | `devbox/sami-devbox-provision` | sami-rocqperf, or sami-devbox itself for every step but vm and host (there it runs each step locally, with no SSH, copies no secret file and skips speed) | the whole provisioning run, step by step (its header lists the steps) |
 | `devbox/sami-devbox-model-routes` | sami-devbox, by `sami-devbox-provision` step install | declares the gateway's GPT-6.1 Sol (and Flex) as `model-gateway-openai/openai/<id>` and `model-gateway/openai/<id>`; points the cross-family astra, astra-api and gpt-api agents at `model-gateway-openai/openai/gpt-6.1-sol`; leaves slow, deep and sami-proxy to `omp/config.yml`'s Codex models (its header says why); edits only its own `omp/models.local.yml` and `omp/config.local.yml` |
-| `devbox/sami-devbox-check` | sami-devbox | A2, and the disks half of A5; `--mark-ready` writes `/mnt/nvme/sami/cutover/target-ready`, which `agentbox move --to sami-devbox` requires |
+| `devbox/sami-devbox-check` | sami-devbox | A2, and the disks half of A5; `--mark-ready` writes `/mnt/nvme/sami/cutover/target-ready`, which `agentbox move --to sami-devbox` requires; the login-file walk (about 80 min) runs only with `--mark-ready` or alone with `--logins`, and a default run says it skipped it |
 | `devbox/sami-devbox-drill` | sami-rocqperf | A5 and A6: `restart`, then `silence` |
 
 ## Before the run
@@ -132,15 +132,13 @@ Host half (`sami-devbox-check`, on sami-devbox as sami):
 | disks | `findmnt`, `stat`, `/proc/swaps` | `/mnt/nvme` = `google-state` xfs, `/mnt/durable` = `google-cold` xfs, `/home`, `/theorem`, `/theorem-ext4`, `/theorem-xfs` = `/mnt/nvme/<name>`, `/mnt/scratch` on `/dev/md*`, swap `/mnt/scratch/swapfile`; `/tmp`, `/var/tmp` = `/mnt/scratch/tmp`, `/mnt/scratch/var-tmp` (a WAIT until the next planned reset) |
 | nofile | `systemctl show tailscaled ssh -p LimitNOFILESoft -p ExecMainStartTimestamp`; `stat` of each `60-nofile.conf` | both units `65536`, and each started after its drop-in (tailscaled: a WAIT until it restarts, at the next planned reset). Not `/proc/<tailscaled>/limits`: Go raises its own soft limit to the hard one and gives its children the one it started with |
 | root disk (`--root` runs only this) | `df /`; `sudo timeout 120 du -x /` | `/` uses at most 40 GiB; no directory on it outside `/usr`, `/var/lib/apt`, `/var/cache/apt`, `/boot`, `/snap`, `/var/lib/snapd`, `/opt`, `/var/log` holds over 1 GiB of its own; `/var/log` at most 4 GiB: journald's 2 GiB, rsyslog's rotated copy (under about 1 GiB, `devbox/logrotate-rsyslog`) and sysstat |
-| no login files | one walk of each of `/`, `/mnt/nvme`, `/mnt/durable`, `/mnt/scratch` (`sudo find -xdev`, the four at once) for these names and the two rows below, which does not enter `node_modules`, `_opam`, `.lake`, `_build`, `site-packages`, Go's module and build caches, `.git/objects`, or Docker's, containerd's and Sysbox's data directories (`LOGIN_PRUNE` says why) | no `application_default_credentials.json`, `box_credential_config.json`, `credentialed_accounts.db`, `.config/gh/hosts.yml`; no `legacy_credentials` unless every file in it is a keyless `external_account` `adc.json` (no `private_key`, no `refresh_token`) or a `.boto` that only names one (a note: moves carry sessions' own gcloud directories holding dev-sjawhar@'s keyless external_account). A `service_account` key fails, as a user login does. The spec's A2 names the directory by name alone; dispatch://INFRA-993 records the change |
-| no gcloud login | every `credentials.db` under a `gcloud` directory | no row of type `authorized_user` |
-| no Azure login | every `azureProfile.json` | no subscription whose user type is `user` |
+| no login files | one walk of each of `/`, `/mnt/nvme`, `/mnt/durable`, `/mnt/scratch` (`sudo find -xdev`, the four at once, each walk's time a note) for these names, `credentials.db` under a `gcloud` directory and `azureProfile.json`, which does not enter `node_modules`, `_opam`, `.lake`, `_build`, `site-packages`, Go's module and build caches, `.git/objects`, or Docker's, containerd's and Sysbox's data directories (`LOGIN_PRUNE` says why); each file judged by what it holds (`LOGIN_JUDGE_PY`) | no `application_default_credentials.json` or `box_credential_config.json` with a `refresh_token` or `private_key`, no `credentialed_accounts.db`, no `.config/gh/hosts.yml` with a GitHub token, no `credentials.db` row of type `authorized_user`, no `legacy_credentials` unless every file in it is a keyless `external_account` `adc.json` or a `.boto` that only names one, and no file that could not be read. A keyless `external_account` (moves carry sessions' own gcloud directories holding dev-sjawhar@'s) and a file with no credential at all (Go tests leave thousands) are notes. The spec's A2 names the files by name alone; dispatch://INFRA-993 and dispatch://INFRA-5287 record the change |
+| no Azure login | every `azureProfile.json` (from the walk above; it and the two rows above run only with `--mark-ready`, or alone with `--logins`) | no subscription whose user type is `user` |
 | mise pins | `mise ls --missing` (`sami-devbox-check --pins` adds the box half's `knives --version` line; `dotfiles-follow` runs it after each fast-forward) | nothing missing |
 | openai routes | `yq` of `~/.dotfiles/omp/config.local.yml` (`task.agentModelOverrides.astra`, `["astra-api"]`, `["gpt-api"]`, `modelRoles.slow`, `.deep`, `task.agentModelOverrides["sami-proxy"]`) and of `~/.omp/agent/models.yml` | astra, astra-api and gpt-api each name `model-gateway-openai/openai/gpt-6.1-sol:xhigh`, and slow, deep and sami-proxy are unset (they take `omp/config.yml`'s Codex models); model-gateway declares 2 or more `openai/` models |
 | GitHub, plain shell | `git ls-remote https://github.com/theorem-labs/{machcsl-riscv,oss-verify-proofs-internal} HEAD` with no agent marker and no routing include, as `agentbox move --to` runs over ssh | a sha for each (the App's token, through `installers/gh-app-host.sh`) |
-| ssh to sami-rocqperf | `ssh -o BatchMode=yes -o ConnectTimeout=15 sami@sami-rocqperf true` (movers run scripts there after the move) | exit 0: both are Sami's own nodes, which Tailscale SSH takes as sami |
 | N6 live tree | `systemctl --user is-active ossv-tree-follow.timer` | not `active`: `~/src/oss-verifier` is the stream's live tree since the move of 2026-11-03 (dispatch://INFRA-993), and nothing merges or resets over it |
-| data copy | the UTC time in `/mnt/nvme/sami/oss-verifier/ops.git/ossv-data-copy.ok` (TOOLS's loop 6 writes it after each verified snapshot of the live tree) | at most 2 h old; before 2026-11-04T00:30Z a `note`, neither ok nor FAIL |
+| data copy | the UTC time in `/mnt/nvme/sami/oss-verifier/notes/ossv-data-copy.ok` (TOOLS's loop 6 writes it after each verified snapshot of the live tree) | at most 2 h old; before 2026-11-04T00:30Z a `note`, neither ok nor FAIL |
 | N6 clones on the state disk | `stat -c %d` of `~/src/oss-verify-proofs-internal`, `~/src/oss-verifier` and `/mnt/nvme` | one device |
 | N6 farm, host | the box half's N6 lines below, run on the host | as below |
 
@@ -277,23 +275,14 @@ The brief must be where the box sees it (`~/src`, `/mnt/durable/sami`) or in a d
 which the box gets as a `--dir`. The worktree is a host directory, so it keeps its work after the box
 closes; `agent-workspace rm` refuses a tree with unpushed work.
 
-## The grading farm's CLI
+## The grading farm (retired)
 
-`installers/grade-farm.sh` (devbox/install.sh) installs `farm` as sami-rocqperf has it: a uv venv
-(CPython 3.13) at `/mnt/nvme/sami/farm-pkg/venv` with grade-farm from `farm-pkg/src`, the shim
-`farm-pkg/bin/farm`, a link `~/.local/bin/farm`, the config `~/.config/grade-farm/config`, and the
-box identity's key `/mnt/nvme/sami/boxid/sshkey`, made on this host and added to the OS Login
-profile of `sa_101805078591270564613` (the account of `boxid/gcloud-box`). sami-rocqperf's key is
-never copied. A box that runs `farm` gets
-`--dir /mnt/nvme/sami/farm-pkg --dir /mnt/nvme/sami/grade-farm --dir /mnt/nvme/sami/boxid`.
-
-The farm root `/mnt/nvme/sami/grade-farm` is state. Until the farm root moves here
-(dispatch://INFRA-993), it is a second root: its `fleet`, `boxes`, `peers`, `box_users`, `drain`,
-`box_images`, `host_class`, `holds`, `ssh_config`, `known_hosts`, `peer_keys.pub`, `disk_reserve`,
-`image_place`, `start_refused` and `no-start` were copied from sami-rocqperf's root on 2026-11-04
-(`rsync -a` of those names). `no-start` stays: this host starts and stops no VM, and runs no
-`farm fleet idle-stop`. A job claims its box on the box (`~/farm/claims`), so both roots can place
-jobs on the same running boxes.
+theorem-labs/grading-tools#1926 (2026-11-14, BET-983) removed `grade-farm/` with the grading boxes:
+a grade now runs as a Kubernetes Job on the build cluster. So `devbox/install.sh` no longer installs
+`farm`; a fresh clone of grading-tools has no `grade-farm/` to install from. This host still holds
+the farm's state: `/mnt/nvme/sami/farm-pkg` (the old clone, venv and shim that `~/.local/bin/farm`
+links to), the farm root `/mnt/nvme/sami/grade-farm` and `~/.config/grade-farm`. `scripts/agentbox`
+binds those paths into a box while they exist. Removing them is a separate decision.
 
 ## Step 3's first action
 
