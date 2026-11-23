@@ -148,19 +148,20 @@ if "$(dirname "${BASH_SOURCE[0]}")/../scripts/on-google-vm"; then
 fi
 
 # Writes the cluster's context alone into $1, unless $1 already holds it. A path that does not
-# exist yet: given an empty file, gcloud warns and leaves a backup of it.
+# exist yet: given an empty file, gcloud warns and leaves a backup of it. A failed step removes the
+# scratch directory and returns that step's status; the EXIT trap is the download's.
 write_kubeconfig() {
-    local file="$1" cluster="$2" location="$3" context="$4" one
+    local file="$1" cluster="$2" location="$3" context="$4" one status=0
     if KUBECONFIG="$file" kubectl config get-contexts -o name 2>/dev/null | grep -qxF "$context"; then
         echo "gcloud-sdk: $file already holds $context"
         return
     fi
     one="$(mktemp -d)"
     KUBECONFIG="$one/config" PATH="$GCLOUD_SDK_ROOT/google-cloud-sdk/bin:$PATH" \
-        "$GCLOUD_SDK_BIN" container clusters get-credentials "$cluster" --location "$location" --project "$KUBE_PROJECT"
-    mkdir -p "$(dirname "$file")"
-    install -m 600 "$one/config" "$file"
+        "$GCLOUD_SDK_BIN" container clusters get-credentials "$cluster" --location "$location" --project "$KUBE_PROJECT" &&
+        mkdir -p "$(dirname "$file")" && install -m 600 "$one/config" "$file" || status=$?
     rm -rf "$one"
+    ((status == 0)) || return "$status"
     echo "gcloud-sdk: wrote $file ($context)"
 }
 

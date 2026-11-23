@@ -18,11 +18,12 @@ its argv, answers `version` with the installer's pinned version (so nothing is d
 the property line a `--configuration <name> config set` asks for, and for `container clusters
 get-credentials <cluster> --location <location> --project <project>` writes at $KUBECONFIG the
 kubeconfig real gcloud writes: that cluster's one context, named as gcloud names it,
-gke_<project>_<location>_<cluster>. A stand-in kubectl lists no context, so the installer asks for
-each file, and its merge into ~/.kube/config writes nothing. The metadata host is a closed port, so
-the Google VM branch (sudo) never runs. sami-devbox-check is read by sourcing it without its
-dispatch, as test_sami_devbox_check_identity.py does, and cluster-packing is loaded as
-test_cluster_packing.py loads it.
+gke_<project>_<location>_<cluster>; for the cluster STUB_MISSING_CLUSTER names, it fails as gcloud
+fails for a cluster that does not exist. A stand-in kubectl lists no context, so the installer
+asks for each file, and its merge into ~/.kube/config writes nothing. The metadata host is a
+closed port, so the Google VM branch (sudo) never runs. sami-devbox-check is read by sourcing it
+without its dispatch, as test_sami_devbox_check_identity.py does, and cluster-packing is loaded
+as test_cluster_packing.py loads it.
 """
 
 from __future__ import annotations
@@ -56,6 +57,8 @@ case "$1" in
   container)
     [[ "$2 $3 $5 $7 $#" == "clusters get-credentials --location --project 8" ]] || {
       echo "stub gcloud: not get-credentials <cluster> --location <location> --project <project>: $*" >&2; exit 2; }
+    [[ "$4" != "${STUB_MISSING_CLUSTER:-}" ]] || {
+      echo "ERROR: (gcloud.container.clusters.get-credentials) ResponseError: code=404, message=Not found: projects/$8/locations/$6/clusters/$4." >&2; exit 1; }
     name="gke_${8}_${6}_${4}"
     cat > "$KUBECONFIG" <<EOF
 apiVersion: v1
@@ -216,6 +219,16 @@ class GcloudSdkInstallerTest(unittest.TestCase):
                  if "grade-us-west1" in str(entry.relative_to(kube))
                  or (entry.is_file() and "grade-us-west1" in entry.read_text(encoding="utf-8"))]
         self.assertEqual(named, [])
+
+    def test_a_failed_get_credentials_leaves_no_scratch_directory(self) -> None:
+        # theorem-us-central1 does not exist yet: gcloud fails, and the installer exits with gcloud's status.
+        self.env["STUB_MISSING_CLUSTER"] = CENTRAL
+        result = subprocess.run(["bash", str(INSTALLER)], env=self.env, capture_output=True, text=True, timeout=120,
+                                check=False)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("ERROR: (gcloud.container.clusters.get-credentials) ResponseError: code=404", result.stderr)
+        tmp = Path(self.env["TMPDIR"])
+        self.assertEqual(sorted(str(entry.relative_to(tmp)) for entry in tmp.rglob("*")), [])
 
     def test_a_machine_set_up_before_keeps_its_grade_us_west1_files(self) -> None:
         kube = self.home / ".kube"
