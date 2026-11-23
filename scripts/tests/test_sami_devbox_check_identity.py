@@ -247,15 +247,39 @@ echo "agent-secrets: METADATA_READ from the broker AGENT_SECRETS_URL names (GCP 
 cat "$STUB_DIR/az-reader"
 """
 DISPATCH = "gke_theorem-agent-infra_us-west1_dispatch"
-GRADE = "gke_theorem-agent-infra_us-west1-b_grade-us-west1"
+GRADE = "gke_theorem-agent-infra_us-central1_theorem-us-central1"
 FARM_SIGNER = "ossv-runs-signer@theorem-agent-infra.iam.gserviceaccount.com"
 BOX_SIGNER = "build-io-signer@theorem-agent-infra.iam.gserviceaccount.com"
+
+# Each answer of `kubectl -n grade auth can-i create jobs` and what the grade pool line makes of it: a grant passes; a
+# refusal, bare or with GKE's reason, nothing, an error, and a word that is no grant fail.
+GRADE_POOL_ANSWERS = (
+    ("yes", "ok"),
+    ("no", "FAIL"),
+    (next(answer for answer, _ in CAN_I_ANSWERS if answer.startswith("no - ")), "FAIL"),
+    ("", "FAIL"),
+    ("error: You must be logged in to the server", "FAIL"),
+    ("nope", "FAIL"),
+)
+
+
+class GradePool(CheckCase):
+    """Each team account may submit a grade in namespace grade (R2 of dispatch://INFRA-4710), so only yes passes."""
+
+    def test_the_grade_pool_line_passes_only_on_yes(self) -> None:
+        write_stub(self.bin, "kubectl", ROUTED_KUBECTL)
+        for answer, want in GRADE_POOL_ANSWERS:
+            with self.subTest(answer=answer):
+                _ = (self.root / f"kubectl.{GRADE}.grade").write_text(answer + "\n", encoding="utf-8")
+                out = self.run_function('grade_pool_check "in the box"')
+                self.assertEqual(len(out), 1, out)
+                self.assertEqual(out[0].split(" ", 1)[0], want, out[0])
 
 
 class RoutedOffTheBox(CheckCase):
     """Uses the move census routes off the box: the box's own answer is a refusal."""
 
-    LABELS = ("grade pool", "N6 signer", "N6 bucket", "N6 farm")
+    LABELS = ("N6 signer", "N6 bucket", "N6 farm")
 
     def setUp(self) -> None:
         super().setUp()
@@ -267,23 +291,21 @@ class RoutedOffTheBox(CheckCase):
         (self.root / name).write_text(value + "\n", encoding="utf-8")
 
     def refused_everywhere(self) -> None:
-        self.set(f"kubectl.{GRADE}.grade", "no")
         self.set(f"kubectl.{DISPATCH}.builds-ossv", "no")
         self.set(f"mint.{FARM_SIGNER}", "refused")
         self.set(f"sign.{FARM_SIGNER}", "refused")
         self.set("ls.ossv-runs", "refused")
 
     def lines(self) -> dict[str, str]:
-        out = self.run_function('grade_pool_check "in the box"; n6_routes_check "in the box"')
-        self.assertEqual(len(out), 4, out)
+        out = self.run_function('n6_routes_check "in the box"')
+        self.assertEqual(len(out), 3, out)
         return {label: line.split(" ", 1)[0] for label in self.LABELS for line in out if f" {label} " in f" {line} "}
 
-    def test_the_plain_dev_box_is_refused_grade_and_the_farms_signer_bucket_and_namespace(self) -> None:
+    def test_the_plain_dev_box_is_refused_the_farms_signer_bucket_and_namespace(self) -> None:
         self.assertEqual(self.lines(), dict.fromkeys(self.LABELS, "ok"))
 
     def test_each_reach_fails_only_its_own_line(self) -> None:
-        for label, name, value in (("grade pool", f"kubectl.{GRADE}.grade", "yes"),
-                                   ("N6 farm", f"kubectl.{DISPATCH}.builds-ossv", "yes"),
+        for label, name, value in (("N6 farm", f"kubectl.{DISPATCH}.builds-ossv", "yes"),
                                    ("N6 bucket", "ls.ossv-runs", "ok"),
                                    ("N6 signer", f"mint.{FARM_SIGNER}", "ok"),
                                    ("N6 signer", f"sign.{FARM_SIGNER}", "ok")):
@@ -295,23 +317,21 @@ class RoutedOffTheBox(CheckCase):
 
     def test_a_failure_that_is_no_refusal_is_no_pass(self) -> None:
         """A transport error of the mint, beside a real refusal of sign-blob, says nothing about the mint's grant.
-        So does a bucket error that is not a 403, and a cluster error."""
+        So does a bucket error that is not a 403."""
         for label, name, value in (("N6 signer", f"mint.{FARM_SIGNER}", "transport"),
                                    ("N6 signer", f"sign.{FARM_SIGNER}", "transport"),
-                                   ("N6 bucket", "ls.ossv-runs", "transport"),
-                                   ("grade pool", f"kubectl.{GRADE}.grade", "error: You must be logged in to the server")):
+                                   ("N6 bucket", "ls.ossv-runs", "transport")):
             with self.subTest(name=name, value=value):
                 self.refused_everywhere()
                 self.set(name, value)
                 self.assertEqual(self.lines()[label], "FAIL")
 
     def test_a_refusal_with_or_without_its_reason_passes_and_every_other_answer_fails(self) -> None:
-        for label, name in (("grade pool", f"kubectl.{GRADE}.grade"), ("N6 farm", f"kubectl.{DISPATCH}.builds-ossv")):
-            for answer, want in CAN_I_ANSWERS:
-                with self.subTest(label=label, answer=answer):
-                    self.refused_everywhere()
-                    self.set(name, answer)
-                    self.assertEqual(self.lines()[label], want)
+        for answer, want in CAN_I_ANSWERS:
+            with self.subTest(answer=answer):
+                self.refused_everywhere()
+                self.set(f"kubectl.{DISPATCH}.builds-ossv", answer)
+                self.assertEqual(self.lines()["N6 farm"], want)
 
     def test_the_box_signs_as_build_io_signer(self) -> None:
         """Census row U23's exception: dev-box@ holds Token Creator on build-io-signer@ alone, so the box mints its token
@@ -465,7 +485,7 @@ class WholeRunCase(CheckCase):
     def defaults(self) -> None:
         """Every identity answer of the plain dev box."""
         for name, value in (("tip.json", "{}"), ("kubectl.envoy-secrets", "no"), ("kubectl.envoy-exec", "no"),
-                            ("kubectl.grade", "no"), ("kubectl.boxid", "yes"), ("sessions", "0"), ("gcloud.boxid", "ok"),
+                            ("kubectl.grade", "yes"), ("kubectl.boxid", "yes"), ("sessions", "0"), ("gcloud.boxid", "ok"),
                             (f"tokeninfo.{BOXID_TOKEN}", json.dumps({"email": DEV_BOX})),
                             ("az-reader", json.dumps({"user": "legion-reader", "type": "servicePrincipal", "subscription": "s"}))):
             self.set(name, value)
@@ -529,7 +549,7 @@ class TheRunsCallTheIdentityChecks(WholeRunCase):
     def assert_each_fault_fails_its_line(self, call: str, unrelated: str, want: dict[str, str],
                                          faults: list[tuple[str, str, str]]) -> None:
         out, _ = self.run_script(call, unrelated)
-        self.assertEqual(self.statuses(out, want), want)
+        self.assertEqual(self.statuses(out, want), want, out)
         clean = self.count(out)
         for label, name, value in faults:
             with self.subTest(fault=label):
@@ -538,7 +558,7 @@ class TheRunsCallTheIdentityChecks(WholeRunCase):
                 if not extra:
                     self.set(name, value)
                 out, rc = self.run_script(call, unrelated, **extra)
-                self.assertEqual(self.statuses(out, want), {**want, label: "FAIL"})
+                self.assertEqual(self.statuses(out, want), {**want, label: "FAIL"}, out)
                 self.assertEqual(self.count(out), clean + 1)
                 self.assertNotEqual(rc, 0)
 
@@ -546,7 +566,7 @@ class TheRunsCallTheIdentityChecks(WholeRunCase):
         self.assert_each_fault_fails_its_line("host", self.HOST_UNRELATED, self.HOST, self.faults("on the host"))
 
     def test_in_box_runs_the_identity_checks(self) -> None:
-        faults = self.faults("in the box") + [("grade pool in the box", "kubectl.grade", "yes"),
+        faults = self.faults("in the box") + [("grade pool in the box", "kubectl.grade", "no"),
                                               ("boxid: kubectl --kubeconfig", "kubectl.boxid", "no"),
                                               ("boxid: CLOUDSDK_CONFIG=", "gcloud.boxid", "error"),
                                               ("Azure:", "az-reader", "AADSTS700213: No matching federated identity record found")]

@@ -1538,12 +1538,12 @@ class GcloudRouting(unittest.TestCase):
         self.stub_gcloud_printing_kubeconfig()
         own = self.fake_home / ".kube" / "config.d"
         cases = (
-            (["container", "clusters", "get-credentials", "grade-us-west1", "--region", "us-west1",
-              "--project", "p"], "grade-us-west1"),
+            (["container", "clusters", "get-credentials", "theorem-us-central1", "--region", "us-central1",
+              "--project", "p"], "theorem-us-central1"),
             (["container", "clusters", "get-credentials", "--zone", "us-west1-a", "builds"], "builds"),
             (["--project", "p", "beta", "container", "clusters", "get-credentials", "-z", "z", "c1"], "c1"),
             (["container", "clusters", "get-credentials",
-              "projects/p/locations/us-west1/clusters/grade-us-west1"], "grade-us-west1"),
+              "projects/p/locations/us-central1/clusters/theorem-us-central1"], "theorem-us-central1"),
         )
         for marker in self.AGENT_MARKERS:
             for args, cluster in cases:
@@ -1557,7 +1557,7 @@ class GcloudRouting(unittest.TestCase):
 
     def test_get_credentials_keeps_a_chosen_kubeconfig_and_a_persons_shell(self):
         self.stub_gcloud_printing_kubeconfig()
-        args = ["container", "clusters", "get-credentials", "grade-us-west1", "--region", "us-west1"]
+        args = ["container", "clusters", "get-credentials", "theorem-us-central1", "--region", "us-central1"]
         cases = (
             ({**self.AGENT_MARKERS[0], "KUBECONFIG": "/tmp/mine"}, "KUBECONFIG=/tmp/mine"),
             ({}, "KUBECONFIG=<unset>"),
