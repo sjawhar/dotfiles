@@ -52,6 +52,22 @@ records there.
 `--no-hook-sweep` skips the hook sweep. It logs that configuration and opens no hook condition.
 The default runs the sweep.
 
+`dotfiles-follow --team-catalog [--installer] [--repo DIR]` runs only the team catalog step of
+step 7 for the checkout, and exits 1 after a failure, else 0. It takes no state lock, writes no
+state file and opens no condition: it prints its notes on stdout, and each failure on stderr, its
+first line starting `dotfiles-follow: team catalog: ` and omp's last lines indented under it.
+Without `--installer` it is `dotfiles-sync`'s call, from its tools step: it stops on a `legion`
+machine profile, runs the checkout's `shims/omp` without `OMP_PROFILE`, `PI_PROFILE` and
+`PI_CODING_AGENT_DIR`, installs one of the four plugins only to end a move, and runs no
+`plugin upgrade`. With `--installer` it is `installers/omp.sh`'s call: it runs `omp` from `PATH`
+with the environment as given and does not stop on a `legion` profile; it fetches the catalog also
+on a machine with none of the four, installs each of the four that is missing, and upgrades one
+below its lock entry. With no lock it says so and runs no omp command. It writes the lock itself
+only to take an entry out of an install's way, and puts the lock back only when its bytes changed
+during the run, so a run that moves, installs and upgrades nothing keeps an uncommitted edit of the
+lock. SIGTERM (the `timeout` of `dotfiles-sync`'s tools step) kills the running omp command's
+process group, puts the lock back as above and exits 143.
+
 ## Why
 
 The cutover rule: the dotfiles change only by commit and push, and each machine pulls. The
@@ -66,10 +82,11 @@ of a checkout other than `~/.dotfiles` does:
 
 - **(A) Guarded writes run only for `~/.dotfiles`; additive writes run for any checkout.** A
   guarded write from another checkout would point the machine at that checkout. The guarded
-  writes are the knives registry copy (step 6), and the omp rule links and the marketplace plugins
-  (step 7). Another checkout logs each one it skips and goes on. The additive writes are
-  `mise install` of the checkout's own pins into the shared `MISE_DATA_DIR`, under the install
-  lock (step 7); Bun's cache (step 7); and the fast-root pass of the hook sweep (step 8, rule C).
+  writes are the knives registry copy (step 6), and the omp rule links and the marketplace
+  plugins, the team catalog's fetch and move included (step 7). Another checkout logs each one it
+  skips and goes on. The additive writes are `mise install` of the checkout's own pins into the
+  shared `MISE_DATA_DIR`, under the install lock (step 7); Bun's cache (step 7); and the fast-root
+  pass of the hook sweep (step 8, rule C).
 - **(B) Judgments and records go to the state file the run uses.** On a file other than
   `~/.dotfiles`' (its own, by default) another checkout opens and clears its own conditions,
   `TOOLS NOT INSTALLED` included, as `~/.dotfiles` does on its file. It records its own tools pass
@@ -148,9 +165,8 @@ Follow restores the managed marketplace lock before it calls the sync.
    checkout would point every session's rules at it. Another `--repo` logs
    `rules: <repo> is not ~/.dotfiles; omp rules not linked` and goes on. Then
    `mise install`, `bun install --frozen-lockfile` in `omp/plugins`, then, only for `~/.dotfiles`,
-   for each registered non-Bun marketplace plugin below the lowest version its lock entry requires,
-   `shims/omp plugin marketplace update <source>` and `shims/omp plugin upgrade <name>@<source>`.
-   `installers/omp.sh` links `~/.omp/plugins` to `~/.dotfiles/omp/plugins`, so an upgrade from
+   the marketplace step below.
+   `installers/omp.sh` links `~/.omp/plugins` to `~/.dotfiles/omp/plugins`, so an omp command from
    another checkout would write this machine's plugins. Another `--repo` logs
    `plugins: <repo> is not ~/.dotfiles; marketplace plugins not upgraded`, runs no omp command
    and goes on to the pin check.
@@ -162,34 +178,71 @@ Follow restores the managed marketplace lock before it calls the sync.
    its pin exits 127 at once instead of waiting on the lock. mise, Bun, the omp commands and the
    pin check get the `MISE_CACHE_DIR` that the checkout's `.bashrc` gives a shell (read under
    `--check-timeout`), so this mise and a session's take the same per-version lock in mise's cache.
-   A unique `installed_plugins.json` record identifies its source. Lock entries with no record
-   are silently skipped: these include vendored plugins such as compound-engineering and new
-   marketplace plugins not yet bootstrapped. Bootstrapping stays an `install.sh` job; follow
-   only upgrades existing installs. Multiple matching records are a reported ambiguity.
-   Each below-entry registered plugin is attempted even if another fails, with a 60 s command cap
-   and 300 s marketplace-phase budget. Normal cleanup tries to restore the tracked lock in a
-   `finally`, with saved bytes as fallback if `git checkout --` fails. An interrupted run may
-   leave it dirty: the next run restores HEAD before fast-forwarding or retrying installation.
+   The marketplace step starts with the team catalog step (`team_catalog_step`). The team catalog
+   is the catalog of `theorem-labs/verification-skills`, and the step owns four of its plugins:
+   `verification`, `tasks`, `engineering` and `dev-infra`. No file here holds the catalog's name:
+   Oh My Pi names a registration after its catalog, and the step reads the name there.
+   - It runs `shims/omp plugin marketplace list` first. On a machine with no registration of the
+     repository and none of the four installed under a catalog name that no registration holds,
+     no move can be under way: the step fetches nothing and runs no other omp command.
+   - Otherwise it fetches the catalog once in each run, whatever the installed versions. It runs
+     `plugin marketplace update <name>` for each registration of the repository, in the order
+     `list` prints them, until one succeeds. Only when none succeeds, or none exists, it runs
+     `plugin marketplace add theorem-labs/verification-skills`. The name of the registration whose
+     fetch succeeded is the catalog's current name. A fetch that fails uninstalls nothing and
+     removes no registration.
+   - When the catalog's name changed, the step moves the four to the new name. A plugin to move is
+     one of the four installed under another name that a registration of the repository holds, or
+     that no registration holds; one of another repository's catalog stays. The step runs
+     `plugin uninstall <plugin>@<old name>` for each plugin to move, then
+     `plugin install <plugin>@<new name>` for each of the four not under the new name, except one
+     whose uninstall failed, with that plugin's entry taken out of the lock first (omp refuses an
+     install whose name the lock holds). Only once all four are under the new name does it run
+     `plugin marketplace remove <old name>`. So the old registration marks a move that failed half
+     way, and the next run ends it.
+   - Follow installs one of the four only to end such a move. Bootstrapping stays an `install.sh`
+     job.
+   - It runs `plugin upgrade <plugin>@<current name>` for each of the four that is below its lock
+     entry, with no second fetch.
+
+   `dotfiles-sync`'s tools step and `installers/omp.sh` run the same step through
+   `dotfiles-follow --team-catalog` (above).
+   The step does not own the other lock entries: an entry of another catalog, a plugin of the team
+   catalog outside the four, and one of the four installed under another repository's catalog or
+   under two IDs. When the step's `list` fails, it owns all four and reports why. For each entry it
+   does not own, a unique `installed_plugins.json` record identifies its source. Lock entries with
+   no record are silently skipped: these include vendored plugins such as compound-engineering and
+   new marketplace plugins not yet bootstrapped. Multiple matching records are a reported
+   ambiguity. Each registered non-Bun marketplace plugin below the lowest version its lock entry
+   requires gets `shims/omp plugin marketplace update <source>` and
+   `shims/omp plugin upgrade <name>@<source>`. A plugin of the team catalog outside the four gets
+   the upgrade alone, since the step fetched its catalog, and nothing when that fetch failed.
+   Each below-entry plugin is attempted even if another fails. Each omp command has a 60 s cap
+   (120 s for a fetch of the team catalog), and the marketplace step has a 300 s budget. Follow's
+   run puts the tracked lock back in a `finally` on every run: `git checkout --`, with the saved
+   bytes as fallback if that fails. An interrupted run may leave it dirty: the next run restores
+   HEAD before fast-forwarding or retrying installation.
    omp installs a catalog plugin only at the version its catalog resolves now, so no machine can go
    back to an older entry. A plugin at or above its entry gets no upgrade or version failure. A
-   plugin below its entry refreshes its catalog and upgrades, and is a version failure only if it is
-   still below afterward; a failed omp command is a failure whatever the version. Dotted-number
-   strings compare numerically; any other pair must be equal JSON values of the same type, and
-   object key order does not matter. An empty or missing entry is handled as before. Every omp
-   command removes `OMP_PROFILE`, `PI_PROFILE`, and
+   plugin below its entry is upgraded after a fetch of its catalog, and is a version failure only
+   if it is still below afterward; a failed omp command is a failure whatever the version.
+   Dotted-number strings compare numerically; any other pair must be equal JSON values of the same
+   type, and object key order does not matter. An installed plugin whose lock entry has an empty
+   or missing version is a failure. Every omp command removes `OMP_PROFILE`, `PI_PROFILE`, and
    `PI_CODING_AGENT_DIR` from its environment. If
    `${XDG_CONFIG_HOME:-~/.config}/omp/profile` contains `legion`, follow does not run omp and
    reports the plugin step as failed. Finally, `devbox/sami-devbox-check --pins` checks knives and
    mise pins. A report when any step fails; the next run retries any marketplace plugin still below
-   its entry. The run judges `TOOLS NOT INSTALLED` and records a pass at HEAD (`tools_ok_head`) in
-   the state file it uses (rule B, above). In `~/.dotfiles` the pass line is
+   its entry, and ends a move that failed half way. The run judges `TOOLS NOT INSTALLED` and
+   records a pass at HEAD (`tools_ok_head`) in the state file it uses (rule B, above). In
+   `~/.dotfiles` the pass line is
    `tools: mise install, frozen Bun install, marketplace pins and sami-devbox-check --pins passed`,
    and in another `--repo` it is
    `tools: mise install, frozen Bun install and sami-devbox-check --pins passed; rules and
    marketplace plugins skipped: <repo> is not ~/.dotfiles`. The line names the tools step's parts
    whether or not each had work: it names the frozen Bun install when `omp/plugins/package.json` is
-   missing and no Bun command ran, and the marketplace pins when there is no lock or no plugin was
-   below its entry, so no omp command ran.
+   missing and no Bun command ran, and the marketplace pins when there is no lock, so no omp
+   command ran, or no plugin was below its entry.
 8. Unless `--no-hook-sweep` is set, every run makes one pass of the leak check's hook sweep,
    `sweep-hooks.sh` of the leak-check tag in `~/.local/share/public-leak-check-hooks`
    (`devbox/sami-devbox-provision --only prepush` installs it; `--hooks-dir`). It installs the
@@ -253,8 +306,9 @@ already holds their bytes, right before the fast-forward. Apart from managed-loc
 refusal leaves HEAD, the index and every file as they were. Outside the checkout, and only from
 `~/.dotfiles` (rule A), step 6 writes `~/.config/knives/repos.toml` and its record only when the
 copy is missing or not a plain file, or `knives/repos.toml`, the workspaces path or the render
-script changed since the last render, and step 7 links rules into `~/.omp/agent/rules/` and
-upgrades marketplace plugins in `~/.omp/plugins`. A run that writes the copy logs it, and the
+script changed since the last render, and step 7 links rules into `~/.omp/agent/rules/`, upgrades
+marketplace plugins in `~/.omp/plugins`, and moves the team catalog's four plugins there and
+changes Oh My Pi's registrations of that catalog. A run that writes the copy logs it, and the
 footer of any report that run writes says so.
 
 ## The kept files: SECRET_FILES that git tracks
@@ -286,7 +340,7 @@ modified here, it refuses with `MAIN CHANGES A KEPT FILE` and names the diff to 
 | HEAD has commits origin/main lacks | `NOT A FAST-FORWARD` | origin/main contains HEAD |
 | the commits to take change a modified kept file | `MAIN CHANGES A KEPT FILE` | they no longer do |
 | managed-lock restoration or `git merge --ff-only` failed | `FAST-FORWARD FAILED` | the managed lock is clean and HEAD is origin/main |
-| the rule link or a marketplace upgrade/version check (both in `~/.dotfiles` only), mise, Bun or the pin lines failed | `TOOLS NOT INSTALLED` | all pass at the current HEAD, in a run that records in that state file (rule B) |
+| the rule link, a marketplace upgrade or version check, or the team catalog step's list, fetch, uninstall, install or remove (each in `~/.dotfiles` only), mise, Bun or the pin lines failed | `TOOLS NOT INSTALLED` | all pass at the current HEAD, in a run that records in that state file (rule B) |
 | `scripts/knives-registry-render --if-changed` failed or ran past `--check-timeout`; the report holds its output and says whether the copy kept what it held | `KNIVES REGISTRY NOT WRITTEN` | a later `~/.dotfiles` run on main renders, or finds nothing to write |
 | the hook sweep is missing, ran past its bound, exited without its summary line, could not hook a public checkout, or deferred one, or the run had no time left for a pass; the report names the kind of pass | `PRE-PUSH HOOK NOT INSTALLED` | a pass ends with 0 failed and 0 deferred; a condition a slow-root pass found clears only on a slow-root pass |
 | `git fetch`, or `jj git fetch` in a colocated checkout, failed on 3 runs in a row (`--fetch-grace`) | `CANNOT FETCH origin/main` | a fetch passes |
@@ -322,16 +376,17 @@ run is left (`pgrep -af dotfiles-follow`). After that every run takes the same l
 
 ## Tests
 
-`python3 -m unittest scripts.tests.test_dotfiles_follow scripts.tests.test_dotfiles_follow_marketplace scripts.tests.test_omp_marketplace_installer scripts.tests.test_dotfiles_follow_jj scripts.tests.test_dotfiles_install_lock`:
+`python3 -m unittest scripts.tests.test_dotfiles_follow scripts.tests.test_dotfiles_follow_marketplace scripts.tests.test_omp_marketplace_installer scripts.tests.test_dotfiles_follow_jj scripts.tests.test_dotfiles_install_lock scripts.tests.test_dotfiles_tools`:
 the follower cases build a throwaway origin and clone with the real provision and check scripts,
 and stand-in `mise`, `knives` and `bun`. Refusal cases assert that HEAD, the index and each file
-are unchanged, except for follow-managed lock recovery. Marketplace cases use a stub `shims/omp`
-that records commands, changes installed versions and rewrites the tracked lock. They cover
-upgrades, a plugin above its entry (no omp command), one upgraded above its entry (a pass), one
-still below after its upgrade (a failure), 0.3.10 above 0.3.9, versions that are not dotted
-numbers, Bun/unchanged/unregistered skips, aggregated failures, decoding, ambiguous sources, report
-classification, timeout cleanup and recovery from arbitrary dirty-lock contents
-before a fast-forward or a same-HEAD retry, including an interrupted durable checkpoint. The
+are unchanged, except for follow-managed lock recovery. Marketplace cases use the fake omp of
+`scripts/tests/fake_omp.py` (below) as `shims/omp`, set to rewrite the tracked lock on every call,
+so a clean lock after a run shows that follow put it back. They cover upgrades, a plugin above its
+entry (no omp command for it), one upgraded above its entry (a pass), one still below after its
+upgrade (a failure), 0.3.10 above 0.3.9, versions that are not dotted numbers,
+Bun/unchanged/unregistered skips, aggregated failures, decoding, ambiguous sources, report
+classification, timeout cleanup and recovery from arbitrary dirty-lock contents before a
+fast-forward or a same-HEAD retry, including an interrupted durable checkpoint. The
 installer module runs `install_marketplace_plugin` and its version reads and comparison, taken
 from `installers/omp.sh`, under `set -euo pipefail` with a stub `omp` on `PATH`: the same version
 cases, and a failed catalog refresh, install or upgrade still reports omp's exit status and leaves
@@ -342,6 +397,51 @@ result and the installer's existing empty-argument result after it reads null, m
 strings. Number spelling, such as 1.10 against 1.1, can differ between jq and Python and is out of
 scope, so no shared row requires agreement on it. Its raw rows are written into the two files as
 JSON text, so the installer reads them as stored.
+The marketplace, team catalog and jj cases share one fake omp, `scripts/tests/fake_omp.py`. It
+models the Oh My Pi that `mise.toml` pins (18.18.6): `plugin marketplace list` prints that
+release's text; `plugin marketplace update` refuses an update across a change of the catalog's
+name; `plugin marketplace add` registers the catalog under its current name beside any other;
+`plugin install` refuses a plugin installed under another ID, and installs nothing while the lock
+holds the plugin's name; and a command it does not model exits 99. A JSON state file holds its
+registrations, the catalog's current name and the failures a case asks for; its call log holds
+each call's arguments and whether the profile variables were set. The fixtures in
+`scripts/tests/omp-marketplace-list/` are that release's own output of
+`omp plugin marketplace list`, captured from it: no registration, one, two, and two in colour.
+`MarketplaceList` reads each with `marketplace_registrations`, checks that text of any other shape
+raises, and checks that the fake prints the bytes of the three fixtures without colour.
+`TeamCatalogStep` runs the team catalog step on a machine of its own for each case, through the
+sync's call (`--team-catalog`), the installer's (`--installer`) or follow's run. Most cases check
+the exact omp calls, the installed records and registrations after the run, the failures and exit
+status, and that the lock holds HEAD's bytes. A change of name moves the four, also when the
+lock's refusal of an install exits 1 and when the registration is spelled as a URL; with no change
+of name, a second run after a move included, the step fetches once and changes nothing; a failed
+fetch uninstalls nothing and removes no registration; the updates go in list order until one
+succeeds; a failed install keeps the old registration, and the next run ends the move through the
+new one; with no registration and none of the four the sync's call fetches nothing, and the
+installer installs all four; a plugin under an unregistered name, or whose old registration is
+gone, is moved, and one of another repository's catalog is not; a failed uninstall, an install
+that exits 0 and installs nothing, and a moved plugin below the lock are failures; the installer
+and follow upgrade a plugin below the lock, and the sync's call does not; the sync's call with no
+move keeps an uncommitted edit of the lock byte for byte, and follow's run puts back a lock a
+killed run left; SIGTERM kills the running command and puts the lock back; a spent budget starts
+no more commands; a `legion` profile stops the sync's call only; the sync's call clears the
+profile variables and the installer's call keeps them; a `list` output of no known shape is a
+failure; and without a lock the mode runs no omp command.
+`TeamCatalogFollow` runs the step through follow's run on the marketplace fixture: a failed fetch
+opens `TOOLS NOT INSTALLED`, and the next run moves the four and clears it; with no change of name
+the catalog is fetched once; a plugin of the team catalog outside the four gets no second update;
+a failed install opens `TOOLS NOT INSTALLED`; and a plugin of another repository's catalog keeps
+its update and upgrade.
+`TeamCatalogCall`, in the installer module, runs `install_team_catalog`, taken from
+`installers/omp.sh`, under `set -euo pipefail` with a copy of the real `scripts/dotfiles-follow`
+and the fake on `PATH`: a change of name moves the four, a failed install is reported and the
+installer goes on, a home with none of the four gets all four, and with no change of name the
+catalog is fetched once.
+`TeamCatalogTools`, in `test_dotfiles_tools`, runs `dotfiles-sync`'s tools step with the real
+`scripts/dotfiles-follow` and the fake as `shims/omp`: the move runs after Bun; a failed install
+fails the sync and keeps the move; another checkout, and a checkout without
+`scripts/dotfiles-follow`, fetch nothing; a failed Bun runs no omp command; and without
+`omp/plugins/package.json` the step runs after mise.
 The jj cases use a real colocated jj checkout whose `@` holds two local files, and check that the
 files keep their bytes and nothing is pushed.
 The registry cases (`KnivesRegistry`, and `JjKnivesRegistry` in the jj module) run the real
@@ -376,7 +476,7 @@ another clone the pass line names the skipped rules and marketplace plugins.
 `~/.dotfiles` each hold lock entries above the installed records. The run of the other clone makes
 no `shims/omp` call and logs
 `plugins: <repo> is not ~/.dotfiles; marketplace plugins not upgraded`; its control, the run of
-`~/.dotfiles`, refreshes each catalog and upgrades each plugin as before.
+`~/.dotfiles`, fetches each catalog once and upgrades each plugin below its entry.
 `test_a_run_of_another_checkout_whose_tools_step_ran_sweeps_fast_roots_only` (`SlowRoots`): a
 run of another clone whose tools step ran makes no slow-root pass.
 `test_a_home_dotfiles_symlinked_out_of_home_keeps_secrets_env_moves_and_renders` keeps

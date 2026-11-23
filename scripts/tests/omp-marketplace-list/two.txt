@@ -1,0 +1,4 @@
+Configured Marketplaces:
+
+  agent-skills  theorem-labs/verification-skills
+  theorem-skills  theorem-labs/verification-skills

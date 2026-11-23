@@ -3,7 +3,8 @@
 
 Run with: python3 -m unittest -v scripts.tests.test_dotfiles_follow_marketplace
 The shared follower harness supplies throwaway git repositories and fake mise and bun;
-only the shim below handles marketplace commands, with no real omp or network access.
+only the fake omp of scripts/tests/fake_omp.py handles marketplace commands, with no real omp or
+network access.
 """
 
 import json
@@ -11,79 +12,30 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 import unittest.mock
+from collections.abc import Mapping
 from pathlib import Path
+from types import SimpleNamespace
 
-from scripts.tests.test_dotfiles_follow import FOLLOW, TOOLS_PASSED, Harness, tools_passed_in
+from scripts.tests import fake_omp
+from scripts.tests.test_dotfiles_follow import FOLLOW, SCRIPT, TOOLS_PASSED, Harness, tools_passed_in
 from scripts.tests.marketplace_version_cases import CASES, EMPTY_CASES, MISSING, RAW_CASES
 
 
-FAKE_OMP = r'''#!/usr/bin/env python3
-import json
-import os
-import subprocess
-import sys
-import time
-from pathlib import Path
+class MarketplaceFixture(Harness):
+    """The fixture and helpers of the marketplace cases, with fake_omp's fake as its shims/omp. It
+    holds no case itself, so a class with cases of its own on this fixture (TeamCatalogFollow) does
+    not run every case again."""
 
-repo = Path(__file__).resolve().parents[1]
-plugins = repo / "omp/plugins"
-args = sys.argv[1:]
-with Path(os.environ["FAKE_OMP_LOG"]).open("a") as log:
-    log.write(json.dumps(args) + "\n")
-data_log = os.environ.get("FAKE_OMP_DATA_LOG")
-if data_log:
-    with Path(data_log).open("a") as log:
-        log.write(os.environ.get("MISE_DATA_DIR", "unset") + "\n")
-# Both successful commands and midway failures can rewrite the tracked lock.
-(plugins / "omp-plugins.lock.json").write_text('{"plugins": {}, "rewritten": true}\n')
-if args[:3] == ["plugin", "marketplace", "update"] and len(args) == 4:
-    time.sleep(float(os.environ.get("FAKE_OMP_DELAY", "0")))
-    if args[3] == os.environ.get("FAKE_OMP_UPDATE_FAIL"):
-        print("catalog refresh failed", file=sys.stderr)
-        sys.exit(8)
-    sys.exit(0)
-if args[:2] == ["plugin", "upgrade"] and len(args) == 3:
-    name, _, source = args[2].rpartition("@")
-    installed_path = plugins / "installed_plugins.json"
-    installed = json.loads(installed_path.read_text())
-    record = installed["plugins"][args[2]][0]
-    if name in os.environ.get("FAKE_OMP_FAIL", "").split(","):
-        record["version"] = "partial"
-        installed_path.write_text(json.dumps(installed))
-        print("upgrade failed midway: " + name, file=sys.stderr)
-        sys.exit(7)
-    if name == os.environ.get("FAKE_OMP_HANG"):
-        record["version"] = "partial"
-        installed_path.write_text(json.dumps(installed))
-        marker = Path(os.environ["FAKE_OMP_MARKER"])
-        late = marker.with_suffix(".late")
-        child = subprocess.Popen([
-            sys.executable, "-c",
-            "import pathlib, time; time.sleep(2); "
-            + "pathlib.Path(" + repr(str(plugins / "omp-plugins.lock.json")) + ").write_text('late child write'); "
-            + "pathlib.Path(" + repr(str(late)) + ").write_text('child survived')",
-        ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        marker.write_text(json.dumps({"pid": child.pid, "deadline": time.monotonic() + 2}))
-        time.sleep(30)
-    record["version"] = json.loads(os.environ["FAKE_OMP_VERSIONS"])[name]
-    installed_path.write_text(json.dumps(installed))
-    if name == os.environ.get("FAKE_OMP_INVALID_BYTES"):
-        os.write(1, b"\xff\n")
-        sys.exit(7)
-    sys.exit(0)
-print("unexpected omp arguments: " + repr(args), file=sys.stderr)
-sys.exit(99)
-'''
-
-
-class MarketplacePlugins(Harness):
     def setUp(self) -> None:
         super().setUp()
         self.omp_log = self.home.parent / "omp.log"
         os.environ["FAKE_OMP_LOG"] = str(self.omp_log)
+        self.fake_state = self.home.parent / "omp-state.json"
+        os.environ["FAKE_OMP_STATE"] = str(self.fake_state)
         os.environ["FAKE_OMP_FAIL"] = ""
         os.environ["FAKE_OMP_UPDATE_FAIL"] = ""
         for key in ("FAKE_OMP_INVALID_BYTES", "FAKE_OMP_HANG", "FAKE_OMP_MARKER", "FAKE_OMP_DELAY"):
@@ -105,10 +57,7 @@ class MarketplacePlugins(Harness):
             },
             "settings": {},
         }, indent=2) + "\n"
-        shim = self.upstream / "shims/omp"
-        shim.parent.mkdir()
-        shim.write_text(FAKE_OMP)
-        shim.chmod(0o755)
+        fake_omp.write(self.upstream / "shims/omp")
         ignored = (self.upstream / ".gitignore").read_text()
         self.commit_upstream(
             "marketplace fixtures",
@@ -152,7 +101,7 @@ class MarketplacePlugins(Harness):
         self.sh("git", "merge", "--ff-only", "--quiet", "origin/main", cwd=self.repo)
 
     def calls(self) -> list[list[str]]:
-        return [json.loads(line) for line in self.omp_log.read_text().splitlines()] if self.omp_log.exists() else []
+        return fake_omp.read_args(self.omp_log)
 
     def data_calls(self) -> list[str]:
         path = Path(os.environ["FAKE_OMP_DATA_LOG"])
@@ -173,14 +122,38 @@ class MarketplacePlugins(Harness):
         )
         self.take_upstream()
 
+
+class MarketplacePlugins(MarketplaceFixture):
+    """The marketplace cases of follow's run. The fake registers the fixture's three catalogs, and
+    the team catalog still has the name it is registered under, verification-skills, so no move is
+    under way. Each run's step lists the registrations, fetches that catalog (`marketplace update
+    verification-skills`) and upgrades dev-infra, one of its four plugins; follow's loop then
+    upgrades verification-skills, a plugin of that catalog outside the four, with no second update,
+    and updates and upgrades core-ops. Each plugin is upgraded only when it is below its lock
+    entry."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        fake_omp.write_state(self.fake_state, {
+            "registrations": [
+                ["verification-skills", fake_omp.TEAM_SOURCE],
+                ["core-ops", "theorem-labs/core-ops"],
+                ["claude-plugins-official", "anthropics/claude-plugins-official"],
+            ],
+            "catalogs": {fake_omp.TEAM_SOURCE: {"name": "verification-skills"}},
+        })
+        # The fake rewrites the lock on every call, so a clean lock after a run shows that follow
+        # put it back, whichever commands ran.
+        os.environ["FAKE_OMP_REWRITE_LOCK"] = "1"
+
     def test_changed_pins_upgrade_unchanged_and_bun_pins_do_not(self) -> None:
         self.take_upstream()
         why = FOLLOW.install_tools(self.repo, self.options())
         self.assertEqual(why, "")
         self.assertEqual(self.calls(), [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "dev-infra@verification-skills"],
-            ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "verification-skills@verification-skills"],
             ["plugin", "marketplace", "update", "core-ops"],
             ["plugin", "upgrade", "core-ops@core-ops"],
@@ -190,9 +163,13 @@ class MarketplacePlugins(Harness):
         self.assertEqual(self.version("slack"), "1.0.0")
         self.assertEqual(self.version("@sjawhar/pi-envoy"), "1.0.0")
         self.assert_clean_lock()
-        # Retrying tools at this HEAD must not re-upgrade anything already at its pin.
+        # Retrying tools at this HEAD fetches the team catalog again, and must not re-upgrade
+        # anything already at its pin.
         self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
-        self.assertEqual(len(self.calls()), 6)
+        self.assertEqual(self.calls()[6:], [
+            ["plugin", "marketplace", "list"],
+            ["plugin", "marketplace", "update", "verification-skills"],
+        ])
         self.assert_clean_lock()
 
     def test_only_home_dotfiles_upgrades_marketplace_plugins(self) -> None:
@@ -205,9 +182,9 @@ class MarketplacePlugins(Harness):
         other_installed = other / "omp/plugins/installed_plugins.json"
         other_installed.write_text(self.installed_path.read_text())
         upgrades = [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "dev-infra@verification-skills"],
-            ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "verification-skills@verification-skills"],
             ["plugin", "marketplace", "update", "core-ops"],
             ["plugin", "upgrade", "core-ops@core-ops"],
@@ -268,6 +245,7 @@ class MarketplacePlugins(Harness):
         self.assertEqual(self.state_data()["last_outcome"], "ok")
         self.assertEqual(self.state_data()["tools_ok_head"], self.target)
         self.assertEqual(self.calls(), [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "verification-skills@verification-skills"],
             ["plugin", "marketplace", "update", "core-ops"],
@@ -278,16 +256,18 @@ class MarketplacePlugins(Harness):
         self.assert_clean_lock()
 
     def test_ambiguous_marketplace_source_is_reported_and_other_plugins_continue(self) -> None:
+        # A plugin outside the team catalog's four, installed under a second ID. One of the four
+        # under a catalog that no registration holds is a plugin the team catalog step moves.
         installed = json.loads(self.installed_path.read_text())
-        installed["plugins"]["dev-infra@another-source"] = installed["plugins"]["dev-infra@verification-skills"]
+        installed["plugins"]["verification-skills@another-source"] = installed["plugins"]["verification-skills@verification-skills"]
         self.installed_path.write_text(json.dumps(installed))
         messages = self.run_follow()
         self.assertEqual(len(messages), 1)
         self.assertIn("TOOLS NOT INSTALLED", messages[0])
-        self.assertIn("dev-infra", messages[0])
+        self.assertIn("omp marketplace plugin verification-skills has no unique installed marketplace", messages[0])
         self.assertIn("source", messages[0])
         self.assertEqual(self.version("core-ops"), "2.0.0")
-        self.assertFalse(any(args[:2] == ["plugin", "upgrade"] and args[2].startswith("dev-infra@") for args in self.calls()))
+        self.assertFalse(any(args[:2] == ["plugin", "upgrade"] and args[2].startswith("verification-skills@") for args in self.calls()))
         self.assertEqual(self.state_data()["last_outcome"], "tools")
         self.assert_clean_lock()
 
@@ -382,6 +362,7 @@ class MarketplacePlugins(Harness):
         self.assertIn("dev-infra", why)
         self.assertIn("partial", why)
         self.assertEqual(self.calls()[calls_before:], [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "dev-infra@verification-skills"],
         ])
@@ -468,9 +449,13 @@ class MarketplacePlugins(Harness):
         why = FOLLOW.install_tools(self.repo, self.options())
         self.assertIn("catalog refresh failed", why)
         self.assertIn("exited 8", why)
+        # The step's update fails, so it tries `marketplace add`, which Oh My Pi refuses while the
+        # name is registered. With that catalog not fetched, no plugin of it is upgraded, and
+        # follow's loop goes on to core-ops.
         self.assertEqual(self.calls(), [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
-            ["plugin", "marketplace", "update", "verification-skills"],
+            ["plugin", "marketplace", "add", fake_omp.TEAM_SOURCE],
             ["plugin", "marketplace", "update", "core-ops"],
             ["plugin", "upgrade", "core-ops@core-ops"],
         ])
@@ -508,11 +493,12 @@ class MarketplacePlugins(Harness):
         self.assertEqual(self.state_data()["tools_ok_head"], self.target)
         self.assertEqual(self.state_data()["last_outcome"], "ok")
         self.assertEqual(self.calls()[6:], [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "dev-infra@verification-skills"],
         ])
         self.assertEqual(self.run_follow(now=1_001_200.0), [])
-        self.assertEqual(len(self.calls()), 8)
+        self.assertEqual(len(self.calls()), 9)
         self.assert_clean_lock()
 
     def test_post_update_report_opens_once_with_on_main_headline(self) -> None:
@@ -648,6 +634,7 @@ class MarketplacePlugins(Harness):
         self.assertEqual(self.head(), self.target)
         self.assertEqual(self.version("dev-infra"), "2.0.0")
         self.assertEqual(self.calls()[6:], [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "dev-infra@verification-skills"],
         ])
@@ -713,15 +700,16 @@ class MarketplacePlugins(Harness):
         self.assertEqual(self.version("dev-infra"), "2.0.0")
         self.assertIsNone(checkpoint)
         self.assertEqual(self.calls()[6:], [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "dev-infra@verification-skills"],
         ])
         self.assertEqual(self.state_data()["tools_ok_head"], self.target)
         self.assert_clean_lock()
         self.assertEqual(self.run_follow(now=1_001_200.0), [])
-        self.assertEqual(len(self.calls()), 8)
+        self.assertEqual(len(self.calls()), 9)
 
-    def test_same_head_recovery_with_matching_pins_does_not_call_omp(self) -> None:
+    def test_same_head_recovery_with_matching_pins_runs_no_upgrade(self) -> None:
         self.assertEqual(self.run_follow(), [])
         (self.repo / "omp/plugins/omp-plugins.lock.json").write_text("local anomaly")
         git = FOLLOW.git
@@ -738,7 +726,11 @@ class MarketplacePlugins(Harness):
 
         with unittest.mock.patch.object(FOLLOW, "git", side_effect=check_checkpoint):
             self.assertEqual(self.run_follow(now=1_000_600.0), [])
-        self.assertEqual(len(self.calls()), 6)
+        self.assertEqual(len(self.calls()), 8)
+        self.assertEqual(self.calls()[6:], [
+            ["plugin", "marketplace", "list"],
+            ["plugin", "marketplace", "update", "verification-skills"],
+        ])
         self.assertEqual(self.state_data()["tools_ok_head"], self.target)
         self.assert_clean_lock()
 
@@ -782,6 +774,7 @@ class MarketplacePlugins(Harness):
         self.assertEqual(self.state_data()["tools_ok_head"], self.target)
         self.assertEqual(self.version("dev-infra"), "2.0.0")
         self.assertEqual(self.calls()[6:], [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "dev-infra@verification-skills"],
         ])
@@ -817,8 +810,9 @@ class MarketplacePlugins(Harness):
 
     def test_marketplace_budget_stops_launching_commands_and_restores_lock(self) -> None:
         self.take_upstream()
-        # The 2 s budget gives a loaded machine time to start the fake omp and log its call.
-        # The delay is far past the budget, so the step ends early only when the budget stops it.
+        # The 2 s budget gives a loaded machine time to start the fake omp and log its calls (the
+        # team catalog step's list, then its update). The delay of the update is far past the
+        # budget, so the step ends early only when the budget stops it.
         delay = 10
         os.environ["FAKE_OMP_DELAY"] = str(delay)
         timeout = self.options().mise_timeout
@@ -828,12 +822,641 @@ class MarketplacePlugins(Harness):
             elapsed = time.monotonic() - start
         self.assertIn("budget", why)
         self.assertLess(elapsed, delay)
-        self.assertEqual(self.calls(), [["plugin", "marketplace", "update", "verification-skills"]])
+        self.assertEqual(self.calls(), [
+            ["plugin", "marketplace", "list"],
+            ["plugin", "marketplace", "update", "verification-skills"],
+        ])
         self.assert_clean_lock()
 
     def sweeps(self) -> list[str]:
         path = Path(f"{self.fake_log}.sweep")
         return path.read_text().splitlines() if path.exists() else []
+
+
+# ------------------------------------------------------------------------------- the team catalog
+
+# The names of INFRA-5366's plan: S the team catalog's source, A and B its name before and after the
+# rename of dispatch://INFRA-4807, O a catalog of another repository, and the four plugins it moves.
+S = fake_omp.TEAM_SOURCE
+A = fake_omp.OLD_NAME
+B = fake_omp.NEW_NAME
+O = fake_omp.OTHER_NAME
+FOUR = fake_omp.TEAM_PLUGINS
+# Oh My Pi 18.18.6's stdout of `omp plugin marketplace list`: no registration, one, two, and two in
+# colour. They were captured from the build mise.toml pins, v18.18.6-sami.20261119-162325, with
+# these commands, run in scripts/tests/omp-marketplace-list/:
+#
+#   COPY=$(mktemp -d)/cat && git clone -q https://github.com/theorem-labs/verification-skills "$COPY"   # main of the catalog, named agent-skills
+#   H=$(mktemp -d) && git config -f "$H/.gitconfig" url."file://$COPY".insteadOf https://github.com/theorem-labs/verification-skills.git
+#   E="env -u OMP_PROFILE -u PI_PROFILE -u PI_CODING_AGENT_DIR -u XDG_DATA_HOME -u PI_CONFIG_DIR -u PI_CONFIG_FILES -u FORCE_COLOR HOME=$H XDG_CONFIG_HOME=$H/.config XDG_CACHE_HOME=$H/.cache XDG_STATE_HOME=$H/.local/state"
+#   $E omp plugin marketplace list > none.txt                       # no registration
+#   $E omp plugin marketplace add theorem-labs/verification-skills && $E omp plugin marketplace list > one.txt
+#   # INFRA-4807's rename in the copy: the name, and each @agent-skills dependency, in .claude-plugin/marketplace.json,
+#   # plugins/tasks/.claude-plugin/plugin.json and plugins/verification/.claude-plugin/plugin.json
+#   sed -i 's/"agent-skills"/"theorem-skills"/; s/@agent-skills/@theorem-skills/g' "$COPY"/.claude-plugin/marketplace.json "$COPY"/plugins/tasks/.claude-plugin/plugin.json "$COPY"/plugins/verification/.claude-plugin/plugin.json
+#   git -C "$COPY" -c user.name=t -c user.email=t@t commit -qam rename
+#   $E omp plugin marketplace add theorem-labs/verification-skills && $E omp plugin marketplace list > two.txt
+#   $E FORCE_COLOR=1 omp plugin marketplace list > two-color.txt
+FIXTURES = Path(__file__).resolve().with_name("omp-marketplace-list")
+# The mode prints each failure on stderr as one line that starts so, with its details indented
+# under it.
+MODE_FAILURE = "dotfiles-follow: team catalog: "
+# The limit on one run of the mode or of a fake: it only stops a stuck run.
+GUARD = 120
+
+LIST = ["plugin", "marketplace", "list"]
+ADD = ["plugin", "marketplace", "add", S]
+
+
+def update(name: str) -> list[str]:
+    return ["plugin", "marketplace", "update", name]
+
+
+def remove(name: str) -> list[str]:
+    return ["plugin", "marketplace", "remove", name]
+
+
+def install(ident: str) -> list[str]:
+    return ["plugin", "install", ident]
+
+
+def uninstall(ident: str) -> list[str]:
+    return ["plugin", "uninstall", ident]
+
+
+def upgrade(ident: str) -> list[str]:
+    return ["plugin", "upgrade", ident]
+
+
+def at(name: str, version: str = "0.2.0", plugins: tuple[str, ...] = FOUR) -> dict[str, str]:
+    """Installed records: each of PLUGINS as <plugin>@NAME at VERSION."""
+    return {ident: version for ident in fake_omp.ids(name, plugins)}
+
+
+def failure_blocks(text: str, starts) -> list[str]:
+    """Each failure in TEXT: a line for which STARTS is true, and the indented lines after it."""
+    blocks: list[str] = []
+    for line in text.splitlines():
+        if starts(line):
+            blocks.append(line)
+        elif blocks and line[:1].isspace():
+            blocks[-1] += "\n" + line
+    return blocks
+
+
+class Run:
+    """One run of the step: its exit status, its failures (failure_blocks) and what it printed."""
+
+    def __init__(self, code: int, failures: list[str], out: str, err: str) -> None:
+        self.code = code
+        self.failures = failures
+        self.out = out
+        self.err = err
+
+    def context(self) -> str:
+        return f"exit {self.code}\nstdout:\n{self.out}\nstderr:\n{self.err}"
+
+
+class MarketplaceList(unittest.TestCase):
+    """marketplace_registrations reads the pin's own output of `omp plugin marketplace list` (P1 to
+    P5 of INFRA-5366's plan), and the fake omp prints those bytes for the same registrations."""
+
+    @staticmethod
+    def fixture(name: str) -> str:
+        return (FIXTURES / name).read_text()
+
+    def test_p1_no_registration(self) -> None:
+        self.assertEqual(FOLLOW.marketplace_registrations(self.fixture("none.txt")), [])
+
+    def test_p2_one_registration(self) -> None:
+        self.assertEqual(FOLLOW.marketplace_registrations(self.fixture("one.txt")), [(A, S)])
+
+    def test_p3_two_registrations_in_list_order(self) -> None:
+        self.assertEqual(FOLLOW.marketplace_registrations(self.fixture("two.txt")), [(A, S), (B, S)])
+
+    def test_p4_two_registrations_in_colour(self) -> None:
+        self.assertEqual(FOLLOW.marketplace_registrations(self.fixture("two-color.txt")), [(A, S), (B, S)])
+
+    def test_p5_text_of_no_known_shape_raises(self) -> None:
+        # An output the step cannot read is never read as "no registration".
+        for text in (
+            "",
+            "\n",
+            "omp: unknown command\n",
+            "No marketplaces configured\n",
+            "Configured Marketplaces:\n\n",
+            f"Configured Marketplaces:\n\n  {A}\n",
+            f"Configured Marketplaces:\n\n  {A}  {S}",
+            f"Configured Marketplaces:\n  {A}  {S}\n",
+        ):
+            with self.subTest(text=text):
+                with self.assertRaises(ValueError):
+                    FOLLOW.marketplace_registrations(text)
+
+    def test_the_fake_lists_the_pins_bytes(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        omp = fake_omp.write(root / "omp")
+        for name, registrations in (("none.txt", []), ("one.txt", [[A, S]]), ("two.txt", [[A, S], [B, S]])):
+            with self.subTest(fixture=name):
+                state = root / f"{name}.json"
+                fake_omp.write_state(state, {"registrations": registrations})
+                done = subprocess.run(
+                    [str(omp), *LIST],
+                    env={"PATH": os.environ["PATH"], "FAKE_OMP_STATE": str(state), "FAKE_OMP_LOG": str(root / "calls")},
+                    capture_output=True, check=True, timeout=GUARD, stdin=subprocess.DEVNULL,
+                )
+                self.assertEqual(done.stdout, (FIXTURES / name).read_bytes())
+
+
+class TeamCatalogStep(unittest.TestCase):
+    """The team catalog step of dotfiles-follow: the rows of the state table of INFRA-5366's plan.
+
+    Each run gets a machine of its own: a git repository holding the lock (fake_omp.TEAM_LOCK), with
+    the fake omp of fake_omp.py as its shims/omp and as `omp` on PATH, the row's installed records,
+    and the fake's state (its registrations and the catalog's current name). A run is the mode as a
+    subprocess, `dotfiles-follow --team-catalog --repo <checkout>` (F, the sync's call) or with
+    --installer (I, installers/omp.sh's call), or follow's own run, install_marketplace_plugins, in
+    this process. A row asserts the exact Oh My Pi calls, the installed records and registrations
+    after the run, its failures and exit status, and that the lock holds HEAD's bytes after it."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.fakebin = fake_omp.write(self.root / "bin" / "omp").parent
+        self.config = self.root / "config"
+        home = self.root / "home"
+        home.mkdir()
+        self.machines = 0
+        # Nothing of this process's environment but what the runs need: no OMP_PROFILE, PI_PROFILE
+        # or PI_CODING_AGENT_DIR of the session that runs the tests.
+        self.env = {
+            "PATH": os.pathsep.join([str(self.fakebin), str(Path(sys.executable).parent), "/usr/local/bin", "/usr/bin", "/bin"]),
+            "HOME": str(home),
+            "XDG_CONFIG_HOME": str(self.config),
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@example.com",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@example.com",
+        }
+
+    def git(self, repo: Path, *args: str) -> bytes:
+        return subprocess.run(["git", "-C", str(repo), *args], env=self.env, check=True, capture_output=True).stdout
+
+    def machine(
+        self,
+        installed: dict[str, str],
+        registrations: list[tuple[str, str]],
+        catalog: str,
+        versions: dict[str, str] | None = None,
+        **state: object,
+    ) -> SimpleNamespace:
+        """A machine whose Oh My Pi holds INSTALLED ({ID: version}) and REGISTRATIONS, in order,
+        while the team catalog is now named CATALOG and gives VERSIONS (0.2.0 for a plugin it does
+        not name); STATE is more of the fake's state."""
+        self.machines += 1
+        root = self.root / f"machine-{self.machines}"
+        repo = root / "dotfiles"
+        fake_omp.write(repo / "shims" / "omp")
+        lock = repo / FOLLOW.MARKETPLACE_LOCK
+        lock.parent.mkdir(parents=True)
+        lock.write_text(fake_omp.TEAM_LOCK)
+        (repo / ".gitignore").write_text("omp/plugins/installed_plugins.json\n")
+        self.git(repo, "init", "-q")
+        self.git(repo, "add", "-A")
+        self.git(repo, "commit", "-q", "-m", "a machine")
+        fake_omp.write_installed(lock.parent / "installed_plugins.json", installed)
+        state_path = root / "omp-state.json"
+        fake_omp.write_state(state_path, {
+            "registrations": [list(entry) for entry in registrations],
+            "catalogs": {S: {"name": catalog, "versions": versions or {}}},
+            **state,
+        })
+        log = root / "omp-calls.jsonl"
+        env = {**self.env, "FAKE_OMP_STATE": str(state_path), "FAKE_OMP_LOG": str(log)}
+        return SimpleNamespace(repo=repo, lock=lock, state=state_path, log=log, env=env)
+
+    @staticmethod
+    def calls(machine: SimpleNamespace) -> list[list[str]]:
+        return fake_omp.read_args(machine.log)
+
+    @staticmethod
+    def installed(machine: SimpleNamespace) -> dict[str, object]:
+        return fake_omp.read_installed(machine.lock.parent / "installed_plugins.json")
+
+    @staticmethod
+    def registrations(machine: SimpleNamespace) -> list[list[str]]:
+        return fake_omp.read_registrations(machine.state)
+
+    def assert_lock_at_head(self, machine: SimpleNamespace) -> None:
+        self.assertEqual(machine.lock.read_bytes(), self.git(machine.repo, "show", f"HEAD:{FOLLOW.MARKETPLACE_LOCK}"))
+
+    def mode(self, machine: SimpleNamespace, *flags: str, env: dict[str, str] | None = None) -> Run:
+        done = subprocess.run(
+            [sys.executable, str(SCRIPT), "--team-catalog", *flags, "--repo", str(machine.repo)],
+            env=env or machine.env, capture_output=True, text=True, timeout=GUARD, stdin=subprocess.DEVNULL,
+        )
+        return Run(done.returncode, failure_blocks(done.stderr, lambda line: line.startswith(MODE_FAILURE)), done.stdout, done.stderr)
+
+    def follow(self, machine: SimpleNamespace) -> Run:
+        with unittest.mock.patch.dict(os.environ, machine.env, clear=True):
+            why = FOLLOW.install_marketplace_plugins(machine.repo, 60.0)
+        return Run(1 if why else 0, failure_blocks(why, lambda line: not line[:1].isspace()), "", why)
+
+    def run_as(self, kind: str, machine: SimpleNamespace) -> Run:
+        if kind == "F":
+            return self.mode(machine)
+        if kind == "I":
+            return self.mode(machine, "--installer")
+        return self.follow(machine)
+
+    def assert_run(
+        self,
+        machine: SimpleNamespace,
+        run: Run,
+        calls: list[list[str]],
+        installed: Mapping[str, object],
+        registrations: list[tuple[str, str]],
+        failures: tuple[tuple[str, ...], ...] = (),
+    ) -> None:
+        """RUN made exactly CALLS and left INSTALLED and REGISTRATIONS; it reported one failure for
+        each entry of FAILURES, holding each of the entry's words, and exited 1 when there was one,
+        else 0; and the lock holds HEAD's bytes."""
+        self.assertEqual(self.calls(machine), calls, run.context())
+        self.assertEqual(self.installed(machine), installed, run.context())
+        self.assertEqual(self.registrations(machine), [list(entry) for entry in registrations], run.context())
+        self.assertEqual(len(run.failures), len(failures), run.context())
+        for block, words in zip(run.failures, failures):
+            for word in words:
+                self.assertIn(word, block, run.context())
+        self.assertEqual(run.code, 1 if failures else 0, run.context())
+        self.assert_lock_at_head(machine)
+
+    def test_st01_a_change_of_name_moves_the_four_to_the_new_name(self) -> None:
+        for kind in ("F", "I", "follow"):
+            with self.subTest(run=kind):
+                machine = self.machine(at(A), [(A, S)], B)
+                self.assert_run(machine, self.run_as(kind, machine), fake_omp.move_calls(A, B), at(B), [(B, S)])
+
+    def test_st01b_the_pins_exit_1_for_an_install_the_lock_refuses_moves_the_same(self) -> None:
+        machine = self.machine(at(A), [(A, S)], B, lock_refusal_exit=1)
+        self.assert_run(machine, self.mode(machine), fake_omp.move_calls(A, B), at(B), [(B, S)])
+
+    def test_st02_no_change_of_name_fetches_once_and_changes_nothing(self) -> None:
+        for kind in ("F", "I", "follow"):
+            with self.subTest(run=kind):
+                machine = self.machine(at(A), [(A, S)], A)
+                self.assert_run(machine, self.run_as(kind, machine), [LIST, update(A)], at(A), [(A, S)])
+
+    def test_st03_a_failed_add_uninstalls_nothing_and_removes_no_registration(self) -> None:
+        machine = self.machine(at(A), [(A, S)], B, fail={"add": True})
+        self.assert_run(machine, self.mode(machine), [LIST, update(A), ADD], at(A), [(A, S)], ((
+            f"plugin marketplace update {A}",
+            f'Marketplace catalog name changed from "{A}" to "{B}"',
+            f"plugin marketplace add {S}",
+            f"git clone of {S} failed",
+        ),))
+
+    def test_st03b_a_failed_update_and_a_refused_add_uninstall_nothing(self) -> None:
+        machine = self.machine(at(A), [(A, S)], A, fail={"update": [A]})
+        self.assert_run(machine, self.mode(machine), [LIST, update(A), ADD], at(A), [(A, S)], ((
+            f"plugin marketplace update {A}",
+            f"git fetch of {S} failed",
+            f"plugin marketplace add {S}",
+            f'Marketplace "{A}" already exists',
+        ),))
+
+    def test_st04_a_failed_install_keeps_the_old_registration_and_the_other_installs_run(self) -> None:
+        machine = self.machine(at(A), [(A, S)], B, fail={"install": [f"tasks@{B}"]})
+        self.assert_run(
+            machine, self.mode(machine), fake_omp.move_calls(A, B)[:-1], at(B, plugins=("verification", "engineering", "dev-infra")),
+            [(A, S), (B, S)], ((f"tasks@{B}", f"plugin install tasks@{B}"),),
+        )
+
+    def test_st05_the_next_run_ends_the_move_through_the_new_registration(self) -> None:
+        machine = self.machine(at(B, plugins=("verification", "engineering", "dev-infra")), [(A, S), (B, S)], B)
+        self.assert_run(
+            machine, self.mode(machine), [LIST, update(A), update(B), install(f"tasks@{B}"), remove(A)], at(B), [(B, S)],
+        )
+
+    def test_st06_no_registration_and_none_of_the_four_fetches_nothing(self) -> None:
+        machine = self.machine({}, [], B)
+        run = self.mode(machine)
+        self.assert_run(machine, run, [LIST], {}, [])
+        self.assertIn(S, run.out)
+        self.assertIn("nothing fetched", run.out)
+
+    def test_st06i_the_installer_installs_the_four_on_a_machine_with_none(self) -> None:
+        machine = self.machine({}, [], B)
+        self.assert_run(
+            machine, self.mode(machine, "--installer"), [LIST, ADD, LIST, *map(install, fake_omp.ids(B))], at(B), [(B, S)],
+        )
+
+    def test_st07_a_plugin_under_an_unregistered_name_is_moved(self) -> None:
+        machine = self.machine({f"engineering@{A}": "0.2.0"}, [], B)
+        self.assert_run(
+            machine, self.mode(machine), [LIST, ADD, LIST, uninstall(f"engineering@{A}"), *map(install, fake_omp.ids(B))],
+            at(B), [(B, S)],
+        )
+
+    def other_repository_machine(self, catalog: str) -> SimpleNamespace:
+        """ST8's start: v, t and e of the team catalog A, and dev-infra of O, a catalog of another
+        repository; both registered, A first."""
+        installed = {**at(A, plugins=("verification", "tasks", "engineering")), f"dev-infra@{O}": "0.2.0"}
+        return self.machine(installed, [(A, S), (O, fake_omp.OTHER_SOURCE)], catalog)
+
+    def test_st08_a_plugin_of_another_repository_is_not_moved(self) -> None:
+        machine = self.other_repository_machine(A)
+        before = self.installed(machine)
+        self.assert_run(machine, self.mode(machine), [LIST, update(A)], before, [(A, S), (O, fake_omp.OTHER_SOURCE)])
+
+    def test_st08i_the_installer_reports_the_install_a_plugin_of_another_repository_blocks(self) -> None:
+        machine = self.other_repository_machine(A)
+        before = self.installed(machine)
+        self.assert_run(
+            machine, self.mode(machine, "--installer"), [LIST, update(A), install(f"dev-infra@{A}")], before,
+            [(A, S), (O, fake_omp.OTHER_SOURCE)], ((f"dev-infra@{A}", f"plugin install dev-infra@{A}"),),
+        )
+
+    def test_st08b_a_move_keeps_a_plugin_of_another_repository_and_the_old_registration(self) -> None:
+        machine = self.other_repository_machine(B)
+        three = ("verification", "tasks", "engineering")
+        self.assert_run(
+            machine, self.mode(machine),
+            [LIST, update(A), ADD, LIST, *map(uninstall, fake_omp.ids(A, three)), *map(install, fake_omp.ids(B))],
+            {**at(B, plugins=three), f"dev-infra@{O}": "0.2.0"}, [(A, S), (O, fake_omp.OTHER_SOURCE), (B, S)],
+            ((f"dev-infra@{B}", f"plugin install dev-infra@{B}"),),
+        )
+
+    def test_st09_updates_go_in_list_order_until_one_succeeds(self) -> None:
+        machine = self.machine({f"verification@{A}": "0.2.0", **at(B, plugins=FOUR[1:])}, [(A, S), (B, S)], B)
+        self.assert_run(
+            machine, self.mode(machine),
+            [LIST, update(A), update(B), uninstall(f"verification@{A}"), install(f"verification@{B}"), remove(A)],
+            at(B), [(B, S)],
+        )
+
+    def test_st10_a_plugin_whose_old_registration_is_gone_is_moved(self) -> None:
+        installed = {f"engineering@{A}": "0.2.0", **at(B, plugins=("verification", "tasks", "dev-infra"))}
+        machine = self.machine(installed, [(B, S)], B)
+        self.assert_run(
+            machine, self.mode(machine), [LIST, update(B), uninstall(f"engineering@{A}"), install(f"engineering@{B}")],
+            at(B), [(B, S)],
+        )
+
+    def test_st11_a_failed_uninstall_installs_that_plugin_nowhere_and_the_others_go_on(self) -> None:
+        machine = self.machine(at(A), [(A, S)], B, fail={"uninstall": [f"tasks@{A}"]})
+        self.assert_run(
+            machine, self.mode(machine),
+            [
+                LIST, update(A), ADD, LIST, *map(uninstall, fake_omp.ids(A)),
+                *map(install, fake_omp.ids(B, ("verification", "engineering", "dev-infra"))),
+            ],
+            {f"tasks@{A}": "0.2.0", **at(B, plugins=("verification", "engineering", "dev-infra"))},
+            [(A, S), (B, S)], ((f"tasks@{A}", f"plugin uninstall tasks@{A}"),),
+        )
+
+    def test_st12_an_install_that_exits_0_and_installs_nothing_is_a_failure(self) -> None:
+        machine = self.machine(at(A), [(A, S)], B, fail={"install_noop": [f"tasks@{B}"]})
+        self.assert_run(
+            machine, self.mode(machine), fake_omp.move_calls(A, B)[:-1], at(B, plugins=("verification", "engineering", "dev-infra")),
+            [(A, S), (B, S)], ((f"tasks@{B}", f"plugin install tasks@{B}", "exited 0"),),
+        )
+
+    def test_st13_a_moved_plugin_below_the_lock_is_a_failure(self) -> None:
+        below = (f"engineering@{B} is 0.0.9, below 0.1.0",)
+        move = fake_omp.move_calls(A, B)
+        for kind, calls in (("F", move), ("I", [*move, upgrade(f"engineering@{B}")])):
+            with self.subTest(run=kind):
+                machine = self.machine(at(A), [(A, S)], B, versions={"engineering": "0.0.9"})
+                self.assert_run(
+                    machine, self.run_as(kind, machine), calls, {**at(B), f"engineering@{B}": "0.0.9"}, [(B, S)], (below,),
+                )
+
+    def test_st14_a_plugin_below_the_lock_is_upgraded_by_the_installer_and_follow_only(self) -> None:
+        for kind in ("F", "I", "follow"):
+            with self.subTest(run=kind):
+                machine = self.machine({**at(A), f"engineering@{A}": "0.0.5"}, [(A, S)], A)
+                run = self.run_as(kind, machine)
+                if kind == "F":
+                    self.assert_run(machine, run, [LIST, update(A)], {**at(A), f"engineering@{A}": "0.0.5"}, [(A, S)])
+                else:
+                    self.assert_run(machine, run, [LIST, update(A), upgrade(f"engineering@{A}")], at(A), [(A, S)])
+
+    def test_st15_a_second_run_after_the_move_changes_nothing(self) -> None:
+        for kind in ("F", "I"):
+            with self.subTest(run=kind):
+                machine = self.machine(at(B), [(B, S)], B)
+                self.assert_run(machine, self.run_as(kind, machine), [LIST, update(B)], at(B), [(B, S)])
+
+    def test_st16_follows_run_puts_back_a_lock_a_killed_run_left(self) -> None:
+        machine = self.machine(at(A), [(A, S)], A)
+        killed = json.loads(fake_omp.TEAM_LOCK)
+        del killed["plugins"]["tasks"]
+        machine.lock.write_text(json.dumps(killed, indent=2) + "\n")
+        self.assert_run(machine, self.follow(machine), [LIST, update(A)], at(A), [(A, S)])
+
+    def test_st16b_the_syncs_call_keeps_an_uncommitted_edit_of_the_lock_when_nothing_moves(self) -> None:
+        machine = self.machine(at(A), [(A, S)], A)
+        edited = fake_omp.TEAM_LOCK.replace('"settings": {}', '"settings": {"edited": "by a session"}').encode()
+        self.assertNotEqual(edited, fake_omp.TEAM_LOCK.encode())
+        machine.lock.write_bytes(edited)
+        run = self.mode(machine)
+        self.assertEqual(self.calls(machine), [LIST, update(A)], run.context())
+        self.assertEqual((run.code, run.failures), (0, []), run.context())
+        self.assertEqual(self.installed(machine), at(A))
+        self.assertEqual(machine.lock.read_bytes(), edited)
+
+    def test_st17_sigterm_kills_the_running_command_and_puts_the_lock_back(self) -> None:
+        marker = self.root / "install.pid"
+        machine = self.machine(
+            at(A), [(A, S)], B, sleep={"args": install(f"tasks@{B}"), "seconds": 3 * GUARD, "marker": str(marker)},
+        )
+        proc = subprocess.Popen(
+            [sys.executable, str(SCRIPT), "--team-catalog", "--repo", str(machine.repo)],
+            env=machine.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True,
+        )
+        fake = 0
+        try:
+            deadline = time.monotonic() + GUARD
+            while not marker.exists() and proc.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if not marker.exists():
+                proc.kill()
+                out, err = proc.communicate()
+                self.fail(f"the mode never reached the second install (exit {proc.returncode}):\n{out}{err}")
+            fake = json.loads(marker.read_text())["pid"]
+            proc.send_signal(signal.SIGTERM)
+            out, err = proc.communicate(timeout=GUARD)
+        finally:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.communicate()
+        try:
+            self.assertEqual(proc.returncode, 143, out + err)
+            with self.assertRaises(ProcessLookupError, msg="the fake's process group outlived the mode"):
+                os.killpg(fake, 0)
+        finally:
+            try:
+                os.killpg(fake, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.assertEqual(self.calls(machine), fake_omp.move_calls(A, B)[:10])
+        self.assert_lock_at_head(machine)
+
+    def test_st18_a_registration_spelled_as_a_url_is_the_team_catalog(self) -> None:
+        machine = self.machine(at(A), [(A, "https://github.com/theorem-labs/verification-skills.git")], B)
+        self.assert_run(machine, self.mode(machine), fake_omp.move_calls(A, B), at(B), [(B, S)])
+
+    def test_st19_a_legion_machine_profile_stops_the_syncs_call_only(self) -> None:
+        profile = self.config / "omp" / "profile"
+        profile.parent.mkdir(parents=True)
+        profile.write_text("legion\n")
+        with self.subTest(run="F"):
+            machine = self.machine(at(A), [(A, S)], A)
+            self.assert_run(machine, self.mode(machine), [], at(A), [(A, S)], (("legion",),))
+        with self.subTest(run="I"):
+            machine = self.machine(at(A), [(A, S)], A)
+            self.assert_run(machine, self.mode(machine, "--installer"), [LIST, update(A)], at(A), [(A, S)])
+
+    def test_st20_the_syncs_call_clears_the_profile_and_the_installers_keeps_it(self) -> None:
+        agent = str(self.root / "pbc-agent")
+        profile = {"OMP_PROFILE": "pbc", "PI_PROFILE": "pbc", "PI_CODING_AGENT_DIR": agent}
+        for kind, flags in (("F", ()), ("I", ("--installer",))):
+            with self.subTest(run=kind):
+                machine = self.machine(at(A), [(A, S)], A)
+                self.assert_run(machine, self.mode(machine, *flags, env={**machine.env, **profile}), [LIST, update(A)], at(A), [(A, S)])
+                omp = machine.repo / "shims" / "omp" if kind == "F" else self.fakebin / "omp"
+                for record in fake_omp.read_calls(machine.log):
+                    self.assertEqual(record["path"], str(omp))
+                    self.assertEqual(record["has_omp_profile"], kind == "I")
+                    self.assertEqual(record["has_pi_profile"], kind == "I")
+                    self.assertEqual(record["agent_dir"], agent if kind == "I" else None)
+
+    def test_st21_a_list_output_of_no_known_shape_is_a_failure(self) -> None:
+        for text in ("omp: the registry is busy\n", ""):
+            with self.subTest(text=text):
+                machine = self.machine(at(A), [(A, S)], A, list_output=text)
+                self.assert_run(machine, self.mode(machine), [LIST], at(A), [(A, S)], (("plugin marketplace list",),))
+
+    def test_st22_without_a_lock_the_mode_says_so_and_runs_nothing(self) -> None:
+        machine = self.machine(at(A), [(A, S)], B)
+        machine.lock.unlink()
+        run = self.mode(machine)
+        self.assertEqual((run.code, run.failures), (0, []), run.context())
+        self.assertEqual(self.calls(machine), [])
+        self.assertIn("team catalog:", run.out)
+        self.assertFalse(machine.lock.exists())
+
+    def test_st23_a_spent_budget_starts_no_more_commands_and_the_lock_is_put_back(self) -> None:
+        marker = self.root / "install.pid"
+        machine = self.machine(at(A), [(A, S)], B, sleep={"args": install(f"tasks@{B}"), "seconds": 3 * GUARD, "marker": str(marker)})
+        started = time.monotonic()
+        with unittest.mock.patch.object(FOLLOW, "MARKETPLACE_TIMEOUT", 10.0):
+            run = self.follow(machine)
+        # Without the budget, the install that sleeps would run to its own limit.
+        self.assertLess(time.monotonic() - started, FOLLOW.MARKETPLACE_COMMAND_TIMEOUT)
+        self.assertEqual(self.calls(machine), fake_omp.move_calls(A, B)[:10], run.context())
+        self.assertTrue([block for block in run.failures if "budget" in block], run.context())
+        self.assertEqual(run.code, 1)
+        self.assertEqual(self.installed(machine), at(B, plugins=("verification",)))
+        self.assert_lock_at_head(machine)
+
+
+class TeamCatalogFollow(MarketplaceFixture):
+    """The team catalog step through follow's run (FI1 to FI5 of INFRA-5366's plan), on the fixture
+    of MarketplaceFixture."""
+
+    def installed(self) -> dict[str, object]:
+        return fake_omp.read_installed(self.installed_path)
+
+    def team_machine(self, installed: dict[str, str], registrations: list[tuple[str, str]], catalog: str, **state: object) -> None:
+        """~/.dotfiles at a new main whose lock holds the four at 0.1.0 and core-ops at 2.0.0; Oh My
+        Pi holding INSTALLED and core-ops@core-ops at 2.0.0, with REGISTRATIONS and core-ops's; the
+        team catalog now named CATALOG; STATE more of the fake's state."""
+        wanted = json.loads(fake_omp.TEAM_LOCK)
+        wanted["plugins"]["core-ops"] = {"version": "2.0.0", "enabledFeatures": None, "enabled": True}
+        self.commit_wanted_lock(wanted)
+        records = {**installed, "core-ops@core-ops": "2.0.0"}
+        fake_omp.write_installed(self.installed_path, records)
+        fake_omp.write_state(self.fake_state, {
+            "registrations": [*map(list, registrations), ["core-ops", "theorem-labs/core-ops"]],
+            "catalogs": {S: {"name": catalog}},
+            **state,
+        })
+
+    def test_fi1_follow_moves_the_four_and_its_tools_condition_clears(self) -> None:
+        self.team_machine(at(A), [(A, S)], B, fail={"add": True})
+        opened = self.run_follow()
+        self.assertEqual(len(opened), 1, opened)
+        self.assertIn("TOOLS NOT INSTALLED", opened[0])
+        self.assertIn(f"plugin marketplace add {S}", opened[0])
+        self.assertEqual(self.calls(), [LIST, update(A), ADD])
+        self.assertEqual(self.installed(), {**at(A), "core-ops@core-ops": "2.0.0"})
+        state = fake_omp.read_state(self.fake_state)
+        del state["fail"]
+        fake_omp.write_state(self.fake_state, state)
+
+        cleared = self.run_follow(now=1_000_600.0)
+        self.assertEqual(len(cleared), 1, cleared)
+        self.assertIn("TOOLS NOT INSTALLED cleared", cleared[0])
+        self.assertEqual(self.calls()[3:], fake_omp.move_calls(A, B))
+        self.assertEqual(self.installed(), {**at(B), "core-ops@core-ops": "2.0.0"})
+        self.assertEqual(self.state_data()["tools_ok_head"], self.target)
+        self.assert_clean_lock()
+
+    def test_fi2_follow_fetches_the_catalog_once_with_no_change_of_name(self) -> None:
+        self.team_machine(at(A), [(A, S)], A)
+        self.assertEqual(self.run_follow(), [])
+        self.assertEqual(self.calls(), [LIST, update(A)])
+        self.assertEqual(self.state_data()["tools_ok_head"], self.target)
+        self.assert_clean_lock()
+
+    def test_fi3_a_plugin_of_the_team_catalog_outside_the_four_gets_no_second_update(self) -> None:
+        # The fixture's catalog of the team source is still named verification-skills, so nothing
+        # moves, and dev-infra (one of the four) is upgraded by the step, verification-skills (not
+        # one of the four) by the loop, with no second update of the catalog the step fetched.
+        self.take_upstream()
+        fake_omp.write_state(self.fake_state, {"registrations": [
+            ["verification-skills", S],
+            ["core-ops", "theorem-labs/core-ops"],
+            ["claude-plugins-official", "anthropics/claude-plugins-official"],
+        ]})
+        self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
+        self.assertEqual(self.calls(), [
+            LIST,
+            update("verification-skills"),
+            upgrade("dev-infra@verification-skills"),
+            upgrade("verification-skills@verification-skills"),
+            update("core-ops"),
+            upgrade("core-ops@core-ops"),
+        ])
+        for name in ("dev-infra", "verification-skills", "core-ops"):
+            self.assertEqual(self.version(name), "2.0.0")
+        self.assert_clean_lock()
+
+    def test_fi4_a_failed_install_is_follows_tools_condition(self) -> None:
+        self.team_machine(at(A), [(A, S)], B, fail={"install": [f"tasks@{B}"]})
+        messages = self.run_follow()
+        self.assertEqual(len(messages), 1, messages)
+        self.assertIn("TOOLS NOT INSTALLED", messages[0])
+        self.assertIn(f"`omp plugin install tasks@{B}`", messages[0])
+        self.assertEqual(self.calls(), fake_omp.move_calls(A, B)[:-1])
+        self.assertNotEqual(self.state_data().get("tools_ok_head"), self.target)
+        self.assert_clean_lock()
+
+    def test_fi5_a_plugin_of_another_repository_gets_its_catalogs_update_and_upgrade(self) -> None:
+        installed = {**at(A, plugins=("verification", "tasks", "engineering")), f"dev-infra@{O}": "0.0.5"}
+        self.team_machine(installed, [(A, S), (O, fake_omp.OTHER_SOURCE)], A)
+        self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
+        self.assertEqual(self.calls(), [LIST, update(A), update(O), upgrade(f"dev-infra@{O}")])
+        self.assertEqual(self.installed()[f"dev-infra@{O}"], "2.0.0")
+        self.assert_clean_lock()
 
 
 if __name__ == "__main__":

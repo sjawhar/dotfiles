@@ -19,6 +19,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
+from scripts.tests import fake_omp
 from scripts.tests.test_dotfiles_follow import (
     FOLLOW,
     REGISTRY_V1,
@@ -32,36 +33,6 @@ from scripts.tests.test_dotfiles_sync import real_binary
 
 REAL_GIT = real_binary("git")
 REAL_JJ = real_binary("jj")
-
-
-FAKE_OMP = r'''#!/usr/bin/env python3
-import json
-import os
-import sys
-from pathlib import Path
-
-repo = Path(__file__).resolve().parents[1]
-args = sys.argv[1:]
-record = {
-    "args": args,
-    "has_omp_profile": "OMP_PROFILE" in os.environ,
-    "has_pi_profile": "PI_PROFILE" in os.environ,
-    "agent_dir": os.environ.get("PI_CODING_AGENT_DIR"),
-}
-with Path(os.environ["FAKE_OMP_LOG"]).open("a") as log:
-    log.write(json.dumps(record) + "\n")
-if os.environ.get("OMP_PROFILE") == "legion" or os.environ.get("PI_PROFILE") == "legion":
-    sys.exit(1)
-if args[:3] == ["plugin", "marketplace", "update"]:
-    sys.exit(0)
-if args[:2] == ["plugin", "upgrade"]:
-    installed_path = repo / "omp/plugins/installed_plugins.json"
-    installed = json.loads(installed_path.read_text())
-    installed["plugins"][args[2]][0]["version"] = "2.0.0"
-    installed_path.write_text(json.dumps(installed))
-    sys.exit(0)
-sys.exit(99)
-'''
 
 
 class JjHarness(Harness):
@@ -82,10 +53,7 @@ class JjHarness(Harness):
         linker = self.upstream / "scripts/omp-link-rules"
         linker.write_text("#!/bin/sh\nexit 0\n")
         linker.chmod(linker.stat().st_mode | stat.S_IEXEC)
-        omp = self.upstream / "shims/omp"
-        omp.parent.mkdir()
-        omp.write_text(FAKE_OMP)
-        omp.chmod(omp.stat().st_mode | stat.S_IEXEC)
+        fake_omp.write(self.upstream / "shims/omp")
         (self.upstream / "omp/plugins/omp-plugins.lock.json").write_text(
             json.dumps({"plugins": {"dev-infra": {"version": "2.0.0"}}}) + "\n"
         )
@@ -105,6 +73,14 @@ class JjHarness(Harness):
         (self.repo / "omp/plugins/installed_plugins.json").write_text(json.dumps(installed))
         self.omp_log = self.home.parent / "omp.log"
         os.environ["FAKE_OMP_LOG"] = str(self.omp_log)
+        # The team catalog's one registration, still named verification-skills, so its step fetches
+        # it and moves nothing; an upgrade installs 2.0.0, the lock's entry.
+        state = self.home.parent / "omp-state.json"
+        os.environ["FAKE_OMP_STATE"] = str(state)
+        fake_omp.write_state(state, {
+            "registrations": [["verification-skills", fake_omp.TEAM_SOURCE]],
+            "version": "2.0.0",
+        })
         self.local_a = self.repo / "secrets.human.d/LOCAL_A.env"
         self.local_b = self.repo / "LOCAL_B.env"
         self.local_a.parent.mkdir()
@@ -124,9 +100,7 @@ class JjHarness(Harness):
         return {line for line in self.jj("diff", "-r", "@", "--name-only").splitlines() if line}
 
     def omp_calls(self) -> list[dict]:
-        if not self.omp_log.exists():
-            return []
-        return [json.loads(line) for line in self.omp_log.read_text().splitlines()]
+        return fake_omp.read_calls(self.omp_log)
 
     def watch_git_pushes(self) -> Path:
         push_log = self.home.parent / "git-push.log"
@@ -180,6 +154,7 @@ class JjFollow(JjHarness):
         self.assertIn("install", self.fake_log.read_text())
         self.assertIn("bun install --frozen-lockfile", self.fake_log.read_text())
         self.assertEqual([call["args"] for call in self.omp_calls()], [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "dev-infra@verification-skills"],
         ])
@@ -361,7 +336,7 @@ class JjSyncFailures(JjHarness):
         self.assertEqual(self.run_follow(), [])
 
         calls = self.omp_calls()
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
         for call in calls:
             self.assertFalse(call["has_omp_profile"])
             self.assertFalse(call["has_pi_profile"])

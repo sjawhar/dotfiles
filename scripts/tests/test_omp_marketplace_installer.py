@@ -18,10 +18,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from scripts.tests import fake_omp
 from scripts.tests.marketplace_version_cases import CASES, EMPTY_CASES, MISSING, RAW_CASES
 
 
 INSTALLER = Path(__file__).resolve().parents[2] / "installers/omp.sh"
+FOLLOW_SCRIPT = Path(__file__).resolve().parents[2] / "scripts/dotfiles-follow"
 PLUGIN = "engineering@agent-skills"
 MARKETPLACE = "theorem-labs/verification-skills"
 CATALOG = "agent-skills"
@@ -31,6 +33,7 @@ FUNCTION_NAMES = (
     "marketplace_lock_version",
     "marketplace_version_at_least",
     "install_marketplace_plugin",
+    "install_team_catalog",
 )
 
 FAKE_OMP = r'''#!/usr/bin/env bash
@@ -655,6 +658,145 @@ class OmpMarketplaceInstaller(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, "no\n", result.stderr)
+
+
+# The team catalog's name after the rename of dispatch://INFRA-4807, as fake_omp names it.
+# MARKETPLACE is the catalog's source and CATALOG its name before.
+NEW = fake_omp.NEW_NAME
+
+
+class TeamCatalogCall(unittest.TestCase):
+    """installers/omp.sh's call of the team catalog step (IN1 to IN4 of INFRA-5366's plan): the
+    extracted install_team_catalog under `set -euo pipefail`, with DOTFILES_DIR a git repository
+    that holds a copy of the real scripts/dotfiles-follow and the lock, and fake_omp's fake omp on
+    PATH."""
+
+    def setUp(self) -> None:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        self.root = Path(temp_dir.name)
+        self.functions = extract_functions(self.root)
+        self.bin = fake_omp.write(self.root / "bin" / "omp").parent
+        self.dotfiles = self.root / "dotfiles"
+        follow = self.dotfiles / "scripts" / "dotfiles-follow"
+        follow.parent.mkdir(parents=True)
+        follow.write_bytes(FOLLOW_SCRIPT.read_bytes())
+        follow.chmod(FOLLOW_SCRIPT.stat().st_mode)
+        self.lock_path = self.dotfiles / "omp/plugins/omp-plugins.lock.json"
+        self.lock_path.parent.mkdir(parents=True)
+        self.lock_path.write_text(fake_omp.TEAM_LOCK)
+        (self.dotfiles / ".gitignore").write_text("omp/plugins/installed_plugins.json\n")
+        self.installed_path = self.dotfiles / "omp/plugins/installed_plugins.json"
+        self.state_path = self.root / "omp-state.json"
+        self.log_path = self.root / "omp-calls.jsonl"
+        home = self.root / "home"
+        tmp = self.root / "tmp"
+        home.mkdir()
+        tmp.mkdir()
+        self.env = {
+            "HOME": str(home),
+            "DOTFILES_DIR": str(self.dotfiles),
+            "PATH": f"{self.bin}:/usr/local/bin:/usr/bin:/bin",
+            "TMPDIR": str(tmp),
+            "FAKE_OMP_STATE": str(self.state_path),
+            "FAKE_OMP_LOG": str(self.log_path),
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@example.com",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@example.com",
+        }
+        for args in (("init", "-q"), ("add", "-A"), ("commit", "-q", "-m", "dotfiles")):
+            subprocess.run(["git", "-C", str(self.dotfiles), *args], env=self.env, check=True, capture_output=True)
+
+    def machine(self, installed: dict[str, str], registrations: list[list[str]], catalog: str, **state: object) -> None:
+        fake_omp.write_installed(self.installed_path, installed)
+        fake_omp.write_state(self.state_path, {
+            "registrations": registrations,
+            "catalogs": {MARKETPLACE: {"name": catalog}},
+            **state,
+        })
+
+    def install(self) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", "-c", 'set -euo pipefail; source "$1"; install_team_catalog; echo INSTALLER-STEP-RETURNED', "_", str(self.functions)],
+            capture_output=True,
+            text=True,
+            env=self.env,
+            check=False,
+            timeout=120,
+        )
+
+    def calls(self) -> list[list[str]]:
+        return fake_omp.read_args(self.log_path)
+
+    def installed(self) -> dict[str, object]:
+        return fake_omp.read_installed(self.installed_path)
+
+    def registrations(self) -> list[list[str]]:
+        return fake_omp.read_registrations(self.state_path)
+
+    def assert_returned(self, result: subprocess.CompletedProcess[str]) -> None:
+        """install.sh goes on after the step, and the lock holds its committed bytes."""
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1:], ["INSTALLER-STEP-RETURNED"], result.stdout + result.stderr)
+        self.assertEqual(self.lock_path.read_text(), fake_omp.TEAM_LOCK)
+
+    def test_in1_a_change_of_name_moves_the_four(self) -> None:
+        self.machine({ident: "0.2.0" for ident in fake_omp.ids(CATALOG)}, [[CATALOG, MARKETPLACE]], NEW)
+
+        result = self.install()
+
+        self.assert_returned(result)
+        self.assertEqual(self.calls(), fake_omp.move_calls(CATALOG, NEW))
+        self.assertEqual(self.installed(), {ident: "0.2.0" for ident in fake_omp.ids(NEW)})
+        self.assertEqual(self.registrations(), [[NEW, MARKETPLACE]])
+        self.assertEqual(result.stderr, "")
+
+    def test_in2_a_failed_install_is_reported_and_the_installer_goes_on(self) -> None:
+        self.machine(
+            {ident: "0.2.0" for ident in fake_omp.ids(CATALOG)}, [[CATALOG, MARKETPLACE]], NEW, fail={"install": [f"tasks@{NEW}"]},
+        )
+
+        result = self.install()
+
+        self.assert_returned(result)
+        lines = result.stderr.splitlines()
+        self.assertTrue(
+            [line for line in lines if line.startswith("dotfiles-follow: team catalog: ") and f"plugin install tasks@{NEW}" in line],
+            result.stderr,
+        )
+        self.assertTrue([line for line in lines if line.startswith("omp: the team catalog step exited 1")], result.stderr)
+        others = ("verification", "engineering", "dev-infra")
+        self.assertEqual(self.installed(), {ident: "0.2.0" for ident in fake_omp.ids(NEW, others)})
+        self.assertEqual(self.registrations(), [[CATALOG, MARKETPLACE], [NEW, MARKETPLACE]])
+
+    def test_in3_a_home_with_none_of_the_four_gets_all_four(self) -> None:
+        self.machine({}, [], NEW)
+
+        result = self.install()
+
+        self.assert_returned(result)
+        self.assertEqual(self.calls(), [
+            ["plugin", "marketplace", "list"],
+            ["plugin", "marketplace", "add", MARKETPLACE],
+            ["plugin", "marketplace", "list"],
+            *(["plugin", "install", ident] for ident in fake_omp.ids(NEW)),
+        ])
+        self.assertEqual(self.installed(), {ident: "0.2.0" for ident in fake_omp.ids(NEW)})
+        self.assertEqual(self.registrations(), [[NEW, MARKETPLACE]])
+        self.assertEqual(result.stderr, "")
+
+    def test_in4_no_change_of_name_fetches_the_catalog_once(self) -> None:
+        self.machine({ident: "0.2.0" for ident in fake_omp.ids(CATALOG)}, [[CATALOG, MARKETPLACE]], CATALOG)
+
+        result = self.install()
+
+        self.assert_returned(result)
+        self.assertEqual(self.calls(), [["plugin", "marketplace", "list"], ["plugin", "marketplace", "update", CATALOG]])
+        self.assertEqual(self.installed(), {ident: "0.2.0" for ident in fake_omp.ids(CATALOG)})
+        self.assertEqual(result.stderr, "")
 
 
 if __name__ == "__main__":

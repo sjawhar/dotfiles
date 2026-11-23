@@ -27,7 +27,8 @@ import unittest
 from collections.abc import Iterator
 from pathlib import Path
 
-from scripts.tests.test_dotfiles_follow import REGISTRY_COPY, REGISTRY_V1, REGISTRY_V2, RegistryCopy, add_registry_render
+from scripts.tests import fake_omp
+from scripts.tests.test_dotfiles_follow import REGISTRY_COPY, REGISTRY_V1, REGISTRY_V2, SCRIPT, RegistryCopy, add_registry_render
 
 ROOT = Path(__file__).resolve().parents[2]
 SYNC = ROOT / "scripts" / "dotfiles-sync"
@@ -224,9 +225,9 @@ class DotfilesTools(ToolsStep):
 
     def test_case_03b_remote_ssh_limit_covers_the_move_the_lock_wait_and_every_command(self) -> None:
         # The ssh limit is the remote host's whole budget: 180 s move, 300 s sync-lock wait, and
-        # for each of the four tools commands (omp-link-rules, the registry render, `mise install`,
-        # the Bun install) its limit plus its 10 s kill grace. Left at the move's 180 s, a remote
-        # install longer than that is killed mid-download.
+        # for each of the five tools commands (omp-link-rules, the registry render, `mise install`,
+        # the Bun install, `dotfiles-follow --team-catalog`) its limit plus its 10 s kill grace.
+        # Left at the move's 180 s, a remote install longer than that is killed mid-download.
         self._install_ssh()
         ssh = self.root / "bin" / "ssh"
         ssh.rename(self.root / "bin" / "ssh-step")
@@ -235,7 +236,7 @@ class DotfilesTools(ToolsStep):
             'echo >> "$SSH_RECORD.parent"\nexec "$(dirname "$0")/ssh-step" "$@"\n'
         )
         ssh.chmod(0o755)
-        for limit, outer in ((None, 2920), ("5", 540)):
+        for limit, outer in ((None, 3530), ("5", 555)):
             with self.subTest(DOTFILES_TOOLS_TIMEOUT=limit):
                 Path(f"{self.ssh_record}.parent").write_text("")
                 env = dict(self.env)
@@ -1245,6 +1246,143 @@ class KnivesRegistry(RegistryCopy, ToolsStep):
             self.assertEqual(len(self.calls("mise")), 1, self.records())
             self.assertEqual(self.calls("bun"), [], self.records())
             self.assert_render_failed(result)
+
+
+TEAM_CATALOG = "dotfiles-follow --team-catalog"
+# The team catalog of INFRA-5366's plan, as fake_omp names it.
+TEAM_SOURCE = fake_omp.TEAM_SOURCE
+OLD = fake_omp.OLD_NAME
+NEW = fake_omp.NEW_NAME
+FOUR = fake_omp.TEAM_PLUGINS
+
+
+class TeamCatalogTools(ToolsStep):
+    """The sync's tools step runs the team catalog step for ~/.dotfiles after Bun (SY1 to SY6 of
+    INFRA-5366's plan). Main holds the real scripts/dotfiles-follow (copied as add_registry_render
+    copies the render), fake_omp's fake as shims/omp and fake_omp.TEAM_LOCK; Oh My Pi holds the four
+    under the old name while the catalog is now named anew (ST1's start)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        follow = self.upstream / "scripts" / "dotfiles-follow"
+        follow.parent.mkdir(parents=True, exist_ok=True)
+        follow.write_bytes(SCRIPT.read_bytes())
+        follow.chmod(SCRIPT.stat().st_mode)
+        fake_omp.write(self.upstream / "shims" / "omp")
+        (self.upstream / "omp" / "plugins" / "omp-plugins.lock.json").write_text(fake_omp.TEAM_LOCK)
+        gitignore = self.upstream / ".gitignore"
+        gitignore.write_text(gitignore.read_text() + "omp/plugins/installed_plugins.json\n")
+        self.commit_upstream("the team catalog step")
+        # The installed records are this machine's, never a commit's, and the checkout is still on
+        # the base commit, which ignores nothing.
+        exclude = self.checkout / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open("a") as handle:
+            handle.write("/omp/plugins/installed_plugins.json\n")
+        self.installed_path = self.checkout / "omp" / "plugins" / "installed_plugins.json"
+        self.installed_path.parent.mkdir(parents=True, exist_ok=True)
+        fake_omp.write_installed(self.installed_path, {ident: "0.2.0" for ident in fake_omp.ids(OLD)})
+        self.omp_state = self.root / "omp-state.json"
+        self.omp_log = self.root / "omp-calls.jsonl"
+        self.write_omp_state()
+        self.env.update(FAKE_OMP_STATE=str(self.omp_state), FAKE_OMP_LOG=str(self.omp_log))
+
+    def write_omp_state(self, **state: object) -> None:
+        fake_omp.write_state(self.omp_state, {
+            "registrations": [[OLD, TEAM_SOURCE]],
+            "catalogs": {TEAM_SOURCE: {"name": NEW}},
+            **state,
+        })
+
+    def omp_calls(self) -> list[list[str]]:
+        return fake_omp.read_args(self.omp_log)
+
+    def installed(self) -> dict[str, object]:
+        return fake_omp.read_installed(self.installed_path)
+
+    def registrations(self) -> list[list[str]]:
+        return fake_omp.read_registrations(self.omp_state)
+
+    def first_record(self, tool: str) -> int:
+        return next(index for index, line in enumerate(self.records()) if line.startswith(f"{tool} "))
+
+    def assert_on_main(self) -> None:
+        self.assertEqual(
+            self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"),
+            self.jj("log", "-r", "main@origin", "--no-graph", "-T", "commit_id"),
+        )
+
+    def test_sy1_a_sync_moves_the_four_after_bun(self) -> None:
+        result = self.sync("local")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.omp_calls(), fake_omp.move_calls(OLD, NEW), result.stdout + result.stderr)
+        self.assertGreater(self.first_record("omp"), self.first_record("bun"), self.records())
+        self.assertIn(f"tools: `{TEAM_CATALOG}` passed in {self.checkout}\n", result.stdout)
+        self.assertEqual(self.installed(), {f"{plugin}@{NEW}": "0.2.0" for plugin in FOUR})
+        self.assertEqual(self.registrations(), [[NEW, TEAM_SOURCE]])
+        self.assertEqual((self.checkout / "omp" / "plugins" / "omp-plugins.lock.json").read_text(), fake_omp.TEAM_LOCK)
+
+    def test_sy2_a_failed_install_fails_the_sync_and_keeps_the_move(self) -> None:
+        self.write_omp_state(fail={"install": [f"tasks@{NEW}"]})
+
+        result = self.sync("local")
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            f"dotfiles-sync: tools step: `{TEAM_CATALOG}` in {self.checkout} exited 1\nlast lines of its output:\n",
+            result.stderr,
+        )
+        report = result.stderr.split(f"`{TEAM_CATALOG}` in {self.checkout} exited 1", 1)[1]
+        self.assertIn(f"plugin install tasks@{NEW}", report)
+        self.assert_on_main()
+        self.assertEqual(self.registrations(), [[OLD, TEAM_SOURCE], [NEW, TEAM_SOURCE]])
+        self.assertEqual(self.omp_calls(), fake_omp.move_calls(OLD, NEW)[:-1])
+
+    def test_sy3_a_checkout_that_is_not_home_dotfiles_fetches_nothing(self) -> None:
+        clone = self.root / "clone"
+        self.run_ok("git", "clone", "-q", str(self.origin), str(clone))
+        self._write_standin("mise", clone / "bin" / "mise")
+
+        result = self._run(SYNC, "--tools", str(clone))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"tools: {clone} is not ~/.dotfiles; team catalog not fetched\n", result.stdout)
+        self.assertEqual(self.omp_calls(), [])
+        self.assert_tools_ran()
+
+    def test_sy4_a_checkout_without_dotfiles_follow_fetches_nothing(self) -> None:
+        (self.upstream / "scripts" / "dotfiles-follow").unlink()
+        self.commit_upstream("no dotfiles-follow")
+
+        result = self.sync("local")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"tools: {self.checkout} has no scripts/dotfiles-follow; team catalog not fetched\n", result.stdout)
+        self.assertEqual(self.omp_calls(), [])
+        self.assert_tools_ran()
+
+    def test_sy5_a_failed_bun_runs_no_omp_command(self) -> None:
+        result = self.sync("local", env={**self.env, "FAKE_BUN_RC": "8"})
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("`bun install --frozen-lockfile`", result.stderr)
+        self.assertIn("exited 8", result.stderr)
+        self.assertEqual(self.omp_calls(), [])
+        self.assertEqual(self.installed(), {f"{plugin}@{OLD}": "0.2.0" for plugin in FOUR})
+
+    def test_sy6_without_a_plugin_manifest_the_step_runs_after_mise(self) -> None:
+        (self.upstream / "omp" / "plugins" / "package.json").unlink()
+        self.commit_upstream("no plugin manifest")
+
+        result = self.sync("local")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.calls("bun"), [], self.records())
+        self.assertEqual(self.omp_calls(), fake_omp.move_calls(OLD, NEW), result.stdout + result.stderr)
+        self.assertGreater(self.first_record("omp"), self.first_record("mise"), self.records())
+        self.assertIn(f"tools: `{TEAM_CATALOG}` passed in {self.checkout}\n", result.stdout)
+        self.assertEqual(self.installed(), {f"{plugin}@{NEW}": "0.2.0" for plugin in FOUR})
 
 
 def tools_functions() -> str:

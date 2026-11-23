@@ -790,10 +790,16 @@ class InstallLock(unittest.TestCase):
         lock_entry = json.dumps({"plugins": {"l10-plugin": {"version": "2.0.0"}}}) + "\n"
         (plugins / "omp-plugins.lock.json").write_text(lock_entry, encoding="utf-8")
         tool(self.bin / "bun", "bun")
+        # The marketplace step first lists the registrations (`plugin marketplace list`): the
+        # stand-in prints Oh My Pi's text for one registration of the team catalog (a captured
+        # fixture), so the step also fetches that catalog; l10-plugin@l10-market is not one of its
+        # plugins.
+        registrations = Path(__file__).resolve().with_name("omp-marketplace-list") / "one.txt"
+        list_registrations = f'[[ "${{1-}} ${{2-}} ${{3-}}" != "plugin marketplace list" ]] || cat {shlex.quote(str(registrations))}'
         # The step reads the installed record again after `plugin upgrade`, and a record still below
         # the lock fails it before the pin check; so the upgrade raises it, as the real one does.
         raise_record = f'[[ "${{1-}} ${{2-}}" != "plugin upgrade" ]] || printf %s {shlex.quote(record("2.0.0"))} > {shlex.quote(str(installed))}'
-        tool(self.checkout / "shims" / "omp", "marketplace", raise_record)
+        tool(self.checkout / "shims" / "omp", "marketplace", f"{list_registrations}\n{raise_record}")
         tool(self.checkout / "devbox" / "sami-devbox-check", "pin check")
         # After its omp calls follow restores the lock with `git checkout`. This git fails as git
         # does outside a repository, so follow writes the lock back itself and no git runs.

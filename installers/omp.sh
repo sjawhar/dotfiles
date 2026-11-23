@@ -112,9 +112,11 @@ rm -rf "${DOTFILES_DIR}/omp/plugins/node_modules/legion"
 # was before this rule.
 # The install record (installed_plugins.json) is machine-local; the lock entry is not, and omp
 # refuses to install a plugin whose name the lock already holds ("Runtime package name ...
-# conflicts") while exiting 0. So on a machine without the install, the stale lock entry is
-# dropped first, and after the omp calls the committed bytes are put back, whatever omp wrote, so
-# the checkout stays clean. The lock changes only by a commit.
+# conflicts"), exiting 1 at the pinned version. So on a machine without the install, the stale lock
+# entry is dropped first, and after the omp calls the committed bytes are put back, whatever omp
+# wrote, so the checkout stays clean. The lock changes only by a commit. This installer and
+# scripts/dotfiles-follow judge whether an install took by installed_plugins.json, whatever omp's
+# exit status.
 # Null, missing, and empty-string values print nothing. A dotted-number string prints raw. Another
 # string has a str: prefix and its JSON text; a non-string has a json: prefix and its JSON text.
 # The prefix keeps the value's kind clear, and JSON text keeps command substitution from cutting a
@@ -184,17 +186,9 @@ install_marketplace_plugin() {
     elif [ -n "$want" ] && ! marketplace_version_at_least "$have" "$want"; then
         { omp plugin marketplace update "${plugin#*@}" && omp plugin upgrade "$plugin"; } || rc=$?
     else
-        # The catalog is checked even when the version is already at or above the lock's entry.
-        # Until 2026-11-07 the update ran ONLY on a mismatch, so a marketplace that had stopped
-        # resolving was invisible on any machine whose versions happened to agree:
-        # theorem-labs/verification-skills renamed its catalog to `agent-skills` and split its
-        # plugin in three, `marketplace update` began refusing outright ("Marketplace catalog name
-        # changed ... Remove and re-add"), and sami-devbox reported nothing at all because
-        # `have == want` for dev-infra kept it off that branch. It surfaced only on sami-rocqperf,
-        # which had drifted far enough to need an upgrade
-        # -- and that machine retires under dispatch://INFRA-993. A check that runs only on a
-        # mismatch cannot report a breakage that prevents mismatches from being fixed, so this one
-        # does not restore the lock afterwards: it only reads, and a failure is reported, never fatal.
+        # The catalog is updated even when the plugin needs no upgrade (it is at or above the
+        # lock's entry, or the lock has none), so a catalog that stopped resolving is reported on
+        # every machine, not only on one that needs an upgrade. A failure is reported, not fatal.
         omp plugin marketplace update "${plugin#*@}" >/dev/null 2>&1 \
             || echo "omp: marketplace ${plugin#*@} no longer resolves; ${plugin} is pinned at ${have#str:} and cannot be upgraded" >&2
     fi
@@ -214,7 +208,7 @@ install_marketplace_plugin() {
         fi
     fi
 }
-# theorem-labs/verification-skills: the agent-skills catalog. All four of its plugins are installed
+# theorem-labs/verification-skills: the team catalog. All four of its plugins are installed
 # because the fleet uses skills from each: validation-loop (verification); designing-tasks and
 # running-task-qa (tasks); running-heavy-jobs, which sends heavy work to the cluster
 # (dispatch://INFRA-898), maintaining-prover-forks and using-transcript-store (engineering);
@@ -224,14 +218,24 @@ install_marketplace_plugin() {
 # landing-a-pr and finding-dropped-work are this repository's own skills, in
 # plugins/sjawhar/skills/.
 #
-# The catalog was renamed `verification-skills` -> `agent-skills` and the single `verification-skills`
-# plugin split into three on 2026-11-07, which broke the install outright: `omp plugin marketplace
-# update verification-skills` refuses with "Marketplace catalog name changed ... Remove and re-add",
-# so both machines sat three releases behind the lock (0.21.26 against 0.21.29) and could not catch up.
-install_marketplace_plugin theorem-labs/verification-skills verification@agent-skills
-install_marketplace_plugin theorem-labs/verification-skills tasks@agent-skills
-install_marketplace_plugin theorem-labs/verification-skills engineering@agent-skills
-install_marketplace_plugin theorem-labs/verification-skills dev-infra@agent-skills
+# team_catalog_step in scripts/dotfiles-follow does the work; follow's own run and dotfiles-sync's
+# tools step run the same step without --installer. With it, the step fetches the catalog once in
+# each run, reads the catalog's name from the registration that fetch leaves (Oh My Pi names it
+# after the catalog), installs each of the four missing under that name and upgrades one below its
+# lock entry. When the name changed, it moves the four: it uninstalls them under the old name,
+# installs them under the new one, and removes the old registration last, only once all four are
+# under the new name, so a run that fails half way leaves that registration to mark the move for
+# the next run. No catalog name is written here, since `omp plugin marketplace update` refuses an
+# update across a change of name: the earlier rename, `verification-skills` to `agent-skills`,
+# left machines behind the lock.
+# The step is a python3 program and needs python3 3.9 or newer from the image (install.sh installs
+# none). Without python3 the call exits 127, env's message and the line below say so on stderr, and
+# install.sh goes on, as after any failure of the step.
+install_team_catalog() {
+    "${DOTFILES_DIR}/scripts/dotfiles-follow" --team-catalog --installer --repo "$DOTFILES_DIR" \
+        || echo "omp: the team catalog step exited $?; verification, tasks, engineering or dev-infra may be missing or below the lock (the lines above name each step that failed)" >&2
+}
+install_team_catalog
 # theorem-labs/core-ops: the company's operations skills, for the documents a customer reads.
 install_marketplace_plugin theorem-labs/core-ops core-ops@core-ops
 # slack@claude-plugins-official brings the Slack skills (slack-messaging, slack-search, ...) written
