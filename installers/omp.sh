@@ -186,17 +186,9 @@ install_marketplace_plugin() {
     elif [ -n "$want" ] && ! marketplace_version_at_least "$have" "$want"; then
         { omp plugin marketplace update "${plugin#*@}" && omp plugin upgrade "$plugin"; } || rc=$?
     else
-        # The catalog is checked even when the version is already at or above the lock's entry.
-        # Until 2026-11-07 the update ran ONLY on a mismatch, so a marketplace that had stopped
-        # resolving was invisible on any machine whose versions happened to agree:
-        # theorem-labs/verification-skills renamed its catalog to `agent-skills` and split its
-        # plugin in three, `marketplace update` began refusing outright ("Marketplace catalog name
-        # changed ... Remove and re-add"), and sami-devbox reported nothing at all because
-        # `have == want` for dev-infra kept it off that branch. It surfaced only on sami-rocqperf,
-        # which had drifted far enough to need an upgrade
-        # -- and that machine retires under dispatch://INFRA-993. A check that runs only on a
-        # mismatch cannot report a breakage that prevents mismatches from being fixed, so this one
-        # does not restore the lock afterwards: it only reads, and a failure is reported, never fatal.
+        # The catalog is updated even when the plugin needs no upgrade (it is at or above the
+        # lock's entry, or the lock has none), so a catalog that stopped resolving is reported on
+        # every machine, not only on one that needs an upgrade. A failure is reported, not fatal.
         omp plugin marketplace update "${plugin#*@}" >/dev/null 2>&1 \
             || echo "omp: marketplace ${plugin#*@} no longer resolves; ${plugin} is pinned at ${have#str:} and cannot be upgraded" >&2
     fi

@@ -42,17 +42,34 @@ What one run does:
      `scripts/omp-link-rules`, which links omp/rules/*.md into ~/.omp/agent/rules/, only for
      ~/.dotfiles (rule A, below; another --repo logs that the omp rules are not linked, and goes
      on), then `mise install`, `bun install --frozen-lockfile` in omp/plugins, then, only for
-     ~/.dotfiles, marketplace catalog refresh and upgrade for registered marketplace plugins below
-     the lowest version their committed lock entries require (a best-effort lock restore
-     afterward).
-     ~/.omp/plugins links to ~/.dotfiles/omp/plugins (installers/omp.sh), so another --repo's
-     upgrade would write this machine's plugins: it logs that the marketplace plugins are not
-     upgraded, runs no omp command, and goes on. A plugin at or above its entry gets no upgrade or
-     version failure; one below is a version failure only if it is still below after its refresh and
-     upgrade, and a failed omp command is a failure whatever the version. Dotted-number strings
-     compare numerically; any other pair must be equal JSON values of the same type, and object key
-     order does not matter. An empty or missing entry is handled as before. Lock entries without an
-     installed marketplace record are skipped; install.sh bootstraps them.
+     ~/.dotfiles, the marketplace step (install_marketplace_plugins). After it, on every run, the
+     lock is put back (`git checkout --`, or the saved bytes when that fails).
+     ~/.omp/plugins links to ~/.dotfiles/omp/plugins (installers/omp.sh), so another --repo's omp
+     command would write this machine's plugins: it logs that the marketplace plugins are not
+     upgraded, runs no omp command, and goes on.
+     The marketplace step starts with the team catalog step (team_catalog_step). The team catalog
+     is the catalog of TEAM_CATALOG_SOURCE, and the step owns four of its plugins,
+     TEAM_CATALOG_PLUGINS (verification, tasks, engineering and dev-infra). It fetches that
+     catalog once in each run of the marketplace step, whatever the installed versions, and takes
+     the catalog's current name from the registration whose fetch succeeded (Oh My Pi names a
+     registration after its catalog). When that name changed, it moves the four: it uninstalls
+     each under the old name and installs it under the new one, and it removes the old
+     registration only when all four are on the new name, so the next run ends a move that failed
+     half way. Follow installs one of the four only to end such a move: bootstrapping stays an
+     install.sh job. With no registration of the repository and none of the four under a catalog
+     name that no registration holds, the step fetches nothing and runs only
+     `plugin marketplace list`. It upgrades each of the four that is below its lock entry, with no
+     second fetch. dotfiles-sync's tools step and installers/omp.sh run the same step through
+     --team-catalog.
+     Every other lock entry with one installed marketplace record gets, below its entry, a refresh
+     of its catalog (`plugin marketplace update`) and `plugin upgrade`; a plugin of the team
+     catalog outside the four gets the upgrade alone, since the step fetched that catalog. A plugin
+     at or above its entry gets no upgrade or version failure; one below is a version failure only
+     if it is still below after its upgrade, and a failed omp command is a failure whatever the
+     version. Dotted-number strings compare numerically; any other pair must be equal JSON values
+     of the same type, and object key order does not matter. An installed plugin whose lock entry
+     has an empty or missing version is a failure. Lock entries without an installed marketplace
+     record are skipped; install.sh bootstraps them.
      `mise install` holds `$MISE_DATA_DIR/.dotfiles-install.lock` (waiting for it at most
      --mise-timeout), the lock dotfiles-sync's tools step, agent-session, shims/knives,
      installers/mise.sh and installers/librarian-harness-host.sh hold too, so installs on one
@@ -102,10 +119,10 @@ One rule says what a run of a checkout other than ~/.dotfiles does (git mode tak
 and DOTFILES_DIR names the default one):
   (A) Guarded writes run only for ~/.dotfiles, because one from another checkout would point the
       machine at that checkout: the knives registry copy (step 6), and the omp rule links and the
-      marketplace plugins (step 7). Another checkout logs each one it skips. Additive writes run
-      for any checkout: `mise install` of its own pins into the shared MISE_DATA_DIR, under the
-      install lock (step 7); Bun's cache (step 7); and the fast-root pass of the hook sweep
-      (step 8, rule C).
+      marketplace plugins, the team catalog's fetch and move included (step 7). Another checkout
+      logs each one it skips. Additive writes run for any checkout: `mise install` of its own pins
+      into the shared MISE_DATA_DIR, under the install lock (step 7); Bun's cache (step 7); and the
+      fast-root pass of the hook sweep (step 8, rule C).
   (B) Judgments and records go to the state file the run uses. On a file other than DEFAULT_STATE
       (its own, by default) another checkout opens and clears its conditions and records its
       tools pass (tools_ok_head) as ~/.dotfiles does on DEFAULT_STATE, so after a pass it skips
