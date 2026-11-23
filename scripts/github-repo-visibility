@@ -84,15 +84,20 @@ if [[ -f "$cache" && -r "$cache" ]]; then
         if ((age >= 0 && age < ttl)); then printf '%s\n' "$value"; exit 0; fi
     fi
 fi
-# Invoke dotfiles' auth-routed gh by path, never whichever gh wins PATH.
+# Invoke dotfiles' auth-routed gh by path, never whichever gh wins PATH, and from the dotfiles tree, never the
+# checkout the caller runs in: gh and the token helpers its agent config runs (secret-run-reason through python3,
+# secrets) are reached through mise's shims, which read the project config of the directory they run in and, under
+# CI=true (omp's bash tool), trust it, so a checkout's `.mise.toml` ran its `_.source` script and its sitecustomize.py
+# inside processes that mint GitHub credentials (measured 2026-11-23). The call names its repository, so it needs no
+# working directory.
 # SIGKILL bounds the whole process group even when a child ignores TERM or holds stdout.
 # The call is word for word the read the leak check makes itself (public_leak_check.py vis_of), which its gh-guard
 # passes at once under PUBLIC_LEAK_CHECK_VISIBILITY_READ. Any other spelling takes the guard's whole path: since
 # leak-check-v31 that starts with a `gh alias list`, and where that read fails the guard refuses this read, so the
 # visibility reads as unknown. Until 2026-11-21 this read had no --hostname, the form the check's shell version
 # passed; the Python check (agent-infra #2080, 2026-11-05) passes only this one.
-gh="${BASH_SOURCE[0]%/*}/../shims/gh"
-value="$(GH_HOST=github.com PUBLIC_LEAK_CHECK_VISIBILITY_READ="$slug" timeout -s KILL 5 "$gh" api --hostname github.com "repos/$slug" --jq .visibility </dev/null 2>/dev/null)" || value=""
+dotfiles="${BASH_SOURCE[0]%/*}/.."
+value="$(CDPATH='' cd -- "$dotfiles" && GH_HOST=github.com PUBLIC_LEAK_CHECK_VISIBILITY_READ="$slug" timeout -s KILL 5 ./shims/gh api --hostname github.com "repos/$slug" --jq .visibility </dev/null 2>/dev/null)" || value=""
 case "$value" in
     public | private | internal)
         # The answer goes into the same cache for the next read, as the leak check writes it (public_leak_check.py

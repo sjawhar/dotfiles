@@ -26,6 +26,13 @@ _shim_dir="${BASH_SOURCE[0]}"
 [[ ! -L "$_shim_dir" ]] || _shim_dir="$(command -p readlink -f -- "$_shim_dir")"
 _shim_dir="${_shim_dir%/*}"
 
+# The Python this shim runs, by path and in isolated mode (-I), never a python3 on PATH: that is mise's shim, and
+# under CI=true (omp's bash tool) mise trusts the checkout's `.mise.toml`, whose `[env]` ran its `_.source` script and
+# the sitecustomize.py its PYTHONPATH names inside this shim (measured 2026-11-23). It needs only the standard library,
+# tomllib included (3.11 or later). Tests replace this one line to make the interpreter fail (shim_copy in
+# shims/tests/test_leak_terms.py).
+_py=/usr/bin/python3
+
 # A jj that hands the call to the first jj on PATH re-enters this shim in the same
 # pid: mise's shim does, when mise has no jj version for the directory (under a
 # relocated XDG_CONFIG_HOME, mise reads no global config), and this shim is that
@@ -465,7 +472,7 @@ resolve_aliases() {
         # Decode TOML without shell evaluation; NUL delimiters preserve every
         # alias argument, including whitespace and newlines. Empty/error output
         # from the decoder is a refusal, never an unguarded fallback.
-        mapfile -d '' -t alias < <(python3 -c '
+        mapfile -d '' -t alias < <("$_py" -I -c '
 import sys, tomllib
 try:
     value = tomllib.loads(sys.stdin.read()).get("aliases", {}).get(sys.argv[1])
@@ -1109,7 +1116,7 @@ if [[ -n "$_jj_command" ]] && ((_jj_help == 0)); then
                 # drops NUL bytes from a variable, so the reader refuses one (a description is text), and the
                 # trailing sentinel keeps final newlines, which $(...) strips.
                 _jj_stdin_status=0
-                _jj_stdin_text="$(python3 -c '
+                _jj_stdin_text="$("$_py" -I -c '
 import sys
 try:
     data = sys.stdin.buffer.read()

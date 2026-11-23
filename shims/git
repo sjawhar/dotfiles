@@ -28,6 +28,12 @@ _shim_dir="${BASH_SOURCE[0]}"
 [[ ! -L "$_shim_dir" ]] || _shim_dir="$(command -p readlink -f -- "$_shim_dir")"
 _shim_dir="${_shim_dir%/*}"
 
+# The Python this shim runs, by path and in isolated mode (-I), never a python3 on PATH: that is mise's shim, and
+# under CI=true (omp's bash tool) mise trusts the checkout's `.mise.toml`, whose `[env]` ran its `_.source` script and
+# the sitecustomize.py its PYTHONPATH names inside this shim (measured 2026-11-23). It needs only the standard library.
+# Tests replace this one line to make the interpreter fail (shims/tests/test_leak_terms.py, shim_copy).
+_py=/usr/bin/python3
+
 LOCK_REASON="agent session: locked on add (AGENTC-431)"
 # The lock shims/jj puts on a workspace's git worktree when this shim did not lock it
 # already (a `jj workspace add` outside an agent session). Ours as well.
@@ -342,7 +348,7 @@ git_expand_aliases() {
         }
         alias_words=()
         if mapfile -d '' -t alias_words < <(
-            python3 - "$_real" "$name" "${args[@]:0:i}" <<'PY'
+            "$_py" -I - "$_real" "$name" "${args[@]:0:i}" <<'PY'
 import os
 import subprocess
 import sys
