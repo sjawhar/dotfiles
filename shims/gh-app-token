@@ -1,10 +1,11 @@
-#!/usr/bin/python3
+#!/usr/bin/python3 -I
 """Owner-aware GitHub App credential helper.
 
 Interpreter is pinned to the system python3, NOT `env python3`: git invokes a credential
 helper with the caller's environment, so under any activated virtualenv (a uv run, an agent
 shell, a project venv) `env python3` can resolve to an interpreter the helper was never run
-under. It needs nothing past the standard library.
+under. It needs nothing past the standard library, so it runs isolated (-I): a PYTHONPATH,
+PYTHONSTARTUP or user site in that environment changes nothing here.
 
 Git credential-helper usage (wired up in gh-app-routes.gitconfig):
   gh-app-token <profile> get
@@ -626,6 +627,13 @@ def secrets_executable() -> str:
     return shutil.which("secrets") or str(mise_shims() / "secrets")
 
 
+# The directory secret-run and secrets run in: this shim's own dotfiles tree, never the caller's checkout. Each can be
+# mise's shim (or run one: secret-run-reason, secrets), and mise reads the project config of the directory it runs in,
+# which under CI=true (omp's bash tool) it trusts, so a checkout's `.mise.toml` ran its `_.source` script and its
+# PYTHONPATH's sitecustomize.py while an App token was minted (measured 2026-11-23).
+OWN_CHECKOUT = Path(__file__).resolve().parents[1]
+
+
 def secret_run_command() -> tuple[str, dict[str, str]]:
     """secret-run on PATH, else the one in this shim's own checkout, and the environment to run
     it in: the caller's, with mise's shims dir after its PATH, so secret-run finds
@@ -647,6 +655,7 @@ def resolve_secret(name: str) -> str:
             text=True,
             check=True,
             env={**os.environ, **mise_environment()},
+            cwd=OWN_CHECKOUT,
         )
     except (subprocess.CalledProcessError, FileNotFoundError) as error:
         detail = (getattr(error, "stderr", None) or "").strip() or str(error)
@@ -804,7 +813,7 @@ def request_broker_installations(
         secret_name,
     ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=False, env=environment)
+        result = subprocess.run(command, capture_output=True, text=True, check=False, env=environment, cwd=OWN_CHECKOUT)
     except FileNotFoundError as error:
         raise AppTokenError("secret-run is not available") from error
     except (OSError, UnicodeDecodeError) as error:

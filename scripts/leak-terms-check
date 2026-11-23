@@ -1427,7 +1427,7 @@ def jj_editor(path: str) -> int:
     try:
         completed = subprocess.run(command, env=environment, check=False)
     except OSError as error:
-        print(f"leak terms: could not run jj editor: {error}", file=sys.stderr)
+        print(f"leak terms: could not run jj editor: {c_escape(str(error))}", file=sys.stderr)
         return 1
     if completed.returncode < 0:
         os.kill(os.getpid(), -completed.returncode)
@@ -1437,7 +1437,7 @@ def jj_editor(path: str) -> int:
     try:
         edited = Path(path).read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
-        print(f"leak terms: cannot read jj editor file: {error}", file=sys.stderr)
+        print(f"leak terms: cannot read jj editor file: {c_escape(str(error))}", file=sys.stderr)
         return 1
     mode = os.environ.get("DOTFILES_JJ_EDITOR_MODE", "single")
     expected_ids = [value for value in os.environ.get("DOTFILES_JJ_EDITOR_IDS", "").split(",") if value]
@@ -2347,7 +2347,7 @@ def scan_outgoing_merges(merges: Mapping[str, Sequence[str]], matcher: TermMatch
             changes = [files[path] for files in parent_files]
             results = {(change.result_mode, change.result) for change in changes}
             if len(results) != 1:
-                raise TextError(f"git gave two versions of file {shown} of merge commit {merge[:12]}")
+                raise TextError(f"git gave two versions of file {path} of merge commit {merge[:12]}")
             result_mode, result = results.pop()
             if result_mode == "000000":
                 continue
@@ -2358,7 +2358,7 @@ def scan_outgoing_merges(merges: Mapping[str, Sequence[str]], matcher: TermMatch
             try:
                 contents = blob_objects(sorted({result, *sources}))
             except TextError as error:
-                raise TextError(f"cannot read file {shown} of merge commit {merge[:12]}") from error
+                raise TextError(f"cannot read file {path} of merge commit {merge[:12]}") from error
             if not every_file_text and b"\0" in contents[result][:8000]:
                 continue
             held: set[str] = set()
@@ -2954,7 +2954,7 @@ class GhText:
 
     def shown(self) -> str:
         detail = f" {c_escape(self.detail)}" if self.detail else ""
-        return (f"{self.option}{detail}{' (standard input)' if self.path == '-' else ''}"
+        return (f"{c_escape(self.option)}{detail}{' (standard input)' if self.path == '-' else ''}"
                 f"{f' ({self.part})' if self.part else ''}")
 
 

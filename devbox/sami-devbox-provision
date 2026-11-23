@@ -273,8 +273,8 @@ step_leakcheck() {
     # Copy only over the previous tag, or this one on a second run; a new machine has no files.
     # Each file is written as .<name>.new and moved over the installed one only when all are written.
     out="$(remote 'set -e; s=/tmp/plc-stage; d=$HOME/.local/share/public-leak-check
-        test -x /usr/bin/python3 && /usr/bin/python3 -I -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)" ||
-            { echo "this machine needs an executable /usr/bin/python3 of 3.9 or newer; nothing was installed"; exit 1; }
+        test -x /usr/bin/python3 && /usr/bin/python3 -I -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" ||
+            { echo "this machine needs an executable /usr/bin/python3 of 3.11 or newer (tomllib, which dotfiles shims/jj and scripts/leak-terms-check import); nothing was installed"; exit 1; }
         mkdir -p "$d" "$HOME/.config/public-leak-check"
         have="$(cd "$d" && sha256sum public-leak-check.sh public_leak_check.py README.md must-pass-lines.txt 2>/dev/null || true)"
         if [ -n "$have" ] && [ "$have" != "$(cat "$s/prev.sha256")" ] && [ "$have" != "$(cat "$s/tag.sha256")" ]; then

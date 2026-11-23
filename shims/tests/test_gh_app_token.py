@@ -757,6 +757,29 @@ class GhAppTokenTests(unittest.TestCase):
         )
         self.assertEqual(self.secrets_calls(), [])
 
+    def test_secret_run_and_secrets_run_in_the_shims_own_checkout(self):
+        # secret-run and secrets can be mise's shims, or run one (secret-run-reason), and mise trusts the project
+        # config of the directory it runs in under CI=true; so each runs in this shim's own dotfiles tree, never in the
+        # caller's checkout. Until 2026-11-23 each ran in the caller's, and a checkout's `.mise.toml` ran while the
+        # token was minted.
+        log = Path(self.temp_dir.name) / "cwd.log"
+        for name in ("secrets", "secret-run"):
+            stub = self.stub_dir / name
+            recorder = f"#!/bin/sh\nprintf '{name} %s\\n' \"$PWD\" >> '{log}'\n"
+            stub.write_text(stub.read_text().replace("#!/bin/sh\n", recorder, 1))
+        caller = Path(self.temp_dir.name) / "caller-checkout"
+        caller.mkdir()
+        previous = os.getcwd()
+        os.chdir(caller)
+        try:
+            rc, _, stderr = self.run_main(["agent", "get"], stdin="host=github.com\npath=METR/hawk.git\n\n")
+        finally:
+            os.chdir(previous)
+        self.assertEqual(rc, 0, stderr)
+        own = MODULE_PATH.resolve().parents[1]
+        ran = sorted(set(log.read_text().splitlines()))
+        self.assertEqual(ran, [f"secret-run {own}", f"secrets {own}"], stderr)
+
     def test_uninstalled_owner_with_unreadable_fallback_secret_quits(self):
         self.git_config["gh-app.agent.fallback-secret"] = "GH_MISSING_TOKEN"
 
