@@ -9,7 +9,7 @@ Sami approves every outside message by default.
 
 A kind of message stops needing his approval once a skill or template guides it and he has seen how the reader's project reacts. What decides is whether the message is a vetted routine or novel contact, not who the reader is.
 
-An outside message is one a person outside Theorem reads, not one that is only public. A reply in a bot-opened thread on a pull request Theorem authors is public. So the public leak check covers it (`public-leak-check.sh check-public-text <file>`).
+An outside message is one a person outside Theorem reads, not one that is only public. A reply in a bot-opened thread on a pull request Theorem authors is public. So run the public leak check on it (`public-leak-check.sh check-public-text <file>`).
 
 | A reply in a bot-opened thread on | Read by | Outside message |
 | --- | --- | --- |
