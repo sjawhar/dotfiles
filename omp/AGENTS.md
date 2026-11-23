@@ -5,7 +5,7 @@
 - A new extension loads only once `installers/omp.sh` links its entry file, and a pull does not run that installer: after the change merges, run `bash installers/omp.sh` on each machine.
 - `omp/agents/` holds omp's agent definitions and `plugins/sjawhar/agents/` holds Claude Code's, under the same names: a change to one does not reach the other.
 - A key never goes in a committed file, in a session's environment, or on an MCP server's command line, where any user on the machine can read it. `omp/mcp.json` starts a server that needs a key through `secret-run` or `secrets`, which put the key in that server's environment.
-- Change a plugin pin (`package.json`, `bun.lock` or `omp-plugins.lock.json` in `omp/plugins/`) only in a clone, by a commit. A plain `bun install` or `bun add` in a machine's `~/.dotfiles` rewrites the pins, and `scripts/dotfiles-follow` then refuses to move that checkout.
+- A plugin pin (`package.json`, `bun.lock` or `omp-plugins.lock.json` in `omp/plugins/`) changes only by a commit. Edit `~/.dotfiles` in place, as the root `AGENTS.md` says: change the pin, install, then `jj commit` those files by name and run `scripts/dotfiles-publish`. Never leave a rewritten pin uncommitted: a plain `bun install` or `bun add` in a machine's `~/.dotfiles` rewrites the pins, and on 2026-11-03 such a rewrite, never committed, stopped `scripts/dotfiles-follow` from moving that checkout.
 - A pin bump redoes each patch in `omp/plugins/patches/` (`bun patch <name>`, then `bun patch --commit node_modules/<name>`): Bun only warns about a patch whose key no longer matches, installs the package unpatched and exits 0. Drop a patch only once the pinned version carries its fix.
 
 ## Where MCP servers and skills load
