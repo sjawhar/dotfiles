@@ -19,22 +19,28 @@
 # scripts/leak-terms-check reads: for another checkout the step says it wrote no copy, and goes
 # on. Then `mise install` in the checkout, then `bun install --frozen-lockfile`
 # in omp/plugins when its package.json is there, with the mise binary and MISE_DATA_DIR (and
-# MISE_CACHE_DIR where it sets one) that the checkout's .bashrc gives a shell. It runs after every
-# move that ends on main, also when main brought nothing new, so a later sync installs a pin an
-# earlier step did not. `mise install` holds an exclusive lock on
+# MISE_CACHE_DIR where it sets one) that the checkout's .bashrc gives a shell. Last,
+# `scripts/dotfiles-follow --team-catalog --repo <checkout>`, which fetches the team catalog and
+# moves its four Oh My Pi plugins when the catalog's name changed; it too runs only for
+# ~/.dotfiles (for another checkout the step says it fetched nothing, and goes on), and a checkout
+# without the script skips it. The step runs after every move that ends on main, also when main
+# brought nothing new, so a later sync installs a pin an earlier step did not. `mise install` holds
+# an exclusive lock on
 # $MISE_DATA_DIR/.dotfiles-install.lock, the one dotfiles-follow, agent-session, shims/knives,
 # installers/mise.sh and installers/librarian-harness-host.sh take for their own installs, so a
 # launch during the install waits for it instead of finding no binary. That `mise install` alone
 # gets DOTFILES_INSTALL_LOCK_HELD=1, so a knives call under it that lacks its pin exits 127 at once
-# instead of waiting on the lock. A failed render stops nothing: mise and Bun still run. A failed
-# `mise install` stops the step before Bun, whose mise shim could install outside that lock. Each
-# command has DOTFILES_TOOLS_TIMEOUT seconds (a whole number 1-600; default 600), the lock wait
-# included; at its limit it gives the command 10 s to exit, then kills every process it left so
-# its lock is free. A failure or a command past its limit prints the command, its status and the
-# last lines of its output, keeps the move, and the run exits non-zero after the other hosts. A
-# remote host's ssh limit is its parts: 180 s for the move, the 300 s default sync-lock wait, and
-# for each of the four commands its limit plus that 10 s kill grace. The sync lock is released
-# before the step, so an install does not hold off another move.
+# instead of waiting on the lock. A failed render stops nothing: mise, Bun and the team catalog
+# step still run. A failed `mise install` stops the step there, before Bun, whose mise shim could
+# install outside that lock; a failed or missing Bun stops it before the team catalog step. Each
+# command, the team catalog step included, has DOTFILES_TOOLS_TIMEOUT seconds (a whole number
+# 1-600; default 600), the lock wait included; at its limit it gives the command 10 s to exit,
+# then kills every process it left so its lock is free. A failure or a command past its limit
+# prints the command, its status and the last lines of its output, keeps the move, and the run
+# exits non-zero after the other hosts. A remote host's ssh limit is its parts: 180 s for the
+# move, the 300 s default sync-lock wait, and for each of the five commands its limit plus that
+# 10 s kill grace. The sync lock is released before the step, so an install does not hold off
+# another move.
 #
 # Internal modes: --here OLD is the move alone, which dotfiles-follow calls and follows with its
 # own render and tools steps (it reports a failed install as TOOLS NOT INSTALLED, not as a failed
@@ -218,9 +224,10 @@ tools_step() (
   # then the knives registry copy. Both only from ~/.dotfiles, the checkout every session runs: a
   # link made from another checkout would point every session's rules at it, and a copy rendered
   # from another checkout would put that checkout's registry into ~/.config/knives/repos.toml, which
-  # scripts/leak-terms-check reads. A failed render stops nothing: mise and Bun still run, and the
-  # step returns the render's status when they and the rule link pass. DOTFILES_DIR names this
-  # checkout, never an inherited value: it is exported above only when the checkout has a .bashrc.
+  # scripts/leak-terms-check reads. A failed render stops nothing: mise, Bun and the team catalog
+  # step still run, and the step returns the render's status when they and the rule link pass.
+  # DOTFILES_DIR names this checkout, never an inherited value: it is exported above only when the
+  # checkout has a .bashrc.
   if [[ ! "$dir" -ef "$HOME/.dotfiles" ]]; then
     printf 'tools: %s is not ~/.dotfiles; omp rules not linked\n' "$dir"
     printf 'tools: %s is not ~/.dotfiles; knives registry copy not written\n' "$dir"
@@ -247,16 +254,26 @@ tools_step() (
   # lock this step holds; Bun's call below does not get it.
   DOTFILES_INSTALL_LOCK_HELD=1 tools_run "mise install" "$dir" "$limit" flock "$lock" "$mise" install || return $?
 
-  if [[ ! -f "$dir/omp/plugins/package.json" ]]; then
-    ((rules_status)) && return "$rules_status"
-    return "$render_status"
+  if [[ -f "$dir/omp/plugins/package.json" ]]; then
+    if ! bun="$(command -v bun 2>/dev/null)"; then
+      tools_error "bun install --frozen-lockfile" "$dir/omp/plugins" 127 "$limit" <(printf 'bun: command not found\n')
+      return 127
+    fi
+    [[ "$bun" = /* ]] || bun="$PWD/$bun"
+    tools_run "bun install --frozen-lockfile" "$dir/omp/plugins" "$limit" "$bun" install --frozen-lockfile || return $?
   fi
-  if ! bun="$(command -v bun 2>/dev/null)"; then
-    tools_error "bun install --frozen-lockfile" "$dir/omp/plugins" 127 "$limit" <(printf 'bun: command not found\n')
-    return 127
+  # Last, the team catalog step (team_catalog_step in scripts/dotfiles-follow: it fetches the team
+  # catalog and moves its four plugins when the catalog's name changed), only from ~/.dotfiles, as
+  # the rules: it changes the machine's Oh My Pi plugins, whose records Oh My Pi keeps in
+  # ~/.dotfiles/omp/plugins (~/.omp/plugins links there).
+  if [[ ! "$dir" -ef "$HOME/.dotfiles" ]]; then
+    printf 'tools: %s is not ~/.dotfiles; team catalog not fetched\n' "$dir"
+  elif [[ ! -x "$dir/scripts/dotfiles-follow" ]]; then
+    printf 'tools: %s has no scripts/dotfiles-follow; team catalog not fetched\n' "$dir"
+  else
+    tools_run "dotfiles-follow --team-catalog" "$dir" "$limit" \
+      env DOTFILES_DIR="$dir" "$dir/scripts/dotfiles-follow" --team-catalog --repo "$dir" || return $?
   fi
-  [[ "$bun" = /* ]] || bun="$PWD/$bun"
-  tools_run "bun install --frozen-lockfile" "$dir/omp/plugins" "$limit" "$bun" install --frozen-lockfile || return $?
   ((rules_status)) && return "$rules_status"
   return "$render_status"
 )
@@ -446,8 +463,9 @@ tools_timeout="$(tools_limit)"
 remote_move_timeout=180
 remote_sync_lock_wait=300
 remote_tools_grace="$tools_grace"
-# omp-link-rules, the knives registry render, mise install and bun install, each with the same limit.
-remote_tools_commands=4
+# omp-link-rules, the knives registry render, mise install, bun install and dotfiles-follow
+# --team-catalog, each with the same limit.
+remote_tools_commands=5
 remote_limit=$((remote_move_timeout + remote_sync_lock_wait + remote_tools_commands * (tools_timeout + remote_tools_grace)))
 
 status=0
