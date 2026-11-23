@@ -5,7 +5,7 @@ description: "Use when building a large project autonomously with subagents (sev
 
 # Subagent-driven development
 
-**Done when:** you have run `finding-dropped-work` over this session's transcript, closed each row it finds as that skill says, and reported its row counts, before you report anything done or move an issue to `done`.
+**Done when:** you ran `finding-dropped-work` over this session's transcript, closed each row it finds as that skill says, and reported its row counts, before you report anything done or move an issue to `done`.
 
 - Where this skill and a stock workflow skill (`subagent-driven-development`, `writing-plans`, `executing-plans` or another) disagree, follow this one.
 - Load `subagent-driven-development` and `using-subagents`.
@@ -40,7 +40,7 @@ description: "Use when building a large project autonomously with subagents (sev
 
 ## 2. Classify each slice
 
-Each slice has one class (platform or application, infrastructure, task authoring, task queueing), proven only its own way. Read `references/slice-classes.md` before you write the verification plan: a slice proven with another class's checks ships unverified.
+Give each slice one class (platform or application, infrastructure, task authoring, task queueing), proven only its own way. Read `references/slice-classes.md` before you write the verification plan: a slice proven with another class's checks ships unverified.
 
 ## 3. List the skills
 
@@ -49,31 +49,31 @@ Each slice has one class (platform or application, infrastructure, task authorin
 - Load what planning needs yourself.
 - Pick the design, implementation, testing and infrastructure skills for the rest.
 - In the plan's `## Skill catalog`, map each step to the skills its worker loads.
-- Each brief names the skills its worker loads.
-- A step that adds or changes a CI workflow maps `developing-ci`: a workflow written without it runs the whole suite on every push.
-  - That step reads `developing-ci` before the first workflow edit, for the same reason.
+- Name in each brief the skills its worker loads.
+- Map each step that adds or changes a CI workflow to `developing-ci`: a workflow written without it runs the whole suite on every push.
+  - Read `developing-ci` before that step's first workflow edit, for the same reason.
 
 ## 4. Write the plan
 
 - Write the first draft from what step 1 read before you open more files.
-- Then fan subagents out to fill the gaps the first draft names.
-- Research never restarts an approved design.
-- A research brief never asks for a plan.
+- Then fan subagents out to fill the gaps the draft names.
+- Never let research restart an approved design.
+- Never ask for a plan in a research brief.
 - Reuse an existing spec, plan or review: repair its gap.
-- Then have a `reviewer` check what the repair of a reused spec, plan or review affects.
+- Then have a `reviewer` check what the repair affects.
 - Put the plan in the issue (its Dispatch document or GitHub issue body), not in a repo file or a PR.
 - Plan the full request.
 - Split parallel work into units no two workers edit: two workers who meet an interface mid-flight both rewrite it.
 - Name the shared contracts before dispatch, for the same reason.
-- Check every claim about existing code against what it names. A number read in a skill is a claim too.
+- Check every claim about existing code against what it names. Treat a number read in a skill as a claim too.
 - Cite file:line for every claim about existing code.
 - **Read `references/slices.md` now:** what a slice is, what it merges as and ends in, how to cut, order and run slices, and a slice's tasks, contracts and scaffolding.
 - Cut over completely: migrate every caller and remove obsolete paths, shims, aliases and dead code, unless Sami requires compatibility.
 - Read `references/plan-sections.md` when you write the plan: its sections, workspaces, and a major design change.
 - Have a `reviewer` gate every new plan before implementation.
-- A `reviewer` gates every later plan edit, before it is built, that changes a slice, a shared contract, an acceptance scenario or which requirement a step meets.
-- That `reviewer` checks the plan against the issue's goal and every requirement, not only whether it can be built.
-- A requirement the plan leaves out fails unless the requester recorded it as out of scope.
+- Have a `reviewer` gate every later plan edit, before it is built, that changes a slice, a shared contract, an acceptance scenario or which requirement a step meets.
+- Have that `reviewer` check the plan against the issue's goal and every requirement, not only whether it can be built.
+- Count a requirement the plan leaves out as failed unless the requester recorded it as out of scope.
 
 ## 5. Dispatch the work
 
@@ -87,13 +87,13 @@ Each slice has one class (platform or application, infrastructure, task authorin
 ## 6. Acceptance after each slice
 
 - Once a slice's tasks are merged into its branch, dispatch `deep` acceptance for its outcome.
-- The last slice runs every driver in the plan (the script or command that runs a scenario through the real surface).
+- Have the last slice run every driver in the plan (the script or command that runs a scenario through the real surface).
 - Require the acceptance worker to dispatch no reviewer.
 - Require the acceptance worker to write a failing test for each defect.
 - Require the acceptance worker to send each defect and its test to the implementer session that built the slice.
 - Mark every scenario `RAN`, `BLOCKED` or `WAIVED-BY-SAMI` as `references/acceptance.md` defines them.
-- A `BLOCKED` scenario holds that slice's merge until every scenario runs or Sami waives its named blocker.
-- Independent work continues while a `BLOCKED` scenario holds a slice's merge.
+- For a `BLOCKED` scenario, hold that slice's merge until every scenario runs or Sami waives its named blocker.
+- Continue independent work while a `BLOCKED` scenario holds a slice's merge.
 
 ## 7. Review, then merge
 
@@ -103,10 +103,10 @@ Run each on the branch tip the one before it left:
 
 1. **The final `reviewer`.**
 2. **`ce-simplify-code`** once for a runtime change, scoped to the PR's diff.
-   - A change `ce-simplify-code` applies is the new head for CI, review and proof.
+   - Treat a change it applies as the new head for CI, review and proof.
 3. **`thermonuclear-deep-review` and `thermonuclear-code-quality`** once at that commit.
-   - You dispatch the pair because the `reviewer` agent cannot.
-   - The final reviewer weighs the pair's findings.
+   - Dispatch the pair because the `reviewer` agent cannot.
+   - Have the final reviewer weigh the pair's findings.
 
 - Fill the gate ledger.
 - Send the merge packet (`running-the-merge-queue`).
@@ -127,9 +127,9 @@ Move the root and every child issue you own at each transition:
 | `needs_review` | Once the PR is open and its merge packet sent |
 | `done` | Your own check through the real surface (what a user of the change touches, not a test, fixture or log line) shows it working in production |
 
-- A green suite, a harness screenshot or a merge is groundwork, not `done`.
+- Treat a green suite, a harness screenshot or a merge as groundwork, not `done`.
 - On another tracker, keep the same states.
-- **Every piece of work you own is a child issue of the root before it waits on anything:** each PR, held slice, defect found in review, and promise you made in a PR, comment or message.
+- **Make every piece of work you own a child issue of the root before it waits on anything:** each PR, held slice, defect found in review, and promise you made in a PR, comment or message.
 - Create each child issue when you defer or find its work, as `backlog`, with what it waits on in its spec.
-- A child issue's wait on Sami is an ask on it.
-- Each row of a local todo or handoff file names its issue key.
+- Make a child issue's wait on Sami an ask on it.
+- In each row of a local todo or handoff file, name its issue key.
