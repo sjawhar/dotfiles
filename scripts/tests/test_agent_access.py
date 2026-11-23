@@ -115,6 +115,26 @@ PARTIAL_OUTPUT = {
     "agent-secrets": 'echo "agent-secrets: dialing the broker"',
     "dispatch": 'echo "dispatch: contacting the server"',
 }
+# Each check that reads its command's stderr apart from its stdout when the command fails: its row, then the line of
+# stderr its detail is, then the line of stdout when stderr has no non-empty line. A line is the `first` or `last`
+# non-empty one, or the `whole` stream, which row() makes one line. kubectl's two commands each have an entry: whoami
+# runs only after current-context answers, and its detail starts with that context.
+FAILURE_PICKS = {
+    "aws": ("aws", "first", "first"),
+    "anthropic_ant": ("anthropic_ant", "first", "first"),
+    "vercel": ("vercel", "last", "last"),
+    # pup's detail is the .status of JSON on its stdout, when it has one, before either line; these stubs print no JSON.
+    "datadog_pup": ("datadog_pup", "first", "first"),
+    "gcloud": ("gcloud", "first", "first"),
+    "google_workspace_work": ("google_workspace_work", "last", "first"),
+    "fleetctl": ("fleetctl", "last", "last"),
+    "sentry": ("sentry", "first", "first"),
+    "kubectl config current-context": ("kubectl", "first", "first"),
+    "kubectl auth whoami": ("kubectl", "first", "first"),
+    "secretsd_grants": ("secretsd_grants", "last", "first"),
+    "agent_secrets_broker": ("agent_secrets_broker", "whole", "whole"),
+    "dispatch": ("dispatch", "first", "first"),
+}
 
 
 class RealBinary(unittest.TestCase):
@@ -558,27 +578,53 @@ fi
                     ("live", "sami@example.com", "2099-01-01T00:00:00Z"),
                 )
 
-    def test_failure_reports_the_stderr_error_not_the_stdout_text(self) -> None:
-        """A tool that exits 1 with text on stdout and its error on stderr gives the stderr error as the detail.
+    def write_failing_stub(self, command: str, writes: tuple[tuple[str, str], ...], first: str = "") -> None:
+        """Stub COMMAND to run FIRST, print each (stream, text) of WRITES with COMMAND in the text's {}, and exit 1."""
+        printed = (
+            f"printf '%s\\n' {shlex.quote(text.format(command))}{' >&2' if stream == 'stderr' else ''}"
+            for stream, text in writes
+        )
+        write_stub(self.stub_dir, command, "\n".join((first, *printed, "exit 1")))
 
-        Each stub writes its stdout text before and after its error, so a check that reads the two streams merged
-        reads stdout text whether it takes the first line, the last line or the whole output. kubectl's current
-        context answers, and `kubectl auth whoami` is the call that fails.
+    def test_failure_detail_picks_by_stream(self) -> None:
+        """A failed check's detail is the line of stderr FAILURE_PICKS names, or of stdout when stderr is empty.
+
+        In `both`, stdout's line comes before and after stderr's two lines, so a check that reads the two streams
+        merged reads stdout text whether it takes the first line, the last line or the whole output.
         """
-        for command in TIMED_CHECKS.values():
-            progress = f'echo "progress of {command} ..."'
-            body = f'{progress}\necho "ERR {command}: denied" >&2\n{progress}'
-            if command == "kubectl":
-                body = f'[[ "$1 $2" == "config current-context" ]] && {{ echo production; exit 0; }}\n{body}'
-            write_stub(self.stub_dir, command, f"{body}\nexit 1")
+        cases: dict[str, tuple[tuple[str, str], ...]] = {
+            "stdout only": (("stdout", "other line of {}"), ("stdout", "ERR {} on stdout")),
+            "two stderr lines": (("stderr", "first err of {}"), ("stderr", "last err of {}")),
+            "both": (
+                ("stdout", "other line of {}"),
+                ("stderr", "first err of {}"),
+                ("stderr", "last err of {}"),
+                ("stdout", "other line of {}"),
+            ),
+        }
+        whoami = "kubectl auth whoami"
+        current_context = '[[ "$1 $2" == "config current-context" ]]'
         self.write_gws_registry("work")
-        rows = self.access_rows()
-        for name, command in TIMED_CHECKS.items():
-            detail = f"ERR {command}: denied"
-            if name == "kubectl":
-                detail = f"context: production; {detail}"
-            with self.subTest(check=name):
-                self.assertEqual((rows[name]["status"], rows[name]["detail"]), ("missing", detail))
+        for case, writes in cases.items():
+            # Every command fails, kubectl's current-context too, so whoami never runs; then current-context answers
+            # `production` and whoami fails.
+            for command in TIMED_CHECKS.values():
+                self.write_failing_stub(command, writes, f"{current_context} || exit 2" if command == "kubectl" else "")
+            rows = self.access_rows()
+            self.write_failing_stub("kubectl", writes, f"{current_context} && {{ echo production; exit 0; }}")
+            whoami_rows = self.access_rows()
+            for check, (name, stderr_pick, stdout_pick) in FAILURE_PICKS.items():
+                command = TIMED_CHECKS[name]
+                stderr = [text.format(command) for stream, text in writes if stream == "stderr"]
+                stdout = [text.format(command) for stream, text in writes if stream == "stdout"]
+                lines, pick = (stderr, stderr_pick) if stderr else (stdout, stdout_pick)
+                detail = {"first": lines[0], "last": lines[-1], "whole": " ".join(lines)}[pick]
+                row = rows[name]
+                if check == whoami:
+                    detail = f"context: production; {detail}"
+                    row = whoami_rows[name]
+                with self.subTest(check=check, case=case):
+                    self.assertEqual((row["status"], row["detail"]), ("missing", detail))
 
     def test_failure_that_printed_text_never_reports_no_output(self) -> None:
         """A failed tool's text reaches the detail from whichever stream it wrote, never `exit <code>, no output`.
