@@ -41,7 +41,9 @@ description: "Use when building a large project autonomously with subagents (sev
 
 ## 2. Classify each slice
 
-Give each slice one class (platform or application, infrastructure, task authoring, task queueing). Prove it only its own way. Read `references/slice-classes.md` before you write the verification plan: a slice proven with another class's checks ships unverified.
+- Give each slice one class (platform or application, infrastructure, task authoring, task queueing).
+- Prove it only its own way.
+- Read `references/slice-classes.md` before you write the verification plan: a slice proven with another class's checks ships unverified.
 
 ## 3. List the skills
 
