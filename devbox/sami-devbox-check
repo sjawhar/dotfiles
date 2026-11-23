@@ -870,6 +870,8 @@ legacy_is_keyless() {
 #            credentials table. Go tests leave such files behind by the thousand: on 2026-11-22, 7,174
 #            application_default_credentials.json holding only {"type": "authorized_user"} in
 #            TestCreateSignalHelper temp directories, each a FAIL while the check judged by name;
+#   gone     a file removed between the walk and this read (Go tests remove their temp files), a note
+#            as find_judge makes a path that went away during the walk;
 #   error    a file that could not be read, which says nothing, so it fails the line.
 # credentials.db is read with immutable=1: a store gcloud left a journal beside is read as it is,
 # with no lock and no write (mode=ro alone answered "attempt to write a readonly database").
@@ -908,6 +910,8 @@ for path in (line.rstrip("\n") for line in sys.stdin):
                 except (ValueError, AttributeError):
                     kind = None
                 say("machine" if kind == "external_account" else "empty", path)
+    except FileNotFoundError:
+        say("gone", path)
     except Exception as e:
         say("error", path, type(e).__name__)
 '
@@ -933,7 +937,7 @@ login_paths_line() {
 # dev-sjawhar@'s keyless external_account (three on 2026-11-03 05:25-05:39Z). Keyless and empty ones
 # are notes; a person's login, a key, and a file that could not be read are FAILs.
 host_logins() {
-    local -a names=() hits=() files=() person=() machine=() empty=() unread=() profiles=() users=()
+    local -a names=() hits=() files=() person=() machine=() empty=() gone=() unread=() profiles=() users=()
     local n f verdict path rest walked=1
     for n in "${LOGIN_FILES[@]}"; do names+=(-name "$n" -o); done
     names+=(-path '*/.config/gh/hosts.yml' -o \( -name credentials.db -path '*gcloud*' \) -o -name azureProfile.json)
@@ -951,11 +955,13 @@ host_logins() {
             person) person+=("$path"); [[ -n "$rest" ]] && users+=("$path: $rest") ;;
             machine) machine+=("$path") ;;
             empty) empty+=("$path") ;;
+            gone) gone+=("$path") ;;
             *) unread+=("$path${rest:+ ($rest)}") ;;
         esac
     done < <((( ${#files[@]} )) && printf '%s\n' "${files[@]}" | sudo -n python3 -c "$LOGIN_JUDGE_PY" 2>&1)
     (( ${#machine[@]} )) && note "logins: keyless external_account credentials (no person's login, no key): $(login_paths_line machine)"
     (( ${#empty[@]} )) && note "logins: login-named files holding no credential: $(login_paths_line empty)"
+    (( ${#gone[@]} )) && note "logins: login-named files removed between the walk and their read: $(login_paths_line gone)"
     (( ${#unread[@]} )) && fail "logins: login files that could not be read: $(login_paths_line unread)"
     if (( ${#person[@]} )); then
         fail "logins: a person's login or a key in $(login_paths_line person)${users:+; gcloud user rows: ${users[*]:0:3}}"
