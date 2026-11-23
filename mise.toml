@@ -30,9 +30,13 @@ paranoid = true
 # config's canonical path), and our worktrees are arbitrary-named flat siblings
 # under ~/src, so these are the working roots, not per-repo leaves. A 2026-11-23
 # census found outside clones under ~/src (upstream mirrors agents read) but none
-# carries a mise config, so nothing untrusted loads from them today; the residual
-# is a future outside clone there that adds one, trusted by path and seen in the
-# PR diff (named in dispatch://INFRA-5432). Deliberately NOT ~/ or the /mnt
+# carries a mise config, so nothing untrusted loads from them today. The residual:
+# no control at mise 2026.10.11 stops an outside clone under ~/src that carries a
+# mise config from being trusted by path (ignored_config_paths set in the global
+# miserc is lifted by a clone's own .miserc.toml; only MISE_IGNORED_CONFIG_PATHS,
+# naming known paths, holds). The remedies that hold are cloning such a repo
+# outside the trusted roots, where it fails closed, or MISE_IGNORED_CONFIG_PATHS
+# for a named clone (dispatch://INFRA-5432). Deliberately NOT ~/ or the /mnt
 # scratch roots: a clone or tarball opened outside these paths stays untrusted.
 # This REPLACES the MISE_TRUSTED_CONFIG_PATHS export .bashrc used to set; mise
 # reads this global setting now, and its env var (precedence rank 2) would have
