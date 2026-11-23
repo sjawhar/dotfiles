@@ -67,6 +67,10 @@
     "knives@knives": true,
     "gws-accounts@gws-accounts": true,
     "sjawhar@sjawhar": true,
+    "verification@theorem-skills": true,
+    "tasks@theorem-skills": true,
+    "engineering@theorem-skills": true,
+    "dev-infra@theorem-skills": true,
     "claude-envoy@legion-plugins": true,
     "slack@claude-plugins-official": true,
     "ctx-memory@ctx-memory": true
@@ -76,6 +80,12 @@
       "source": {
         "source": "github",
         "repo": "sjawhar/dotfiles"
+      }
+    },
+    "theorem-skills": {
+      "source": {
+        "source": "github",
+        "repo": "theorem-labs/verification-skills"
       }
     },
     "knives": {
