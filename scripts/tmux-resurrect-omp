@@ -119,8 +119,9 @@ def children(pid: int) -> list[int]:
 
 
 def comm(pid: int) -> str:
+    # Any process may name itself any bytes, so the name decodes with replacement.
     try:
-        return Path(f"/proc/{pid}/comm").read_text().strip()
+        return Path(f"/proc/{pid}/comm").read_bytes().decode("utf8", "replace").strip()
     except OSError:
         return ""
 

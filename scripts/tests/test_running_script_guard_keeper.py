@@ -13,11 +13,15 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 import uuid
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from non_utf8_name import process_named  # noqa: E402 - found through the path above
 
 SCRIPT = Path(__file__).resolve().parents[1] / "running-script-guard-keeper"
 NAMESPACE = "pid-" + "".join(ch for ch in os.readlink("/proc/self/ns/pid") if ch.isdigit())
@@ -76,6 +80,13 @@ class Keeper(unittest.TestCase):
         self.assertTrue(wait_for(self.ours), "the keeper never created pass.lock")
         first = self.lock.stat().st_mtime_ns
         self.assertTrue(wait_for(lambda: self.lock.stat().st_mtime_ns > first, 5), "pass.lock was not refreshed")
+
+    def test_holds_the_lock_while_an_older_guard_named_in_bytes_that_are_not_utf8_lives(self) -> None:
+        """A process may name itself any bytes (prctl PR_SET_NAME), and its stat carries them."""
+        with process_named() as named:
+            (self.state / "sessions" / f"{named.pid}-{uuid.uuid4()}").write_text("")
+            self.start()
+            self.assertTrue(wait_for(self.ours), "the keeper never created pass.lock")
 
     def test_leaves_a_lock_another_process_holds_and_takes_it_once_free(self) -> None:
         self.older_guard()

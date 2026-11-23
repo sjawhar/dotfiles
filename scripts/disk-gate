@@ -229,8 +229,8 @@ def bound(pid, device, kinds):
 
 def scope_of(pid):
     try:
-        with open(f"/proc/{pid}/cgroup") as fh:
-            path = fh.read().splitlines()[0].split(":", 2)[2]
+        with open(f"/proc/{pid}/cgroup", "rb") as fh:
+            path = fh.read().decode("utf8", "replace").splitlines()[0].split(":", 2)[2]
         return os.path.basename(path).replace("\t", " ").replace(",", " ") or "-"
     except (OSError, IndexError):
         return "-"
@@ -259,8 +259,9 @@ def ident(root, skip, agent, free, procs):
     if root not in procs or root == 1:
         return ""
     try:
-        with open(f"/proc/{root}/comm") as fh:
-            if fh.read().strip() in ("systemd", "init"):
+        # Any process may name itself any bytes, so the name decodes with replacement.
+        with open(f"/proc/{root}/comm", "rb") as fh:
+            if fh.read().decode("utf8", "replace").strip() in ("systemd", "init"):
                 return ""
     except OSError:
         return ""

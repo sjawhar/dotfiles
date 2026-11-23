@@ -268,8 +268,9 @@ class Envoy(envoy_client.Envoy):
 
 
 def read_text(path: str) -> str:
+    # Decoded with replacement: it also reads /proc/<pid>/cgroup, whose path may hold any bytes.
     try:
-        return Path(path).read_text()
+        return Path(path).read_bytes().decode("utf8", "replace")
     except OSError:
         return ""
 
@@ -339,7 +340,7 @@ def run_queue() -> tuple[int, int]:
 def _proc_ticks(base: Path) -> int | None:
     """utime + stime of the task under one /proc/<pid> directory, in clock ticks, or None."""
     try:
-        data = (base / "stat").read_text()
+        data = (base / "stat").read_bytes().decode("utf8", "replace")
         fields = data[data.rfind(")") + 2 :].split()
         return int(fields[11]) + int(fields[12])
     except (OSError, ValueError, IndexError):
@@ -349,7 +350,7 @@ def _proc_ticks(base: Path) -> int | None:
 def _exec_start(base: Path) -> float | None:
     """`se.exec_start` from /proc/<pid>/sched: ms since boot when the task last ran on a CPU."""
     try:
-        for line in (base / "sched").read_text().splitlines():
+        for line in (base / "sched").read_bytes().decode("utf8", "replace").splitlines():
             if line.startswith("se.exec_start"):
                 return float(line.split(":", 1)[1])
     except (OSError, ValueError, IndexError):
@@ -402,7 +403,7 @@ def kernel_stalls(proc: Path | None = None) -> dict:
         if comm not in HUNG_COMMANDS:
             continue
         try:
-            data = (base / "stat").read_text()
+            data = (base / "stat").read_bytes().decode("utf8", "replace")
             state = data[data.rfind(")") + 2 :].split()[0]
         except (OSError, IndexError):
             continue
@@ -532,7 +533,7 @@ def d_state_tasks(proc: Path | None = None, limit: int = STACK_MAX_TASKS) -> lis
             continue
         base = proc / name
         try:
-            data = (base / "stat").read_text()
+            data = (base / "stat").read_bytes().decode("utf8", "replace")
             state = data[data.rfind(")") + 2 :].split()[0]
         except (OSError, IndexError):
             continue
@@ -605,7 +606,7 @@ def switch_kworkers(proc: Path | None = None, limit: int = STACK_MAX_WORKERS) ->
             continue
         base = proc / name
         try:
-            data = (base / "stat").read_text()
+            data = (base / "stat").read_bytes().decode("utf8", "replace")
             comm = data[data.find("(") + 1 : data.rfind(")")]
             state = data[data.rfind(")") + 2 :].split()[0]
         except (OSError, IndexError):
@@ -968,15 +969,17 @@ def cmdline_of(pid: int) -> str:
 
 
 def comm_of(pid: int) -> str:
+    # Any process may name itself any bytes, and comm, stat and status all carry the name, so
+    # every read of another process's file here decodes with replacement.
     try:
-        return Path(f"/proc/{pid}/comm").read_text().strip()
+        return Path(f"/proc/{pid}/comm").read_bytes().decode("utf8", "replace").strip()
     except OSError:
         return ""
 
 
 def ppid_of(pid: int) -> int:
     try:
-        data = Path(f"/proc/{pid}/stat").read_text()
+        data = Path(f"/proc/{pid}/stat").read_bytes().decode("utf8", "replace")
         return int(data[data.rfind(")") + 2 :].split()[1])
     except (OSError, ValueError, IndexError):
         return 0
@@ -984,7 +987,7 @@ def ppid_of(pid: int) -> int:
 
 def age_of(pid: int) -> float:
     try:
-        data = Path(f"/proc/{pid}/stat").read_text()
+        data = Path(f"/proc/{pid}/stat").read_bytes().decode("utf8", "replace")
         ticks = int(data[data.rfind(")") + 2 :].split()[19])
         uptime = float(read_text("/proc/uptime").split()[0])
         return max(0.0, uptime - ticks / CLOCK_TICK)
@@ -995,7 +998,7 @@ def age_of(pid: int) -> float:
 def cpu_ticks_of(pid: int) -> int | None:
     """utime + stime of a process, in clock ticks, or None when it is gone."""
     try:
-        data = Path(f"/proc/{pid}/stat").read_text()
+        data = Path(f"/proc/{pid}/stat").read_bytes().decode("utf8", "replace")
         fields = data[data.rfind(")") + 2 :].split()
         return int(fields[11]) + int(fields[12])
     except (OSError, ValueError, IndexError):
@@ -1266,7 +1269,7 @@ def memory_of(pid: int) -> tuple[int, int]:
     so no sudo). A kernel thread has neither line and reads (0, 0)."""
     rss = swap = 0
     try:
-        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+        for line in Path(f"/proc/{pid}/status").read_bytes().decode("utf8", "replace").splitlines():
             if line.startswith("VmRSS:"):
                 rss = int(line.split()[1]) * 1024
             elif line.startswith("VmSwap:"):

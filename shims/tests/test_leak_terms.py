@@ -1799,12 +1799,14 @@ index 0000000,0000000,0000000..1111111
         )
 
         def members(cgroup: str) -> list[str]:
-            """Every process whose cgroup is CGROUP, read from /proc."""
+            """Every process whose cgroup is CGROUP, read from /proc. Read as bytes: any process's cgroup path may hold
+            any bytes, and this walks every process on the host."""
+            want = f"0::{cgroup}\n".encode()
             found = []
             for entry in os.scandir("/proc"):
                 if entry.name.isdigit():
                     try:
-                        if f"0::{cgroup}\n" in Path(f"/proc/{entry.name}/cgroup").read_text(encoding="utf-8"):
+                        if want in Path(f"/proc/{entry.name}/cgroup").read_bytes():
                             found.append(entry.name)
                     except OSError:
                         pass  # the process exited while /proc was read
