@@ -349,11 +349,11 @@ check_agent_secrets_broker() {
         row agent_secrets_broker live "this process is a registered broker session" "n/a" "agent-secrets identity" \
             "secret-run uses the broker instead of secretsd for this session"
     else
-        # The detail is the whole of stderr, else the whole of stdout, which row makes one line; a stream with no
-        # visible character (CR is in [:space:]) is passed over, and two such streams give the fallback.
-        detail="$(<"$err")"
-        [[ "$detail" =~ [^[:space:]] ]] || detail=$out
-        [[ "$detail" =~ [^[:space:]] ]] || detail="no broker identity; secret-run falls back to secretsd"
+        # The detail is the non-empty lines of stderr, else of stdout, which row makes one line; a stream with no
+        # non-empty line is passed over, and two such streams give the fallback.
+        detail="$(awk '{ gsub(/\r/, "") } NF' <<<"$(<"$err")")"
+        [[ -n "$detail" ]] || detail="$(awk '{ gsub(/\r/, "") } NF' <<<"$out")"
+        [[ -n "$detail" ]] || detail="no broker identity; secret-run falls back to secretsd"
         row agent_secrets_broker missing - - "agent-secrets identity" "$(failure_detail "$rc" "$detail")"
     fi
 }

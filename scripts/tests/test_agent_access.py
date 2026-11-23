@@ -824,6 +824,16 @@ fi
                 with self.subTest(case=case, check=name):
                     self.assertEqual((rows[name]["status"], rows[name]["identity"]), ("live", "unknown"))
 
+    def test_broker_failure_detail_has_no_blank_lines(self) -> None:
+        """agent-secrets' whole output is one line of its non-empty lines: a blank line before or between adds no space."""
+        for stream, redirect in (("stderr", " >&2"), ("stdout", "")):
+            with self.subTest(stream=stream):
+                write_stub(
+                    self.stub_dir, "agent-secrets", f"printf '\\n \\nno session\\n\\r\\nhint: run under secret-run\\n'{redirect}\nexit 1"
+                )
+                row = self.access_rows()["agent_secrets_broker"]
+                self.assertEqual((row["status"], row["detail"]), ("missing", "no session hint: run under secret-run"))
+
     def test_broker_failure_with_only_blank_output_gives_the_fallback_text(self) -> None:
         """`agent-secrets identity` failing with only blanks and CRs gives the fallback detail, not a blank one.
 
