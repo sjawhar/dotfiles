@@ -178,6 +178,30 @@ class AttributionIsLoadSwapWatch(unittest.TestCase):
         self.assertEqual([row["session"] for row in rows], [ALPHA])
 
 
+class AgentWalk(unittest.TestCase):
+    """agent_processes over a stand-in /proc: the one walk that reads every process's name."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.proc = Path(self.tmp.name)
+
+    def process(self, entry: str, comm: bytes | None) -> None:
+        (self.proc / entry).mkdir()
+        if comm is not None:
+            (self.proc / entry / "comm").write_bytes(comm)
+
+    def test_a_name_that_is_not_utf8_is_read_and_passed_over(self) -> None:
+        """Any process may set any 15 bytes as its name (prctl PR_SET_NAME), UTF-8 or not."""
+        self.process("100", b"omp\n")
+        self.process("101", b"\xffbadname\n")
+        self.process("102", b"claude\n")
+        self.process("103", b"\xffomp\n")
+        self.process("104", None)  # gone between the listing and the read
+        self.process("self", b"python3\n")
+        self.assertEqual(TOOL.agent_processes(str(self.proc)), {100: "omp", 102: "claude"})
+
+
 class Retention(FakeBox):
     def setUp(self) -> None:
         super().setUp()
