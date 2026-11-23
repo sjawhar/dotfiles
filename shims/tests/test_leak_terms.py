@@ -2167,8 +2167,11 @@ class GitLeaks(LeakTestCase):
         markers = self.root / "gh-markers"
         write_hostile_mise_config(checkout, markers)
         # This checkout's shims/ and scripts/ first, so gh-app-token runs this checkout's secret-run, then mise's shims,
-        # ahead of the python3 of the environment these tests run in.
-        environment = {**os.environ, "CI": "true",
+        # ahead of the python3 of the environment these tests run in. It keeps this machine's HOME, whose mise config
+        # sets paranoid (mise.toml's [settings]): that refuses the checkout's config, so neither the route nor the
+        # control could run a marker and the row would show nothing. MISE_PARANOID=0 turns it off for this row alone,
+        # so the route is held to running no code of the checkout without paranoid's help.
+        environment = {**os.environ, "CI": "true", "MISE_PARANOID": "0",
                        "PATH": os.pathsep.join([str(ROOT / "shims"), str(ROOT / "scripts"), mise,
                                                 os.environ["PATH"]])}
         result = self.launch([str(ROOT / "shims" / "gh"), "api", "repos/tc-leak-test-none-0b1/x"], cwd=checkout,
