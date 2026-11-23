@@ -17,7 +17,7 @@ import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from non_utf8_name import READ_AS, process_named  # noqa: E402 - found through the path above
+from non_utf8_name import NAME, READ_AS, process_named  # noqa: E402 - found through the path above
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "load-swap-watch"
@@ -512,6 +512,13 @@ class ProcessNamedInNonUtf8Bytes(unittest.TestCase):
         with process_named() as named:
             rss, _ = WATCH.memory_of(named.pid)
             self.assertGreater(rss, 0)
+
+    def test_a_file_read_as_text_may_hold_any_bytes(self) -> None:
+        """read_text also reads /proc/<pid>/cgroup, whose path may hold any bytes, as a name may."""
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup = Path(directory) / "cgroup"
+            cgroup.write_bytes(b"0::/user.slice/" + NAME + b".scope\n")
+            self.assertEqual(WATCH.read_text(str(cgroup)), f"0::/user.slice/{READ_AS}.scope\n")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,9 @@ that walks every process on the host meets one whenever pytest-xdist runs the tw
 from __future__ import annotations
 
 import contextlib
+import os
+import select
+import signal
 import subprocess
 import sys
 import tempfile
@@ -43,12 +46,16 @@ class Named(NamedTuple):
 
 
 @contextlib.contextmanager
-def process_named(*command: str, name: bytes = NAME, env: dict[str, str] | None = None) -> Generator[Named]:
+def process_named(
+    *command: str, name: bytes = NAME, env: dict[str, str] | None = None, ready_within: float = 60.0
+) -> Generator[Named]:
     """A live child of this process named `name` for the length of the block.
 
     With `command`, the child first runs it as its own child, so that command's parent process
     carries the name. Raises AssertionError when the kernel does not show the name, so a test
-    never passes on a process that is not named as it says.
+    never passes on a process that is not named as it says, and when the child (with its command)
+    is not ready within `ready_within` seconds, so a hung command fails the test instead of
+    hanging it.
     """
     with tempfile.TemporaryFile() as output:
         child = subprocess.Popen(
@@ -57,9 +64,13 @@ def process_named(*command: str, name: bytes = NAME, env: dict[str, str] | None 
             stdout=subprocess.PIPE,
             stderr=output,
             env=env,
+            start_new_session=True,  # one group, so a hung command dies with the child
         )
         try:
             assert child.stdout is not None
+            if not select.select([child.stdout], [], [], ready_within)[0]:
+                os.killpg(child.pid, signal.SIGKILL)
+                raise AssertionError(f"the named child was not ready within {ready_within:g} s")
             ready = child.stdout.readline().decode()
             output.seek(0)
             printed = output.read().decode("utf8", "replace")

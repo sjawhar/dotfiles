@@ -101,7 +101,7 @@ def iso(epoch: float) -> str:
 def proc_stat_fields(pid: int) -> list[str]:
     """The fields of /proc/<pid>/stat after the comm, or [] when the process is gone."""
     try:
-        data = Path(f"/proc/{pid}/stat").read_text()
+        data = Path(f"/proc/{pid}/stat").read_bytes().decode("utf8", "replace")
     except OSError:
         return []
     cut = data.rfind(")")

@@ -18,9 +18,10 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from non_utf8_name import process_named  # noqa: E402 - found through the path above
+from non_utf8_name import NAME, READ_AS, process_named  # noqa: E402 - found through the path above
 
 
 def fs_type(path: Path) -> str:
@@ -38,6 +39,28 @@ def other_disk(than: Path) -> Path | None:
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "disk-gate"
+
+
+def probe_namespace() -> dict[str, Any]:
+    """The gate's Python probe (its PROBE_PY heredoc), loaded as a namespace without running it."""
+    body = SCRIPT.read_text().split("read -r -d '' PROBE_PY <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    namespace: dict[str, Any] = {"__name__": "disk_gate_probe"}
+    exec(compile(body, str(SCRIPT), "exec"), namespace)
+    return namespace
+
+
+class ProbeReading(unittest.TestCase):
+    def test_a_scope_path_that_is_not_utf8_is_read(self) -> None:
+        """A process's cgroup path, which the gate prints as its scope, may hold any bytes, as a name may."""
+        probe = probe_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup = Path(directory) / "cgroup"
+            cgroup.write_bytes(b"0::/user.slice/" + NAME + b".scope\n")
+            real_open = open
+            probe["open"] = lambda path, *args, **kwargs: real_open(
+                cgroup if path == "/proc/4242/cgroup" else path, *args, **kwargs)
+            self.assertEqual(probe["scope_of"](4242), f"{READ_AS}.scope")
+
 
 # The filesystem's size answers `--output=size` (the gate scales /mnt/nvme's floor by it); any
 # other call is the free space.

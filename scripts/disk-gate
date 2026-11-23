@@ -229,8 +229,8 @@ def bound(pid, device, kinds):
 
 def scope_of(pid):
     try:
-        with open(f"/proc/{pid}/cgroup") as fh:
-            path = fh.read().splitlines()[0].split(":", 2)[2]
+        with open(f"/proc/{pid}/cgroup", "rb") as fh:
+            path = fh.read().decode("utf8", "replace").splitlines()[0].split(":", 2)[2]
         return os.path.basename(path).replace("\t", " ").replace(",", " ") or "-"
     except (OSError, IndexError):
         return "-"

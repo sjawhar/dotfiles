@@ -268,8 +268,9 @@ class Envoy(envoy_client.Envoy):
 
 
 def read_text(path: str) -> str:
+    # Decoded with replacement: it also reads /proc/<pid>/cgroup, whose path may hold any bytes.
     try:
-        return Path(path).read_text()
+        return Path(path).read_bytes().decode("utf8", "replace")
     except OSError:
         return ""
 

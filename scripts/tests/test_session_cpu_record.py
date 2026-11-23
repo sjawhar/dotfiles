@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """Tests for scripts/session-cpu-record: its delta math, its attribution and its retention.
 
-Nothing here reads a real /proc or a real cgroup. The process table, the cgroup counters and
-the environments are fabricated, and the attribution test drives the REAL `session_claim` of
+Nothing here walks a real /proc or reads a real cgroup. The process table, the cgroup counters
+and the environments are fabricated, and the attribution test drives the REAL `session_claim` of
 scripts/load-swap-watch over that fabricated tree, so a change there that breaks this recorder
-fails here.
+fails here. One test reads the stat of a child it starts itself.
 """
 
 import datetime as dt
 import importlib.machinery
 import importlib.util
 import json
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from non_utf8_name import process_named  # noqa: E402 - found through the path above
 
 SCRIPT = Path(__file__).resolve().parents[1] / "session-cpu-record"
 LOADER = importlib.machinery.SourceFileLoader("session_cpu_record", str(SCRIPT))
@@ -200,6 +204,12 @@ class AgentWalk(unittest.TestCase):
         self.process("104", None)  # gone between the listing and the read
         self.process("self", b"python3\n")
         self.assertEqual(TOOL.agent_processes(str(self.proc)), {100: "omp", 102: "claude"})
+
+    def test_the_stat_of_a_process_named_in_bytes_that_are_not_utf8_is_read(self) -> None:
+        """An agent's pid can be reused by such a process between the walk and the read of its stat."""
+        with process_named() as named:
+            fields = TOOL.proc_stat_fields(named.pid)
+        self.assertGreaterEqual(len(fields), 20)
 
 
 class Retention(FakeBox):
