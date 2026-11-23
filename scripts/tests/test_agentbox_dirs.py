@@ -101,6 +101,10 @@ class AgentboxDirs(unittest.TestCase):
             # /run/user/<uid>/agentbox.
             "AGENTBOX_RUN_BASE": str(self.root / "run"),
             "AGENTBOX_CACHE_ROOT": str(self.root / "box-cache"),
+            # The box's record and its exit row, in the fixture and not in this host's
+            # /mnt/scratch/<user>/agentbox/disks and /mnt/durable/<user>/agentbox-exits.tsv.
+            "AGENTBOX_DISKS": str(self.root / "disks"),
+            "AGENTBOX_EXITS": str(self.root / "agentbox-exits.tsv"),
             # The limits are tested in scripts/tests/test_agentbox_limits.py; a box here needs no
             # filesystem of its own, which would want root.
             "AGENTBOX_DISK": "0",
