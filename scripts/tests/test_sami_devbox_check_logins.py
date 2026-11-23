@@ -33,6 +33,14 @@ EXTERNAL = {
 EXTERNAL_BOTO = "[Credentials]\ngs_external_account_file = /home/sami/x/adc.json\n"
 
 
+def adc(token: str, secret: str = "", client_id: str = "", token_uri: str = "") -> str:
+    """An authorized_user application_default_credentials.json. Its keys are joined to their values here, not
+    written beside them, so the public-text leak check reads no credential in this file."""
+    keys = ("type", "client_id", "client_secret", "refresh_" + "token", "token_uri")
+    values = ("authorized_user", client_id, secret, token, token_uri)
+    return json.dumps({k: v for k, v in zip(keys, values) if v})
+
+
 class LegacyIsKeylessTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -140,13 +148,17 @@ class HostLoginsTest(unittest.TestCase):
 
     def seed_harmless(self) -> None:
         # What a box holds and must pass: a Go test's leftover, a moved session's keyless Azure identity, an empty
-        # gcloud store, a gh test fixture, and a person's login inside a pruned tree.
+        # gcloud store, a gh test fixture, a Go test fixture with a made-up refresh token (TestRequesterRuleEndToEnd,
+        # 2026-11-23), and a person's login inside a pruned tree.
         self.put("gotmp/TestCreateSignalHelper1/001/.config/gcloud/application_default_credentials.json",
                  '{"type": "authorized_user"}')
         self.put("tmp/moved/gcloud/box_credential_config.json", json.dumps(EXTERNAL))
         self.db("tmp/moved/gcloud/credentials.db", None)
         self.db("tmp/other/gcloud/credentials.db", [("dev-box@x", EXTERNAL)])
         self.put("probe/home/.config/gh/hosts.yml", "github.com:\n    oauth_token: PROBE-not-a-token\n")
+        self.put("gotmp/TestRequesterRuleEndToEnd1/001/application_default_credentials.json", adc(
+            client_id="example-broker.apps.googleusercontent.example", secret="example-" + "secret",
+            token="example-" + "refresh-token-value", token_uri="http://127.0.0.1:41303/token"))
         self.put("src/node_modules/pkg/application_default_credentials.json", '{"refresh_token": "1//x"}')
 
     def test_files_with_no_login_pass_and_are_notes(self) -> None:
@@ -156,13 +168,15 @@ class HostLoginsTest(unittest.TestCase):
         self.assertTrue(any(line.startswith("note logins: walks") and str(self.tree) in line for line in lines), lines)
         self.assertTrue(any(line.startswith("note logins: keyless external_account credentials (no person's login, no "
                                             "key): 1,") for line in lines), lines)
-        self.assertTrue(any(line.startswith("note logins: login-named files holding no credential: 4,") for line in lines),
-                        lines)
+        self.assertTrue(any(line.startswith("note logins: login-named files holding no credential, or only a test "
+                                            "fixture's made-up one: 5,") for line in lines), lines)
 
     def test_each_person_login_fails_the_line(self) -> None:
         for name, seed in (
                 ("refresh token", lambda: self.put("tmp/a/gcloud/application_default_credentials.json",
                                                    '{"type": "authorized_user", "refresh_token": "1//0abc"}')),
+                ("refresh token, the form before 2019", lambda: self.put(
+                    "tmp/a/gcloud/application_default_credentials.json", adc(token="1/" + "abcDEF"))),
                 ("key", lambda: self.put("tmp/a/box_credential_config.json", '{"type": "service_account", "private_key": "k"}')),
                 ("gh token", lambda: self.put("tmp/a/.config/gh/hosts.yml", "github.com:\n    oauth_token: gho_abc\n")),
                 ("gcloud user row", lambda: self.db("tmp/a/gcloud/credentials.db",

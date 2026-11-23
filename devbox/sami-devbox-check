@@ -861,15 +861,17 @@ legacy_is_keyless() {
 
 # LOGIN_JUDGE_PY: judge, as root, each login file named on stdin (one path a line) by what it holds,
 # and print `<verdict>TAB<path>[TAB<accounts>]` a line (a tab, so a path may hold spaces). Verdicts:
-#   person   a person's login or a long-lived secret: a JSON credential with a refresh_token or a
-#            private_key, a gh hosts.yml with a GitHub token (gho_, ghp_, ghu_, ghs_, ghr_,
-#            github_pat_), a credentialed_accounts.db (A2 names it), a gcloud credentials.db with an
-#            authorized_user row (its accounts follow);
+#   person   a person's login or a long-lived secret: a JSON credential with a private_key or a refresh
+#            token of Google's form (it begins `1/`: `1//0…` since 2019, `1/…` before), a gh hosts.yml with
+#            a GitHub token (gho_, ghp_, ghu_, ghs_, ghr_, github_pat_), a credentialed_accounts.db (A2
+#            names it), a gcloud credentials.db with an authorized_user row (its accounts follow);
 #   machine  a keyless external_account (an Azure box's identity: no refresh token, no key);
-#   empty    no credential at all: a JSON or hosts.yml with neither, a credentials.db with no row or no
-#            credentials table. Go tests leave such files behind by the thousand: on 2026-11-22, 7,174
+#   empty    no credential at all, or only a test fixture's made-up one: a JSON or hosts.yml with no
+#            key and no token of a real form, a credentials.db with no row or no credentials table. Go
+#            tests leave such files behind by the thousand: on 2026-11-22, 7,174
 #            application_default_credentials.json holding only {"type": "authorized_user"} in
-#            TestCreateSignalHelper temp directories, each a FAIL while the check judged by name;
+#            TestCreateSignalHelper temp directories, each a FAIL while the check judged by name, and
+#            one TestRequesterRuleEndToEnd fixture whose refresh token is the word `example…`;
 #   gone     a file removed between the walk and this read (Go tests remove their temp files), a note
 #            as find_judge makes a path that went away during the walk;
 #   error    a file that could not be read, which says nothing, so it fails the line.
@@ -877,7 +879,7 @@ legacy_is_keyless() {
 # with no lock and no write (mode=ro alone answered "attempt to write a readonly database").
 LOGIN_JUDGE_PY='
 import json, os, re, sqlite3, sys
-SECRET = re.compile(r"\"(refresh_token|private_key)\"\s*:\s*\"[^\"]+")
+SECRET = re.compile(r"\"private_key\"\s*:\s*\"[^\"]+|\"refresh_token\"\s*:\s*\"1/")
 GH_TOKEN = re.compile(r"oauth_token:\s*[\x27\"]?(gh[opusr]_|github_pat_)")
 def say(*fields):
     print("\t".join(fields))
@@ -960,7 +962,7 @@ host_logins() {
         esac
     done < <((( ${#files[@]} )) && printf '%s\n' "${files[@]}" | sudo -n python3 -c "$LOGIN_JUDGE_PY" 2>&1)
     (( ${#machine[@]} )) && note "logins: keyless external_account credentials (no person's login, no key): $(login_paths_line machine)"
-    (( ${#empty[@]} )) && note "logins: login-named files holding no credential: $(login_paths_line empty)"
+    (( ${#empty[@]} )) && note "logins: login-named files holding no credential, or only a test fixture's made-up one: $(login_paths_line empty)"
     (( ${#gone[@]} )) && note "logins: login-named files removed between the walk and their read: $(login_paths_line gone)"
     (( ${#unread[@]} )) && fail "logins: login files that could not be read: $(login_paths_line unread)"
     if (( ${#person[@]} )); then
