@@ -44,8 +44,8 @@
 - Make a second tree only when two workers edit different files at once.
 - **Outside an agent box:**
   - make each further tree with `agent-workspace new <repo> <name>` (`agent-workspace --help`);
-  - remove each further tree with `agent-workspace rm`, not `rm -rf`;
-  - do not `git clone` a repository already checked out on the machine: a plain clone copies its whole object store.
+  - remove each further tree with `agent-workspace rm`, not `rm -rf`.
+- Do not `git clone` a repository already checked out on the machine: a plain clone copies its whole object store.
 - When a tree needs refs the source must not see, use `agent-workspace new --separate-repo`, a `git clone --shared` that borrows the source's objects.
   - `--independent` makes a full clone that pays for a private copy of every object.
 - Do not remove or move the canonical checkout (`~/src/<repo>`): every worktree and `--shared` clone of it stops working.
