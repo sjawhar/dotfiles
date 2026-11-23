@@ -1,0 +1,6 @@
+# root's perf configuration on sami-devbox (dispatch://INFRA-5287). devbox/gce-host.sh installs it as
+# /root/.perfconfig. `sudo perf record` copies every binary it samples into a build-id cache, by
+# default /root/.debug on the boot disk, which holds the OS only: on 2026-11-22 that cache held
+# 1.6 GiB, 1.5 GiB of it copies of binaries under /home/sami. The cache is on the state disk instead.
+[buildid]
+	dir = /mnt/nvme/root-perf-buildid
