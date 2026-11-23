@@ -251,16 +251,8 @@ GRADE = "gke_theorem-agent-infra_us-central1_theorem-us-central1"
 FARM_SIGNER = "ossv-runs-signer@theorem-agent-infra.iam.gserviceaccount.com"
 BOX_SIGNER = "build-io-signer@theorem-agent-infra.iam.gserviceaccount.com"
 
-# Each answer of `kubectl -n grade auth can-i create jobs` and what the grade pool line makes of it: a grant passes; a
-# refusal, bare or with GKE's reason, nothing, an error, and a word that is no grant fail.
-GRADE_POOL_ANSWERS = (
-    ("yes", "ok"),
-    ("no", "FAIL"),
-    (next(answer for answer, _ in CAN_I_ANSWERS if answer.startswith("no - ")), "FAIL"),
-    ("", "FAIL"),
-    ("error: You must be logged in to the server", "FAIL"),
-    ("nope", "FAIL"),
-)
+# Each answer of CAN_I_ANSWERS and what the grade pool line, which wants a grant, makes of it: only yes passes.
+GRADE_POOL_ANSWERS = tuple((answer, "ok" if answer == "yes" else "FAIL") for answer, _ in CAN_I_ANSWERS)
 
 
 class GradePool(CheckCase):

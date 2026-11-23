@@ -239,7 +239,7 @@ class GcloudSdkInstallerTest(unittest.TestCase):
 
     def test_every_context_the_check_and_the_packing_script_read_is_one_the_installer_writes(self) -> None:
         _ = self.run_installer()
-        written = {context for path in sorted((self.home / ".kube" / "config.d").iterdir())
+        written = {context for path in (self.home / ".kube" / "config.d").iterdir()
                    for context in kubeconfig_contexts(path)}
         body = f'source <(sed \'/^case "${{1:-}}" in/,$d\' {CHECK}); printf "%s\\n" "$KUBE_CONTEXT" "$GRADE_KUBE_CONTEXT"'
         result = subprocess.run(["bash", "-c", body], env=self.env, capture_output=True, text=True, timeout=60,

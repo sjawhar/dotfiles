@@ -392,10 +392,6 @@ grade_pool_check() {
         || fail "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: want yes, got: $(tail -1 <<<"$got")"
 }
 
-# What the move census (dispatch://INFRA-1433, move-census.md) routes off the box, read from the
-# box: each is refused, and a failure that is not a refusal (REFUSED) fails the line.
-#   the farm's URL signer ossv-runs-signer@, its run bucket and its Jobs in builds-ossv: the farm's
-#   own pods (U05).
 # signer_try SA: mint SA's token and sign a blob as it. Sets sign_tok_rc, sign_tok_out (the token,
 # or the mint's error), sign_tok_note (what a line may print of it: a token's length, never the
 # token, or the mint's last error line), sign_rc, sign_out and sign_bytes (the signature's size).
@@ -427,6 +423,10 @@ n6_box_signer_check() {
         fail "N6 signer $where: $N6_BOX_SIGNER: $sign_tok_note; signBlob exit $sign_rc: $(tail -1 <<<"$sign_out")"
     fi
 }
+# What the move census (dispatch://INFRA-1433, move-census.md) routes off the box, read from the
+# box: each is refused, and a failure that is not a refusal (REFUSED) fails the line.
+#   the farm's URL signer ossv-runs-signer@, its run bucket and its Jobs in builds-ossv: the farm's
+#   own pods (U05).
 N6_FARM_SIGNER=ossv-runs-signer@theorem-agent-infra.iam.gserviceaccount.com
 n6_routes_check() {
     local where="$1" out got sign_tok_rc sign_tok_out sign_tok_note sign_rc sign_out sign_bytes
