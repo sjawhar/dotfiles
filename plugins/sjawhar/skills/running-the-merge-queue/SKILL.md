@@ -26,7 +26,7 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 - Read the record again at each wake and before each merge.
 - Only a current decision sets a hold or a quiet window: never restore a lifted hold or infer a window from history.
 - Merge only by an ordinary protected squash merge.
-- Never merge under a permission inferred from earlier use: a grant given to this queue session stays live for it.
+- Never merge under a permission inferred from earlier use. A grant given to this queue session stays live for it.
 - Ask Sami once for a merge window: a span to merge READY PRs without asking per PR.
 - At registration, check the author, the account this session writes as (`gh api user --jq .login`), required reviews and CODEOWNERS.
 - An approval that account cannot give is unmet until `landing-a-pr`'s repo merge rules name who gives it.
