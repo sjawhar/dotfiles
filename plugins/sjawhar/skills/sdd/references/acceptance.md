@@ -29,4 +29,7 @@
 
 ## A slice with a browser page
 
-Before handing over, the implementer runs ce-dogfood (read `~/.dotfiles/vendor/compound-engineering/skills/ce-dogfood/SKILL.md`) on its branch, with the real data the user sees and the user as the persona. It fixes clipped text, empty states and dead clicks. Its report goes on the slice's issue. Each decision it leaves for a person becomes a decision block in the spec.
+- Before handing over, the implementer runs ce-dogfood (read `~/.dotfiles/vendor/compound-engineering/skills/ce-dogfood/SKILL.md`) on its branch, with the real data the user sees and the user as the persona.
+- It fixes clipped text, empty states and dead clicks.
+- Its report goes on the slice's issue.
+- Each decision it leaves for a person becomes a decision block in the spec.

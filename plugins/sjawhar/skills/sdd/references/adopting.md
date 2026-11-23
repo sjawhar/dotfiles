@@ -9,4 +9,7 @@ Read, from the tracker and the repo:
 - branch, diff, CI and review state, checked against the code, not the PR description;
 - unfinished acceptance items, naming the next one. Check each item marked done against the code.
 
-An approved design stays approved. Do not restart brainstorming, re-ask an answered question, re-propose a rejected approach or ask Sami to approve it again. Edits that record his answers or measured corrections do not reopen it. Ask again only when your plan changes what he approved, and say what the approval is for.
+- An approved design stays approved.
+- Do not restart brainstorming, re-ask an answered question, re-propose a rejected approach or ask Sami to approve it again.
+- Edits that record his answers or measured corrections do not reopen it.
+- Ask again only when your plan changes what he approved, and say what the approval is for.

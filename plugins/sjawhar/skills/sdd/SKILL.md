@@ -7,7 +7,8 @@ description: "Use when building a large project autonomously with subagents (sev
 
 **Done when:** you have run `finding-dropped-work` over this session's transcript, closed each row it finds as that skill says, and reported its row counts, before you report anything done or move an issue to `done`.
 
-Where this skill and a stock workflow skill (`subagent-driven-development`, `writing-plans`, `executing-plans` or another) disagree, follow this one. Load `subagent-driven-development` and `using-subagents`.
+- Where this skill and a stock workflow skill (`subagent-driven-development`, `writing-plans`, `executing-plans` or another) disagree, follow this one.
+- Load `subagent-driven-development` and `using-subagents`.
 
 ## Who does what
 
