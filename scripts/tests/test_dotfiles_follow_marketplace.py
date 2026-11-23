@@ -3,7 +3,8 @@
 
 Run with: python3 -m unittest -v scripts.tests.test_dotfiles_follow_marketplace
 The shared follower harness supplies throwaway git repositories and fake mise and bun;
-only the shim below handles marketplace commands, with no real omp or network access.
+only the fake omp of scripts/tests/fake_omp.py handles marketplace commands, with no real omp or
+network access.
 """
 
 import json
@@ -23,71 +24,13 @@ from scripts.tests.test_dotfiles_follow import FOLLOW, SCRIPT, TOOLS_PASSED, Har
 from scripts.tests.marketplace_version_cases import CASES, EMPTY_CASES, MISSING, RAW_CASES
 
 
-FAKE_OMP = r'''#!/usr/bin/env python3
-import json
-import os
-import subprocess
-import sys
-import time
-from pathlib import Path
-
-repo = Path(__file__).resolve().parents[1]
-plugins = repo / "omp/plugins"
-args = sys.argv[1:]
-with Path(os.environ["FAKE_OMP_LOG"]).open("a") as log:
-    log.write(json.dumps(args) + "\n")
-data_log = os.environ.get("FAKE_OMP_DATA_LOG")
-if data_log:
-    with Path(data_log).open("a") as log:
-        log.write(os.environ.get("MISE_DATA_DIR", "unset") + "\n")
-# Both successful commands and midway failures can rewrite the tracked lock.
-(plugins / "omp-plugins.lock.json").write_text('{"plugins": {}, "rewritten": true}\n')
-if args[:3] == ["plugin", "marketplace", "update"] and len(args) == 4:
-    time.sleep(float(os.environ.get("FAKE_OMP_DELAY", "0")))
-    if args[3] == os.environ.get("FAKE_OMP_UPDATE_FAIL"):
-        print("catalog refresh failed", file=sys.stderr)
-        sys.exit(8)
-    sys.exit(0)
-if args[:2] == ["plugin", "upgrade"] and len(args) == 3:
-    name, _, source = args[2].rpartition("@")
-    installed_path = plugins / "installed_plugins.json"
-    installed = json.loads(installed_path.read_text())
-    record = installed["plugins"][args[2]][0]
-    if name in os.environ.get("FAKE_OMP_FAIL", "").split(","):
-        record["version"] = "partial"
-        installed_path.write_text(json.dumps(installed))
-        print("upgrade failed midway: " + name, file=sys.stderr)
-        sys.exit(7)
-    if name == os.environ.get("FAKE_OMP_HANG"):
-        record["version"] = "partial"
-        installed_path.write_text(json.dumps(installed))
-        marker = Path(os.environ["FAKE_OMP_MARKER"])
-        late = marker.with_suffix(".late")
-        child = subprocess.Popen([
-            sys.executable, "-c",
-            "import pathlib, time; time.sleep(2); "
-            + "pathlib.Path(" + repr(str(plugins / "omp-plugins.lock.json")) + ").write_text('late child write'); "
-            + "pathlib.Path(" + repr(str(late)) + ").write_text('child survived')",
-        ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        marker.write_text(json.dumps({"pid": child.pid, "deadline": time.monotonic() + 2}))
-        time.sleep(30)
-    record["version"] = json.loads(os.environ["FAKE_OMP_VERSIONS"])[name]
-    installed_path.write_text(json.dumps(installed))
-    if name == os.environ.get("FAKE_OMP_INVALID_BYTES"):
-        os.write(1, b"\xff\n")
-        sys.exit(7)
-    sys.exit(0)
-print("unexpected omp arguments: " + repr(args), file=sys.stderr)
-sys.exit(99)
-'''
-
-
 class MarketplaceFixture(Harness):
-    """The fixture and helpers of the marketplace cases. It holds no case itself, so a class with
-    another fake omp (TeamCatalogFollow) does not run every case again."""
+    """The fixture and helpers of the marketplace cases, with fake_omp's fake as its shims/omp. It
+    holds no case itself, so a class with cases of its own on this fixture (TeamCatalogFollow) does
+    not run every case again."""
 
     # The shims/omp the fixture commits.
-    omp_script = FAKE_OMP
+    omp_script = fake_omp.SCRIPT
 
     def setUp(self) -> None:
         super().setUp()
@@ -161,7 +104,7 @@ class MarketplaceFixture(Harness):
         self.sh("git", "merge", "--ff-only", "--quiet", "origin/main", cwd=self.repo)
 
     def calls(self) -> list[list[str]]:
-        return [json.loads(line) for line in self.omp_log.read_text().splitlines()] if self.omp_log.exists() else []
+        return [record["args"] for record in fake_omp.read_calls(self.omp_log)]
 
     def data_calls(self) -> list[str]:
         path = Path(os.environ["FAKE_OMP_DATA_LOG"])
@@ -184,14 +127,38 @@ class MarketplaceFixture(Harness):
 
 
 class MarketplacePlugins(MarketplaceFixture):
+    """The marketplace cases of follow's run from before the team catalog step. The fake registers
+    the fixture's three catalogs, and the team catalog still has the name it is registered under,
+    verification-skills, so no move is under way. Each run's step lists the registrations, fetches
+    that catalog (`marketplace update verification-skills`) and upgrades dev-infra, one of its four
+    plugins; follow's loop then upgrades verification-skills, a plugin of that catalog outside the
+    four, with no second update, and updates and upgrades core-ops. Each plugin is upgraded only
+    when it is below its lock entry."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.fake_state = self.home.parent / "omp-state.json"
+        os.environ["FAKE_OMP_STATE"] = str(self.fake_state)
+        fake_omp.write_state(self.fake_state, {
+            "registrations": [
+                ["verification-skills", fake_omp.TEAM_SOURCE],
+                ["core-ops", "theorem-labs/core-ops"],
+                ["claude-plugins-official", "anthropics/claude-plugins-official"],
+            ],
+            "catalogs": {fake_omp.TEAM_SOURCE: {"name": "verification-skills"}},
+        })
+        # These cases' fake rewrote the lock on every call, so a clean lock after a run shows that
+        # follow put it back, whichever commands ran.
+        os.environ["FAKE_OMP_REWRITE_LOCK"] = "1"
+
     def test_changed_pins_upgrade_unchanged_and_bun_pins_do_not(self) -> None:
         self.take_upstream()
         why = FOLLOW.install_tools(self.repo, self.options())
         self.assertEqual(why, "")
         self.assertEqual(self.calls(), [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "dev-infra@verification-skills"],
-            ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "verification-skills@verification-skills"],
             ["plugin", "marketplace", "update", "core-ops"],
             ["plugin", "upgrade", "core-ops@core-ops"],
@@ -201,9 +168,13 @@ class MarketplacePlugins(MarketplaceFixture):
         self.assertEqual(self.version("slack"), "1.0.0")
         self.assertEqual(self.version("@sjawhar/pi-envoy"), "1.0.0")
         self.assert_clean_lock()
-        # Retrying tools at this HEAD must not re-upgrade anything already at its pin.
+        # Retrying tools at this HEAD fetches the team catalog again, and must not re-upgrade
+        # anything already at its pin.
         self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
-        self.assertEqual(len(self.calls()), 6)
+        self.assertEqual(self.calls()[6:], [
+            ["plugin", "marketplace", "list"],
+            ["plugin", "marketplace", "update", "verification-skills"],
+        ])
         self.assert_clean_lock()
 
     def test_only_home_dotfiles_upgrades_marketplace_plugins(self) -> None:
@@ -216,9 +187,9 @@ class MarketplacePlugins(MarketplaceFixture):
         other_installed = other / "omp/plugins/installed_plugins.json"
         other_installed.write_text(self.installed_path.read_text())
         upgrades = [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "dev-infra@verification-skills"],
-            ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "verification-skills@verification-skills"],
             ["plugin", "marketplace", "update", "core-ops"],
             ["plugin", "upgrade", "core-ops@core-ops"],
@@ -279,6 +250,7 @@ class MarketplacePlugins(MarketplaceFixture):
         self.assertEqual(self.state_data()["last_outcome"], "ok")
         self.assertEqual(self.state_data()["tools_ok_head"], self.target)
         self.assertEqual(self.calls(), [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "verification-skills@verification-skills"],
             ["plugin", "marketplace", "update", "core-ops"],
@@ -289,16 +261,18 @@ class MarketplacePlugins(MarketplaceFixture):
         self.assert_clean_lock()
 
     def test_ambiguous_marketplace_source_is_reported_and_other_plugins_continue(self) -> None:
+        # A plugin outside the team catalog's four, installed under a second ID. One of the four
+        # under a catalog that no registration holds is a plugin the team catalog step moves.
         installed = json.loads(self.installed_path.read_text())
-        installed["plugins"]["dev-infra@another-source"] = installed["plugins"]["dev-infra@verification-skills"]
+        installed["plugins"]["verification-skills@another-source"] = installed["plugins"]["verification-skills@verification-skills"]
         self.installed_path.write_text(json.dumps(installed))
         messages = self.run_follow()
         self.assertEqual(len(messages), 1)
         self.assertIn("TOOLS NOT INSTALLED", messages[0])
-        self.assertIn("dev-infra", messages[0])
+        self.assertIn("omp marketplace plugin verification-skills has no unique installed marketplace", messages[0])
         self.assertIn("source", messages[0])
         self.assertEqual(self.version("core-ops"), "2.0.0")
-        self.assertFalse(any(args[:2] == ["plugin", "upgrade"] and args[2].startswith("dev-infra@") for args in self.calls()))
+        self.assertFalse(any(args[:2] == ["plugin", "upgrade"] and args[2].startswith("verification-skills@") for args in self.calls()))
         self.assertEqual(self.state_data()["last_outcome"], "tools")
         self.assert_clean_lock()
 
@@ -393,6 +367,7 @@ class MarketplacePlugins(MarketplaceFixture):
         self.assertIn("dev-infra", why)
         self.assertIn("partial", why)
         self.assertEqual(self.calls()[calls_before:], [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "dev-infra@verification-skills"],
         ])
@@ -479,9 +454,13 @@ class MarketplacePlugins(MarketplaceFixture):
         why = FOLLOW.install_tools(self.repo, self.options())
         self.assertIn("catalog refresh failed", why)
         self.assertIn("exited 8", why)
+        # The step's update fails, so it tries `marketplace add`, which Oh My Pi refuses while the
+        # name is registered. With that catalog not fetched, no plugin of it is upgraded, and
+        # follow's loop goes on to core-ops.
         self.assertEqual(self.calls(), [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
-            ["plugin", "marketplace", "update", "verification-skills"],
+            ["plugin", "marketplace", "add", fake_omp.TEAM_SOURCE],
             ["plugin", "marketplace", "update", "core-ops"],
             ["plugin", "upgrade", "core-ops@core-ops"],
         ])
@@ -519,11 +498,12 @@ class MarketplacePlugins(MarketplaceFixture):
         self.assertEqual(self.state_data()["tools_ok_head"], self.target)
         self.assertEqual(self.state_data()["last_outcome"], "ok")
         self.assertEqual(self.calls()[6:], [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "dev-infra@verification-skills"],
         ])
         self.assertEqual(self.run_follow(now=1_001_200.0), [])
-        self.assertEqual(len(self.calls()), 8)
+        self.assertEqual(len(self.calls()), 9)
         self.assert_clean_lock()
 
     def test_post_update_report_opens_once_with_on_main_headline(self) -> None:
@@ -659,6 +639,7 @@ class MarketplacePlugins(MarketplaceFixture):
         self.assertEqual(self.head(), self.target)
         self.assertEqual(self.version("dev-infra"), "2.0.0")
         self.assertEqual(self.calls()[6:], [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "dev-infra@verification-skills"],
         ])
@@ -724,15 +705,16 @@ class MarketplacePlugins(MarketplaceFixture):
         self.assertEqual(self.version("dev-infra"), "2.0.0")
         self.assertIsNone(checkpoint)
         self.assertEqual(self.calls()[6:], [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "dev-infra@verification-skills"],
         ])
         self.assertEqual(self.state_data()["tools_ok_head"], self.target)
         self.assert_clean_lock()
         self.assertEqual(self.run_follow(now=1_001_200.0), [])
-        self.assertEqual(len(self.calls()), 8)
+        self.assertEqual(len(self.calls()), 9)
 
-    def test_same_head_recovery_with_matching_pins_does_not_call_omp(self) -> None:
+    def test_same_head_recovery_with_matching_pins_runs_no_upgrade(self) -> None:
         self.assertEqual(self.run_follow(), [])
         (self.repo / "omp/plugins/omp-plugins.lock.json").write_text("local anomaly")
         git = FOLLOW.git
@@ -749,7 +731,11 @@ class MarketplacePlugins(MarketplaceFixture):
 
         with unittest.mock.patch.object(FOLLOW, "git", side_effect=check_checkpoint):
             self.assertEqual(self.run_follow(now=1_000_600.0), [])
-        self.assertEqual(len(self.calls()), 6)
+        self.assertEqual(len(self.calls()), 8)
+        self.assertEqual(self.calls()[6:], [
+            ["plugin", "marketplace", "list"],
+            ["plugin", "marketplace", "update", "verification-skills"],
+        ])
         self.assertEqual(self.state_data()["tools_ok_head"], self.target)
         self.assert_clean_lock()
 
@@ -793,6 +779,7 @@ class MarketplacePlugins(MarketplaceFixture):
         self.assertEqual(self.state_data()["tools_ok_head"], self.target)
         self.assertEqual(self.version("dev-infra"), "2.0.0")
         self.assertEqual(self.calls()[6:], [
+            ["plugin", "marketplace", "list"],
             ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "dev-infra@verification-skills"],
         ])
@@ -828,8 +815,9 @@ class MarketplacePlugins(MarketplaceFixture):
 
     def test_marketplace_budget_stops_launching_commands_and_restores_lock(self) -> None:
         self.take_upstream()
-        # The 2 s budget gives a loaded machine time to start the fake omp and log its call.
-        # The delay is far past the budget, so the step ends early only when the budget stops it.
+        # The 2 s budget gives a loaded machine time to start the fake omp and log its calls (the
+        # team catalog step's list, then its update). The delay of the update is far past the
+        # budget, so the step ends early only when the budget stops it.
         delay = 10
         os.environ["FAKE_OMP_DELAY"] = str(delay)
         timeout = self.options().mise_timeout
@@ -839,7 +827,10 @@ class MarketplacePlugins(MarketplaceFixture):
             elapsed = time.monotonic() - start
         self.assertIn("budget", why)
         self.assertLess(elapsed, delay)
-        self.assertEqual(self.calls(), [["plugin", "marketplace", "update", "verification-skills"]])
+        self.assertEqual(self.calls(), [
+            ["plugin", "marketplace", "list"],
+            ["plugin", "marketplace", "update", "verification-skills"],
+        ])
         self.assert_clean_lock()
 
     def sweeps(self) -> list[str]:

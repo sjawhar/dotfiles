@@ -226,9 +226,9 @@ class DotfilesTools(ToolsStep):
 
     def test_case_03b_remote_ssh_limit_covers_the_move_the_lock_wait_and_every_command(self) -> None:
         # The ssh limit is the remote host's whole budget: 180 s move, 300 s sync-lock wait, and
-        # for each of the four tools commands (omp-link-rules, the registry render, `mise install`,
-        # the Bun install) its limit plus its 10 s kill grace. Left at the move's 180 s, a remote
-        # install longer than that is killed mid-download.
+        # for each of the five tools commands (omp-link-rules, the registry render, `mise install`,
+        # the Bun install, `dotfiles-follow --team-catalog`) its limit plus its 10 s kill grace.
+        # Left at the move's 180 s, a remote install longer than that is killed mid-download.
         self._install_ssh()
         ssh = self.root / "bin" / "ssh"
         ssh.rename(self.root / "bin" / "ssh-step")
@@ -237,7 +237,7 @@ class DotfilesTools(ToolsStep):
             'echo >> "$SSH_RECORD.parent"\nexec "$(dirname "$0")/ssh-step" "$@"\n'
         )
         ssh.chmod(0o755)
-        for limit, outer in ((None, 2920), ("5", 540)):
+        for limit, outer in ((None, 3530), ("5", 555)):
             with self.subTest(DOTFILES_TOOLS_TIMEOUT=limit):
                 Path(f"{self.ssh_record}.parent").write_text("")
                 env = dict(self.env)

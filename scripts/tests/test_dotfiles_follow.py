@@ -1927,13 +1927,17 @@ class KnivesRegistry(RegistryCopy, Harness):
 
 
 # shims/omp as a stand-in for the one-rule table: it records each call with the checkout it runs in,
-# and an upgrade sets the installed record to the version the lock asks for.
+# lists one registration, verification-skills of the team catalog's repository (Oh My Pi's text), so
+# the team catalog step fetches that catalog and moves nothing, and an upgrade sets the installed
+# record to the version the lock asks for.
 RECORDING_OMP = """#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
 repo = Path(__file__).resolve().parents[1]
 with open(os.environ["FAKE_LOG"], "a") as log:
     log.write("omp " + " ".join(sys.argv[1:]) + " in " + str(repo) + "\\n")
+if sys.argv[1:] == ["plugin", "marketplace", "list"]:
+    sys.stdout.write("Configured Marketplaces:\\n\\n  verification-skills  theorem-labs/verification-skills\\n")
 if sys.argv[1:3] == ["plugin", "upgrade"]:
     plugins = repo / "omp/plugins"
     want = json.loads((plugins / "omp-plugins.lock.json").read_text())["plugins"][sys.argv[3].rpartition("@")[0]]
