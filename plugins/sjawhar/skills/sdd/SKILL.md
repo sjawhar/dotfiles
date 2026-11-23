@@ -29,10 +29,11 @@ description: "Use when building a large project autonomously with subagents (sev
 
 1. **Find the tracker** that answers with a command that exits 0, such as `dispatch issue --help` or `gh issue list`.
    - On Dispatch, search for related work first (`dispatch` skill).
-   - **None reachable:** say what failed in one line.
-   - **None reachable:** work from the repo (checked-in plans and specs, `git log`, the branch diff) and the conversation.
-   - **None reachable:** do not skip this step.
-   - **None reachable:** do not restart approval.
+   - **None reachable:**
+     - say what failed in one line;
+     - work from the repo (checked-in plans and specs, `git log`, the branch diff) and the conversation;
+     - do not skip this step;
+     - do not restart approval.
 2. **Read `references/adopting.md` before you plan,** to:
    - read what is settled and what is really built;
    - keep an approved design approved.
@@ -40,7 +41,7 @@ description: "Use when building a large project autonomously with subagents (sev
 
 ## 2. Classify each slice
 
-Give each slice one class (platform or application, infrastructure, task authoring, task queueing), proven only its own way. Read `references/slice-classes.md` before you write the verification plan: a slice proven with another class's checks ships unverified.
+Give each slice one class (platform or application, infrastructure, task authoring, task queueing). Prove it only its own way. Read `references/slice-classes.md` before you write the verification plan: a slice proven with another class's checks ships unverified.
 
 ## 3. List the skills
 
