@@ -4,16 +4,21 @@
 #
 #   sami-devbox-check               on sami-devbox, as sami: the host checks, then a new agent
 #                                   box that runs this script with --in-box; exit 0 only when
-#                                   every check of both passes.
-#   sami-devbox-check --mark-ready  the same, and on a pass writes the readiness marker that
-#                                   `agentbox move --to sami-devbox` requires before it moves
-#                                   any session (CUTOVER_DIR/target-ready).
+#                                   every check of both passes. The login-file walk of every disk
+#                                   (host_logins, about 80 min) is left out, with a note line
+#                                   that says so; omp's own login store is still judged.
+#   sami-devbox-check --mark-ready  the same with the login-file walk, and on a pass writes the
+#                                   readiness marker that `agentbox move --to sami-devbox`
+#                                   requires before it moves any session (CUTOVER_DIR/target-ready):
+#                                   the marker says no person's login is on any disk.
 #   sami-devbox-check --in-box      the box half; agentbox runs it, a person does not.
 #   sami-devbox-check --pins        only the pin lines (knives is mise.toml's pin, mise has every
 #                                   pin installed), on the host; scripts/dotfiles-follow runs it
 #                                   after each fast-forward. No log file, no marker.
 #   sami-devbox-check --root        only the root-disk lines (/ under 40 GiB, no directory over
 #                                   1 GiB outside the OS's own, /var/log under 4 GiB), on the
+#                                   host. No log file, no marker.
+#   sami-devbox-check --logins      only the login lines, with the walk of every disk, on the
 #                                   host. No log file, no marker.
 #
 # A2 asks that a NEW session on the machine runs in an agent box and reaches, from inside the
@@ -1350,6 +1355,7 @@ dispatch_cli_check() {
     (( rc == 0 )) && ok "dispatch --help $where: exit 0" || fail "dispatch --help $where: exit $rc: $(head -1 <<<"$out")"
 }
 
+# host [--mark-ready]: the host half, then the box half. With --mark-ready it walks every disk for login files.
 host() {
     echo "== host $(hostname -s), $(stamp)"
     host_identity
@@ -1387,7 +1393,15 @@ host() {
     fi
     missing="$(yq '[.providers["model-gateway"].models[].id | select(test("^openai/"))] | length' "$HOME/.omp/agent/models.yml" 2>&1)"
     [[ "$missing" =~ ^[0-9]+$ && "$missing" -ge 2 ]] && ok "omp models.yml: model-gateway declares $missing openai/ models" || fail "omp models.yml: model-gateway's openai/ models: want 2 or more, got: $missing"
-    host_logins
+    # The login-file walk runs with --mark-ready (the marker says no person's login is on any disk) and
+    # alone with --logins. Its last measured run took 4,926 s (2026-11-23 04:12-05:34Z, at a load of 82
+    # to 131 on 288 CPUs), which made every default run take hours (dispatch://INFRA-5287).
+    if [[ "${1:-}" == --mark-ready ]]; then
+        host_logins
+    else
+        note "logins: the login-file walk of ${LOGIN_MOUNTS[*]} is skipped in a default run (its last run took 4,926 s, about 80 min, on 2026-11-23); run it with: sami-devbox-check --logins"
+        host_omp_logins
+    fi
     host_owners
     host_guard
     github_check "on the host"
@@ -1455,6 +1469,7 @@ case "${1:-}" in
     --in-box) in_box; exit $? ;;
     --pins) knives_check; mise_check; (( fails == 0 )); exit $? ;;
     --root) host_rootfs; (( fails == 0 )); exit $? ;;
+    --logins) host_logins; (( fails == 0 )); exit $? ;;
     ""|--mark-ready) ;;
     *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" >&2; exit 2 ;;
 esac
@@ -1463,7 +1478,7 @@ mkdir -p "$CUTOVER_DIR" || exit 1
 # An old marker says nothing about this run: remove it first, so a failed or crashed run leaves none.
 rm -f "$CUTOVER_DIR/target-ready" || exit 1
 log="$CUTOVER_DIR/a2-$(date -u +%Y%m%dT%H%M%SZ).log"
-host 2>&1 | tee "$log"
+host "${1:-}" 2>&1 | tee "$log"
 status=("${PIPESTATUS[@]}")
 fails="$(grep -c '^FAIL' "$log")"
 echo "log: $log"
