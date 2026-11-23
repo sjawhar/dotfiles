@@ -84,6 +84,85 @@ ensure_json() {
     jq "$transform" "$file" > "$tmp" && mv "$tmp" "$real"
 }
 
+# Installs the sysctl.d file $1 at $2 and applies it, for a role installer that sets kernel values
+# (installers/docker.sh's conntrack step, devbox/gce-host.sh's pipe limit); $3 is the key $1 must
+# set. $2 is replaced unless it holds $1 byte for byte, so a file written there by hand is replaced
+# even when it sets the same values; the new file has mode 0644 and takes $2's place in one rename.
+# `sysctl -p $2` runs when $2 was written or the kernel holds another value for one of $1's keys,
+# and the step then fails unless the kernel holds every one. It writes and applies through sudo; the
+# kernel's values are read from /proc/sys, which needs neither root nor sysctl on PATH. $2 and
+# /proc/sys are under INSTALL_ROOT, which is empty unless a test sets it.
+ensure_sysctl_conf() {
+    if (($# != 3)) || [[ -z "$3" ]]; then
+        echo "usage: ensure_sysctl_conf <source> <path> <key the source must set>" >&2
+        return 2
+    fi
+    local src="$1" root="${INSTALL_ROOT:-}" conf="${INSTALL_ROOT:-}$2" required="$3"
+    local dir staged unapplied
+    unapplied="$(sysctl_conf_unapplied "$src" "$root" "$required")" || return 1
+    if cmp -s -- "$src" "$conf"; then
+        echo "ensure_sysctl_conf: $conf is in place already"
+        [[ -n "$unapplied" ]] || return 0
+    else
+        dir="${conf%/*}"
+        if [[ ! -d "$dir" ]]; then
+            sudo install -d -m 0755 "$dir" || return 1
+        fi
+        staged="$(sudo mktemp "$dir/.${conf##*/}.XXXXXX")" || return 1
+        # mv -T: a directory at $2 fails the rename instead of taking the file inside it.
+        if ! sudo install -m 0644 -- "$src" "$staged" || ! sudo mv -fT -- "$staged" "$conf"; then
+            sudo rm -f -- "$staged"
+            return 1
+        fi
+        echo "ensure_sysctl_conf: wrote $conf"
+    fi
+    sudo sysctl -q -p "$conf" || return 1
+    unapplied="$(sysctl_conf_unapplied "$src" "$root" "$required")" || return 1
+    if [[ -n "$unapplied" ]]; then
+        echo "ensure_sysctl_conf: after sysctl -p $conf, ${unapplied//$'\n'/; }" >&2
+        return 1
+    fi
+    echo "ensure_sysctl_conf: the kernel holds every value $conf sets"
+}
+
+# Each key of the sysctl.d file $1 whose value the kernel (/proc/sys under $2) does not hold, one
+# line each: `the kernel's <key> is <its value>, not <the file's>`; nothing when it holds them all.
+# A key set twice counts at its last value, as `sysctl -p` leaves it. Blank lines and comments (#
+# or ;) are skipped; blanks around a key, its `=` and its value do not count, and a run of blanks
+# inside a value counts as one space (/proc/sys separates fields with tabs). Fails on a line that
+# is not `key = value` with a key and a value, and when $1 does not set the key $3.
+sysctl_conf_unapplied() {
+    # IFS as bash sets it, whatever the caller's: read trims and splits by it, and [*] joins by it.
+    local src="$1" root="$2" required="$3" line key IFS=$' \t\n'
+    local -a keys=() value live
+    local -A want=()
+    if [[ ! -r "$src" ]]; then
+        echo "ensure_sysctl_conf: cannot read $src" >&2
+        return 1
+    fi
+    while read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" == \#* || "$line" == \;* ]] && continue
+        read -r key <<<"${line%%=*}"
+        read -ra value <<<"${line#*=}"
+        if [[ "$line" != *=* || -z "$key" || "$key" == *[[:space:]]* || ${#value[@]} == 0 ]]; then
+            echo "ensure_sysctl_conf: $src: not a key = value line: $line" >&2
+            return 1
+        fi
+        # ${…+set}, not [[ -v ]]: bash 3.2 (macOS's /bin/bash, which sources this file too) cannot
+        # parse -v, and a parse error stops every installer that sources lib.sh.
+        [[ -n "${want[$key]+set}" ]] || keys+=("$key")
+        want[$key]="${value[*]}"
+    done <"$src"
+    if [[ -z "${want[$required]+set}" ]]; then
+        echo "ensure_sysctl_conf: $src does not set $required" >&2
+        return 1
+    fi
+    for key in "${keys[@]}"; do
+        read -ra live <<<"$(cat -- "$root/proc/sys/${key//.//}" 2>/dev/null || true)"
+        [[ "${live[*]}" == "${want[$key]}" ]] || echo "the kernel's $key is ${live[*]:-unreadable}, not ${want[$key]}"
+    done
+}
+
 # apt 2.8 can install a configured source's same-version copy instead of a local file
 # (Debian bug #1058934), so apt gets only dependency fields and dpkg gets the checked file.
 # It keeps the two refusals of apt that `dpkg -i` lacks: it installs nothing over a newer

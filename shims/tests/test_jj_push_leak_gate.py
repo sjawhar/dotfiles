@@ -210,7 +210,8 @@ VISIBILITY_READ = "api --hostname github.com repos/{} --jq .visibility"
 # installed check (theorem-labs/agent-infra's leak-check/, a private repository) is not. A case that needs the
 # installed check's own behaviour, or the hooks its tag installs, is marked needs_the_installed_check.
 # It is called as the installed one is: `<check> <remote> <url>`, in the repository, with git's update lines on stdin;
-# and `<check> gh-guard <gh arguments>` by scripts/public-text-gate, for each call shims/gh makes in an agent session.
+# and `<check> gh-guard <gh arguments>` (`<check> gh-guard -- WORD` for a gh call of one word) by
+# scripts/public-text-gate, for each call shims/gh makes in an agent session.
 # It passes every gh call. It passes a push to a URL of FIXTURE_PRIVATE_URLS, exactly as written, and prints nothing, as
 # the installed check passes a push to a private repository. Otherwise it prints, first, the two kinds of advisory line
 # the installed check prints ahead of its verdict (its self-test line, and one `reviewed row unused` line), which the

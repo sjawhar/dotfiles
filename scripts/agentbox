@@ -450,7 +450,8 @@ if [[ -z "$OSSV_SSH" && -d "/mnt/nvme/$(id -un)/oss-verifier/ssh" ]]; then OSSV_
 COMPUTE_INVENTORY="${AGENTBOX_COMPUTE_INVENTORY:-}"
 if [[ -z "$COMPUTE_INVENTORY" && -d "/mnt/nvme/$(id -un)" ]]; then COMPUTE_INVENTORY="/mnt/nvme/$(id -un)/compute-inventory"; fi
 [[ "$DURABLE_DIR" == /* && -d "$DURABLE_DIR" ]] || DURABLE_DIR=""
-# The grading farm's three host paths (installers/grade-farm.sh), in every box whose host has
+# The retired grading farm's three host paths (grading-tools#1926 removed grade-farm/; no installer
+# writes them any more, devbox/sami-devbox.md), in every box whose host still has
 # them, each at its own path — never /mnt/nvme/<user> whole (Sami,
 # dispatch://INFRA-702/comment/11d4bf79-4369-4beb-8691-ec688cee53ab):
 #   farm-pkg     the package `farm` is: ~/.local/bin/farm, which every box has through the
@@ -458,8 +459,8 @@ if [[ -z "$COMPUTE_INVENTORY" && -d "/mnt/nvme/$(id -un)" ]]; then COMPUTE_INVEN
 #                directory `farm` is a dangling link and every call dies `No such file or
 #                directory`. That is what every box on sami-devbox had after the 18:05Z re-box
 #                on 2026-11-04, and it stopped the release builds. Bound READ-ONLY: the shim,
-#                its grading-tools clone and its venv are written by installers/grade-farm.sh
-#                on the host alone, and a run writes nothing in it.
+#                its grading-tools clone and its venv were written on the host alone, and a run
+#                writes nothing in it.
 #   grade-farm   the farm root (FARM_DIR: fleet, boxes, ssh_config, known_hosts, the no-start
 #                switch and the ssh control sockets each run opens). Read-write.
 #   boxid        the box identity's ssh key and its gcloud configuration, whose token cache

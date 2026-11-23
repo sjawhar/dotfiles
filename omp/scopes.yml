@@ -1,0 +1,30 @@
+# Where an MCP server or a skill loads; shims/omp applies it at each launch. An entry names an MCP
+# server (under mcp:) or a skill, by a name or a glob as skills.ignoredSkills takes them (under
+# skills:), with `context: personal|theorem`, `host: <short hostname>`, or both. It loads only
+# where every scope it names matches; anything not named here loads everywhere. A server is named
+# as omp names it: a server of omp/mcp.json by its key there, a plugin's as `<plugin>:<server>`.
+# A session's context is its profile when that is `personal` or `theorem`, else the one word in the
+# machine's ${XDG_CONFIG_HOME:-$HOME/.config}/omp/context. With no such file, or any other word, the
+# context is unknown and every context-scoped entry loads; a `host:` entry still applies.
+# omp/AGENTS.md has more.
+mcp:
+  # The chat hub listens on oryx loopback, and its MATRIX_HUB_* secrets are only in oryx's
+  # secrets.local.env.
+  chathub: {host: oryx}
+  slack: {context: theorem}
+  # The slack@claude-plugins-official plugin (installers/omp.sh) brings the same server; omp/mcp.json's
+  # `slack` shadows it only where that one loads.
+  "slack:slack": {context: theorem}
+  retell: {context: personal}
+skills:
+  chat-hub: {host: oryx}
+  home-assistant: {context: personal}
+  skiplagged: {context: personal}
+  story-development: {context: personal}
+  disk-hygiene: {context: theorem}
+  making-explainer-videos: {context: theorem}
+  outside-message: {context: theorem}
+  reading-spend: {context: theorem}
+  skill-librarian: {context: theorem}
+  using-gcloud: {context: theorem}
+  writing-a-standup-recap: {context: theorem}

@@ -13,7 +13,7 @@
 #                                   pin installed), on the host; scripts/dotfiles-follow runs it
 #                                   after each fast-forward. No log file, no marker.
 #   sami-devbox-check --root        only the root-disk lines (/ under 40 GiB, no directory over
-#                                   1 GiB outside the OS's own, /var/log under 2 GiB), on the
+#                                   1 GiB outside the OS's own, /var/log under 4 GiB), on the
 #                                   host. No log file, no marker.
 #
 # A2 asks that a NEW session on the machine runs in an agent box and reaches, from inside the
@@ -53,8 +53,10 @@ KUBE_CONTEXT=gke_theorem-agent-infra_us-west1_dispatch
 # S3's grade Jobs: namespace grade of grade-us-west1 (installers/gcloud-sdk.sh, KUBE_CLUSTERS).
 GRADE_KUBE_CONTEXT=gke_theorem-agent-infra_us-west1-b_grade-us-west1
 # The box-identity paths scripts from sami-rocqperf name (installers/gcloud-boxid.sh); the box half
-# gets the directory as a session moved with `--dir` to it does.
-BOXID_DIR="/mnt/nvme/$(id -un)/boxid"
+# gets the directory at the same path (agentbox binds it into every box). Named from HOME, not
+# `id -un`: a box's user is not the host's (ubuntu), and its HOME is the host user's /home/<user>,
+# so `id -un` named /mnt/nvme/ubuntu/boxid in the box and failed both boxid lines (2026-11-22).
+BOXID_DIR="/mnt/nvme/${HOME##*/}/boxid"
 # Where the box identity writes a scratch object: the prefix LINUX-1248's red-team runs write.
 GCS_PROBE_PREFIX=gs://theorem-build-io/out/linux/redteam
 # The file names A2 lists. A2's list names credentialed_accounts.db, which gcloud does not
@@ -68,6 +70,10 @@ ok() { echo "ok   $*"; }
 fail() { echo "FAIL $*"; fails=$((fails + 1)); }
 note() { echo "note $*"; }
 stamp() { date -u +%FT%TZ; }
+# Whether $1, the output of `kubectl auth can-i`, is its refusal: `no`, or `no - <reason>` where the
+# API server gives one (GKE names the IAM permission and the RBAC verb that would grant it). An error,
+# `yes` and nothing at all are not one.
+refused() { [[ "$1" == no || "$1" == "no - "* ]]; }
 
 # The account the metadata server serves, read as every client reads it: through GCE_METADATA_HOST,
 # which names the host's relay on the host (once the switch is on) and the box relay in a box.
@@ -81,8 +87,9 @@ metadata_account_check() {
 
 # What the plain dev box may not do and may do: mint no token of infra-applier@ (the box's token,
 # on curl's stdin, to testIamPermissions, which answers the permissions the caller holds), read no
-# Envoy Secret, exec into no Envoy pod, and list the agent sessions. An answer that is an error
-# says nothing about a grant, so it fails the line.
+# Envoy Secret, exec into no Envoy pod, and list every agent session (`list --all`: a bare
+# `theorem-session list` shows only the caller's own agents). An answer that is an error says
+# nothing about a grant, so it fails the line.
 identity_limits_check() {
     local where="$1" tok out got
     if tok="$(gcloud auth print-access-token 2>&1)"; then
@@ -98,17 +105,17 @@ identity_limits_check() {
         fail "infra-applier closed $where: gcloud auth print-access-token: $(tail -1 <<<"$tok")"
     fi
     got="$(kubectl --context "$KUBE_CONTEXT" -n envoy auth can-i get secrets 2>&1)"
-    [[ "$got" == no ]] && ok "no envoy secrets $where: kubectl -n envoy auth can-i get secrets: no" \
+    refused "$got" && ok "no envoy secrets $where: kubectl -n envoy auth can-i get secrets: no" \
         || fail "no envoy secrets $where: kubectl -n envoy auth can-i get secrets: $(tail -1 <<<"$got")"
     got="$(kubectl --context "$KUBE_CONTEXT" -n envoy auth can-i create pods/exec 2>&1)"
-    [[ "$got" == no ]] && ok "no envoy exec $where: kubectl -n envoy auth can-i create pods/exec: no" \
+    refused "$got" && ok "no envoy exec $where: kubectl -n envoy auth can-i create pods/exec: no" \
         || fail "no envoy exec $where: kubectl -n envoy auth can-i create pods/exec: $(tail -1 <<<"$got")"
     if ! command -v theorem-session >/dev/null; then
-        fail "sessions $where: theorem-session is not on PATH (agent-infra sessions/README.md builds it)"
-    elif out="$(timeout 120 theorem-session list 2>&1)"; then
-        ok "sessions $where: theorem-session list exits 0 ($(wc -l <<<"$out") lines)"
+        fail "sessions $where: theorem-session is not on PATH (installers/theorem-session.sh installs it)"
+    elif out="$(timeout 120 theorem-session list --all 2>&1)"; then
+        ok "sessions $where: theorem-session list --all exits 0 ($(wc -l <<<"$out") lines)"
     else
-        fail "sessions $where: theorem-session list: $(tail -1 <<<"$out")"
+        fail "sessions $where: theorem-session list --all: $(tail -1 <<<"$out")"
     fi
 }
 
@@ -378,7 +385,7 @@ n6_check() {
 grade_pool_check() {
     local where="$1" got
     got="$(kubectl --context "$GRADE_KUBE_CONTEXT" -n grade auth can-i create jobs 2>&1)"
-    [[ "$got" == no ]] && ok "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: no (a Legion pod submits as grade-submit@)" \
+    refused "$got" && ok "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: no (a Legion pod submits as grade-submit@)" \
         || fail "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: want no, got: $(tail -1 <<<"$got")"
 }
 # signer_try SA: mint SA's token and sign a blob as it. Sets sign_tok_rc, sign_tok_out (the token,
@@ -427,7 +434,7 @@ n6_routes_check() {
         && ok "N6 bucket $where: $ACCOUNT is refused the listing of gs://theorem-ossv-runs/out/ossv/ (the farm's pods write it)" \
         || fail "N6 bucket $where: gs://theorem-ossv-runs/out/ossv/: want a refusal, got: $(tail -1 <<<"$out")"
     got="$(kubectl --context "$KUBE_CONTEXT" -n "$N6_NAMESPACE" auth can-i create jobs 2>&1)"
-    [[ "$got" == no ]] && ok "N6 farm $where: kubectl -n $N6_NAMESPACE auth can-i create jobs: no (the farm's pods submit)" \
+    refused "$got" && ok "N6 farm $where: kubectl -n $N6_NAMESPACE auth can-i create jobs: no (the farm's pods submit)" \
         || fail "N6 farm $where: kubectl -n $N6_NAMESPACE auth can-i create jobs: want no, got: $(tail -1 <<<"$got")"
 }
 
@@ -450,8 +457,9 @@ ossv_tree_host_check() {
 # data_copy_check [NOW] -- the stream's data copy (TOOLS's loop 6, /mnt/durable/sami/tools-loops/data-copy.sh)
 # saved the live tree to Cloud Storage within 2 h: after each verified snapshot it writes its UTC time to
 # OSSV_DATA_COPY_OK. The loop starts here in the freeze of 2026-11-03, so before OSSV_DATA_COPY_FROM the line
-# is a note, neither ok nor FAIL. NOW is the Unix time to judge at (default: now).
-OSSV_DATA_COPY_OK=/mnt/nvme/sami/oss-verifier/ops.git/ossv-data-copy.ok
+# is a note, neither ok nor FAIL. NOW is the Unix time to judge at (default: now). The stamp is the one the
+# loop writes since 2026-11-06, in notes/: its old path in ops.git went with that retired directory.
+OSSV_DATA_COPY_OK=/mnt/nvme/sami/oss-verifier/notes/ossv-data-copy.ok
 OSSV_DATA_COPY_FROM=2026-11-04T00:30:00Z
 data_copy_check() {
     local now="${1:-$(date +%s)}" from got at
@@ -593,12 +601,20 @@ azure_check() {
 # The transcript store, as a session reads it: `tq` through the front door
 # (https://transcript-store.$TAILNET, agent-infra transcript-store/), which names this machine by
 # its owner's login, sami@theorem.dev, as Sami's own node, with no password (dispatch://INFRA-913,
-# dispatch://INFRA-1099). A read-only count of the sessions table must give a positive number.
+# dispatch://INFRA-1099). A read-only count of the sessions table must give a positive number:
+# stdout's last line. tq writes on stderr a warning when a host it expects has not loaded lately;
+# that is the store's import (since sami-rocqperf's deletion on 2026-11-12, dispatch://INFRA-1236),
+# not this read, so it is a note. Read with the count, as it was until 2026-11-22, the warning
+# took the count's place and failed the line.
 tq_check() {
-    local where="$1" out
+    local where="$1" out err
+    err="$(mktemp)"
     # uv tool install puts tq in ~/.local/bin, which a non-login shell's PATH lacks.
-    out="$(PATH="$HOME/.local/bin:$PATH" timeout 60 tq sql 'SELECT count() FROM sessions' 2>&1 | tail -1)"
-    [[ "$out" =~ ^[0-9]+$ && "$out" -gt 0 ]] && ok "transcript store $where: tq sql count of sessions -> $out" || fail "transcript store $where: tq sql 'SELECT count() FROM sessions': $out"
+    out="$(PATH="$HOME/.local/bin:$PATH" timeout 60 tq sql 'SELECT count() FROM sessions' 2>"$err" | tail -1)"
+    [[ "$out" =~ ^[0-9]+$ && "$out" -gt 0 ]] && ok "transcript store $where: tq sql count of sessions -> $out" \
+        || fail "transcript store $where: tq sql 'SELECT count() FROM sessions': ${out:-nothing on stdout}; stderr: $(tail -1 "$err")"
+    if grep -q 'warning' "$err"; then note "transcript store $where: $(grep -m1 'warning' "$err")"; fi
+    rm -f "$err"
 }
 
 # --- the host half ---------------------------------------------------------------------------
@@ -632,10 +648,15 @@ host_disks() {
     else
         fail "disk: /mnt/scratch: want a RAID md device, got ${src:-nothing}"
     fi
-    if swapon --show=NAME --noheadings 2>/dev/null | grep -qx /mnt/scratch/swapfile; then
-        ok "swap: /mnt/scratch/swapfile active ($(swapon --show=SIZE --noheadings 2>/dev/null | head -1 | tr -d ' '))"
+    # /proc/swaps, the table `swapon --show` prints: swapon is in /usr/sbin, which a PATH need not
+    # hold (2026-11-22: the tmux server's PATH, which agent sessions inherit, lacked it, and
+    # `swapon: command not found` failed this line with both swap files active). Sizes are KiB.
+    local swaps
+    swaps="$(awk 'NR > 1 && $1 == "/mnt/scratch/swapfile" { print $3 }' /proc/swaps 2>&1)"
+    if [[ "$swaps" =~ ^[0-9]+$ ]]; then
+        ok "swap: /mnt/scratch/swapfile active ($(numfmt --to=iec --from-unit=1024 "$swaps"), /proc/swaps)"
     else
-        fail "swap: /mnt/scratch/swapfile not active: $(swapon --show 2>&1 | tr '\n' ' ')"
+        fail "swap: /mnt/scratch/swapfile not active: /proc/swaps lists: $(awk 'NR > 1 { printf "%s ", $1 }' /proc/swaps 2>&1)"
     fi
     [[ -d "/mnt/scratch/$(id -un)" && -O "/mnt/scratch/$(id -un)" ]] && ok "scratch: /mnt/scratch/$(id -un) is $(id -un)'s" || fail "scratch: /mnt/scratch/$(id -un) missing or not $(id -un)'s"
     # /tmp and /var/tmp are bound from the scratch only at a boot (devbox/gce-disks, bind_tmp), so
@@ -658,12 +679,17 @@ host_disks() {
 # (ROOT_OS_DIRS) holds more than 1 GiB, counted without those directories and without any mount
 # below it (`du -x`: /home, /var/lib/docker, /theorem and the other binds are other filesystems,
 # and a bind hides what the boot disk holds under it, which only the df test sees). /var/log is
-# the OS's while it holds at most 2 GiB (journald's cap is 2 GiB, devbox/journald-cap.conf). The
-# directory named is the deepest one over the limit, so the line says where the bytes are. du runs
-# with sudo and a time bound: it took 0.4 s on 2026-11-03.
+# the OS's while it holds at most VARLOG_MAX_GIB: journald's 2 GiB (devbox/journald-cap.conf),
+# rsyslog's text copy of the same records, which devbox/logrotate-rsyslog keeps under about 1 GiB,
+# and sysstat's month of samples (205 MiB on 2026-11-22). Until 2026-11-22 the limit was journald's
+# 2 GiB alone, which a full journal reaches by itself, while rsyslog rotated weekly with no size
+# bound: /var/log held 7.3 GiB, 4.2 GiB of it one week's syslog.1. The directory named is the
+# deepest one over the limit, so the line says where the bytes are. du runs with sudo and a time
+# bound: it took 0.4 s on 2026-11-03.
 ROOT_MAX_GIB=40
 ROOT_OS_DIRS=(/usr /var/lib/apt /var/cache/apt /boot /snap /var/lib/snapd /opt /var/log)
 ROOT_DU_SECONDS=120
+VARLOG_MAX_GIB=4
 # stdin: `du -x -B1 -0 /`; argv: the OS's directories. Prints `TOTAL <bytes> <dirs>`, `VARLOG
 # <bytes>` and one `BIG <bytes> <path>` per deepest directory over 1 GiB of its own.
 ROOT_DU_PY='
@@ -726,34 +752,86 @@ host_rootfs() {
     else
         ok "root disk: no directory outside ${ROOT_OS_DIRS[*]} holds over 1G of its own (du -x /: $(numfmt --to=iec "$total") in $dirs directories, $((SECONDS - t0)) s)"
     fi
-    if (( varlog <= 2 * 1024 ** 3 )); then
-        ok "root disk: /var/log holds $(numfmt --to=iec "$varlog"), at most 2G"
+    if (( varlog <= VARLOG_MAX_GIB * 1024 ** 3 )); then
+        ok "root disk: /var/log holds $(numfmt --to=iec "$varlog"), at most ${VARLOG_MAX_GIB}G"
     else
-        fail "root disk: /var/log holds $(numfmt --to=iec "$varlog"), over 2G (journald's cap: devbox/journald-cap.conf)"
+        fail "root disk: /var/log holds $(numfmt --to=iec "$varlog"), over ${VARLOG_MAX_GIB}G (journald's cap devbox/journald-cap.conf, rsyslog's rotation devbox/logrotate-rsyslog); largest: $(sudo -n du -xsh /var/log/* 2>/dev/null | sort -rh | head -3 | tr '\t\n' ' ;')"
     fi
 }
 
 # sudo_find ARRAY ARGS...: `sudo -n find ARGS`, appending each path to the array named ARRAY, and
 # a FAIL when find (or sudo) exits non-zero, so a walk that failed never reads as one that found
-# nothing. A path that sessions remove while find walks it is not a failure: find then exits 1
-# and says "No such file or directory" for it (A2 of 08:22Z on 2026-11-03 failed on a file a lane
-# deleted under /mnt/nvme/sami/wt/SkipRecheck). Only when every error line is that one is the run
-# a pass, with a note; any other error, or a non-zero exit with no error line, stays a FAIL.
+# nothing (find_judge).
 sudo_find() {
-    local -n into="$1"
+    local arr="$1" out err rc=0
     shift
-    local out err rc=0
     out="$(mktemp)" err="$(mktemp)"
     # shellcheck disable=SC2024  # the output files are sami's own temp files, on purpose
     sudo -n find "$@" >"$out" 2>"$err" || rc=$?
-    mapfile -t -O "${#into[@]}" into <"$out"
+    find_judge "$arr" "sudo -n find $1" "$rc" "$out" "$err"
+}
+
+# find_judge ARRAY LABEL RC OUT ERR: append the paths in file OUT to the array named ARRAY, judge
+# find's exit status RC and its error file ERR, remove both files, and return the judged status. A
+# path that sessions remove while find walks it is not a failure: find then exits 1 and says "No
+# such file or directory" for it (A2 of 08:22Z on 2026-11-03 failed on a file a lane deleted under
+# /mnt/nvme/sami/wt/SkipRecheck). Only when every error line is that one is the run a pass, with a
+# note; any other error, or a non-zero exit with no error line, stays a FAIL.
+find_judge() {
+    local -n judged="$1"
+    local label="$2" rc="$3" out="$4" err="$5"
+    mapfile -t -O "${#judged[@]}" judged <"$out"
     if (( rc == 1 )) && [[ -s "$err" ]] && ! grep -qv ': No such file or directory$' "$err"; then
-        note "logins: sudo -n find $1: $(grep -c '' "$err") path(s) went away during the walk, e.g. $(tail -1 "$err")"
+        note "logins: $label: $(grep -c '' "$err") path(s) went away during the walk, e.g. $(tail -1 "$err")"
         rc=0
     fi
-    (( rc == 0 )) || fail "logins: sudo -n find $1 exited $rc: $(tail -1 "$err")"
+    (( rc == 0 )) || fail "logins: $label exited $rc: $(tail -1 "$err")"
     rm -f "$out" "$err"
     return "$rc"
+}
+
+# What the login walk does not enter: directories that package managers, build tools, git and the
+# container runtime fill with what they install or generate, where gcloud, gh and az never write a
+# login (they write in a config directory: ~/.config/gcloud or CLOUDSDK_CONFIG, ~/.config/gh,
+# ~/.azure, which the walk still reaches wherever it is). A file in them with a login file's name
+# is package data (a test fixture), not a person's login. Docker's, containerd's and Sysbox's data
+# directories hold image layers and container filesystems: a login there was copied from a
+# directory the walk reads, or pulled with an image. Until 2026-11-22 the walk entered all of them:
+# three whole walks of each disk, one for the A2 names, one for credentials.db, one for
+# azureProfile.json, and on 2026-11-22, at a load of 2,000 on 288 CPUs, the first walk of
+# /mnt/nvme (426 million inodes) alone had run for over 80 minutes when it was stopped.
+LOGIN_PRUNE=(-name node_modules -o -name _opam -o -name .lake -o -name _build -o -name site-packages
+    -o -name gomodcache -o -name go-build -o -name 'gocache*' -o -path '*/pkg/mod' -o -path '*.git/objects'
+    -o -path /mnt/nvme/docker -o -path /mnt/nvme/containerd -o -path /mnt/nvme/sysbox)
+LOGIN_MOUNTS=(/ /mnt/nvme /mnt/durable /mnt/scratch)
+
+# login_walks ARRAY EXPR...: one pruned walk of each of LOGIN_MOUNTS for EXPR, the four at once
+# (one find per disk), each judged by find_judge; the paths go to the array named ARRAY, and the
+# time of each walk to LOGIN_WALK_TIMES. Non-zero when any walk failed.
+login_walks() {
+    local arr="$1" dir i rc secs t0=$SECONDS walked=0
+    local -a pids=()
+    shift
+    dir="$(mktemp -d)"
+    for i in "${!LOGIN_MOUNTS[@]}"; do
+        (
+            r=0
+            # shellcheck disable=SC2024  # the output files are sami's own temp files, on purpose
+            sudo -n find "${LOGIN_MOUNTS[i]}" -xdev -type d \( "${LOGIN_PRUNE[@]}" \) -prune -o \( "$@" \) -print \
+                >"$dir/$i.out" 2>"$dir/$i.err" || r=$?
+            echo "$r $((SECONDS - t0))" >"$dir/$i.rc"
+        ) &
+        pids+=($!)
+    done
+    wait "${pids[@]}"
+    LOGIN_WALK_TIMES=""
+    for i in "${!LOGIN_MOUNTS[@]}"; do
+        read -r rc secs <"$dir/$i.rc" || { rc=2 secs=unknown; }
+        find_judge "$arr" "the walk of ${LOGIN_MOUNTS[i]}" "$rc" "$dir/$i.out" "$dir/$i.err" || walked=1
+        LOGIN_WALK_TIMES+="${LOGIN_MOUNTS[i]} $secs s; "
+    done
+    rm -rf "$dir"
+    return "$walked"
 }
 
 # legacy_is_keyless DIR: DIR, a gcloud legacy_credentials directory, holds no person's login and no
@@ -781,51 +859,119 @@ legacy_is_keyless() {
     done <<<"$out"
 }
 
+# LOGIN_JUDGE_PY: judge, as root, each login file named on stdin (one path a line) by what it holds,
+# and print `<verdict>TAB<path>[TAB<accounts>]` a line (a tab, so a path may hold spaces). Verdicts:
+#   person   a person's login or a long-lived secret: a JSON credential with a private_key or a refresh
+#            token of Google's form (it begins `1/`: `1//0…` since 2019, `1/…` before), a gh hosts.yml with
+#            a GitHub token (gho_, ghp_, ghu_, ghs_, ghr_, github_pat_), a credentialed_accounts.db (A2
+#            names it), a gcloud credentials.db with an authorized_user row (its accounts follow);
+#   machine  a keyless external_account (an Azure box's identity: no refresh token, no key);
+#   empty    no credential at all, or only a test fixture's made-up one: a JSON or hosts.yml with no
+#            key and no token of a real form, a credentials.db with no row or no credentials table. Go
+#            tests leave such files behind by the thousand: on 2026-11-22, 7,174
+#            application_default_credentials.json holding only {"type": "authorized_user"} in
+#            TestCreateSignalHelper temp directories, each a FAIL while the check judged by name, and
+#            one TestRequesterRuleEndToEnd fixture whose refresh token is the word `example…`;
+#   gone     a file removed between the walk and this read (Go tests remove their temp files), a note
+#            as find_judge makes a path that went away during the walk;
+#   error    a file that could not be read, which says nothing, so it fails the line.
+# credentials.db is read with immutable=1: a store gcloud left a journal beside is read as it is,
+# with no lock and no write (mode=ro alone answered "attempt to write a readonly database").
+LOGIN_JUDGE_PY='
+import json, os, re, sqlite3, sys
+SECRET = re.compile(r"\"private_key\"\s*:\s*\"[^\"]+|\"refresh_token\"\s*:\s*\"1/")
+GH_TOKEN = re.compile(r"oauth_token:\s*[\x27\"]?(gh[opusr]_|github_pat_)")
+def say(*fields):
+    print("\t".join(fields))
+for path in (line.rstrip("\n") for line in sys.stdin):
+    if not path:
+        continue
+    name = os.path.basename(path)
+    try:
+        if name == "credentialed_accounts.db":
+            say("person", path)
+        elif name == "credentials.db":
+            con = sqlite3.connect("file:" + path + "?mode=ro&immutable=1", uri=True)
+            try:
+                rows = con.execute("select account_id, value from credentials").fetchall()
+            except sqlite3.OperationalError as e:
+                if "no such table" not in str(e):
+                    raise
+                rows = []
+            users = [a for a, v in rows if json.loads(v).get("type") == "authorized_user"]
+            say("person", path, ",".join(users)) if users else say("empty", path)
+        else:
+            text = open(path, errors="replace").read()
+            if name == "hosts.yml":
+                say("person" if GH_TOKEN.search(text) else "empty", path)
+            elif SECRET.search(text):
+                say("person", path)
+            else:
+                try:
+                    kind = json.loads(text).get("type")
+                except (ValueError, AttributeError):
+                    kind = None
+                say("machine" if kind == "external_account" else "empty", path)
+    except FileNotFoundError:
+        say("gone", path)
+    except Exception as e:
+        say("error", path, type(e).__name__)
+'
+
+# login_paths_line ARRAY: the count of the paths in the array named ARRAY, the directories that hold
+# most of them, and the first five, so a line stays readable when there are thousands (run 2 of
+# 2026-11-22 printed one line of 1 MB).
+login_paths_line() {
+    local -n lp="$1"
+    printf '%s' "${#lp[@]}, mostly under $(printf '%s\n' "${lp[@]}" | awk -F/ '{ print "/" $2 "/" $3 "/" $4 "/" $5 }' \
+        | sort | uniq -c | sort -rn | head -3 | awk '{ printf "%s%s (%s)", (NR > 1 ? ", " : ""), $2, $1 }'); e.g. ${lp[*]:0:5}"
+}
+
 # No person's login on any mounted disk: the A2 file names, a gh login, and any gcloud or Azure
-# store that holds a user's login. Every local filesystem is walked once (-xdev per mount).
-# A2 names legacy_credentials as a person's login, and gcloud also writes that directory for the
-# machine's own accounts: a session's own CLOUDSDK_CONFIG that holds dev-sjawhar@'s keyless
-# external_account has one, and `agentbox move --to` carries it with the session (three on
-# 2026-11-03 05:25-05:39Z). So a legacy_credentials directory is judged by what it holds, as
-# credentials.db is below: one that legacy_is_keyless passes is a note, not a FAIL; every other
-# file of the list, and a service account key, is a FAIL.
+# store that holds a user's login. Every local filesystem is walked once (-xdev per mount) for all
+# of these names together, past the trees LOGIN_PRUNE names (login_walks), and each walk's time is a
+# note. Until 2026-11-22 it was walked three times, once per kind of file, and the second and third
+# walks skipped /mnt/scratch.
+# A file is judged by what it holds (LOGIN_JUDGE_PY), not by its name: A2 names the files, and gcloud,
+# Go tests and moved sessions write files of those names that hold no person's login. A
+# legacy_credentials directory is judged by legacy_is_keyless: gcloud writes it for the machine's
+# own accounts too, and `agentbox move --to` carries a session's own CLOUDSDK_CONFIG holding
+# dev-sjawhar@'s keyless external_account (three on 2026-11-03 05:25-05:39Z). Keyless and empty ones
+# are notes; a person's login, a key, and a file that could not be read are FAILs.
 host_logins() {
-    local -a names=() found=() person=() machine=() dbs=() profiles=()
-    local n f walked=1
+    local -a names=() hits=() files=() person=() machine=() empty=() gone=() unread=() profiles=() users=()
+    local n f verdict path rest walked=1
     for n in "${LOGIN_FILES[@]}"; do names+=(-name "$n" -o); done
-    names+=(-path '*/.config/gh/hosts.yml')
-    for mnt in / /mnt/nvme /mnt/durable /mnt/scratch; do
-        sudo_find found "$mnt" -xdev \( "${names[@]}" \) -print || walked=0
+    names+=(-path '*/.config/gh/hosts.yml' -o \( -name credentials.db -path '*gcloud*' \) -o -name azureProfile.json)
+    login_walks hits "${names[@]}" || walked=0
+    note "logins: walks (one pruned find per disk, the four at once): ${LOGIN_WALK_TIMES%; }"
+    for f in "${hits[@]}"; do
+        case "${f##*/}" in
+            azureProfile.json) profiles+=("$f") ;;
+            legacy_credentials) if legacy_is_keyless "$f"; then machine+=("$f"); else person+=("$f"); fi ;;
+            *) files+=("$f") ;;
+        esac
     done
-    for f in "${found[@]}"; do
-        if [[ "${f##*/}" == legacy_credentials ]] && legacy_is_keyless "$f"; then machine+=("$f"); else person+=("$f"); fi
-    done
-    (( ${#machine[@]} )) && note "logins: legacy_credentials holding only keyless external_account credentials (no person's login, no key): ${machine[*]}"
+    while IFS=$'\t' read -r verdict path rest; do
+        case "$verdict" in
+            person) person+=("$path"); [[ -n "$rest" ]] && users+=("$path: $rest") ;;
+            machine) machine+=("$path") ;;
+            empty) empty+=("$path") ;;
+            gone) gone+=("$path") ;;
+            *) unread+=("$path${rest:+ ($rest)}") ;;
+        esac
+    done < <((( ${#files[@]} )) && printf '%s\n' "${files[@]}" | sudo -n python3 -c "$LOGIN_JUDGE_PY" 2>&1)
+    (( ${#machine[@]} )) && note "logins: keyless external_account credentials (no person's login, no key): $(login_paths_line machine)"
+    (( ${#empty[@]} )) && note "logins: login-named files holding no credential, or only a test fixture's made-up one: $(login_paths_line empty)"
+    (( ${#gone[@]} )) && note "logins: login-named files removed between the walk and their read: $(login_paths_line gone)"
+    (( ${#unread[@]} )) && fail "logins: login files that could not be read: $(login_paths_line unread)"
     if (( ${#person[@]} )); then
-        fail "logins: person's login files present: ${person[*]}"
-    elif (( walked )); then
-        ok "logins: no ${LOGIN_FILES[*]} or .config/gh/hosts.yml holding a person's login on /, /mnt/nvme, /mnt/durable, /mnt/scratch"
+        fail "logins: a person's login or a key in $(login_paths_line person)${users:+; gcloud user rows: ${users[*]:0:3}}"
+    elif (( walked && ${#unread[@]} == 0 )); then
+        ok "logins: no ${LOGIN_FILES[*]}, gcloud credentials.db or .config/gh/hosts.yml holding a person's login on ${LOGIN_MOUNTS[*]}, past package, build, git-object and container trees"
     fi
-    # gcloud's own stores: a row whose credential is authorized_user is a person's login.
-    found=()
-    walked=1
-    sudo_find dbs / /mnt/nvme /mnt/durable -xdev -name credentials.db -path '*gcloud*' -print || walked=0
-    for f in "${dbs[@]}"; do
-        n="$(python3 - "$f" <<'PY' 2>&1
-import json, sqlite3, sys
-con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
-rows = con.execute("select account_id, value from credentials").fetchall()
-print(" ".join(a for a, v in rows if json.loads(v).get("type") == "authorized_user"))
-PY
-)"
-        [[ -n "$n" ]] && found+=("$f: $n")
-    done
-    if (( ${#found[@]} )); then fail "logins: gcloud user logins stored: ${found[*]}"
-    elif (( walked )); then ok "logins: no gcloud credentials.db holds an authorized_user row"; fi
     # Azure: a profile whose subscriptions name a user is a person's login.
-    found=()
-    walked=1
-    sudo_find profiles / /mnt/nvme /mnt/durable -xdev -name azureProfile.json -print || walked=0
+    local -a found=()
     for f in "${profiles[@]}"; do
         sudo -n cat "$f" 2>/dev/null | jq -e '[.subscriptions[]?.user.type] | any(. == "user")' >/dev/null 2>&1 && found+=("$f")
     done
@@ -834,12 +980,15 @@ PY
     host_omp_logins
 }
 
-# omp's own credential store on the host. Every live row is a person's login, with two exceptions:
-# the Slack MCP login, which the box half's "slack MCP" line judges, and Sami's own Anthropic login,
-# which he added himself at 2026-11-03 22:40Z (interactive /login in session 01a13dca's omp) while
-# he fixed the stalled sessions; that one row, matched by provider, account and creation time, is a
-# note. Any other row, or another Anthropic login, is a FAIL.
+# omp's own credential store on the host. Every live row is a person's login, with these exceptions:
+# the Slack MCP login, which the box half's "slack MCP" line judges, and two logins Sami added himself,
+# each matched by provider, account and creation time and a note: his Anthropic login of 2026-11-03
+# 22:40Z (interactive /login in session 01a13dca's omp, while he fixed the stalled sessions), and his
+# Codex login of 2026-11-11 00:53Z, which the implementation roles run on
+# (dispatch://INFRA-2212/comment/a2e7c2d6-c3bc-4153-964d-def0409b241e; devbox/sami-devbox-model-routes).
+# Any other row, or another login of either provider, is a FAIL.
 SAMI_ANTHROPIC_LOGIN="anthropic|email:sami@theorem.dev|1793745601"
+SAMI_CODEX_LOGIN="openai-codex|email:sami@theorem.dev|1794358386"
 host_omp_logins() {
     local out rc=0 row
     local -a other=()
@@ -857,6 +1006,7 @@ PY
         case "$row" in
             "mcp_oauth:profile:default:https://mcp.slack.com/mcp|"*) ;;
             "$SAMI_ANTHROPIC_LOGIN") note "logins: omp agent.db holds Sami's own login, added by him 22:40Z while fixing the stall (anthropic, sami@theorem.dev, created 2026-11-03T22:40Z)" ;;
+            "$SAMI_CODEX_LOGIN") note "logins: omp agent.db holds Sami's own Codex login, added by him for the implementation roles (openai-codex, sami@theorem.dev, created 2026-11-11T00:53Z)" ;;
             *) other+=("$row") ;;
         esac
     done <<<"$out"
@@ -952,20 +1102,56 @@ host_guard() {
     fi
 }
 
-# No unit failing on the machine: the user manager's and the system's failed lists are empty, and
-# unit-health-watch (scripts/unit-health-watch) holds no open condition in its state file.
+# failed_units MANAGER: the units `systemctl MANAGER --failed` lists (MANAGER --user or --system),
+# one `<kind> <unit>` per line; on an error, the error, and a non-zero exit. Kind `session` is
+# logind's session-*.scope, a login session (an ssh session killed by a client timeout leaves one
+# failed). Kind `transient` is a unit made at run time, not installed: systemd-run's (agents'
+# tests and probes, many of which fail on purpose: 255 of the 259 failed user units on 2026-11-22)
+# and a program's own scope (Chromium asks for app-org.chromium.Chromium-<pid>.scope, which fails
+# with result `resources` when the pid has ended or sits in a cgroup the manager may not move it
+# from). A unit is transient when Transient=yes or its unit file is in the manager's transient
+# directory, where a daemon-reload leaves it with Transient=no. Kind `unit` is any other: one the
+# machine was provisioned with. A unit gone between the list and the show is left out.
+failed_units() {
+    local list rc=0
+    list="$(systemctl "$1" --failed --no-legend --plain 2>&1)" || rc=$?
+    (( rc == 0 )) || { tr '\n' ';' <<<"$list"; return "$rc"; }
+    [[ -n "$list" ]] || return 0
+    awk '{ print $1 }' <<<"$list" | xargs -r systemctl "$1" show -p Id -p LoadState -p Transient -p FragmentPath -- 2>/dev/null | awk '
+        function emit() {
+            if (id != "" && load != "not-found")
+                print (id ~ /^session-.*\.scope$/ ? "session" : (t == "yes" || f ~ /\/systemd\/transient\// ? "transient" : "unit")), id
+            id = load = t = f = ""
+        }
+        /^Id=/ { id = substr($0, 4) }
+        /^LoadState=/ { load = substr($0, 11) }
+        /^Transient=/ { t = substr($0, 11) }
+        /^FragmentPath=/ { f = substr($0, 14) }
+        /^$/ { emit() }
+        END { emit() }'
+}
+
+# No unit failing on the machine: neither manager's failed list holds an installed unit, and
+# unit-health-watch (scripts/unit-health-watch) holds no open condition in its state file. Failed
+# login-session scopes and transient units (failed_units) are notes, not FAILs.
 host_units() {
-    local got state
-    got="$(systemctl --user --failed --no-legend --plain 2>&1)"
-    [[ -z "$got" ]] && ok "units: systemctl --user --failed lists nothing" || fail "units: systemctl --user --failed: $(tr '\n' ';' <<<"$got")"
-    # logind's session-*.scope units are login sessions (an ssh session killed by a client timeout
-    # leaves one failed), not provisioning units: a note, not a FAIL. Every other unit is judged.
-    got="$(systemctl --failed --no-legend --plain 2>&1)"
-    local sessions
-    sessions="$(awk '$1 ~ /^session-.*\.scope$/ { print $1 }' <<<"$got")"
-    got="$(awk '$1 !~ /^session-.*\.scope$/' <<<"$got")"
-    [[ -n "$sessions" ]] && note "units: failed login-session scopes (not judged): $(tr '\n' ' ' <<<"$sessions")"
-    [[ -z "$got" ]] && ok "units: systemctl --failed lists nothing but login-session scopes" || fail "units: systemctl --failed: $(tr '\n' ';' <<<"$got")"
+    local got state manager kinds judged transient sessions
+    for manager in --user --system; do
+        if ! kinds="$(failed_units "$manager")"; then
+            fail "units: systemctl $manager --failed: $kinds"
+            continue
+        fi
+        judged="$(awk '$1 == "unit" { print $2 }' <<<"$kinds")"
+        transient="$(awk '$1 == "transient" { print $2 }' <<<"$kinds")"
+        sessions="$(awk '$1 == "session" { print $2 }' <<<"$kinds")"
+        [[ -n "$sessions" ]] && note "units: failed login-session scopes of systemctl $manager (not judged): $(tr '\n' ' ' <<<"$sessions")"
+        [[ -n "$transient" ]] && note "units: $(grep -c . <<<"$transient") failed transient units of systemctl $manager (systemd-run's and programs' own scopes; not judged), e.g. $(head -3 <<<"$transient" | tr '\n' ' ')"
+        if [[ -z "$judged" ]]; then
+            ok "units: systemctl $manager --failed lists no installed unit"
+        else
+            fail "units: systemctl $manager --failed lists installed units: $(tr '\n' ' ' <<<"$judged")"
+        fi
+    done
     for state in "/mnt/nvme/$(id -un)/tmp/unit-health-watch/state.json" "${XDG_STATE_HOME:-$HOME/.local/state}/unit-health-watch/state.json"; do
         [[ -s "$state" ]] && break
     done
@@ -1039,19 +1225,6 @@ host_bwrap() {
     (( ${#args[@]} )) || { fail "bwrap sandbox: no command line in $BWRAP_SMOKE_FILE (git -C $DOTFILES_DIR/.secrets pull)"; return; }
     out="$(bwrap "${args[@]}" 2>&1)" || rc=$?
     (( rc == 0 )) && ok "bwrap ${args[*]}: exit 0" || fail "bwrap ${args[*]}: exit $rc: $(tail -1 <<<"$out")"
-}
-
-# Movers (S3 and others) run scripts on sami-rocqperf over ssh after the move, so this machine
-# must reach it. Both are Sami's own nodes, so Tailscale SSH on sami-rocqperf takes the
-# connection as sami by the policy's accept rule for his own devices (dispatch://INFRA-1099).
-rocqperf_check() {
-    local out rc=0
-    out="$(ssh -o BatchMode=yes -o ConnectTimeout=15 sami@sami-rocqperf true </dev/null 2>&1)" || rc=$?
-    if (( rc == 0 )); then
-        ok "ssh sami-devbox -> sami-rocqperf: ssh -o BatchMode=yes sami@sami-rocqperf true exits 0"
-    else
-        fail "ssh sami-devbox -> sami-rocqperf: exit $rc: $(tail -1 <<<"$out")"
-    fi
 }
 
 # The public-text leak check: ~/.local/share/public-leak-check holds the tag of agent-infra's
@@ -1146,18 +1319,23 @@ global_hooks_host_check() {
 # MISE_DATA_DIR is set in that shell too (without it the shim installs a second kubectl). That shell
 # also gets GCE_METADATA_HOST, _ROOT and _IP from .bashrc once the host's clients read the metadata
 # relay (installers/agent-identity.sh), so each one set here is passed on. The namespace is builds,
-# which the box account's team set reads (move census row U07).
+# which the box account's team set reads (move census row U07). The list is one request for one
+# job (`?limit=1`); the server's remainingItemCount gives the total. It was `get jobs --chunk-size
+# 1`, one request per job: over the 1,910 jobs of 2026-11-22 that paging ran for 220 s, outlived
+# its continue token and failed with `Error from server (Expired)`, which read as an expired
+# credential.
 SSH_PATH="$HOME/.cargo/bin:$HOME/.dotfiles/shims:$HOME/.dotfiles/bin:$HOME/.dotfiles/scripts:$HOME/.npm-global/bin:$HOME/.mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
 host_plain_path_kubectl() {
-    local out rc=0 name
+    local out rc=0 name n
     local -a relay=()
     for name in GCE_METADATA_HOST GCE_METADATA_ROOT GCE_METADATA_IP; do
         [[ -n "${!name:-}" ]] && relay+=("$name=${!name}")
     done
     out="$(env -i HOME="$HOME" MISE_DATA_DIR="$HOME/.mise" KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" PATH="$SSH_PATH" \
-        ${relay[@]+"${relay[@]}"} kubectl --context "$KUBE_CONTEXT" -n builds get jobs --chunk-size 1 -o name 2>&1)" || rc=$?
-    (( rc == 0 )) && ok "ssh-PATH kubectl: env -i kubectl -n builds get jobs: exit 0 ($(grep -c . <<<"$out") jobs)" \
-        || fail "ssh-PATH kubectl: env -i kubectl -n builds get jobs: exit $rc: $(tail -1 <<<"$out")"
+        ${relay[@]+"${relay[@]}"} kubectl --context "$KUBE_CONTEXT" get --raw "/apis/batch/v1/namespaces/builds/jobs?limit=1" 2>&1)" || rc=$?
+    n="$(jq -r 'select(.kind == "JobList") | (.items | length) + (.metadata.remainingItemCount // 0)' <<<"$out" 2>/dev/null)"
+    (( rc == 0 )) && [[ "$n" =~ ^[0-9]+$ ]] && ok "ssh-PATH kubectl: env -i kubectl get --raw /apis/batch/v1/namespaces/builds/jobs?limit=1: exit 0 ($n jobs)" \
+        || fail "ssh-PATH kubectl: env -i kubectl get --raw /apis/batch/v1/namespaces/builds/jobs?limit=1: exit $rc: $(tail -1 <<<"$out" | cut -c1-300)"
 }
 
 # The Dispatch CLI by name, as a shell omp did not start finds it (shims/dispatch): on the host with
@@ -1214,7 +1392,6 @@ host() {
     host_guard
     github_check "on the host"
     tq_check "on the host"
-    rocqperf_check
     leak_check_host_check
     prepush_hook_host_check
     global_hooks_host_check

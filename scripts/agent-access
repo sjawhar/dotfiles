@@ -29,15 +29,36 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 # row NAME STATUS IDENTITY EXPIRY COMMAND [DETAIL]: write one tab-separated
-# result row. Fields must not contain tabs or newlines; callers collapse them.
+# result row. row removes each carriage return from IDENTITY, EXPIRY, COMMAND
+# and DETAIL, makes each tab and newline in them a space, and writes NAME and
+# STATUS as the caller gives them.
 row() {
-    local name=$1 status=$2 identity=$3 expiry=$4 command=$5 detail=${6:-}
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$name" "$status" "${identity//$'\t'/ }" "${expiry//$'\t'/ }" \
-        "${command//$'\t'/ }" "${detail//$'\n'/ }" >"$tmp/$name"
+    local name=$1 status=$2 field fields=()
+    for field in "$3" "$4" "$5" "${6:-}"; do
+        field=${field//$'\r'/}
+        fields+=("${field//[$'\t\n']/ }")
+    done
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$status" "${fields[@]}" >"$tmp/$name"
 }
 
-first_line() { head -n1 <<<"$1" | tr -d '\r'; }
+# first_line TEXT: print TEXT's first non-empty line, CR removed; a line of only spaces and tabs counts as empty.
+first_line() { awk '{ gsub(/\r/, "") } NF { print; exit }' <<<"$1"; }
+
+# last_line TEXT: print TEXT's last non-empty line, CR removed, empty as in first_line; for a check that reads the
+# last line on purpose, as when a tool writes its error after its advisories.
+last_line() { awk '{ gsub(/\r/, "") } NF { l = $0 } END { print l }' <<<"$1"; }
+
+# failure_detail RC TEXT: TEXT, unless RC is 124: `timeout` killed the command, and what it printed is not its answer.
+# An empty TEXT gives `exit RC, no output`, so a failed row never has an empty detail.
+failure_detail() {
+    if (($1 == 124)); then
+        printf 'timed out after %ss' "$TIMEOUT_S"
+    elif [[ -z "$2" ]]; then
+        printf 'exit %s, no output' "$1"
+    else
+        printf '%s' "$2"
+    fi
+}
 
 # jwt_field FIELD: print FIELD from the JWT payload in $JWT_FIELD_TOKEN, or
 # nothing (rc 1). The token goes through the environment, never argv
@@ -66,15 +87,19 @@ print(value)
 
 iso() { python3 -c "import datetime,sys; print(datetime.datetime.fromtimestamp(int(sys.argv[1]), datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$1" 2>/dev/null; }
 
+# aws can write a warning to stderr when it answers, so stdout alone is parsed;
+# a failure reports stderr's first non-empty line (aws starts an error with an
+# empty line), or stdout's when stderr is empty.
 check_aws() {
-    local out rc arn
-    out="$(timeout "$TIMEOUT_S" aws sts get-caller-identity --output json 2>&1)"
+    local out rc arn detail err="$tmp/aws.stderr"
+    out="$(timeout "$TIMEOUT_S" aws sts get-caller-identity --output json 2>"$err")"
     rc=$?
     if ((rc == 0)); then
         arn="$(jq -r '.Arn // empty' <<<"$out" 2>/dev/null)"
         row aws live "${arn:-unknown}" "n/a (instance-role session, no fixed expiry)" "aws sts get-caller-identity"
     else
-        row aws missing - - "aws sts get-caller-identity" "$(first_line "$out")"
+        detail="$(first_line "$(<"$err")")"
+        row aws missing - - "aws sts get-caller-identity" "$(failure_detail "$rc" "${detail:-$(first_line "$out")}")"
     fi
 }
 
@@ -92,66 +117,89 @@ check_github_app() {
             "no installation discovered yet this host; shims/gh mints on first push/API call. Personal gh login is refused by design."
         return
     fi
-    owners="$(jq -r 'keys | join(", ")' "$f" 2>/dev/null)"
+    # gh-app-token reads a covered-owner file that is not a JSON object as invalid, never as no owners.
+    if ! owners="$(jq -rn 'input | if type == "object" then keys | join(", ") else error("not a JSON object") end' "$f" 2>/dev/null)"; then
+        row github_app unknown - - "cat $dir/covered-*.json" "unreadable covered-owner cache: $f"
+        return
+    fi
     row github_app live "App covers: ${owners:-unknown}; other owners -> GH_PUBLIC_REPO_PAT fallback" \
         "n/a (installation tokens auto-mint, ~1h)" "cat $dir/covered-*.json" \
         "personal gh login is refused by design (shims/gh)"
 }
 
+# The login, the expiry and `expired` are matched in stdout and stderr together, since no run here has shown which
+# stream ant answers on and each is a fixed pattern; a failure reports stderr's first non-empty line, or stdout's when
+# stderr is empty.
 check_ant() {
-    local out rc email exp status
-    out="$(timeout "$TIMEOUT_S" ant auth status 2>&1)"
+    local out rc email exp status detail err="$tmp/ant.stderr"
+    out="$(timeout "$TIMEOUT_S" ant auth status 2>"$err")"
     rc=$?
     if ((rc != 0)); then
-        row anthropic_ant missing - - "ant auth status" "$(first_line "$out")"
+        detail="$(first_line "$(<"$err")")"
+        row anthropic_ant missing - - "ant auth status" "$(failure_detail "$rc" "${detail:-$(first_line "$out")}")"
         return
     fi
+    out+=$'\n'"$(<"$err")"
     email="$(grep -oP 'Logged in to .* as \K\S+' <<<"$out" || true)"
     exp="$(grep -oP 'expires:\s+\K\S+' <<<"$out" || true)"
     if grep -qi 'expired' <<<"$out"; then status=expired; else status=live; fi
     row anthropic_ant "$status" "${email:-unknown}" "${exp:-unknown}" "ant auth status"
 }
 
+# vercel can write a notice (an available update) to stderr, so the identity is
+# stdout's last non-empty line; a failure reports stderr's last non-empty line,
+# or stdout's when stderr is empty.
 check_vercel() {
-    local out rc user
-    out="$(timeout "$TIMEOUT_S" vercel whoami 2>&1)"
+    local out rc user detail err="$tmp/vercel.stderr"
+    out="$(timeout "$TIMEOUT_S" vercel whoami 2>"$err")"
     rc=$?
     if ((rc == 0)); then
-        user="$(tail -n1 <<<"$out" | tr -d '\r')"
-        row vercel live "$user" "n/a" "vercel whoami"
+        user="$(last_line "$out")"
+        row vercel live "${user:-unknown}" "n/a" "vercel whoami"
     else
-        row vercel missing - - "vercel whoami" "$(tail -n1 <<<"$out" | tr -d '\r')"
+        detail="$(last_line "$(<"$err")")"
+        row vercel missing - - "vercel whoami" "$(failure_detail "$rc" "${detail:-$(last_line "$out")}")"
     fi
 }
 
-# pup exits 0 and prints "Not authenticated" when it holds no token, so the exit code and a text
-# match on "Authenticated" both read as live; its --no-agent JSON carries the real answer.
+# pup exits 0 and writes "Not authenticated" to stderr when it holds no token, so the exit code and a text
+# match on "Authenticated" both read as live; its --no-agent JSON on stdout carries the real answer. A missing
+# row reports the JSON's .status, else stderr's first non-empty line, else stdout's first non-empty line.
 check_datadog() {
-    local out rc site exp
-    out="$(timeout "$TIMEOUT_S" pup --no-agent auth status 2>/dev/null)"
+    local out rc site exp detail err="$tmp/pup.stderr"
+    out="$(timeout "$TIMEOUT_S" pup --no-agent auth status 2>"$err")"
     rc=$?
     if ((rc == 0)) && jq -e '.authenticated == true' >/dev/null 2>&1 <<<"$out"; then
         site="$(jq -r '.site // empty' <<<"$out" 2>/dev/null)"
         exp="$(jq -r '.expires_at // empty' <<<"$out" 2>/dev/null)"
         row datadog_pup live "${site:-unknown}" "${exp:-unknown}" "pup --no-agent auth status"
     else
-        row datadog_pup missing - - "pup --no-agent auth status" "$(jq -r '.status // empty' <<<"$out" 2>/dev/null || first_line "$out")"
+        detail="$(jq -r '.status // empty' <<<"$out" 2>/dev/null)"
+        detail="${detail:-$(first_line "$(<"$err")")}"
+        row datadog_pup missing - - "pup --no-agent auth status" \
+            "$(failure_detail "$rc" "${detail:-$(first_line "$out")}")"
     fi
 }
 
+# gcloud can write a warning to stderr when it answers, so stdout alone is
+# parsed. Only a JSON list with no ACTIVE account is `no ACTIVE account`; an
+# answer that is not a JSON list is `unknown`. A failure reports stderr's first
+# non-empty line, or stdout's when stderr is empty.
 check_gcloud() {
-    local out rc active
-    out="$(timeout "$TIMEOUT_S" gcloud auth list --format=json 2>&1)"
+    local out rc active detail err="$tmp/gcloud.stderr"
+    out="$(timeout "$TIMEOUT_S" gcloud auth list --format=json 2>"$err")"
     rc=$?
-    if ((rc == 0)); then
-        active="$(jq -r '[.[] | select(.status=="ACTIVE")][0].account // empty' <<<"$out" 2>/dev/null)"
-        if [[ -n "$active" ]]; then
-            row gcloud live "$active" "n/a" "gcloud auth list"
-        else
-            row gcloud missing - - "gcloud auth list" "no ACTIVE account"
-        fi
+    if ((rc != 0)); then
+        detail="$(first_line "$(<"$err")")"
+        row gcloud missing - - "gcloud auth list" "$(failure_detail "$rc" "${detail:-$(first_line "$out")}")"
+        return
+    fi
+    if ! active="$(jq -rn 'input | if type == "array" then [.[] | select(.status == "ACTIVE")][0].account // empty else error("not a JSON list") end' <<<"$out" 2>/dev/null)"; then
+        row gcloud unknown - - "gcloud auth list" "unparseable answer: $(first_line "$out")"
+    elif [[ -n "$active" ]]; then
+        row gcloud live "$active" "n/a" "gcloud auth list"
     else
-        row gcloud missing - - "gcloud auth list" "$(first_line "$out")"
+        row gcloud missing - - "gcloud auth list" "no ACTIVE account"
     fi
 }
 
@@ -161,8 +209,9 @@ check_gws() {
     # is the Gmail profile: every account's read tier holds Gmail read-only, and
     # some (wren) hold nothing else. gws writes advisories ("Using keyring
     # backend: ...") to stderr, so stdout alone is parsed and a failure reports
-    # stderr's last line.
-    local accounts_file="$HOME/.config/gws/accounts.json" accounts account out rc email err
+    # stderr's last non-empty line, or stdout's first non-empty line when stderr
+    # is empty.
+    local accounts_file="$HOME/.config/gws/accounts.json" accounts account out rc email err detail
     if [[ ! -f "$accounts_file" ]]; then
         row google_workspace missing - - "jq keys $accounts_file" "no $accounts_file"
         return
@@ -184,78 +233,128 @@ check_gws() {
                 email="$(jq -r '.emailAddress // empty' <<<"$out" 2>/dev/null)"
                 row "google_workspace_${account}" live "${email:-unknown}" "n/a" "GWS_ACCOUNT=${account} gws gmail users getProfile"
             else
-                row "google_workspace_${account}" missing - - "GWS_ACCOUNT=${account} gws gmail users getProfile" "$(tail -n1 "$err")"
+                detail="$(last_line "$(<"$err")")"
+                row "google_workspace_${account}" missing - - "GWS_ACCOUNT=${account} gws gmail users getProfile" \
+                    "$(failure_detail "$rc" "${detail:-$(first_line "$out")}")"
             fi
         ) &
     done <<<"$accounts"
     wait
 }
 
+# The exit code alone decides a live row, whose identity is the email in ~/.fleet/config. A failure reports
+# stderr's last non-empty line, or stdout's last non-empty line when stderr is empty.
 check_fleetctl() {
-    local out rc email
-    out="$(timeout "$TIMEOUT_S" fleetctl get config --json 2>&1)"
+    local out rc email detail err="$tmp/fleetctl.stderr"
+    out="$(timeout "$TIMEOUT_S" fleetctl get config --json 2>"$err")"
     rc=$?
     email="$(awk -F': *' '/^ *email:/{print $2; exit}' "$HOME/.fleet/config" 2>/dev/null | tr -d '\r')"
     if ((rc == 0)); then
         row fleetctl live "${email:-unknown}" "n/a" "fleetctl get config"
     else
-        row fleetctl missing - - "fleetctl get config" "$(tail -n1 <<<"$out")"
+        detail="$(last_line "$(<"$err")")"
+        row fleetctl missing - - "fleetctl get config" "$(failure_detail "$rc" "${detail:-$(last_line "$out")}")"
     fi
 }
 
+# sentry-cli info prints its configuration on stdout and its error on stderr, so the User: line is read from stdout
+# alone; a failure reports stderr's first non-empty line, or stdout's when stderr is empty.
 check_sentry() {
-    local out rc user
-    out="$(timeout "$TIMEOUT_S" sentry-cli info 2>&1)"
+    local out rc user detail err="$tmp/sentry.stderr"
+    out="$(timeout "$TIMEOUT_S" sentry-cli info 2>"$err")"
     rc=$?
     user="$(grep -oP '^\s*User:\s*\K\S+' <<<"$out" || true)"
     if ((rc == 0)) && [[ -n "$user" ]]; then
         row sentry live "$user" "n/a (auth token)" "sentry-cli info"
+    elif ((rc == 0)); then
+        # An org auth token answers with no User: line; its first line (`Sentry Server: ...`) reads as an answer.
+        row sentry missing - - "sentry-cli info" "no User: line in sentry-cli info"
     else
-        row sentry missing - - "sentry-cli info" "$(first_line "$out")"
+        detail="$(first_line "$(<"$err")")"
+        row sentry missing - - "sentry-cli info" "$(failure_detail "$rc" "${detail:-$(first_line "$out")}")"
     fi
 }
 
+# kubectl can write a warning to stderr, so the context and the Username line are read from stdout alone; a failure
+# of either call reports stderr's first non-empty line, or stdout's when stderr is empty. A context with no visible
+# character is `unknown`.
 check_kubectl() {
-    local ctx rc out username
-    ctx="$(timeout "$TIMEOUT_S" kubectl config current-context 2>&1)"
+    local ctx rc out username detail err="$tmp/kubectl.stderr"
+    ctx="$(timeout "$TIMEOUT_S" kubectl config current-context 2>"$err")"
     rc=$?
     if ((rc != 0)); then
-        row kubectl missing - - "kubectl config current-context" "$(first_line "$ctx")"
+        detail="$(first_line "$(<"$err")")"
+        row kubectl missing - - "kubectl config current-context" \
+            "$(failure_detail "$rc" "${detail:-$(first_line "$ctx")}")"
         return
     fi
-    out="$(timeout "$TIMEOUT_S" kubectl auth whoami 2>&1)"
+    [[ "$ctx" =~ [^[:space:]] ]] || ctx=unknown
+    out="$(timeout "$TIMEOUT_S" kubectl auth whoami 2>"$err")"
     rc=$?
     if ((rc == 0)); then
         username="$(grep -oP '^Username\s+\K\S+' <<<"$out" || true)"
         row kubectl live "${username:-unknown} (context: $ctx)" "n/a (assumed-role session)" "kubectl auth whoami"
     else
-        row kubectl missing - - "kubectl auth whoami" "context: $ctx; $(first_line "$out")"
+        detail="$(first_line "$(<"$err")")"
+        row kubectl missing - - "kubectl auth whoami" \
+            "context: $ctx; $(failure_detail "$rc" "${detail:-$(first_line "$out")}")"
     fi
 }
 
-# Session-scope secrets this process already holds via secretsd (names only,
-# never values - `secrets grants` reports keys and ages, not secret contents).
+# The secret keys secretsd grants to every session and scope (names only, never
+# values). `secrets grants` heads its secret-grant table `KEY` (v3.8.4 and
+# earlier) or `SECRET GRANT` (after); the table ends at an empty line or at a
+# `KIND` line, which starts a second table, of requests, receipts and
+# capabilities, that is not read. Only stdout is parsed. A failure reports
+# stderr's last non-empty line (the secrets shim writes a notice to stderr
+# before the client runs), or stdout's first non-empty line when stderr is
+# empty. A lone `no active grants` line means no keys; an answer of no known
+# shape reports `unknown`.
 check_secretsd() {
-    local out rc keys
-    out="$(timeout "$TIMEOUT_S" secrets grants 2>&1)"
+    local out rc err detail line first key keys=""
+    err="$tmp/secretsd.stderr"
+    out="$(timeout "$TIMEOUT_S" secrets grants 2>"$err")"
     rc=$?
-    if ((rc == 0)); then
-        keys="$(tail -n +2 <<<"$out" | awk '{print $1}' | paste -sd, -)"
-        row secretsd_grants live "${keys:-none}" "see \`secrets grants\` for per-key age" "secrets grants" "key names only, never values"
-    else
-        row secretsd_grants missing - - "secrets grants" "$(first_line "$out")"
+    if ((rc != 0)); then
+        detail="$(last_line "$(<"$err")")"
+        row secretsd_grants missing - - "secrets grants" "$(failure_detail "$rc" "${detail:-$(first_line "$out")}")"
+        return
     fi
+    {
+        IFS= read -r line
+        IFS=$'\t' read -r first _ <<<"$line"
+        case "$first" in
+            KEY | "SECRET GRANT")
+                while IFS=$'\t' read -r key _ && [[ -n "$key" && "$key" != KIND ]]; do
+                    keys+="${keys:+,}$key"
+                done
+                ;;
+            KIND) ;;
+            *)
+                if [[ "$line" != "no active grants" ]]; then
+                    row secretsd_grants unknown - - "secrets grants" "unrecognised answer: $line"
+                    return
+                fi
+                ;;
+        esac
+    } <<<"$out"
+    row secretsd_grants live "${keys:-none}" "see \`secrets grants\`" "secrets grants" "keys of every session and scope; names only, never values"
 }
 
 check_agent_secrets_broker() {
-    local out rc
-    out="$(timeout "$TIMEOUT_S" agent-secrets identity 2>&1)"
+    local out rc detail err="$tmp/agent-secrets.stderr"
+    out="$(timeout "$TIMEOUT_S" agent-secrets identity 2>"$err")"
     rc=$?
     if ((rc == 0)); then
         row agent_secrets_broker live "this process is a registered broker session" "n/a" "agent-secrets identity" \
             "secret-run uses the broker instead of secretsd for this session"
     else
-        row agent_secrets_broker missing - - "agent-secrets identity" "${out:-no broker identity; secret-run falls back to secretsd}"
+        # The detail is the non-empty lines of stderr, else of stdout, which row makes one line; a stream with no
+        # non-empty line is passed over, and two such streams give the fallback.
+        detail="$(awk '{ gsub(/\r/, "") } NF' <<<"$(<"$err")")"
+        [[ -n "$detail" ]] || detail="$(awk '{ gsub(/\r/, "") } NF' <<<"$out")"
+        [[ -n "$detail" ]] || detail="no broker identity; secret-run falls back to secretsd"
+        row agent_secrets_broker missing - - "agent-secrets identity" "$(failure_detail "$rc" "$detail")"
     fi
 }
 
@@ -269,20 +368,25 @@ check_modal() {
 
 # Dispatch: the session's harness plugin (pi-envoy, claude-envoy) puts
 # `dispatch` on its shell's PATH and names the
-# session for it; `dispatch whoami` answers whom Dispatch takes it for.
+# session for it; `dispatch whoami` answers whom Dispatch takes it for. The
+# identity is stdout's first non-empty line, so a warning on stderr is not it;
+# a failure reports stderr's first non-empty line, or stdout's when stderr is
+# empty.
 check_dispatch() {
-    local out rc
+    local out rc identity detail err="$tmp/dispatch.stderr"
     if ! command -v dispatch >/dev/null 2>&1; then
         row dispatch missing - - "command -v dispatch" \
             "no dispatch on PATH; the session's harness plugin puts it there, so this shell is not an agent session's"
         return
     fi
-    out="$(timeout "$TIMEOUT_S" dispatch whoami 2>&1)"
+    out="$(timeout "$TIMEOUT_S" dispatch whoami 2>"$err")"
     rc=$?
     if ((rc == 0)); then
-        row dispatch live "$(first_line "$out")" "n/a" "dispatch whoami"
+        identity="$(first_line "$out")"
+        row dispatch live "${identity:-unknown}" "n/a" "dispatch whoami"
     else
-        row dispatch missing - - "dispatch whoami" "$(first_line "$out")"
+        detail="$(first_line "$(<"$err")")"
+        row dispatch missing - - "dispatch whoami" "$(failure_detail "$rc" "${detail:-$(first_line "$out")}")"
     fi
 }
 
@@ -315,12 +419,11 @@ order=(aws github_app anthropic_ant "${extra_rows[@]}" google_workspace "${gws_r
     fleetctl sentry kubectl secretsd_grants agent_secrets_broker modal dispatch)
 
 if ((json)); then
+    # jq splits each row on every tab: `IFS=$'\t' read` makes a run of tabs one
+    # separator, so an empty field would move each later field one place left.
     for name in "${order[@]}"; do
         [[ -f "$tmp/$name" ]] || continue
-        IFS=$'\t' read -r n status identity expiry command detail <"$tmp/$name"
-        jq -c -n --arg name "$n" --arg status "$status" --arg identity "$identity" \
-            --arg expiry "$expiry" --arg command "$command" --arg detail "$detail" \
-            '{name:$name,status:$status,identity:$identity,expiry:$expiry,command:$command,detail:$detail}'
+        jq -c -R 'split("\t") | {name:.[0],status:.[1],identity:.[2],expiry:.[3],command:.[4],detail:(.[5] // "")}' <"$tmp/$name"
     done | jq -s '.'
 else
     # No dependency on `column`: it is not on PATH inside an agent box image.

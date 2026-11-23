@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -74,6 +75,66 @@ SECRET_MARKERS = [
     "ghs_should_never_print",
     "sk-ant-should-never-print",
 ]
+
+# `secrets grants` as the secrets v3.8.4 pin answers it: one table, headed KEY SCOPE AGE.
+SECRETS_GRANTS_V384 = "KEY\tSCOPE\tAGE\nTEST_KEY\tsession\t10s\n"
+# The notice `shims/secrets` writes to stderr before it runs the real client for an agent's call.
+SECRETS_SHIM_NOTICE = (
+    "secrets shim: non-interactive SSH, so an agent's call: agent-tier only, through the broker"
+    " (set AGENT_SHIM_PERSON=1 for your own)\n"
+)
+# Each check that runs its command under `timeout`: its row name, and the command its stub replaces. gws runs once per
+# account in its registry; the timeout tests give it one account, `work`.
+TIMED_CHECKS = {
+    "aws": "aws",
+    "anthropic_ant": "ant",
+    "vercel": "vercel",
+    "datadog_pup": "pup",
+    "gcloud": "gcloud",
+    "google_workspace_work": "gws",
+    "fleetctl": "fleetctl",
+    "sentry": "sentry-cli",
+    "kubectl": "kubectl",
+    "secretsd_grants": "secrets",
+    "agent_secrets_broker": "agent-secrets",
+    "dispatch": "dispatch",
+}
+# What each command has printed when `timeout` stops it, on a stream its check reads. kubectl's current context
+# answers, and `kubectl auth whoami` is the call that times out.
+PARTIAL_OUTPUT = {
+    "aws": """echo '{"UserId": "AROA123:i-abc", "Arn": "arn:aws:sts::123:'""",
+    "ant": 'echo "  Logged in to Example Org as"',
+    "vercel": 'echo "Vercel CLI 39.1.0" >&2',
+    "pup": """echo '{"authenticated": true, "site": "us5.'""",
+    "gcloud": """echo '[{"account": "sami@'""",
+    "gws": """echo "Using keyring backend: keyring" >&2\necho '{"emailAddress": '""",
+    "fleetctl": 'echo "Fetching config from https://fleet.example.com"',
+    "sentry-cli": 'echo "Sentry Server: https://sentry.io"',
+    "kubectl": '[[ "$1 $2" == "config current-context" ]] && { echo production; exit 0; }\necho "Username   arn:aws:sts::123:"',
+    "secrets": f"printf %s {shlex.quote(SECRETS_SHIM_NOTICE)} >&2\nprintf 'SECRET GRANT\\tSCOPE\\n'",
+    "agent-secrets": 'echo "agent-secrets: dialing the broker"',
+    "dispatch": 'echo "dispatch: contacting the server"',
+}
+# Each check that reads its command's stderr apart from its stdout when the command fails: its row, then the line of
+# stderr its detail is, then the line of stdout when stderr has no non-empty line. A line is the `first` or `last`
+# non-empty one, or the `whole` stream's non-empty lines, which row() makes one line. kubectl's two commands each have
+# an entry: whoami runs only after current-context answers, and its detail starts with that context.
+FAILURE_PICKS = {
+    "aws": ("aws", "first", "first"),
+    "anthropic_ant": ("anthropic_ant", "first", "first"),
+    "vercel": ("vercel", "last", "last"),
+    # pup's detail is the .status of JSON on its stdout, when it has one, before either line; these stubs print no JSON.
+    "datadog_pup": ("datadog_pup", "first", "first"),
+    "gcloud": ("gcloud", "first", "first"),
+    "google_workspace_work": ("google_workspace_work", "last", "first"),
+    "fleetctl": ("fleetctl", "last", "last"),
+    "sentry": ("sentry", "first", "first"),
+    "kubectl config current-context": ("kubectl", "first", "first"),
+    "kubectl auth whoami": ("kubectl", "first", "first"),
+    "secretsd_grants": ("secretsd_grants", "last", "first"),
+    "agent_secrets_broker": ("agent_secrets_broker", "whole", "whole"),
+    "dispatch": ("dispatch", "first", "first"),
+}
 
 
 class RealBinary(unittest.TestCase):
@@ -181,6 +242,29 @@ class AgentAccess(unittest.TestCase):
         )
         self.elapsed = time.monotonic() - start
         return result
+
+    def access_rows(self, script: Path = AGENT_ACCESS) -> dict[str, dict[str, str]]:
+        """Run `agent-access --json` and return its rows by name."""
+        result = self.run_access("--json", script=script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return {row["name"]: row for row in json.loads(result.stdout)}
+
+    def write_gws_registry(self, *accounts: str) -> None:
+        """Write gws-accounts' registry under HOME, with one key per account."""
+        gws_dir = self.home / ".config" / "gws"
+        gws_dir.mkdir(parents=True, exist_ok=True)
+        (gws_dir / "accounts.json").write_text(json.dumps({account: {} for account in accounts}), encoding="utf-8")
+
+    def private_check_script(self, checks: str) -> Path:
+        """Return a copy of agent-access in a dotfiles tree whose private agent-access.d/demo.sh holds CHECKS."""
+        dotfiles = self.root / "dotfiles"
+        (dotfiles / "scripts").mkdir(parents=True)
+        script = dotfiles / "scripts" / "agent-access"
+        shutil.copy(AGENT_ACCESS, script)
+        private = dotfiles / ".secrets" / "dotfiles" / "agent-access.d"
+        private.mkdir(parents=True)
+        (private / "demo.sh").write_text(checks, encoding="utf-8")
+        return script
 
     def test_core_tools_are_their_binaries_not_mise_shims(self) -> None:
         write_stub(self.root, "probe", 'for tool in "$@"; do command -v "$tool" || exit 1; done')
@@ -374,9 +458,9 @@ fi
         write_stub(
             self.stub_dir,
             "secrets",
-            r"""
+            f"""
 if [[ "$1" == grants ]]; then
-    printf 'KEY\tSCOPE\tAGE\nTEST_KEY\tsession\t10s\n'
+    printf %s {shlex.quote(SECRETS_GRANTS_V384)}
     exit 0
 fi
 """,
@@ -415,21 +499,673 @@ fi
 
         self.assert_no_secrets(result.stdout)
 
+    def timed_out_rows(self, outputs: dict[str, str]) -> dict[str, dict[str, str]]:
+        """Return the rows when each command in OUTPUTS runs its stub body, then exits 124 as `timeout` does."""
+        for command, body in outputs.items():
+            write_stub(self.stub_dir, command, f"{body}\nexit 124")
+        self.write_gws_registry("work")
+        return self.access_rows()
+
+    def assert_timed_out(self, rows: dict[str, dict[str, str]], details: dict[str, str]) -> None:
+        """Each check in TIMED_CHECKS is missing, its detail the one DETAILS names or `timed out after 6s`."""
+        for name, command in TIMED_CHECKS.items():
+            with self.subTest(check=name):
+                row = rows[name]
+                self.assertEqual(
+                    (row["status"], row["detail"]),
+                    ("missing", details.get(name, "timed out after 6s")),
+                    f"{name} ({command} exited 124)",
+                )
+
+    def test_timeout_after_partial_output_reports_the_timeout(self) -> None:
+        """`timeout` exits 124 when it stops a command; the detail says so, not the partial answer printed first."""
+        rows = self.timed_out_rows(PARTIAL_OUTPUT)
+        self.assert_timed_out(rows, {"kubectl": "context: production; timed out after 6s"})
+
+    def test_timeout_with_no_output_reports_the_timeout(self) -> None:
+        """A command stopped before it printed: no empty detail, no broker fallback, and kubectl's context timed out."""
+        rows = self.timed_out_rows({command: "" for command in TIMED_CHECKS.values()})
+        self.assert_timed_out(rows, {})
+
+    def test_failure_detail_skips_an_empty_first_line(self) -> None:
+        """A failure's detail is its first non-empty line: a lone CR line and a line of only blanks are empty."""
+        expired = (
+            "An error occurred (ExpiredToken) when calling the GetCallerIdentity operation:"
+            " The security token included in the request is expired"
+        )
+        crashed = "ERROR: gcloud crashed (OperationalError): unable to open database file"
+        write_stub(self.stub_dir, "aws", f"echo\necho {shlex.quote(expired)}\nexit 253")
+        write_stub(self.stub_dir, "dispatch", "printf '\\r\\ndispatch: not logged in\\n'\nexit 1")
+        write_stub(self.stub_dir, "gcloud", f"printf ' \\t \\n'\necho {shlex.quote(crashed)}\nexit 1")
+        result = self.run_access("--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = {row["name"]: row for row in json.loads(result.stdout)}
+        details = {"aws": expired, "dispatch": "dispatch: not logged in", "gcloud": crashed}
+        for name, detail in details.items():
+            with self.subTest(check=name):
+                self.assertEqual((rows[name]["status"], rows[name]["detail"]), ("missing", detail))
+
+    def test_failure_with_no_output_names_its_exit_code(self) -> None:
+        """A command that fails and prints nothing gives the detail `exit <code>, no output`, never an empty one."""
+        for command in TIMED_CHECKS.values():
+            write_stub(self.stub_dir, command, "exit 3")
+        self.write_gws_registry("work")
+        rows = self.access_rows()
+        details = {name: "exit 3, no output" for name in TIMED_CHECKS}
+        # The broker check's own text for an empty answer stays.
+        details["agent_secrets_broker"] = "no broker identity; secret-run falls back to secretsd"
+        for name, detail in details.items():
+            with self.subTest(check=name):
+                self.assertEqual((rows[name]["status"], rows[name]["detail"]), ("missing", detail))
+        write_stub(
+            self.stub_dir, "kubectl", '[[ "$1 $2" == "config current-context" ]] && { echo production; exit 0; }\nexit 3'
+        )
+        with self.subTest(check="kubectl auth whoami"):
+            kubectl = self.access_rows()["kubectl"]
+            self.assertEqual(
+                (kubectl["status"], kubectl["detail"]), ("missing", "context: production; exit 3, no output")
+            )
+
+    def test_ant_login_is_read_from_either_stream(self) -> None:
+        """ant's login and expiry are found whichever stream it answers on; no run here has shown which one it uses."""
+        login = 'echo "  Logged in to Example Org as sami@example.com"\necho "  expires:        2099-01-01T00:00:00Z"'
+        for stream, redirect in (("stdout", ""), ("stderr", " >&2")):
+            with self.subTest(stream=stream):
+                write_stub(self.stub_dir, "ant", "\n".join(line + redirect for line in login.splitlines()))
+                row = self.access_rows()["anthropic_ant"]
+                self.assertEqual(
+                    (row["status"], row["identity"], row["expiry"]),
+                    ("live", "sami@example.com", "2099-01-01T00:00:00Z"),
+                )
+
+    def write_failing_stub(self, command: str, writes: tuple[tuple[str, str], ...], first: str = "") -> None:
+        """Stub COMMAND to run FIRST, print each (stream, text) of WRITES with COMMAND in the text's {}, and exit 1."""
+        printed = (
+            f"printf '%s\\n' {shlex.quote(text.format(command))}{' >&2' if stream == 'stderr' else ''}"
+            for stream, text in writes
+        )
+        write_stub(self.stub_dir, command, "\n".join((first, *printed, "exit 1")))
+
+    def test_failure_detail_picks_by_stream(self) -> None:
+        """A failed check's detail is the line of stderr FAILURE_PICKS names, or of stdout when stderr is empty.
+
+        In `both`, stdout's line comes before and after stderr's two lines, so a check that reads the two streams
+        merged reads stdout text whether it takes the first line, the last line or the whole output.
+        """
+        cases: dict[str, tuple[tuple[str, str], ...]] = {
+            "stdout only": (("stdout", "other line of {}"), ("stdout", "ERR {} on stdout")),
+            "two stderr lines": (("stderr", "first err of {}"), ("stderr", "last err of {}")),
+            "both": (
+                ("stdout", "other line of {}"),
+                ("stderr", "first err of {}"),
+                ("stderr", "last err of {}"),
+                ("stdout", "other line of {}"),
+            ),
+        }
+        whoami = "kubectl auth whoami"
+        current_context = '[[ "$1 $2" == "config current-context" ]]'
+        self.write_gws_registry("work")
+        for case, writes in cases.items():
+            # Every command fails, kubectl's current-context too, so whoami never runs; then current-context answers
+            # `production` and whoami fails.
+            for command in TIMED_CHECKS.values():
+                self.write_failing_stub(command, writes, f"{current_context} || exit 2" if command == "kubectl" else "")
+            rows = self.access_rows()
+            self.write_failing_stub("kubectl", writes, f"{current_context} && {{ echo production; exit 0; }}")
+            whoami_rows = self.access_rows()
+            for check, (name, stderr_pick, stdout_pick) in FAILURE_PICKS.items():
+                command = TIMED_CHECKS[name]
+                stderr = [text.format(command) for stream, text in writes if stream == "stderr"]
+                stdout = [text.format(command) for stream, text in writes if stream == "stdout"]
+                lines, pick = (stderr, stderr_pick) if stderr else (stdout, stdout_pick)
+                detail = {"first": lines[0], "last": lines[-1], "whole": " ".join(lines)}[pick]
+                row = rows[name]
+                if check == whoami:
+                    detail = f"context: production; {detail}"
+                    row = whoami_rows[name]
+                with self.subTest(check=check, case=case):
+                    self.assertEqual((row["status"], row["detail"]), ("missing", detail))
+
+    def test_failure_that_printed_text_never_reports_no_output(self) -> None:
+        """A failed tool's text reaches the detail from whichever stream it wrote, never `exit <code>, no output`.
+
+        pup writes to stderr (on oryx it prints `Not authenticated` there beside its JSON), and a gws that writes its
+        error to stdout leaves stderr empty; each check that reads one stream first falls back to the other.
+        """
+        write_stub(self.stub_dir, "pup", "printf '\\nError: request to api.datadoghq.com timed out\\n' >&2\nexit 1")
+        write_stub(self.stub_dir, "gws", "printf '\\nerror: 403 insufficient scope\\n'\nexit 1")
+        self.write_gws_registry("work")
+        rows = self.access_rows()
+        details = {
+            "datadog_pup": "Error: request to api.datadoghq.com timed out",
+            "google_workspace_work": "error: 403 insufficient scope",
+        }
+        for name, detail in details.items():
+            with self.subTest(check=name):
+                self.assertEqual((rows[name]["status"], rows[name]["detail"]), ("missing", detail))
+
+    def test_datadog_answer_without_a_status_reports_its_first_line(self) -> None:
+        """pup's answer with no `.status` gives its first line as the detail, not an empty one."""
+        cases = {
+            ('{"authenticated":false}', 0): '{"authenticated":false}',
+            ('{"authenticated":false,"status":"token expired"}', 0): "token expired",
+            ("Not authenticated", 0): "Not authenticated",
+            ("", 1): "exit 1, no output",
+        }
+        for (stdout, code), detail in cases.items():
+            with self.subTest(stdout=stdout, code=code):
+                write_stub(self.stub_dir, "pup", f"printf %s {shlex.quote(stdout)}\nexit {code}")
+                row = self.access_rows()["datadog_pup"]
+                self.assertEqual((row["status"], row["detail"]), ("missing", detail))
+
+    def test_gcloud_parses_only_stdout_and_reports_an_unparseable_answer(self) -> None:
+        """A stderr warning does not hide the ACTIVE account; an answer that is not a JSON list is `unknown`.
+
+        Only a parsed list with no ACTIVE account is `no ACTIVE account`, and a failure reports stderr's first line.
+        """
+        active = '[{"account":"sami@example.com","status":"ACTIVE"}]'
+        cases = {
+            "a warning on stderr before the answer": (
+                f"echo 'WARNING: update available' >&2\necho {shlex.quote(active)}",
+                ("live", "sami@example.com", ""),
+            ),
+            "text on stdout": (
+                "echo 'You are not logged in'",
+                ("unknown", "-", "unparseable answer: You are not logged in"),
+            ),
+            "empty stdout": ("exit 0", ("unknown", "-", "unparseable answer: ")),
+            "a list with no ACTIVE account": ("echo '[]'", ("missing", "-", "no ACTIVE account")),
+            "a failure with its error on stderr after stdout": (
+                "echo '[]'\necho 'ERROR: (gcloud.auth.list) boom' >&2\nexit 1",
+                ("missing", "-", "ERROR: (gcloud.auth.list) boom"),
+            ),
+        }
+        for case, (body, expected) in cases.items():
+            with self.subTest(case=case):
+                write_stub(self.stub_dir, "gcloud", body)
+                row = self.access_rows()["gcloud"]
+                self.assertEqual((row["status"], row["identity"], row["detail"]), expected)
+
+    def test_vercel_identity_is_stdout_and_a_failure_reports_stderr(self) -> None:
+        """vercel's notice on stderr is not the identity; a failure reports stderr's last line, else stdout's."""
+        vercel_logged_out = (
+            "> Run `vercel deploy --temporary` to create a temporary deployment you can claim later,"
+            " or `vercel login` to log in."
+        )
+        cases = {
+            "an update notice on stderr after the identity": (
+                "echo sami-2219\necho 'Run npm i -g vercel@latest to update.' >&2",
+                ("live", "sami-2219", ""),
+            ),
+            "a failure with vercel's banner, then its error, on stderr": (
+                "echo 'Vercel CLI 59.14.0 (Node.js 22.22.2)' >&2\necho '> Logged out.' >&2\n"
+                f"echo {shlex.quote(vercel_logged_out)} >&2\nexit 1",
+                ("missing", "-", vercel_logged_out),
+            ),
+            "a failure with its error on stdout only": (
+                "echo 'Error: not logged in'\nexit 1",
+                ("missing", "-", "Error: not logged in"),
+            ),
+        }
+        for case, (body, expected) in cases.items():
+            with self.subTest(case=case):
+                write_stub(self.stub_dir, "vercel", body)
+                row = self.access_rows()["vercel"]
+                self.assertEqual((row["status"], row["identity"], row["detail"]), expected)
+
+    def test_last_line_readers_skip_empty_lines_and_carriage_returns(self) -> None:
+        """Where a check reads the last line on purpose, it reads the last non-empty one, CR removed."""
+        write_stub(
+            self.stub_dir, "gws", "printf 'Using keyring backend: keyring\\nerror: 401 Unauthorized\\n\\n' >&2\nexit 1"
+        )
+        self.write_gws_registry("work")
+        write_stub(self.stub_dir, "secrets", "printf 'secrets: cannot reach secretsd\\n\\n' >&2\nexit 1")
+        write_stub(self.stub_dir, "fleetctl", "printf 'denied\\r\\n\\r\\n'\nexit 1")
+        write_stub(self.stub_dir, "vercel", "printf 'Error: no credentials\\r\\n \\r\\n' >&2\nexit 1")
+        rows = self.access_rows()
+        details = {
+            "google_workspace_work": "error: 401 Unauthorized",
+            "secretsd_grants": "secrets: cannot reach secretsd",
+            "fleetctl": "denied",
+            "vercel": "Error: no credentials",
+        }
+        for name, detail in details.items():
+            with self.subTest(check=name):
+                self.assertEqual((rows[name]["status"], rows[name]["detail"]), ("missing", detail))
+        write_stub(self.stub_dir, "vercel", "printf 'sami-2219\\r\\n\\r\\n'")
+        with self.subTest(check="vercel identity"):
+            vercel = self.access_rows()["vercel"]
+            self.assertEqual((vercel["status"], vercel["identity"]), ("live", "sami-2219"))
+
+    def test_aws_parses_only_stdout_and_a_failure_reports_stderr(self) -> None:
+        """A stderr warning does not hide a valid ARN; a failure reports stderr's first non-empty line."""
+        arn = "arn:aws:sts::123:assumed-role/test/i-abc"
+        expired = "An error occurred (ExpiredToken) when calling the GetCallerIdentity operation: token expired"
+        cases = {
+            "a warning on stderr before the answer": (
+                f"echo 'WARNING: Python 3.8 is deprecated' >&2\necho {shlex.quote(json.dumps({'Arn': arn}))}",
+                ("live", arn, ""),
+            ),
+            "a failure with its error on stderr after an empty line": (
+                f"echo >&2\necho {shlex.quote(expired)} >&2\nexit 254",
+                ("missing", "-", expired),
+            ),
+        }
+        for case, (body, expected) in cases.items():
+            with self.subTest(case=case):
+                write_stub(self.stub_dir, "aws", body)
+                row = self.access_rows()["aws"]
+                self.assertEqual((row["status"], row["identity"], row["detail"]), expected)
+
+    def test_github_app_unreadable_cache_is_unknown(self) -> None:
+        """A covered-owner cache that is not a JSON object gives `unknown` and names the file, not `live`."""
+        cache = self.home / ".cache" / "gh-app-token"
+        cache.mkdir(parents=True)
+        covered = cache / "covered-123.json"
+        for content in ("{not json", '["stub-owner"]', ""):
+            with self.subTest(content=content):
+                covered.write_text(content, encoding="utf-8")
+                row = self.access_rows()["github_app"]
+                self.assertEqual(
+                    (row["status"], row["identity"], row["detail"]),
+                    ("unknown", "-", f"unreadable covered-owner cache: {covered}"),
+                )
+
+    def test_sentry_answer_without_a_user_line_says_so(self) -> None:
+        """sentry-cli info with no `User:` line is missing: exit 0 (an org auth token) says so; a failure reports why.
+
+        Real sentry-cli with no login exits 1 with its configuration on stdout and, on stderr, its error, an empty
+        line and a hint; a failure with nothing on stderr reports stdout's first line.
+        """
+        auth_error = "error: Auth token is required for this request. Please run `sentry-cli login` and try again!"
+        cases = {
+            "an org auth token": (
+                "Sentry Server: https://sentry.io\nDefault Organization: example\n",
+                "",
+                0,
+                "no User: line in sentry-cli info",
+            ),
+            "a failure with its error on stdout only": (
+                "error: API request failed\n  caused by: 401\n",
+                "",
+                1,
+                "error: API request failed",
+            ),
+            "no login: the configuration on stdout, the error on stderr": (
+                "Sentry Server: https://sentry.io\nDefault Organization: -\nDefault Project: -\n\n"
+                "Authentication Info:\n  Method: Unauthorized\n",
+                f"{auth_error}\n\nAdd --log-level=[info|debug] or export SENTRY_LOG_LEVEL=[info|debug] to see more"
+                " output.\nPlease attach the full debug log to all bug reports.\n",
+                1,
+                auth_error,
+            ),
+        }
+        for case, (stdout, stderr, code, detail) in cases.items():
+            with self.subTest(case=case):
+                write_stub(
+                    self.stub_dir,
+                    "sentry-cli",
+                    f"printf %s {shlex.quote(stdout)}\nprintf %s {shlex.quote(stderr)} >&2\nexit {code}",
+                )
+                row = self.access_rows()["sentry"]
+                self.assertEqual((row["status"], row["detail"]), ("missing", detail))
+
+    def test_live_answer_with_no_identity_line_reports_unknown(self) -> None:
+        """vercel and dispatch exiting 0 with no non-empty line report the identity `unknown`, as other checks do."""
+        cases = {
+            "no output": "exit 0",
+            "only blank lines": "printf '\\n \\r\\n'",
+        }
+        for case, body in cases.items():
+            write_stub(self.stub_dir, "vercel", body)
+            write_stub(self.stub_dir, "dispatch", body)
+            rows = self.access_rows()
+            for name in ("vercel", "dispatch"):
+                with self.subTest(case=case, check=name):
+                    self.assertEqual((rows[name]["status"], rows[name]["identity"]), ("live", "unknown"))
+
+    def test_broker_failure_detail_has_no_blank_lines(self) -> None:
+        """agent-secrets' whole output is one line of its non-empty lines: a blank line before or between adds no space."""
+        for stream, redirect in (("stderr", " >&2"), ("stdout", "")):
+            with self.subTest(stream=stream):
+                write_stub(
+                    self.stub_dir, "agent-secrets", f"printf '\\n \\nno session\\n\\r\\nhint: run under secret-run\\n'{redirect}\nexit 1"
+                )
+                row = self.access_rows()["agent_secrets_broker"]
+                self.assertEqual((row["status"], row["detail"]), ("missing", "no session hint: run under secret-run"))
+
+    def test_broker_failure_with_only_blank_output_gives_the_fallback_text(self) -> None:
+        """`agent-secrets identity` failing with only blanks and CRs gives the fallback detail, not a blank one.
+
+        A timeout still reports the timeout.
+        """
+        fallback = "no broker identity; secret-run falls back to secretsd"
+        cases = {
+            "spaces, a tab and CRLF": ("printf ' \\r\\n\\t\\n'", 1, fallback),
+            "a lone CRLF": ("printf '\\r\\n'", 1, fallback),
+            "blank output, then a timeout": ("printf ' \\r\\n'", 124, "timed out after 6s"),
+        }
+        for case, (body, code, detail) in cases.items():
+            with self.subTest(case=case):
+                write_stub(self.stub_dir, "agent-secrets", f"{body}\nexit {code}")
+                row = self.access_rows()["agent_secrets_broker"]
+                self.assertEqual((row["status"], row["detail"]), ("missing", detail))
+
+    def test_kubectl_context_is_stdout_and_a_failure_reports_stderr(self) -> None:
+        """A kubectl warning on stderr is not part of the context; a current-context failure reports stderr's line.
+
+        A current-context failure with nothing on stderr reports stdout's first line.
+        """
+        # `kubectl auth whoami` answers; any call but `config current-context` exits 2.
+        stub = (
+            'if [[ "$1 $2" == "auth whoami" ]]; then\n'
+            '    echo "Username   arn:aws:sts::123:assumed-role/test/i-abc"; exit 0\n'
+            "fi\n"
+            '[[ "$1 $2" == "config current-context" ]] || exit 2'
+        )
+        cases = {
+            "a warning on stderr before the context": (
+                "echo 'W1122 warning: config is old' >&2\necho production",
+                ("live", "arn:aws:sts::123:assumed-role/test/i-abc (context: production)", ""),
+            ),
+            "a failure with its error on stderr after stdout": (
+                "echo 'Fetching context'\necho 'error: current-context is not set' >&2\nexit 1",
+                ("missing", "-", "error: current-context is not set"),
+            ),
+            "a failure with its error on stdout only": (
+                "echo 'error: current-context is not set'\nexit 1",
+                ("missing", "-", "error: current-context is not set"),
+            ),
+        }
+        for case, (context, expected) in cases.items():
+            with self.subTest(case=case):
+                write_stub(self.stub_dir, "kubectl", f"{stub}\n{context}")
+                row = self.access_rows()["kubectl"]
+                self.assertEqual((row["status"], row["identity"], row["detail"]), expected)
+
+    def test_kubectl_empty_context_is_unknown(self) -> None:
+        """current-context exiting 0 with no non-empty line gives `(context: unknown)`, not an empty context."""
+        cases = {
+            "no output": "exit 0",
+            "only blank lines": "printf '\\n \\t\\r\\n'\nexit 0",
+        }
+        for case, context in cases.items():
+            with self.subTest(case=case):
+                write_stub(
+                    self.stub_dir,
+                    "kubectl",
+                    f'if [[ "$1 $2" == "config current-context" ]]; then\n{context}\nfi\n'
+                    'echo "Username   arn:aws:sts::123:assumed-role/test/i-abc"',
+                )
+                row = self.access_rows()["kubectl"]
+                self.assertEqual(
+                    (row["status"], row["identity"]),
+                    ("live", "arn:aws:sts::123:assumed-role/test/i-abc (context: unknown)"),
+                )
+
+    def test_dispatch_identity_is_stdout_and_a_failure_reports_stderr(self) -> None:
+        """A dispatch warning on stderr is not the identity; a failure reports stderr's first line, else stdout's."""
+        cases = {
+            "a warning on stderr before the identity": (
+                "echo 'dispatch: warning: config is old' >&2\necho 'session 01a20508 (Legion implementer)'",
+                ("live", "session 01a20508 (Legion implementer)", ""),
+            ),
+            "a failure with its error on stderr after stdout": (
+                "echo 'contacting the server'\necho 'dispatch: not logged in' >&2\nexit 1",
+                ("missing", "-", "dispatch: not logged in"),
+            ),
+        }
+        for case, (body, expected) in cases.items():
+            with self.subTest(case=case):
+                write_stub(self.stub_dir, "dispatch", f'[[ "$1" == whoami ]] || exit 2\n{body}')
+                row = self.access_rows()["dispatch"]
+                self.assertEqual((row["status"], row["identity"], row["detail"]), expected)
+
+    def secretsd_row(self, stdout: str, stderr: str = "", code: int = 0) -> dict[str, str]:
+        """Return the secretsd_grants row when `secrets grants` writes STDERR, then STDOUT, and exits CODE.
+
+        Any other `secrets` subcommand exits 2.
+        """
+        stdout_file = self.root / "secrets-grants.stdout"
+        stderr_file = self.root / "secrets-grants.stderr"
+        stdout_file.write_text(stdout, encoding="utf-8")
+        stderr_file.write_text(stderr, encoding="utf-8")
+        write_stub(
+            self.stub_dir,
+            "secrets",
+            f"""
+[[ "$1" == grants ]] || exit 2
+cat {shlex.quote(str(stderr_file))} >&2
+cat {shlex.quote(str(stdout_file))}
+exit {code}
+""",
+        )
+        result = self.run_access("--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows: list[dict[str, str]] = json.loads(result.stdout)
+        return next(row for row in rows if row["name"] == "secretsd_grants")
+
+    def test_secretsd_v384_answer(self) -> None:
+        row = self.secretsd_row(SECRETS_GRANTS_V384)
+        self.assertEqual((row["status"], row["identity"]), ("live", "TEST_KEY"))
+
+    def test_secretsd_no_active_grants(self) -> None:
+        row = self.secretsd_row("no active grants\n")
+        self.assertEqual((row["status"], row["identity"]), ("live", "none"))
+
+    def test_secretsd_both_tables(self) -> None:
+        """The secret-grant table, an empty line, then the KIND table: only the first holds keys."""
+        row = self.secretsd_row(
+            "SECRET GRANT\tSCOPE\tEXPIRES\n"
+            "TEST_KEY\tsession\t3412s\n"
+            "\n"
+            "KIND\tNAME\tSCOPE\tSTATE\tEXPIRES\n"
+            "request\tCAP_BROWSER\tomp 4242\tpending, id 7\t72s\n"
+            "capability\tbrowser\t-\tactive\t41012s\n"
+        )
+        self.assertEqual((row["status"], row["identity"]), ("live", "TEST_KEY"))
+
+    def test_secretsd_second_table_only(self) -> None:
+        row = self.secretsd_row(
+            "KIND\tNAME\tSCOPE\tSTATE\tEXPIRES\n"
+            "request\tCAP_BROWSER\tomp 4242\tpending, id 7\t72s\n"
+            "capability\tbrowser\t-\tactive\t41012s\n"
+        )
+        self.assertEqual((row["status"], row["identity"]), ("live", "none"))
+
+    def test_secretsd_two_keys(self) -> None:
+        row = self.secretsd_row("SECRET GRANT\tSCOPE\tEXPIRES\nA\tsession\t5s\nB\ttty /dev/pts/3\t9s\n")
+        self.assertEqual((row["status"], row["identity"]), ("live", "A,B"))
+
+    def test_secretsd_kind_line_with_no_empty_line(self) -> None:
+        row = self.secretsd_row(
+            "SECRET GRANT\tSCOPE\tEXPIRES\n"
+            "TEST_KEY\tsession\t3412s\n"
+            "KIND\tNAME\tSCOPE\tSTATE\tEXPIRES\n"
+            "request\tCAP_BROWSER\tomp 4242\tpending, id 7\t72s\n"
+        )
+        self.assertEqual((row["status"], row["identity"]), ("live", "TEST_KEY"))
+
+    def test_secretsd_stderr_before_the_table(self) -> None:
+        """A shim's notice on stderr, written before the table, is not a key."""
+        row = self.secretsd_row(SECRETS_GRANTS_V384, stderr=SECRETS_SHIM_NOTICE)
+        self.assertEqual((row["status"], row["identity"]), ("live", "TEST_KEY"))
+
+    def test_secretsd_failure(self) -> None:
+        row = self.secretsd_row("", stderr="secrets: cannot reach secretsd\n", code=1)
+        self.assertEqual((row["status"], row["identity"]), ("missing", "-"))
+        self.assertEqual(row["detail"], "secrets: cannot reach secretsd")
+
+    def test_secretsd_failure_after_a_shim_notice(self) -> None:
+        """The client's own error, written after the shim's notice, is the detail."""
+        row = self.secretsd_row("", stderr=SECRETS_SHIM_NOTICE + "secrets: cannot reach secretsd\n", code=1)
+        self.assertEqual((row["status"], row["identity"]), ("missing", "-"))
+        self.assertEqual(row["detail"], "secrets: cannot reach secretsd")
+
+    def test_secretsd_failure_with_only_stdout(self) -> None:
+        """With no stderr the detail is stdout's first line, its tabs made spaces so the row keeps its fields."""
+        row = self.secretsd_row("KEY\tSCOPE\n", code=1)
+        self.assertEqual((row["status"], row["identity"]), ("missing", "-"))
+        self.assertEqual(row["detail"], "KEY SCOPE")
+
+    def test_secretsd_unrecognised_answer(self) -> None:
+        row = self.secretsd_row("NEW HEADER\tX\nA\tsession\t5s\n")
+        self.assertEqual((row["status"], row["identity"]), ("unknown", "-"))
+        self.assertEqual(row["detail"], "unrecognised answer: NEW HEADER X")
+
+    def test_secretsd_empty_stdout(self) -> None:
+        row = self.secretsd_row("")
+        self.assertEqual((row["status"], row["identity"]), ("unknown", "-"))
+        self.assertEqual(row["detail"], "unrecognised answer: ")
+
+    def test_secretsd_row_text(self) -> None:
+        row = self.secretsd_row(SECRETS_GRANTS_V384)
+        self.assertEqual(row["expiry"], "see `secrets grants`")
+        self.assertEqual(row["detail"], "keys of every session and scope; names only, never values")
+
+    def test_row_makes_a_tab_in_a_detail_a_space(self) -> None:
+        """check_fleetctl's detail is a raw output line; row() makes its tab a space so the row keeps its fields."""
+        write_stub(self.stub_dir, "fleetctl", 'printf "denied\\tby policy\\n"\nexit 1')
+        result = self.run_access("--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = {row["name"]: row for row in json.loads(result.stdout)}
+        self.assertEqual((rows["fleetctl"]["status"], rows["fleetctl"]["detail"]), ("missing", "denied by policy"))
+
+    def test_row_makes_a_newline_in_a_kubectl_identity_and_a_broker_detail_a_space(self) -> None:
+        """A warning line before the kubectl context and a two-line broker error stay inside their rows.
+
+        A newline in a field splits the row file in two: `--json` reads only the first line, so the row loses its
+        later fields, and the table prints the rest as a line of its own.
+        """
+        write_stub(
+            self.stub_dir,
+            "kubectl",
+            r"""
+if [[ "$1 $2" == "config current-context" ]]; then printf 'W1122 warning: config is old\nproduction\n'; exit 0; fi
+if [[ "$1 $2" == "auth whoami" ]]; then
+    echo "Username   arn:aws:sts::123:assumed-role/test/i-abc"
+    exit 0
+fi
+exit 2
+""",
+        )
+        write_stub(
+            self.stub_dir,
+            "agent-secrets",
+            r"""
+[[ "$1" == identity ]] || exit 2
+printf 'agent-secrets: no broker session\nhint: run under secret-run\n'
+exit 1
+""",
+        )
+        result = self.run_access("--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = {row["name"]: row for row in json.loads(result.stdout)}
+        kubectl = rows["kubectl"]
+        self.assertEqual(
+            (kubectl["status"], kubectl["identity"], kubectl["expiry"], kubectl["command"]),
+            (
+                "live",
+                "arn:aws:sts::123:assumed-role/test/i-abc (context: W1122 warning: config is old production)",
+                "n/a (assumed-role session)",
+                "kubectl auth whoami",
+            ),
+        )
+        broker = rows["agent_secrets_broker"]
+        self.assertEqual(
+            (broker["status"], broker["detail"]),
+            ("missing", "agent-secrets: no broker session hint: run under secret-run"),
+        )
+
+        table = self.run_access()
+        self.assertEqual(table.returncode, 0, table.stderr)
+        lines = table.stdout.splitlines()
+        # The header, then one line per row: a split row adds a line that starts with neither name.
+        self.assertEqual(len(lines), len(rows) + 1, table.stdout)
+        for name in ("kubectl", "agent_secrets_broker"):
+            with self.subTest(name=name):
+                self.assertEqual(len([line for line in lines if line.startswith(name)]), 1, table.stdout)
+
+    def test_row_makes_tabs_and_newlines_spaces_in_every_field(self) -> None:
+        """row() makes each tab and newline in the identity, expiry, command and detail a space."""
+        script = self.private_check_script(
+            "check_demo() {\n"
+            "    row demo_platform live $'id\\tone\\ntwo' $'exp\\tone\\ntwo' $'cmd\\tone\\ntwo' $'det\\tone\\ntwo'\n"
+            "}\n"
+            "extra_checks+=(check_demo)\n"
+            "extra_rows+=(demo_platform)\n"
+        )
+        result = self.run_access("--json", script=script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        demo = next(row for row in json.loads(result.stdout) if row["name"] == "demo_platform")
+        self.assertEqual(
+            (demo["status"], demo["identity"], demo["expiry"], demo["command"], demo["detail"]),
+            ("live", "id one two", "exp one two", "cmd one two", "det one two"),
+        )
+
+    def test_row_removes_carriage_returns_from_every_field(self) -> None:
+        """A CRLF kubectl context, a CRLF broker error and a CR in each field of a private row reach no row."""
+        write_stub(
+            self.stub_dir,
+            "kubectl",
+            r"""
+if [[ "$1 $2" == "config current-context" ]]; then printf 'production\r\n'; exit 0; fi
+if [[ "$1 $2" == "auth whoami" ]]; then
+    echo "Username   arn:aws:sts::123:assumed-role/test/i-abc"
+    exit 0
+fi
+exit 2
+""",
+        )
+        write_stub(
+            self.stub_dir,
+            "agent-secrets",
+            "printf 'agent-secrets: no broker session\\r\\nhint: run under secret-run\\r\\n'\nexit 1",
+        )
+        script = self.private_check_script(
+            "check_demo() { row demo_platform live $'id\\r\\none' $'exp\\r\\none' $'cmd\\r\\none' $'det\\r\\none'; }\n"
+            "extra_checks+=(check_demo)\n"
+            "extra_rows+=(demo_platform)\n"
+        )
+        rows = self.access_rows(script)
+        checks = {
+            "kubectl": ("live", "arn:aws:sts::123:assumed-role/test/i-abc (context: production)", ""),
+            "agent_secrets_broker": ("missing", "-", "agent-secrets: no broker session hint: run under secret-run"),
+        }
+        for name, expected in checks.items():
+            with self.subTest(check=name):
+                self.assertEqual((rows[name]["status"], rows[name]["identity"], rows[name]["detail"]), expected)
+        with self.subTest(check="demo_platform"):
+            demo = rows["demo_platform"]
+            self.assertEqual(
+                (demo["status"], demo["identity"], demo["expiry"], demo["command"], demo["detail"]),
+                ("live", "id one", "exp one", "cmd one", "det one"),
+            )
+
+    def test_json_keeps_every_field_in_its_place_after_an_empty_field(self) -> None:
+        """`--json` keeps each of a row's six fields in place when the identity and expiry are empty.
+
+        `IFS=$'\\t' read` makes a run of tabs one separator, so each field after an empty one moved one place left.
+        """
+        script = self.private_check_script(
+            'check_demo() { row demo_platform live "" "" "demo login" "from the private part"; }\n'
+            "extra_checks+=(check_demo)\n"
+            "extra_rows+=(demo_platform)\n"
+        )
+        demo = self.access_rows(script)["demo_platform"]
+        self.assertEqual(
+            (demo["status"], demo["identity"], demo["expiry"], demo["command"], demo["detail"]),
+            ("live", "", "", "demo login", "from the private part"),
+        )
+
     def test_private_checks_beside_the_dotfiles_are_sourced_and_ordered(self) -> None:
         # A check whose name would name a customer lives in <dotfiles>/.secrets/dotfiles/
         # agent-access.d/*.sh (a private repository); the script finds that directory from its
         # own path, runs each check it adds and prints the rows it names after `anthropic_ant`.
-        dotfiles = self.root / "dotfiles"
-        (dotfiles / "scripts").mkdir(parents=True)
-        script = dotfiles / "scripts" / "agent-access"
-        shutil.copy(AGENT_ACCESS, script)
-        private = dotfiles / ".secrets" / "dotfiles" / "agent-access.d"
-        private.mkdir(parents=True)
-        (private / "demo.sh").write_text(
+        script = self.private_check_script(
             'check_demo() { row demo_platform live demo-identity - "demo login" "from the private part"; }\n'
             "extra_checks+=(check_demo)\n"
-            "extra_rows+=(demo_platform)\n",
-            encoding="utf-8",
+            "extra_rows+=(demo_platform)\n"
         )
         result = self.run_access("--json", script=script)
         self.assertEqual(result.returncode, 0, result.stderr)

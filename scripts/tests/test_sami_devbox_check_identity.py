@@ -6,7 +6,7 @@ metadata_account_check reads the account the metadata server serves the way ever
 answers dev-sjawhar@ fails it, which is the check's state before the switch. identity_limits_check
 holds the four lines of what the plain dev box may not and may do: no infra-applier@ token mint (a
 testIamPermissions answer with no permission, the token on curl's stdin, never its argv), no Envoy
-Secret read, no exec into an Envoy pod, and `theorem-session list` working.
+Secret read, no exec into an Envoy pod, and `theorem-session list --all` working.
 
 Technique, as test_sami_devbox_check_logins.py: the real script sourced without its dispatch, each
 function run alone. gce_metadata_stub.py is the metadata server; `gcloud`, `curl`, `kubectl` and
@@ -84,10 +84,24 @@ case "$*" in
     *) echo "unexpected kubectl $*" >&2; exit 2 ;;
 esac
 """
+# Answers only `list --all`: a bare `list` shows the caller's own agents alone (theorem-labs/agent-infra#5776), so a
+# check that runs it gets exit 2 and fails its line.
 SESSION = r"""#!/bin/bash
-[[ "$1" == list ]] && exit "$(cat "$STUB_DIR/sessions")"
+[[ "$*" == "list --all" ]] && exit "$(cat "$STUB_DIR/sessions")"
 exit 2
 """
+# Each answer of `kubectl auth can-i` and what it makes of a line that wants a refusal: `no`, bare or with the reason GKE
+# gives (as GKE answered sami-devbox on 2026-11-22 at 12:07Z), passes; a grant, nothing, an error, and a word that only
+# begins with "no" fail.
+CAN_I_ANSWERS = (
+    ("no", "ok"),
+    ('no - requires one of ["container.secrets.get"] permission(s) in Cloud IAM or a Kubernetes RBAC role with verb "get" '
+     'for resource "secrets". (Error ID: CiQwMWEyMDMyNy05MmNhLTc3OGQtYTZhYS1lY2IzZWVjYzAyZDISAA==)', "ok"),
+    ("yes", "FAIL"),
+    ("", "FAIL"),
+    ("error: You must be logged in to the server", "FAIL"),
+    ("nope", "FAIL"),
+)
 
 
 def write_stub(directory: Path, name: str, body: str) -> None:
@@ -174,10 +188,19 @@ class IdentityLimits(CheckCase):
         got = self.lines()
         self.assertEqual((got["infra-applier closed"], got["no envoy secrets"], got["no envoy exec"]), ("FAIL", "FAIL", "FAIL"))
 
-    def test_no_theorem_session_on_path_fails_the_sessions_line(self) -> None:
+    def test_a_refusal_with_or_without_its_reason_passes_and_every_other_answer_fails(self) -> None:
+        for answer, want in CAN_I_ANSWERS:
+            with self.subTest(answer=answer):
+                self.answers(tip={}, secrets=answer, exec_=answer, sessions=0)
+                got = self.lines()
+                self.assertEqual((got["no envoy secrets"], got["no envoy exec"]), (want, want))
+
+    def test_no_theorem_session_on_path_fails_the_sessions_line_naming_its_installer(self) -> None:
         (self.bin / "theorem-session").unlink()
         self.env["PATH"] = f"{self.bin}:/usr/bin:/bin"
-        self.assertEqual(self.lines()["sessions"], "FAIL")
+        [line] = [line for line in self.run_function('identity_limits_check "on the host"') if " sessions " in line]
+        self.assertTrue(line.startswith("FAIL "), line)
+        self.assertIn("installers/theorem-session.sh installs it", line)
 
     def test_a_cut_short_iam_answer_is_no_pass_even_if_the_json_is_complete(self) -> None:
         write_stub(self.bin, "curl", '#!/bin/bash\ncat >/dev/null\nprintf "{}"\nexit 18\n')
@@ -282,6 +305,14 @@ class RoutedOffTheBox(CheckCase):
                 self.set(name, value)
                 self.assertEqual(self.lines()[label], "FAIL")
 
+    def test_a_refusal_with_or_without_its_reason_passes_and_every_other_answer_fails(self) -> None:
+        for label, name in (("grade pool", f"kubectl.{GRADE}.grade"), ("N6 farm", f"kubectl.{DISPATCH}.builds-ossv")):
+            for answer, want in CAN_I_ANSWERS:
+                with self.subTest(label=label, answer=answer):
+                    self.refused_everywhere()
+                    self.set(name, answer)
+                    self.assertEqual(self.lines()[label], want)
+
     def test_the_box_signs_as_build_io_signer(self) -> None:
         """Census row U23's exception: dev-box@ holds Token Creator on build-io-signer@ alone, so the box mints its token
         and signs as it. A refusal of either fails the line."""
@@ -309,16 +340,29 @@ class RoutedOffTheBox(CheckCase):
 
     def test_the_ssh_path_kubectl_line_carries_the_relay_and_reads_a_namespace_the_team_set_reads(self) -> None:
         """A command sshd runs gets the three GCE_METADATA_* values from .bashrc, so the line that stands in for one
-        passes them on. It lists Jobs in builds, which the team set reads (census row U07), not in builds-ossv."""
+        passes them on. It lists Jobs in builds, which the team set reads (census row U07), not in builds-ossv: one
+        request for one Job, whose answer counts the rest (`--chunk-size 1` paged 1,910 Jobs on 2026-11-22 until its
+        continue token expired)."""
         # env -i drops STUB_DIR, so the stub writes to a path baked into it.
         write_stub(self.bin, "kubectl", '#!/bin/bash\nprintf "%s\\n" "$*" "HOST=${GCE_METADATA_HOST:-}" '
-                   f'"ROOT=${{GCE_METADATA_ROOT:-}}" "IP=${{GCE_METADATA_IP:-}}" >"{self.root}/kubectl.seen"\n')
+                   f'"ROOT=${{GCE_METADATA_ROOT:-}}" "IP=${{GCE_METADATA_IP:-}}" >"{self.root}/kubectl.seen"\n'
+                   """echo '{"kind":"JobList","items":[{}],"metadata":{"remainingItemCount":1909}}'\n""")
         relay = {name: "127.0.0.1:8170" for name in ("GCE_METADATA_HOST", "GCE_METADATA_ROOT", "GCE_METADATA_IP")}
         [line] = self.run_function(f'SSH_PATH="{self.bin}:$SSH_PATH"; host_plain_path_kubectl', **relay)
         self.assertTrue(line.startswith("ok "), line)
+        self.assertIn("(1910 jobs)", line)
         seen = (self.root / "kubectl.seen").read_text(encoding="utf-8").splitlines()
-        self.assertIn("-n builds get jobs", seen[0])
+        self.assertIn("get --raw /apis/batch/v1/namespaces/builds/jobs?limit=1", seen[0])
         self.assertEqual(seen[1:], ["HOST=127.0.0.1:8170", "ROOT=127.0.0.1:8170", "IP=127.0.0.1:8170"])
+
+    def test_an_ssh_path_kubectl_answer_that_is_no_job_list_fails(self) -> None:
+        """An error, and an exit 0 whose answer is no JobList (a Status, nothing), say nothing about the list."""
+        for body in ('echo "Error from server (Expired): continue token expired" >&2; exit 1',
+                     """echo '{"kind":"Status","status":"Failure"}'""", "exit 0"):
+            with self.subTest(body=body):
+                write_stub(self.bin, "kubectl", f"#!/bin/bash\n{body}\n")
+                [line] = self.run_function(f'SSH_PATH="{self.bin}:$SSH_PATH"; host_plain_path_kubectl')
+                self.assertTrue(line.startswith("FAIL "), line)
 
     def test_azure_reads_go_through_az_reader(self) -> None:
         (self.root / "az-reader").write_text(json.dumps({"user": "legion-reader", "type": "servicePrincipal",
@@ -400,7 +444,7 @@ class WholeRunCase(CheckCase):
         write_stub(dotfiles / "scripts", "agentbox", "#!/bin/bash\nexit 0\n")
         ssh_bin = self.root / "ssh-bin"
         ssh_bin.mkdir()
-        write_stub(ssh_bin, "kubectl", "#!/bin/bash\necho job.batch/stub\n")
+        write_stub(ssh_bin, "kubectl", """#!/bin/bash\necho '{"kind":"JobList","items":[{}],"metadata":{}}'\n""")
         for name, body in (("gcloud", BOX_GCLOUD), ("curl", CURL), ("kubectl", BOX_KUBECTL), ("theorem-session", SESSION),
                            ("az-reader", AZ_READER), ("timeout", TIMEOUT), ("tailscale", TAILSCALE), ("id", ID),
                            ("hostname", "#!/bin/bash\necho sami-devbox\n"), ("secrets", "#!/bin/bash\nexit 1\n")):
@@ -454,7 +498,7 @@ class TheRunsCallTheIdentityChecks(WholeRunCase):
     so a fault changes exactly its own line and adds exactly one to the count."""
 
     HOST_UNRELATED = ("host_disks host_rootfs host_units host_packages host_bwrap host_nofile dispatch_cli_check "
-                      "mise_check host_logins host_owners host_guard github_check tq_check rocqperf_check "
+                      "mise_check host_logins host_owners host_guard github_check tq_check "
                       "leak_check_host_check prepush_hook_host_check global_hooks_host_check ossv_tree_host_check n6_check "
                       "host_kernel")
     BOX_UNRELATED = ("moved_gcloud_config_check gateway_check tools_check github_check tq_check n6_check host_sshd_check "

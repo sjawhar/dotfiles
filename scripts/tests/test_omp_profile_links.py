@@ -1,26 +1,43 @@
 #!/usr/bin/env python3
 """shims/omp under a named profile: the profile's symlinks track the installer's in ~/.omp, unless
-the profile holds .no-shared-setup."""
+the profile holds .no-shared-setup. A profile's mcp.json is no link and no plain copy: the shim builds
+it from omp/mcp.json (scripts/tests/test_omp_scopes.py has the scoping)."""
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import stat
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 DOTFILES = Path(__file__).resolve().parents[2]
 SHIM = DOTFILES / "shims" / "omp"
+# The real yq, found through mise before a test moves HOME and PATH: the shim builds each profile's
+# mcp.json and skill overlay with it.
+REAL_YQ = subprocess.run(
+    [str(DOTFILES / "bin" / "mise") if (DOTFILES / "bin" / "mise").exists() else "mise", "which", "yq"],
+    capture_output=True, text=True, check=True,
+).stdout.strip()
+# The scratch omp/mcp.json: one server, which an empty omp/scopes.yml loads everywhere.
+SHARED_MCP = {"mcpServers": {"shared": {"command": "true"}}}
 
 
 def write_stub(directory: Path, name: str, body: str) -> None:
     path = directory / name
+    # A link here may point at a real tool (yq): replace the link, never write through it.
+    path.unlink(missing_ok=True)
     path.write_text(f"#!/bin/bash\n{body}\n", encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
+def read_json(path: Path) -> object:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 @dataclass
@@ -31,6 +48,7 @@ class Scratch:
     targets: Path
     omp: Path
     stubs: Path
+    dotfiles: Path
     env: dict[str, str]
 
     def run(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
@@ -39,39 +57,59 @@ class Scratch:
         )
 
 
+def dotfiles_tree(root: Path) -> Path:
+    """ROOT/dotfiles: the repository, a link per entry, but for omp/, whose entries are links too but
+    for the two files the shim builds a profile's mcp.json from, which are the test's own: omp/mcp.json
+    (SHARED_MCP) and omp/scopes.yml (empty). No machine's local overlay is carried over."""
+    dotfiles = root / "dotfiles"
+    (dotfiles / "omp").mkdir(parents=True)
+    for entry in DOTFILES.iterdir():
+        if entry.name != "omp":
+            (dotfiles / entry.name).symlink_to(entry)
+    for entry in (DOTFILES / "omp").iterdir():
+        if entry.name not in ("mcp.json", "scopes.yml") and not entry.name.endswith("local.yml"):
+            (dotfiles / "omp" / entry.name).symlink_to(entry)
+    (dotfiles / "omp" / "mcp.json").write_text(json.dumps(SHARED_MCP) + "\n", encoding="utf-8")
+    (dotfiles / "omp" / "scopes.yml").write_text("{}\n", encoding="utf-8")
+    return dotfiles
+
+
 def default_layout(root: Path, config_dir: str = ".omp") -> Scratch:
-    """ROOT/home/CONFIG_DIR as installers/omp.sh leaves it, its links into ROOT/dotfiles-omp."""
+    """ROOT/home/CONFIG_DIR as installers/omp.sh leaves it, its links into ROOT/dotfiles-omp, and
+    DOTFILES_DIR a dotfiles_tree."""
     home = root / "home"
     (home / ".config").mkdir(parents=True)
     targets = root / "dotfiles-omp"
     for name in ("plugins", "agents", "hooks", "prompts"):
         (targets / name).mkdir(parents=True)
-    for name in ("mcp.json", "viewport.ts"):
+    for name in ("lsp.json", "viewport.ts"):
         (targets / name).write_text("", encoding="utf-8")
     omp = home / config_dir
     agent = omp / "agent"
     (agent / "extensions").mkdir(parents=True)
     (omp / "plugins").symlink_to(targets / "plugins")
-    for name in ("agents", "hooks", "prompts", "mcp.json"):
+    for name in ("agents", "hooks", "prompts", "lsp.json"):
         (agent / name).symlink_to(targets / name)
     (agent / "extensions" / "viewport.ts").symlink_to(targets / "viewport.ts")
     for name in ("config.yml", "models.yml", "agent.db"):
         (agent / name).write_text("{}", encoding="utf-8")
     stubs = root / "bin"
     stubs.mkdir()
+    (stubs / "yq").symlink_to(REAL_YQ)
     # `mise env -s bash` puts the pinned release's install dir on PATH.
     tool = home / ".mise" / "installs" / "github-sjawhar-oh-my-pi" / "1.0.0" / "bin"
     tool.mkdir(parents=True)
-    # The stub omp prints its arguments and the profile variables it was started with.
+    # The stub omp prints its arguments and the profile, overlay and Claude variables it was started with.
     write_stub(
         tool,
         "omp",
         'echo "AGENT omp $*"\necho "PROFILE ${OMP_PROFILE-unset} ${OMP_IN_DEFAULT_PROFILE-unset}"\n'
-        'echo "PI ${PI_PROFILE-unset}"',
+        'echo "PI ${PI_PROFILE-unset}"\necho "CONFIG ${PI_CONFIG_FILES-unset}"\necho "CLAUDE ${CLAUDE_CONFIG_DIR-unset}"',
     )
     write_stub(stubs, "mise", f"echo 'export PATH=\"{tool}:$PATH\"'")
+    dotfiles = dotfiles_tree(root)
     env = {
-        "DOTFILES_DIR": str(DOTFILES),
+        "DOTFILES_DIR": str(dotfiles),
         "HOME": str(home),
         "PATH": f"{stubs}:/usr/bin:/bin",
         "XDG_CONFIG_HOME": str(home / ".config"),
@@ -86,7 +124,7 @@ def default_layout(root: Path, config_dir: str = ".omp") -> Scratch:
     }
     if config_dir != ".omp":
         env["PI_CONFIG_DIR"] = config_dir
-    return Scratch(home, targets, omp, stubs, env)
+    return Scratch(home, targets, omp, stubs, dotfiles, env)
 
 
 # The ways a launch names its profile; the machine file is $XDG_CONFIG_HOME/omp/profile.
@@ -106,17 +144,13 @@ def mark(scratch: Scratch, overlay: bool) -> Path:
     (agent / "agents").symlink_to(scratch.targets / "old-agents")
     # The overlay setup moves a real file into the default and links to it there.
     (agent / "own.txt").write_text("the profile's own", encoding="utf-8")
-    # A copy as last copied, which the mirror refreshes when the shared file changes. The overlay
-    # setup refuses a real mcp.json beside the default's link and fails the launch, which would hide
-    # what it wrote, so the overlay profile's copy is lsp.json, which the default lacks and it moves.
-    copy = "lsp.json" if overlay else "mcp.json"
-    for path in (agent / copy, agent / ".mirror-src" / copy):
+    # A copy as last built, which the shim rebuilds when omp/mcp.json changes.
+    for path in (agent / "mcp.json", agent / ".mirror-src" / "mcp.json"):
         path.write_text("old copy", encoding="utf-8")
     if overlay:
         (agent / "models.overlay.yml").write_text("providers: {}\n", encoding="utf-8")
         (agent / "models.yml").write_text("old: models\n", encoding="utf-8")
-    else:
-        (scratch.targets / "mcp.json").write_text("new shared", encoding="utf-8")
+    (scratch.dotfiles / "omp" / "mcp.json").write_text('{"mcpServers": {"new": {}}}\n', encoding="utf-8")
     return profile
 
 
@@ -156,7 +190,8 @@ def calls(log: Path) -> list[str]:
     return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
 
 
-# The tools the overlay setup runs, each a logging stub in logging_home's tree.
+# The tools the overlay setup runs, each a logging stub in logging_home's tree. Its yq logs only the
+# models merge (`yq eval-all`); every other call runs the real yq.
 OVERLAY_TOOLS = {"omp-models-check", "flock", "yq"}
 
 
@@ -189,41 +224,42 @@ class OmpProfileLinks(unittest.TestCase):
         omp_profile, in_default = line.split(" ")[1:]
         return omp_profile, in_default
 
-    def assert_mirrors_canonical(self, profile: Path, targets: Path | None = None) -> None:
-        """PROFILE holds the installer's entries as the mirror leaves them, from TARGETS (the test's
-        own by default)."""
-        targets = targets or self.targets
+    def assert_mirrors_canonical(self, profile: Path, scratch: Scratch | None = None) -> None:
+        """PROFILE holds the installer's entries as the mirror leaves them, and an mcp.json built from
+        omp/mcp.json, from SCRATCH (the test's own by default)."""
+        scratch = scratch or self.scratch
+        targets = scratch.targets
         self.assertEqual(link_target(profile / "plugins"), str(targets / "plugins"))
         for name in ("agents", "hooks", "prompts"):
             self.assertEqual(link_target(profile / "agent" / name), str(targets / name))
         # A shared config file is a copy, so a write to the profile's file cannot reach the shared one.
+        self.assertFalse(os.path.islink(profile / "agent" / "lsp.json"))
+        self.assertEqual((profile / "agent" / "lsp.json").read_bytes(), (targets / "lsp.json").read_bytes())
+        # mcp.json is built, so it holds omp/mcp.json's servers, which an empty omp/scopes.yml all loads.
         self.assertFalse(os.path.islink(profile / "agent" / "mcp.json"))
-        self.assertEqual((profile / "agent" / "mcp.json").read_bytes(), (targets / "mcp.json").read_bytes())
+        self.assertEqual(read_json(profile / "agent" / "mcp.json"), read_json(scratch.dotfiles / "omp" / "mcp.json"))
         # Extension code stays linked: a copy would resolve its imports from the profile.
         self.assertEqual(link_target(profile / "agent/extensions/viewport.ts"), str(targets / "viewport.ts"))
 
     def logging_home(self, config_dir: str = ".omp") -> tuple[Scratch, Path]:
-        """A fresh tree whose overlay tools log: its DOTFILES_DIR links the repository's entries but
-        for a logging omp-models-check, and flock and yq log too, each a `NAME ARGS` line in the
-        returned log. Fresh, so no case sees another's writes: a shim that ignores the marker, for
-        one, moves an overlay profile's entries, the marker too, into the default, where the next
-        case would find them."""
+        """A fresh tree whose overlay tools log: its DOTFILES_DIR's scripts/ links the repository's
+        scripts but for a logging omp-models-check, and flock and yq's models merge log too, each a
+        `NAME ARGS` line in the returned log. Fresh, so no case sees another's writes: a shim that
+        ignores the marker, for one, moves an overlay profile's entries, the marker too, into the
+        default, where the next case would find them."""
         root = Path(tempfile.mkdtemp(dir=self.temp_dir.name))
         scratch = default_layout(root, config_dir)
         log = root / "calls.log"
-        dotfiles = root / "dotfiles"
-        (dotfiles / "scripts").mkdir(parents=True)
+        scripts = scratch.dotfiles / "scripts"
+        scripts.unlink()
+        scripts.mkdir()
         # A link per entry, not one into the repository's scripts/, where the stub would replace the checker.
-        for entry in DOTFILES.iterdir():
-            if entry.name != "scripts":
-                (dotfiles / entry.name).symlink_to(entry)
         for entry in (DOTFILES / "scripts").iterdir():
             if entry.name != "omp-models-check":
-                (dotfiles / "scripts" / entry.name).symlink_to(entry)
-        write_stub(dotfiles / "scripts", "omp-models-check", f'echo "omp-models-check $*" >>"{log}"')
+                (scripts / entry.name).symlink_to(entry)
+        write_stub(scripts, "omp-models-check", f'echo "omp-models-check $*" >>"{log}"')
         write_stub(scratch.stubs, "flock", f'echo "flock $*" >>"{log}"')
-        write_stub(scratch.stubs, "yq", f'echo "yq $*" >>"{log}"\necho "a: 1"')
-        scratch.env["DOTFILES_DIR"] = str(dotfiles)
+        write_stub(scratch.stubs, "yq", f'[[ "${{1-}}" == eval-all ]] || exec "{REAL_YQ}" "$@"\necho "yq $*" >>"{log}"\necho "a: 1"')
         return scratch, log
 
     def launch(self, scratch: Scratch, how: str, name: str) -> None:
@@ -261,7 +297,7 @@ class OmpProfileLinks(unittest.TestCase):
     def assert_shared_setup_runs(self, scratch: Scratch, log: Path, how: str) -> None:
         """Unmarked profiles beside a marked one, launched HOW, still get the shared setup."""
         self.launch(scratch, how, "q")
-        self.assert_mirrors_canonical(scratch.omp / "profiles" / "q", scratch.targets)
+        self.assert_mirrors_canonical(scratch.omp / "profiles" / "q", scratch)
         agent = shared_profile(scratch, "o")
         seen = len(calls(log))
         self.launch(scratch, how, "o")
@@ -296,45 +332,63 @@ class OmpProfileLinks(unittest.TestCase):
     def test_a_write_to_the_profiles_mcp_json_does_not_reach_the_shared_file(self) -> None:
         """2026-11-01: a probe harness wrote `{ "mcpServers": {} }` to its profile's agent/mcp.json,
         a link to the shared file, and every session on the box started with no MCP servers."""
-        (self.targets / "mcp.json").write_text('{"mcpServers": {"slack": {}}}', encoding="utf-8")
+        shared = self.scratch.dotfiles / "omp" / "mcp.json"
+        shared.write_text('{"mcpServers": {"slack": {}}}', encoding="utf-8")
         agent = self.omp / "profiles" / "probe" / "agent"
         self.assert_launched(self.omp_run("--profile", "probe"))
         (agent / "mcp.json").write_text('{ "mcpServers": {} }\n', encoding="utf-8")
-        self.assertEqual((self.targets / "mcp.json").read_text(encoding="utf-8"), '{"mcpServers": {"slack": {}}}')
+        self.assertEqual(shared.read_text(encoding="utf-8"), '{"mcpServers": {"slack": {}}}')
         self.assert_launched(self.omp_run("--profile", "probe"))
         self.assertEqual((agent / "mcp.json").read_text(encoding="utf-8"), '{ "mcpServers": {} }\n')
-        self.assertEqual((self.targets / "mcp.json").read_text(encoding="utf-8"), '{"mcpServers": {"slack": {}}}')
+        self.assertEqual(shared.read_text(encoding="utf-8"), '{"mcpServers": {"slack": {}}}')
+
+    def shared_versions(self, name: str) -> tuple[Path, tuple[str, ...], Callable[[str], object]]:
+        """The file a profile's NAME comes from, three versions of it, and how to read the profile's
+        copy for comparing with one: mcp.json is built from omp/mcp.json, so as JSON; a mirrored
+        file such as lsp.json is a byte copy of the default's link."""
+        if name == "mcp.json":
+            versions = tuple(json.dumps({"mcpServers": {v: {}}}) for v in ("v1", "v2", "v3"))
+            return self.scratch.dotfiles / "omp" / "mcp.json", versions, lambda text: json.loads(text)
+        return self.targets / name, ("v1", "v2", "v3"), lambda text: text
 
     def test_the_copy_follows_the_shared_file_until_the_profile_changes_it(self) -> None:
         agent = self.omp / "profiles" / "theorem" / "agent"
-        (self.targets / "mcp.json").write_text("v1", encoding="utf-8")
-        self.assert_launched(self.omp_run("--profile", "theorem"))
-        (self.targets / "mcp.json").write_text("v2", encoding="utf-8")
-        self.assert_launched(self.omp_run("--profile", "theorem"))
-        self.assertEqual((agent / "mcp.json").read_text(encoding="utf-8"), "v2")
-        (agent / "mcp.json").write_text("the profile's own", encoding="utf-8")
-        (self.targets / "mcp.json").write_text("v3", encoding="utf-8")
-        self.assert_launched(self.omp_run("--profile", "theorem"))
-        self.assertEqual((agent / "mcp.json").read_text(encoding="utf-8"), "the profile's own")
+        for name in ("mcp.json", "lsp.json"):
+            with self.subTest(name=name):
+                shared, (v1, v2, v3), parse = self.shared_versions(name)
+                shared.write_text(v1, encoding="utf-8")
+                self.assert_launched(self.omp_run("--profile", "theorem"))
+                shared.write_text(v2, encoding="utf-8")
+                self.assert_launched(self.omp_run("--profile", "theorem"))
+                self.assertEqual(parse((agent / name).read_text(encoding="utf-8")), parse(v2))
+                (agent / name).write_text("the profile's own", encoding="utf-8")
+                shared.write_text(v3, encoding="utf-8")
+                self.assert_launched(self.omp_run("--profile", "theorem"))
+                self.assertEqual((agent / name).read_text(encoding="utf-8"), "the profile's own")
 
     def test_an_old_link_to_the_shared_file_becomes_a_copy(self) -> None:
         agent = self.omp / "profiles" / "theorem" / "agent"
         agent.mkdir(parents=True)
-        (self.targets / "mcp.json").write_text("shared", encoding="utf-8")
-        (agent / "mcp.json").symlink_to(self.targets / "mcp.json")
-        self.assert_launched(self.omp_run("--profile", "theorem"))
-        self.assertFalse(os.path.islink(agent / "mcp.json"))
-        self.assertEqual((agent / "mcp.json").read_text(encoding="utf-8"), "shared")
-        (agent / "mcp.json").write_text("written", encoding="utf-8")
-        self.assertEqual((self.targets / "mcp.json").read_text(encoding="utf-8"), "shared")
+        for name in ("mcp.json", "lsp.json"):
+            with self.subTest(name=name):
+                shared, (v1, _, _), parse = self.shared_versions(name)
+                shared.write_text(v1, encoding="utf-8")
+                # The mcp.json case's launch already gave the profile its own lsp.json.
+                (agent / name).unlink(missing_ok=True)
+                (agent / name).symlink_to(shared)
+                self.assert_launched(self.omp_run("--profile", "theorem"))
+                self.assertFalse(os.path.islink(agent / name))
+                self.assertEqual(parse((agent / name).read_text(encoding="utf-8")), parse(v1))
+                (agent / name).write_text("written", encoding="utf-8")
+                self.assertEqual(shared.read_text(encoding="utf-8"), v1)
 
     def test_a_copy_whose_shared_file_is_gone_is_removed_unless_changed(self) -> None:
         agent = self.omp / "profiles" / "theorem" / "agent"
         self.assert_launched(self.omp_run("--profile", "theorem"))
-        self.assertTrue((agent / "mcp.json").is_file())
-        (self.omp / "agent" / "mcp.json").unlink()
+        self.assertTrue((agent / "lsp.json").is_file())
+        (self.omp / "agent" / "lsp.json").unlink()
         self.assert_launched(self.omp_run("--profile", "theorem"))
-        self.assertFalse(os.path.lexists(agent / "mcp.json"))
+        self.assertFalse(os.path.lexists(agent / "lsp.json"))
 
     def test_a_profiles_envoy_json_is_its_own(self) -> None:
         """A named profile reads Dispatch and Envoy from its own agent dir's envoy.json, and has

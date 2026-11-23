@@ -22,6 +22,14 @@ minutes in (2026-10-22). A fresh release is returned whatever the request: GitHu
 installation token for one hour, so asking for an hour (as a watch does) means a fresh token,
 never a loop, and a caller needing more than that hour asks again.
 
+A cached token is also asked of GitHub (GET /rate_limit, which spends none of the rate limit)
+once its last check is LIVENESS_INTERVAL (60 s) old. A 401 there means GitHub revoked the
+token: its cache entry is dropped and one fresh token is minted in its place. Any other answer,
+or none, records the check and serves the cached token. So a token revoked while cached, as
+after a leak, is served for at most a minute. On 2026-11-22 a leaked token was revoked a minute
+after it was minted, and every agent-profile call for its repository on that machine got the
+dead token and a 401 until the cache entry was replaced by hand.
+
 A profile lives in git config and needs the App id (which names its covered-owner file) and
 the secrets-broker secret holding the App's key; a fallback secret is optional:
   [gh-app "<profile>"]
@@ -109,7 +117,9 @@ request:
 import argparse
 import base64
 import binascii
+import contextlib
 import fcntl
+import http.client
 import json
 import os
 import re
@@ -179,6 +189,10 @@ def seed_cache_dir(new: Path, old: Path) -> None:
 
 GITHUB_API = "https://api.github.com"
 TOKEN_REFRESH_MARGIN = 300  # Refresh five minutes before expiry.
+# How old a cached token's last check at GitHub may be before it is checked again
+# (live_cached_token), and how long each connect or read of that check waits for GitHub.
+LIVENESS_INTERVAL = 60
+LIVENESS_TIMEOUT = 5
 MIN_LIFETIME_ENV = "GH_APP_TOKEN_MIN_LIFETIME"
 # An agent box gets its broker identity after it starts, not before: scripts/agentbox puts
 # enrollment.pending in the box's key dir ahead of `docker run` and keeps it fresh until the
@@ -347,18 +361,101 @@ def required_lifetime() -> int:
     return max(TOKEN_REFRESH_MARGIN, requested)
 
 
-def get_cached_token(profile: str, owner: str, min_lifetime: int = TOKEN_REFRESH_MARGIN, scope: str = "") -> str | None:
-    cache_file = token_cache_file(profile, owner, scope)
-    if not cache_file.exists():
-        return None
+def seconds_left(entry: dict[str, Any]) -> float:
+    """How long entry's token has before it lapses, by its expires_at."""
+    expires_at = datetime.fromisoformat(entry["expires_at"].replace("Z", "+00:00"))
+    return (expires_at - datetime.now(timezone.utc)).total_seconds()
+
+
+def cached_entry(cache_file: Path, min_lifetime: int) -> dict[str, Any] | None:
+    """cache_file's entry while its token has more than min_lifetime seconds left, else None. An
+    entry another call removes while this one reads it is a miss."""
     try:
         data = json.loads(cache_file.read_text())
-        expires_at = datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00"))
-        if (expires_at - datetime.now(timezone.utc)).total_seconds() > min_lifetime:
-            return data["token"]
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        if "token" in data and seconds_left(data) > min_lifetime:
+            return data
+    except (OSError, KeyError, TypeError, ValueError):
         return None
     return None
+
+
+def get_cached_token(profile: str, owner: str, min_lifetime: int = TOKEN_REFRESH_MARGIN, scope: str = "") -> str | None:
+    entry = cached_entry(token_cache_file(profile, owner, scope), min_lifetime)
+    return entry["token"] if entry else None
+
+
+def utc_stamp(moment: datetime) -> str:
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@contextlib.contextmanager
+def token_cache_locked():
+    """Hold the lock over every token entry's writes: the mint's (get_token) and a check's
+    record or drop (settle_checked_entry), so a check never replaces or removes an entry another
+    call wrote after the check began. It is never held across a network call."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (CACHE_DIR / "tokens.lock").open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def github_status(path: str, bearer: str) -> int | None:
+    """GitHub's HTTP status for GET path with bearer, or None when no answer came: no
+    connection, a connect or read that waited LIVENESS_TIMEOUT seconds, or a reply that is not
+    HTTP."""
+    request = urllib.request.Request(
+        GITHUB_API + path,
+        headers={
+            "Authorization": f"Bearer {bearer}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=LIVENESS_TIMEOUT) as response:
+            return response.status
+    except urllib.error.HTTPError as error:
+        error.close()
+        return error.code
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError):
+        return None
+
+
+def live_cached_token(cache_file: Path, entry: dict[str, Any]) -> str | None:
+    """entry's token, or None when GitHub answers 401 for it (revoked), after dropping
+    cache_file. GitHub is asked only when the entry's checked_at is LIVENESS_INTERVAL old or
+    more, missing or in the future; any answer but 401, or none, records a new checked_at, so
+    one cache entry costs at most one request a minute."""
+    now = datetime.now(timezone.utc)
+    try:
+        checked = datetime.fromisoformat(entry["checked_at"].replace("Z", "+00:00"))
+        if 0 <= (now - checked).total_seconds() < LIVENESS_INTERVAL:
+            return entry["token"]
+    except (KeyError, AttributeError, TypeError, ValueError):
+        pass
+    if github_status("/rate_limit", entry["token"]) == 401:
+        settle_checked_entry(cache_file, entry["token"], None)
+        return None
+    settle_checked_entry(cache_file, entry["token"], utc_stamp(now))
+    return entry["token"]
+
+
+def settle_checked_entry(cache_file: Path, token: str, checked_at: str | None) -> None:
+    """After a check of token, and only while cache_file still holds token: record checked_at
+    in it, or remove it when checked_at is None (GitHub answered 401). An entry another call
+    wrote while the check was out stays as it is. A failure leaves the entry: after a 401 the
+    mint that follows replaces it, and a check not recorded is made again by the next call."""
+    try:
+        with token_cache_locked():
+            current = json.loads(cache_file.read_text())
+            if not isinstance(current, dict) or current.get("token") != token:
+                return
+            if checked_at is None:
+                cache_file.unlink()
+            else:
+                write_cache_file(cache_file, {**current, "checked_at": checked_at})
+    except (OSError, ValueError, AppTokenError):
+        pass
 
 
 def write_cache_file(cache_file: Path, data: dict[str, Any]) -> None:
@@ -870,13 +967,25 @@ def get_token(
     refused: frozenset[str],
 ) -> str:
     """Return a token for one owner (narrowed by scope when given), never reusing another owner's
-    or another scope's cache, and never a cached one with min_lifetime seconds or less left. An
-    owner-wide release caches no token for an owner in refused (refused_owners)."""
+    or another scope's cache, never a cached one with min_lifetime seconds or less left (counted
+    again after its check at GitHub), and never a cached one GitHub answered 401 for
+    (live_cached_token): that one is replaced by one fresh mint. An owner-wide release caches no
+    token for an owner in refused (refused_owners). Every token it caches is recorded as checked
+    when minted, under the token-cache lock."""
     owner = owner.casefold()
     key = scope_key(scope)
-    cached_token = get_cached_token(profile, owner, min_lifetime, key)
-    if cached_token:
-        return cached_token
+    cache_file = token_cache_file(profile, owner, key)
+    entry = cached_entry(cache_file, min_lifetime)
+    if entry:
+        cached_token = live_cached_token(cache_file, entry)
+        if cached_token is None:
+            print(
+                f"gh-app-token: GitHub answered 401 for the cached token of profile {profile} "
+                f"(owner={owner}{', ' + key if key else ''}): it was revoked, so it is dropped",
+                file=sys.stderr,
+            )
+        elif seconds_left(entry) > min_lifetime:
+            return cached_token
 
     app_id = git_config(f"gh-app.{profile}.app-id")
     key_secret = git_config_optional(f"gh-app.{profile}.key-secret")
@@ -890,26 +999,31 @@ def get_token(
     else:
         installations = request_broker_installations(git_config(f"gh-app.{profile}.broker-secret"), owner, scope)
         covered = {name: installation["installation_id"] for name, installation in installations.items()}
+    minted_at = utc_stamp(datetime.now(timezone.utc))
     remember_covered_owners(app_id, covered)
-    if not scope:
-        # An owner-wide release holds every covered owner's token: cache them all but the ones
-        # this machine refuses. A narrowed one is cached under its scope alone, never in an
-        # owner-wide entry.
-        for name, installation in installations.items():
-            if name in refused:
-                continue
-            write_cache_file(
-                token_cache_file(profile, name),
-                {"token": installation["token"], "expires_at": installation["expires_at"]},
-            )
     installation = installations.get(owner)
+    try:
+        with token_cache_locked():
+            if not scope:
+                # An owner-wide release holds every covered owner's token: cache them all but the
+                # ones this machine refuses. A narrowed one is cached under its scope alone, never
+                # in an owner-wide entry.
+                for name, minted in installations.items():
+                    if name in refused:
+                        continue
+                    write_cache_file(
+                        token_cache_file(profile, name),
+                        {"token": minted["token"], "expires_at": minted["expires_at"], "checked_at": minted_at},
+                    )
+            elif installation is not None:
+                write_cache_file(
+                    cache_file,
+                    {"token": installation["token"], "expires_at": installation["expires_at"], "checked_at": minted_at},
+                )
+    except OSError as error:
+        raise AppTokenError("failed to write credential cache") from error
     if installation is None:
         raise UninstalledOwnerError(f"GitHub App is not installed for owner {owner}")
-    if scope:
-        write_cache_file(
-            token_cache_file(profile, owner, key),
-            {"token": installation["token"], "expires_at": installation["expires_at"]},
-        )
     return installation["token"]
 
 
