@@ -84,7 +84,7 @@ def read_processes(proc: Path = Path("/proc")) -> list[dict]:
         p = {"pid": int(d.name), "ppid": int(fields[1]), "uid": uid, "argv": argv, "cgroup": ""}
         if is_omp(p):
             try:
-                p["cgroup"] = (d / "cgroup").read_text().strip()
+                p["cgroup"] = (d / "cgroup").read_bytes().decode("utf8", "replace").strip()  # a path may be any bytes
             except OSError:
                 pass
         out.append(p)

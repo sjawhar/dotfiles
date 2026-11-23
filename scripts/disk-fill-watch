@@ -765,7 +765,7 @@ def session_phrase(pid: int, scope: str = "") -> str:
 def scope_of(pid: int) -> str:
     """The systemd scope name of a pid: what `systemd-run --user --scope` named its session."""
     try:
-        for line in Path(f"/proc/{pid}/cgroup").read_text().splitlines():
+        for line in Path(f"/proc/{pid}/cgroup").read_bytes().decode("utf8", "replace").splitlines():  # any bytes
             parts = line.split(":", 2)
             if len(parts) == 3 and parts[0] == "0":
                 return parts[2].strip().rsplit("/", 1)[-1]
