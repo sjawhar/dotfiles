@@ -178,8 +178,9 @@ class AttributionIsLoadSwapWatch(unittest.TestCase):
         self.assertEqual([row["session"] for row in rows], [ALPHA])
 
 
-class Retention(unittest.TestCase):
+class Retention(FakeBox):
     def setUp(self) -> None:
+        super().setUp()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.dir = Path(self.tmp.name)
@@ -212,14 +213,21 @@ class Retention(unittest.TestCase):
         self.assertTrue(odd.exists())
 
     def test_a_sample_run_writes_a_day_file_and_prunes(self) -> None:
+        """A whole sample over the fabricated box: it walks no real /proc and asks no real Envoy.
+
+        Over the real /proc it read every process on the host, so another test's process named in
+        non-UTF-8 bytes (test_oryx_tunnel_key_cleanup's) failed it whenever the two ran at once.
+        """
+        self.add_agent(100, ALPHA, "/alpha.scope", started=1000.0)
+        self.cgroup_cpu["/alpha.scope"] = 42.0
         stale = self.day(30)
         options = TOOL.argparse.Namespace(records=str(self.dir), keep_days=7, quiet=True)
         TOOL.sample(options)
         self.assertFalse(stale.exists())
         today = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
         written = json.loads((self.dir / f"{today}.jsonl").read_text().splitlines()[-1])
-        self.assertIn("sessions", written)
-        self.assertIn("counters", written)
+        self.assertEqual([row["session"] for row in written["sessions"]], [ALPHA])
+        self.assertIn("cg:/alpha.scope", written["counters"])
 
 
 class ReadingItBack(unittest.TestCase):
