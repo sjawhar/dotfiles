@@ -154,7 +154,7 @@ def procs_under(path: str) -> list[tuple[int, str]]:
     hits: list[tuple[int, str]] = []
     for pid in refs_under(path, proc_path_refs()[0]):
         try:
-            hits.append((pid, Path(f"/proc/{pid}/comm").read_text().strip()))
+            hits.append((pid, Path(f"/proc/{pid}/comm").read_bytes().decode("utf8", "replace").strip()))
         except OSError:
             hits.append((pid, "?"))
     return hits
@@ -1739,16 +1739,18 @@ def _proc_io(pid: str) -> dict[str, int] | None:
 
 
 def _proc_stat_fields(pid: str) -> list[str] | None:
-    """Fields of /proc/<pid>/stat after comm: state [0], utime [11], stime [12], starttime [19]."""
+    """Fields of /proc/<pid>/stat after comm: state [0], utime [11], stime [12], starttime [19].
+    A process may name itself any bytes, and stat and comm carry the name, so both decode with
+    replacement."""
     try:
-        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return Path(f"/proc/{pid}/stat").read_bytes().decode("utf8", "replace").rsplit(")", 1)[1].split()
     except (OSError, IndexError):
         return None
 
 
 def _proc_comm(pid: int | str) -> str:
     try:
-        return Path(f"/proc/{pid}/comm").read_text().strip()
+        return Path(f"/proc/{pid}/comm").read_bytes().decode("utf8", "replace").strip()
     except OSError:
         return "?"
 
