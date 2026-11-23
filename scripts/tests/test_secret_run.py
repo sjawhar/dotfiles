@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import re
 import socket
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -957,13 +958,23 @@ class SecretRun(unittest.TestCase):
         self.assertNotIn(SECRETSD_READ, result.stderr)
 
     def test_a_failed_reason_builder_still_says_who_asks(self) -> None:
-        """The broker path never stops on the reason: a builder that fails (here python3 itself)
-        leaves the caller's reason, in printable ASCII, with the host and the pid."""
+        """The broker path never stops on the reason: a builder that fails leaves the caller's
+        reason, in printable ASCII, with the host and the pid. secret-run runs the builder that
+        sits beside its own resolved path, so the builder that fails is a stub beside a copy of
+        secret-run. A python3 stub first on PATH no longer reaches it: secret-run-reason runs
+        /usr/bin/python3 -I."""
         self.with_client()
-        write_stub(self.stub_dir, "python3", "exit 1")
-        result = self.run_secret_run(
-            "--reason", "gws theorem modify", "AIRTABLE_TOKEN", *self.CMD,
-            STUB_IDENTITY="0", SECRET_RUN_REASON="line one\nline\u202etwo",
+        copy = self.stub_dir / "copy"
+        copy.mkdir()
+        script = shutil.copy2(SECRET_RUN, copy / "secret-run")
+        write_stub(copy, "secret-run-reason", "exit 1")
+        result = subprocess.run(
+            [str(script), "--reason", "gws theorem modify", "AIRTABLE_TOKEN", *self.CMD],
+            capture_output=True,
+            text=True,
+            env={**self.env, "STUB_IDENTITY": "0", "SECRET_RUN_REASON": "line one\nline\u202etwo"},
+            check=False,
+            timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines()[-1], "via=broker")
