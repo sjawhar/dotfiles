@@ -14,7 +14,6 @@ import contextlib
 import fcntl
 import importlib.machinery
 import importlib.util
-import json
 import os
 import re
 import shlex
@@ -29,7 +28,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from scripts.tests import fake_omp
-from scripts.tests.test_dotfiles_follow import REGISTRY_COPY, REGISTRY_V1, REGISTRY_V2, RegistryCopy, add_registry_render
+from scripts.tests.test_dotfiles_follow import REGISTRY_COPY, REGISTRY_V1, REGISTRY_V2, SCRIPT, RegistryCopy, add_registry_render
 
 ROOT = Path(__file__).resolve().parents[2]
 SYNC = ROOT / "scripts" / "dotfiles-sync"
@@ -1249,44 +1248,28 @@ class KnivesRegistry(RegistryCopy, ToolsStep):
             self.assert_render_failed(result)
 
 
-FOLLOW = ROOT / "scripts" / "dotfiles-follow"
 TEAM_CATALOG = "dotfiles-follow --team-catalog"
-# The team catalog of INFRA-5366's plan, as fake_omp names it, and the lock of the cases below:
-# the four at 0.1.0, below the version the fake's catalog gives.
+# The team catalog of INFRA-5366's plan, as fake_omp names it.
 TEAM_SOURCE = fake_omp.TEAM_SOURCE
 OLD = fake_omp.OLD_NAME
 NEW = fake_omp.NEW_NAME
 FOUR = fake_omp.TEAM_PLUGINS
-TEAM_LOCK = json.dumps({
-    "plugins": {plugin: {"version": "0.1.0", "enabledFeatures": None, "enabled": True} for plugin in FOUR},
-    "settings": {},
-}, indent=2) + "\n"
-# ST1's calls: the fetch across the change of name, every uninstall, every install, the removal.
-MOVE_CALLS = [
-    ["plugin", "marketplace", "list"],
-    ["plugin", "marketplace", "update", OLD],
-    ["plugin", "marketplace", "add", TEAM_SOURCE],
-    ["plugin", "marketplace", "list"],
-    *(["plugin", "uninstall", f"{plugin}@{OLD}"] for plugin in FOUR),
-    *(["plugin", "install", f"{plugin}@{NEW}"] for plugin in FOUR),
-    ["plugin", "marketplace", "remove", OLD],
-]
 
 
 class TeamCatalogTools(ToolsStep):
     """The sync's tools step runs the team catalog step for ~/.dotfiles after Bun (SY1 to SY6 of
     INFRA-5366's plan). Main holds the real scripts/dotfiles-follow (copied as add_registry_render
-    copies the render), fake_omp's fake as shims/omp and the lock; Oh My Pi holds the four under the
-    old name while the catalog is now named anew (ST1's start)."""
+    copies the render), fake_omp's fake as shims/omp and fake_omp.TEAM_LOCK; Oh My Pi holds the four
+    under the old name while the catalog is now named anew (ST1's start)."""
 
     def setUp(self) -> None:
         super().setUp()
         follow = self.upstream / "scripts" / "dotfiles-follow"
         follow.parent.mkdir(parents=True, exist_ok=True)
-        follow.write_bytes(FOLLOW.read_bytes())
-        follow.chmod(FOLLOW.stat().st_mode)
+        follow.write_bytes(SCRIPT.read_bytes())
+        follow.chmod(SCRIPT.stat().st_mode)
         fake_omp.write(self.upstream / "shims" / "omp")
-        (self.upstream / "omp" / "plugins" / "omp-plugins.lock.json").write_text(TEAM_LOCK)
+        (self.upstream / "omp" / "plugins" / "omp-plugins.lock.json").write_text(fake_omp.TEAM_LOCK)
         gitignore = self.upstream / ".gitignore"
         gitignore.write_text(gitignore.read_text() + "omp/plugins/installed_plugins.json\n")
         self.commit_upstream("the team catalog step")
@@ -1298,10 +1281,7 @@ class TeamCatalogTools(ToolsStep):
             handle.write("/omp/plugins/installed_plugins.json\n")
         self.installed_path = self.checkout / "omp" / "plugins" / "installed_plugins.json"
         self.installed_path.parent.mkdir(parents=True, exist_ok=True)
-        self.installed_path.write_text(json.dumps({
-            "version": 2,
-            "plugins": {f"{plugin}@{OLD}": [{"scope": "user", "version": "0.2.0"}] for plugin in FOUR},
-        }))
+        fake_omp.write_installed(self.installed_path, {ident: "0.2.0" for ident in fake_omp.ids(OLD)})
         self.omp_state = self.root / "omp-state.json"
         self.omp_log = self.root / "omp-calls.jsonl"
         self.write_omp_state()
@@ -1315,16 +1295,13 @@ class TeamCatalogTools(ToolsStep):
         })
 
     def omp_calls(self) -> list[list[str]]:
-        return [record["args"] for record in fake_omp.read_calls(self.omp_log)]
+        return fake_omp.read_args(self.omp_log)
 
     def installed(self) -> dict[str, object]:
-        return {
-            ident: records[0]["version"]
-            for ident, records in json.loads(self.installed_path.read_text())["plugins"].items()
-        }
+        return fake_omp.read_installed(self.installed_path)
 
     def registrations(self) -> list[list[str]]:
-        return fake_omp.read_state(self.omp_state)["registrations"]
+        return fake_omp.read_registrations(self.omp_state)
 
     def first_record(self, tool: str) -> int:
         return next(index for index, line in enumerate(self.records()) if line.startswith(f"{tool} "))
@@ -1339,12 +1316,12 @@ class TeamCatalogTools(ToolsStep):
         result = self.sync("local")
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.omp_calls(), MOVE_CALLS, result.stdout + result.stderr)
+        self.assertEqual(self.omp_calls(), fake_omp.move_calls(OLD, NEW), result.stdout + result.stderr)
         self.assertGreater(self.first_record("omp"), self.first_record("bun"), self.records())
         self.assertIn(f"tools: `{TEAM_CATALOG}` passed in {self.checkout}\n", result.stdout)
         self.assertEqual(self.installed(), {f"{plugin}@{NEW}": "0.2.0" for plugin in FOUR})
         self.assertEqual(self.registrations(), [[NEW, TEAM_SOURCE]])
-        self.assertEqual((self.checkout / "omp" / "plugins" / "omp-plugins.lock.json").read_text(), TEAM_LOCK)
+        self.assertEqual((self.checkout / "omp" / "plugins" / "omp-plugins.lock.json").read_text(), fake_omp.TEAM_LOCK)
 
     def test_sy2_a_failed_install_fails_the_sync_and_keeps_the_move(self) -> None:
         self.write_omp_state(fail={"install": [f"tasks@{NEW}"]})
@@ -1360,7 +1337,7 @@ class TeamCatalogTools(ToolsStep):
         self.assertIn(f"plugin install tasks@{NEW}", report)
         self.assert_on_main()
         self.assertEqual(self.registrations(), [[OLD, TEAM_SOURCE], [NEW, TEAM_SOURCE]])
-        self.assertEqual(self.omp_calls(), MOVE_CALLS[:-1])
+        self.assertEqual(self.omp_calls(), fake_omp.move_calls(OLD, NEW)[:-1])
 
     def test_sy3_a_checkout_that_is_not_home_dotfiles_fetches_nothing(self) -> None:
         clone = self.root / "clone"
@@ -1402,7 +1379,7 @@ class TeamCatalogTools(ToolsStep):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.calls("bun"), [], self.records())
-        self.assertEqual(self.omp_calls(), MOVE_CALLS, result.stdout + result.stderr)
+        self.assertEqual(self.omp_calls(), fake_omp.move_calls(OLD, NEW), result.stdout + result.stderr)
         self.assertGreater(self.first_record("omp"), self.first_record("mise"), self.records())
         self.assertIn(f"tools: `{TEAM_CATALOG}` passed in {self.checkout}\n", result.stdout)
         self.assertEqual(self.installed(), {f"{plugin}@{NEW}": "0.2.0" for plugin in FOUR})

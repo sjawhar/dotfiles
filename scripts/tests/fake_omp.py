@@ -1,8 +1,8 @@
 """One fake omp for the tests of the marketplace step of scripts/dotfiles-follow, of its call from
-installers/omp.sh and of its call from scripts/dotfiles-sync. write() puts it at a path as an
-executable Python script.
+installers/omp.sh and of its call from scripts/dotfiles-sync, and the data and readers those tests
+share. write() puts the fake at a path as an executable Python script.
 
-It models what Oh My Pi 18.18.6 (the pin of mise.toml) does, as INFRA-5366's plan measured it:
+It models what Oh My Pi 18.18.6 (the pin of mise.toml) does, as measured on that release:
 
 - `plugin marketplace list` prints the text of the pin: "No marketplaces configured", or
   "Configured Marketplaces:" and one `  <name>  <source>` line for each registration, in the order
@@ -47,19 +47,34 @@ and `has_pi_profile` (whether OMP_PROFILE and PI_PROFILE were set), `agent_dir` 
 PI_CODING_AGENT_DIR, or null) and `path`, the path it ran as. With RECORD set it also appends
 `omp <args>` to that file, so a test of the sync can order its calls after Bun's and mise's.
 
-Under OMP_PROFILE or PI_PROFILE `legion` it logs the call and exits 1, as the fake of
-test_dotfiles_follow_jj did. The environment knobs of the fake that test_dotfiles_follow_marketplace
-held before this one keep their names and behaviour: FAKE_OMP_UPDATE_FAIL, FAKE_OMP_DELAY,
-FAKE_OMP_FAIL, FAKE_OMP_HANG (with FAKE_OMP_MARKER), FAKE_OMP_INVALID_BYTES, FAKE_OMP_VERSIONS and
-FAKE_OMP_DATA_LOG. FAKE_OMP_REWRITE_LOCK=1 makes every call write {"plugins": {}, "rewritten": true}
-to the lock, as that fake always did; it is off by default, since a lock emptied on every call
-hides the install that the lock refuses.
+Under OMP_PROFILE or PI_PROFILE `legion` it logs the call and exits 1. Its environment knobs:
+
+- FAKE_OMP_UPDATE_FAIL=<name>: `plugin marketplace update <name>` prints "catalog refresh failed"
+  on stderr and exits 8.
+- FAKE_OMP_DELAY=<seconds>: `plugin marketplace update` sleeps that long before anything else.
+- FAKE_OMP_FAIL=<plugin>,...: `plugin upgrade` of one of these plugins sets its installed version
+  to "partial", prints "upgrade failed midway: <plugin>" on stderr and exits 7.
+- FAKE_OMP_HANG=<plugin> with FAKE_OMP_MARKER=<path>: `plugin upgrade` of that plugin sets its
+  installed version to "partial" and starts a child that, 2 s later, writes "late child write" to
+  the lock and "child survived" to the marker's path with its suffix replaced by .late. It writes
+  {"pid": the child's pid, "deadline": the monotonic time of the child's writes} to the marker, then
+  sleeps 30 s before it upgrades as below.
+- FAKE_OMP_INVALID_BYTES=<plugin>: `plugin upgrade` of that plugin upgrades it, then writes the
+  byte 0xff and a newline to stdout and exits 7.
+- FAKE_OMP_VERSIONS=<JSON object>: `plugin upgrade` of a plugin the object names sets the version
+  it gives, in place of the catalog's, and needs no registration.
+- FAKE_OMP_DATA_LOG=<path>: every call appends its MISE_DATA_DIR ("unset" when there is none) to
+  that file as a line.
+- FAKE_OMP_REWRITE_LOCK=1: every call that a legion profile does not stop writes
+  {"plugins": {}, "rewritten": true} to the lock before its command. It is off by default, since a
+  lock emptied on every call hides the install that the lock refuses.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 # The names the tests use: the team catalog's source and its name before and after the rename of
 # dispatch://INFRA-4807, and a catalog of another repository.
@@ -69,6 +84,12 @@ NEW_NAME = "theorem-skills"
 OTHER_NAME = "other-cat"
 OTHER_SOURCE = "example/other"
 TEAM_PLUGINS = ("verification", "tasks", "engineering", "dev-infra")
+# The lock the tests commit: the four at 0.1.0, below 0.2.0, the version the fake gives a plugin
+# whose catalog names none.
+TEAM_LOCK = json.dumps({
+    "plugins": {plugin: {"version": "0.1.0", "enabledFeatures": None, "enabled": True} for plugin in TEAM_PLUGINS},
+    "settings": {},
+}, indent=2) + "\n"
 
 SCRIPT = r'''#!/usr/bin/env python3
 # The fake omp of scripts/tests/fake_omp.py, whose docstring says what it models.
@@ -325,14 +346,58 @@ def write(path: Path) -> Path:
     return path
 
 
-def write_state(path: Path, state: dict) -> None:
+def write_state(path: Path, state: dict[str, Any]) -> None:
     path.write_text(json.dumps(state))
 
 
-def read_state(path: Path) -> dict:
+def read_state(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
-def read_calls(log: Path) -> list[dict]:
+def read_calls(log: Path) -> list[dict[str, Any]]:
     """The fake's call log: one dict a call, oldest first ([] before the first call)."""
     return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+def read_args(log: Path) -> list[list[str]]:
+    """The arguments of each call in the fake's call log LOG, oldest first."""
+    return [record["args"] for record in read_calls(log)]
+
+
+def read_registrations(state_path: Path) -> list[list[str]]:
+    """The registrations, [name, source] each, of the fake's state at STATE_PATH."""
+    return read_state(state_path)["registrations"]
+
+
+def write_installed(path: Path, installed: dict[str, str]) -> None:
+    """Write an installed_plugins.json at PATH that holds each ID of INSTALLED ({ID: version}) with
+    one record at its version."""
+    path.write_text(json.dumps({
+        "version": 2,
+        "plugins": {ident: [{"scope": "user", "version": version}] for ident, version in installed.items()},
+    }))
+
+
+def read_installed(path: Path) -> dict[str, object]:
+    """{ID: the version of its first record} of the installed_plugins.json at PATH."""
+    return {ident: records[0]["version"] for ident, records in json.loads(path.read_text())["plugins"].items()}
+
+
+def ids(name: str, plugins: tuple[str, ...] = TEAM_PLUGINS) -> list[str]:
+    """The ID of each of PLUGINS under the catalog NAME."""
+    return [f"{plugin}@{name}" for plugin in plugins]
+
+
+def move_calls(old: str, new: str) -> list[list[str]]:
+    """The calls of a move of the four from the team catalog's name OLD to NEW (row ST1): the fetch
+    (the update, which Oh My Pi refuses across the change of name, then the add and a second list),
+    every uninstall, every install, then the removal of the old registration."""
+    return [
+        ["plugin", "marketplace", "list"],
+        ["plugin", "marketplace", "update", old],
+        ["plugin", "marketplace", "add", TEAM_SOURCE],
+        ["plugin", "marketplace", "list"],
+        *(["plugin", "uninstall", ident] for ident in ids(old)),
+        *(["plugin", "install", ident] for ident in ids(new)),
+        ["plugin", "marketplace", "remove", old],
+    ]

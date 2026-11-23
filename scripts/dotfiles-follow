@@ -414,7 +414,7 @@ MARKETPLACE_LOCK = "omp/plugins/omp-plugins.lock.json"
 MARKETPLACE_COMMAND_TIMEOUT = 60.0
 MARKETPLACE_TIMEOUT = 300.0
 
-# The team catalog: the one place in code that names its repository (R1 of dispatch://INFRA-5366).
+# The team catalog: the one place in code that names its repository.
 # Its name is never written anywhere: team_catalog_step reads it from Oh My Pi's registry after
 # each fetch.
 TEAM_CATALOG_SOURCE = "theorem-labs/verification-skills"
@@ -521,7 +521,7 @@ def version_at_least(have: object, want: object) -> bool:
     Two ASCII dotted-number strings compare component by component after leading zeros are removed;
     the shorter is padded with zeros (1.2 equals 1.2.0, 0.3.10 is above 0.3.9, 0.3.09 equals
     0.3.9). Any other pair must be equal JSON values of the same type; object key order does not
-    matter. An empty or missing entry is handled as before.
+    matter.
     """
     numeric = r"[0-9]+(?:\.[0-9]+)*"
     if not (
@@ -553,6 +553,23 @@ def below_lock(ident: str, have: object, want: object, lock: Path) -> str:
     return f"{ident} is {have or 'not installed'}, below {want}, the lowest version {display_path(lock)} records."
 
 
+def installed_version(records: list) -> object:
+    """The version of RECORDS, one plugin's records in installed_plugins.json: its first record's,
+    or None when it has none."""
+    return records[0].get("version") if records else None
+
+
+def no_committed_version(name: str, lock: Path) -> str:
+    """The failure of NAME's entry in LOCK when the entry has an empty or missing version."""
+    return f"omp marketplace plugin {name} has no committed version in {display_path(lock)}."
+
+
+def installed_plugins(path: Path) -> dict:
+    """The plugins of PATH, an installed_plugins.json, or {} when there is no file. A file that
+    cannot be read or parsed raises, and the caller reports it."""
+    return json.loads(path.read_text()).get("plugins", {}) if path.is_file() else {}
+
+
 def marketplace_registrations(stdout: str) -> list[tuple[str, str]]:
     """(name, source) of each registration in STDOUT, the output of `omp plugin marketplace list`,
     in the order it lists them.
@@ -579,8 +596,8 @@ def marketplace_registrations(stdout: str) -> list[tuple[str, str]]:
 def is_team_catalog_source(source: str) -> bool:
     """True when SOURCE, a registration's source, is TEAM_CATALOG_SOURCE: compared without case,
     as owner/repository or after one of GITHUB_SOURCE_PREFIXES, with or without a final .git or /.
-    (main's installers/omp.sh found the registration by `grep`, so a URL spelling may be
-    registered.)"""
+    (install_marketplace_plugin in installers/omp.sh finds a registration by `grep`, so one may be
+    spelled as a URL.)"""
     text = source.lower()
     for prefix in GITHUB_SOURCE_PREFIXES:
         if text.startswith(prefix):
@@ -597,19 +614,22 @@ class TeamCatalog:
     """What team_catalog_step found and did.
 
     current: the catalog's current name, the name of the registration whose fetch succeeded in
-    this run (None when none did); fetched: whether one did; listed: whether the step read its
-    first `list`; registrations: the names of the team catalog's registrations, and registered:
-    every registered name, both as the step's last `list` read them; failures and notes: lines to
-    report."""
+    this run (None when none did); listed: whether the step read its first `list`; registrations:
+    the names of the team catalog's registrations, and registered: every registered name, both as
+    the step's last `list` read them; failures and notes: lines to report."""
 
     def __init__(self) -> None:
         self.current = None
-        self.fetched = False
         self.listed = False
         self.registrations = []
         self.registered = []
         self.failures = []
         self.notes = []
+
+    def owns(self, catalog: str) -> bool:
+        """True when CATALOG, the catalog name of an installed ID, is the name of a registration of
+        the team catalog or of no registration: one of the four installed under it is the step's."""
+        return catalog in self.registrations or catalog not in self.registered
 
 
 class TeamCatalogStopped(Exception):
@@ -654,7 +674,7 @@ def team_catalog_step(
 
     def read_installed() -> dict:
         try:
-            return json.loads(installed_path.read_text()).get("plugins", {}) if installed_path.is_file() else {}
+            return installed_plugins(installed_path)
         except (OSError, ValueError, AttributeError) as error:
             raise TeamCatalogStopped(f"cannot read {display_path(installed_path)}: {error}") from error
 
@@ -667,6 +687,14 @@ def team_catalog_step(
             return marketplace_registrations(out), ""
         except ValueError as error:
             return None, f"`omp plugin marketplace list` printed text this step cannot read ({error}):\n{tail(out + err)}"
+
+    def record_registrations(listed: list[tuple[str, str]]) -> tuple[list[str], list[str]]:
+        """Set result.registrations and result.registered from LISTED, the registrations a `list`
+        printed, and return them: (the team catalog's registration names, every registered name)."""
+        own = [name for name, source in listed if is_team_catalog_source(source)]
+        names = [name for name, _source in listed]
+        result.registrations, result.registered = own, names
+        return own, names
 
     def take_lock_entry(plugin: str) -> None:
         data = json.loads(lock.read_bytes())
@@ -690,17 +718,15 @@ def team_catalog_step(
             result.failures.append(why)
             return
         result.listed = True
-        own = [name for name, source in listed if is_team_catalog_source(source)]
-        names = [name for name, _source in listed]
-        result.registrations, result.registered = own, names
+        own, names = record_registrations(listed)
         team_ids = [
             ident for ident in installed
             if ident.rpartition("@")[0] in TEAM_CATALOG_PLUGINS and ident.rpartition("@")[2]
         ]
 
         # 3. With no registration of the team catalog, and none of the four installed under a name
-        # that no catalog is registered as, no move can be under way: fetch nothing (R2's
-        # exception). The catalog is private, so an add there fails on a box that cannot read it.
+        # that no catalog is registered as, no move can be under way: fetch nothing. The catalog is
+        # private, so an add there fails on a box that cannot read it.
         if not install and not own and all(ident.rpartition("@")[2] in names for ident in team_ids):
             result.notes.append(
                 f"team catalog: no registration of {TEAM_CATALOG_SOURCE} and none of"
@@ -740,7 +766,7 @@ def team_catalog_step(
                     )
                 else:
                     current = added[0]
-                    listed = after
+                    own, _names = record_registrations(after)
         if current is None:
             # The fetch failed: nothing is uninstalled and no registration is removed (R2).
             result.failures.append(
@@ -748,10 +774,7 @@ def team_catalog_step(
                 " is removed:\n" + "\n".join(tried)
             )
             return
-        result.current, result.fetched = current, True
-        own = [name for name, source in listed if is_team_catalog_source(source)]
-        names = [name for name, _source in listed]
-        result.registrations, result.registered = own, names
+        result.current = current
         result.notes.append(f"team catalog: fetched {TEAM_CATALOG_SOURCE}, whose catalog is named {current}")
 
         # 5. A move is under way while one of the four is installed under another name that is the
@@ -763,7 +786,7 @@ def team_catalog_step(
             for ident in team_ids
             if ident.rpartition("@")[0] == plugin
             and ident.rpartition("@")[2] != current
-            and (ident.rpartition("@")[2] in own or ident.rpartition("@")[2] not in names)
+            and result.owns(ident.rpartition("@")[2])
         ]
         old_names = [name for name in own if name != current]
         moving = bool(to_move or old_names)
@@ -784,12 +807,14 @@ def team_catalog_step(
         # 7. During a move, and on every run of installers/omp.sh's call: install each of the four
         # not installed under the current name. Oh My Pi refuses an install whose name the lock
         # holds, so that entry goes first; the caller puts the lock back after the last install.
-        # Each install is judged by installed_plugins.json, whatever its exit status.
+        # Each install is judged by installed_plugins.json, whatever its exit status. holding is that
+        # file as read after the last omp command that can change it.
+        holding = read_installed()
         installed_now: list[str] = []
         if moving or install:
             for plugin in TEAM_CATALOG_PLUGINS:
                 ident = f"{plugin}@{current}"
-                if plugin in kept or ident in read_installed():
+                if plugin in kept or ident in holding:
                     continue
                 try:
                     take_lock_entry(plugin)
@@ -797,7 +822,8 @@ def team_catalog_step(
                     result.failures.append(f"{ident}: cannot take {plugin} out of {display_path(lock)} for its install: {error}")
                     continue
                 code, out, err = run(["plugin", "install", ident], MARKETPLACE_COMMAND_TIMEOUT)
-                if ident in read_installed():
+                holding = read_installed()
+                if ident in holding:
                     installed_now.append(ident)
                 else:
                     result.failures.append(
@@ -810,7 +836,6 @@ def team_catalog_step(
         # 8. Only once each of the four is installed under the current name, remove the team
         # catalog's other registrations: until then the old one marks a move the next run ends.
         if moving and old_names:
-            holding = read_installed()
             if all(f"{plugin}@{current}" in holding for plugin in TEAM_CATALOG_PLUGINS):
                 for name in old_names:
                     code, out, err = run(["plugin", "marketplace", "remove", name], MARKETPLACE_COMMAND_TIMEOUT)
@@ -821,11 +846,11 @@ def team_catalog_step(
                         )
                     else:
                         result.notes.append(f"team catalog: removed the registration {name}")
+                holding = read_installed()
 
         # 9. Versions against the lock's entries: with UPGRADE, `plugin upgrade` (no second fetch)
         # for one below its entry, then a failure for one still below; without it, only a plugin
         # this run installed is judged.
-        holding = read_installed()
         for plugin in TEAM_CATALOG_PLUGINS:
             ident = f"{plugin}@{current}"
             if ident not in holding or plugin not in wanted or not (upgrade or ident in installed_now):
@@ -833,10 +858,9 @@ def team_catalog_step(
             try:
                 want = wanted[plugin].get("version")
                 if not want:
-                    result.failures.append(f"omp marketplace plugin {plugin} has no committed version in {display_path(lock)}.")
+                    result.failures.append(no_committed_version(plugin, lock))
                     continue
-                records = holding[ident]
-                have = records[0].get("version") if records else None
+                have = installed_version(holding[ident])
                 if version_at_least(have, want):
                     continue
                 if upgrade:
@@ -844,8 +868,7 @@ def team_catalog_step(
                     if code != 0:
                         result.failures.append(f"{ident}: `omp plugin upgrade {ident}` exited {code}:\n{tail(out + err)}")
                         continue
-                    records = read_installed().get(ident, [])
-                    have = records[0].get("version") if records else None
+                    have = installed_version(read_installed().get(ident, []))
                 if not version_at_least(have, want):
                     result.failures.append(below_lock(ident, have, want, lock))
             except (OSError, ValueError, TypeError, KeyError, AttributeError, IndexError) as error:
@@ -896,7 +919,7 @@ def install_marketplace_plugins(
         saved = lock.read_bytes()
         wanted = json.loads(saved).get("plugins", {})
         dependencies = json.loads(package.read_text()).get("dependencies", {}) if package.is_file() else {}
-        installed = json.loads(installed_path.read_text()).get("plugins", {}) if installed_path.is_file() else {}
+        installed = installed_plugins(installed_path)
     except (OSError, ValueError) as error:
         return f"Cannot read omp plugin pins or installed records: {error}"
 
@@ -913,7 +936,7 @@ def install_marketplace_plugins(
             log(note)
         try:
             # The step can have moved, installed or upgraded plugins.
-            installed = json.loads(installed_path.read_text()).get("plugins", {}) if installed_path.is_file() else {}
+            installed = installed_plugins(installed_path)
         except (OSError, ValueError) as error:
             failures.append(f"Cannot read omp plugin installed records after the team catalog step: {error}")
             installed = {}
@@ -932,12 +955,10 @@ def install_marketplace_plugins(
                 # One of the four is the step's when its one installed ID names a catalog of the
                 # team catalog's repository or of none, and every one of them when the step could
                 # not read the registrations (it reported why). One under another repository's
-                # catalog, or installed under two IDs, is the loop's, as before.
-                if name in TEAM_CATALOG_PLUGINS and (not team.listed or (
-                    len(matches) == 1
-                    and (matches[0].rpartition("@")[2] in team.registrations
-                         or matches[0].rpartition("@")[2] not in team.registered)
-                )):
+                # catalog, or installed under two IDs, is the loop's.
+                if name in TEAM_CATALOG_PLUGINS and (
+                    not team.listed or (len(matches) == 1 and team.owns(matches[0].rpartition("@")[2]))
+                ):
                     continue
                 if len(matches) > 1:
                     failures.append(
@@ -947,11 +968,10 @@ def install_marketplace_plugins(
                     continue
                 want = pin.get("version")
                 if not want:
-                    failures.append(f"omp marketplace plugin {name} has no committed version in {display_path(lock)}.")
+                    failures.append(no_committed_version(name, lock))
                     continue
                 plugin = matches[0]
-                records = installed[plugin]
-                have = records[0].get("version") if records else None
+                have = installed_version(installed[plugin])
                 if version_at_least(have, want):
                     continue
                 # Like installers/omp.sh: refresh the catalog before upgrading, then check the
@@ -962,7 +982,7 @@ def install_marketplace_plugins(
                 if source in team.registrations:
                     # A plugin of the team catalog outside the four: the step fetched the catalog
                     # this run, or reported why it could not.
-                    if not team.fetched:
+                    if team.current is None:
                         continue
                     commands = commands[1:]
                 for args in commands:
@@ -980,7 +1000,7 @@ def install_marketplace_plugins(
                         break
                 else:
                     current = json.loads(installed_path.read_text()).get("plugins", {}).get(plugin, [])
-                    have = current[0].get("version") if current else None
+                    have = installed_version(current)
                     if not version_at_least(have, want):
                         failures.append(below_lock(plugin, have, want, lock))
             except (OSError, ValueError, TypeError, KeyError, AttributeError, IndexError) as error:
@@ -999,8 +1019,9 @@ def run_team_catalog(repo: Path, installer: bool) -> int:
     runs REPO's shims/omp with no OMP_PROFILE, PI_PROFILE or PI_CODING_AGENT_DIR, and installs one
     of the four only to end a move. With INSTALLER it is installers/omp.sh's call: omp from PATH
     with the environment as given, an install of each of the four that is missing and an upgrade
-    of one below the lock. Notes go to stdout and each failure to stderr as one line that starts
-    `dotfiles-follow: team catalog: `. Returns 1 after a failure, else 0.
+    of one below the lock. Notes go to stdout and each failure to stderr, its first line starting
+    `dotfiles-follow: team catalog: ` and omp's last lines indented under it. Returns 1 after a
+    failure, else 0.
 
     The lock is put back (put_back_marketplace_lock) only when its bytes changed during the run: a
     run that moved and installed nothing leaves an uncommitted edit of it as it was, since the sync

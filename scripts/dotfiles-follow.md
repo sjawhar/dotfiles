@@ -54,18 +54,19 @@ The default runs the sweep.
 
 `dotfiles-follow --team-catalog [--installer] [--repo DIR]` runs only the team catalog step of
 step 7 for the checkout, and exits 1 after a failure, else 0. It takes no state lock, writes no
-state file and opens no condition: it prints its notes on stdout, and each failure on stderr as a
-line that starts `dotfiles-follow: team catalog: `. Without `--installer` it is `dotfiles-sync`'s
-call, from its tools step: it stops on a `legion` machine profile, runs the checkout's `shims/omp`
-without `OMP_PROFILE`, `PI_PROFILE` and `PI_CODING_AGENT_DIR`, installs one of the four plugins
-only to end a move, and runs no `plugin upgrade`. With `--installer` it is `installers/omp.sh`'s
-call: it runs `omp` from `PATH` with the environment as given and does not stop on a `legion`
-profile; it fetches the catalog also on a machine with none of the four, installs each of the four
-that is missing, and upgrades one below its lock entry. With no lock it says so and runs no omp
-command. It writes the lock itself only to take an entry out of an install's way, and puts the lock
-back only when its bytes changed during the run, so a run that moves, installs and upgrades nothing
-keeps an uncommitted edit of the lock. SIGTERM (the `timeout` of `dotfiles-sync`'s tools step)
-kills the running omp command's process group, puts the lock back as above and exits 143.
+state file and opens no condition: it prints its notes on stdout, and each failure on stderr, its
+first line starting `dotfiles-follow: team catalog: ` and omp's last lines indented under it.
+Without `--installer` it is `dotfiles-sync`'s call, from its tools step: it stops on a `legion`
+machine profile, runs the checkout's `shims/omp` without `OMP_PROFILE`, `PI_PROFILE` and
+`PI_CODING_AGENT_DIR`, installs one of the four plugins only to end a move, and runs no
+`plugin upgrade`. With `--installer` it is `installers/omp.sh`'s call: it runs `omp` from `PATH`
+with the environment as given and does not stop on a `legion` profile; it fetches the catalog also
+on a machine with none of the four, installs each of the four that is missing, and upgrades one
+below its lock entry. With no lock it says so and runs no omp command. It writes the lock itself
+only to take an entry out of an install's way, and puts the lock back only when its bytes changed
+during the run, so a run that moves, installs and upgrades nothing keeps an uncommitted edit of the
+lock. SIGTERM (the `timeout` of `dotfiles-sync`'s tools step) kills the running omp command's
+process group, puts the lock back as above and exits 143.
 
 ## Why
 

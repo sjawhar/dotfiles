@@ -660,16 +660,9 @@ class OmpMarketplaceInstaller(unittest.TestCase):
                 self.assertEqual(result.stdout, "no\n", result.stderr)
 
 
-# The team catalog of INFRA-5366's plan, as fake_omp names it: its source, its name before and
-# after the rename of dispatch://INFRA-4807, and the four plugins installers/omp.sh installs from it.
-TEAM_SOURCE = fake_omp.TEAM_SOURCE
-OLD = fake_omp.OLD_NAME
+# The team catalog's name after the rename of dispatch://INFRA-4807, as fake_omp names it.
+# MARKETPLACE is the catalog's source and CATALOG its name before.
 NEW = fake_omp.NEW_NAME
-FOUR = fake_omp.TEAM_PLUGINS
-TEAM_LOCK = json.dumps({
-    "plugins": {plugin: {"version": "0.1.0", "enabledFeatures": None, "enabled": True} for plugin in FOUR},
-    "settings": {},
-}, indent=2) + "\n"
 
 
 class TeamCatalogCall(unittest.TestCase):
@@ -691,7 +684,7 @@ class TeamCatalogCall(unittest.TestCase):
         follow.chmod(FOLLOW_SCRIPT.stat().st_mode)
         self.lock_path = self.dotfiles / "omp/plugins/omp-plugins.lock.json"
         self.lock_path.parent.mkdir(parents=True)
-        self.lock_path.write_text(TEAM_LOCK)
+        self.lock_path.write_text(fake_omp.TEAM_LOCK)
         (self.dotfiles / ".gitignore").write_text("omp/plugins/installed_plugins.json\n")
         self.installed_path = self.dotfiles / "omp/plugins/installed_plugins.json"
         self.state_path = self.root / "omp-state.json"
@@ -718,13 +711,10 @@ class TeamCatalogCall(unittest.TestCase):
             subprocess.run(["git", "-C", str(self.dotfiles), *args], env=self.env, check=True, capture_output=True)
 
     def machine(self, installed: dict[str, str], registrations: list[list[str]], catalog: str, **state: object) -> None:
-        self.installed_path.write_text(json.dumps({
-            "version": 2,
-            "plugins": {ident: [{"scope": "user", "version": version}] for ident, version in installed.items()},
-        }))
+        fake_omp.write_installed(self.installed_path, installed)
         fake_omp.write_state(self.state_path, {
             "registrations": registrations,
-            "catalogs": {TEAM_SOURCE: {"name": catalog}},
+            "catalogs": {MARKETPLACE: {"name": catalog}},
             **state,
         })
 
@@ -739,48 +729,35 @@ class TeamCatalogCall(unittest.TestCase):
         )
 
     def calls(self) -> list[list[str]]:
-        return [record["args"] for record in fake_omp.read_calls(self.log_path)]
+        return fake_omp.read_args(self.log_path)
 
     def installed(self) -> dict[str, object]:
-        return {
-            ident: records[0]["version"]
-            for ident, records in json.loads(self.installed_path.read_text())["plugins"].items()
-        }
+        return fake_omp.read_installed(self.installed_path)
 
     def registrations(self) -> list[list[str]]:
-        return fake_omp.read_state(self.state_path)["registrations"]
+        return fake_omp.read_registrations(self.state_path)
 
     def assert_returned(self, result: subprocess.CompletedProcess[str]) -> None:
         """install.sh goes on after the step, and the lock holds its committed bytes."""
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.splitlines()[-1:], ["INSTALLER-STEP-RETURNED"], result.stdout + result.stderr)
-        self.assertEqual(self.lock_path.read_text(), TEAM_LOCK)
-
-    @staticmethod
-    def ids(name: str, plugins: tuple[str, ...] = FOUR) -> list[str]:
-        return [f"{plugin}@{name}" for plugin in plugins]
+        self.assertEqual(self.lock_path.read_text(), fake_omp.TEAM_LOCK)
 
     def test_in1_a_change_of_name_moves_the_four(self) -> None:
-        self.machine({ident: "0.2.0" for ident in self.ids(OLD)}, [[OLD, TEAM_SOURCE]], NEW)
+        self.machine({ident: "0.2.0" for ident in fake_omp.ids(CATALOG)}, [[CATALOG, MARKETPLACE]], NEW)
 
         result = self.install()
 
         self.assert_returned(result)
-        self.assertEqual(self.calls(), [
-            ["plugin", "marketplace", "list"],
-            ["plugin", "marketplace", "update", OLD],
-            ["plugin", "marketplace", "add", TEAM_SOURCE],
-            ["plugin", "marketplace", "list"],
-            *(["plugin", "uninstall", ident] for ident in self.ids(OLD)),
-            *(["plugin", "install", ident] for ident in self.ids(NEW)),
-            ["plugin", "marketplace", "remove", OLD],
-        ])
-        self.assertEqual(self.installed(), {ident: "0.2.0" for ident in self.ids(NEW)})
-        self.assertEqual(self.registrations(), [[NEW, TEAM_SOURCE]])
+        self.assertEqual(self.calls(), fake_omp.move_calls(CATALOG, NEW))
+        self.assertEqual(self.installed(), {ident: "0.2.0" for ident in fake_omp.ids(NEW)})
+        self.assertEqual(self.registrations(), [[NEW, MARKETPLACE]])
         self.assertEqual(result.stderr, "")
 
     def test_in2_a_failed_install_is_reported_and_the_installer_goes_on(self) -> None:
-        self.machine({ident: "0.2.0" for ident in self.ids(OLD)}, [[OLD, TEAM_SOURCE]], NEW, fail={"install": [f"tasks@{NEW}"]})
+        self.machine(
+            {ident: "0.2.0" for ident in fake_omp.ids(CATALOG)}, [[CATALOG, MARKETPLACE]], NEW, fail={"install": [f"tasks@{NEW}"]},
+        )
 
         result = self.install()
 
@@ -792,8 +769,8 @@ class TeamCatalogCall(unittest.TestCase):
         )
         self.assertTrue([line for line in lines if line.startswith("omp: the team catalog step exited 1")], result.stderr)
         others = ("verification", "engineering", "dev-infra")
-        self.assertEqual(self.installed(), {ident: "0.2.0" for ident in self.ids(NEW, others)})
-        self.assertEqual(self.registrations(), [[OLD, TEAM_SOURCE], [NEW, TEAM_SOURCE]])
+        self.assertEqual(self.installed(), {ident: "0.2.0" for ident in fake_omp.ids(NEW, others)})
+        self.assertEqual(self.registrations(), [[CATALOG, MARKETPLACE], [NEW, MARKETPLACE]])
 
     def test_in3_a_home_with_none_of_the_four_gets_all_four(self) -> None:
         self.machine({}, [], NEW)
@@ -803,22 +780,22 @@ class TeamCatalogCall(unittest.TestCase):
         self.assert_returned(result)
         self.assertEqual(self.calls(), [
             ["plugin", "marketplace", "list"],
-            ["plugin", "marketplace", "add", TEAM_SOURCE],
+            ["plugin", "marketplace", "add", MARKETPLACE],
             ["plugin", "marketplace", "list"],
-            *(["plugin", "install", ident] for ident in self.ids(NEW)),
+            *(["plugin", "install", ident] for ident in fake_omp.ids(NEW)),
         ])
-        self.assertEqual(self.installed(), {ident: "0.2.0" for ident in self.ids(NEW)})
-        self.assertEqual(self.registrations(), [[NEW, TEAM_SOURCE]])
+        self.assertEqual(self.installed(), {ident: "0.2.0" for ident in fake_omp.ids(NEW)})
+        self.assertEqual(self.registrations(), [[NEW, MARKETPLACE]])
         self.assertEqual(result.stderr, "")
 
     def test_in4_no_change_of_name_fetches_the_catalog_once(self) -> None:
-        self.machine({ident: "0.2.0" for ident in self.ids(OLD)}, [[OLD, TEAM_SOURCE]], OLD)
+        self.machine({ident: "0.2.0" for ident in fake_omp.ids(CATALOG)}, [[CATALOG, MARKETPLACE]], CATALOG)
 
         result = self.install()
 
         self.assert_returned(result)
-        self.assertEqual(self.calls(), [["plugin", "marketplace", "list"], ["plugin", "marketplace", "update", OLD]])
-        self.assertEqual(self.installed(), {ident: "0.2.0" for ident in self.ids(OLD)})
+        self.assertEqual(self.calls(), [["plugin", "marketplace", "list"], ["plugin", "marketplace", "update", CATALOG]])
+        self.assertEqual(self.installed(), {ident: "0.2.0" for ident in fake_omp.ids(CATALOG)})
         self.assertEqual(result.stderr, "")
 
 
