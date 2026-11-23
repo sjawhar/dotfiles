@@ -149,7 +149,7 @@ Box half (`agentbox new --dir /mnt/nvme/sami/cutover --dir /mnt/nvme/sami/boxid 
 | metadata account | as on the host, from the box relay | dev-box@ |
 | Google Cloud | `gcloud auth list --filter=status:ACTIVE`; tokeninfo of `gcloud auth print-access-token` | both name dev-box@ |
 | build pool | `kubectl --context gke_theorem-agent-infra_us-west1_dispatch -n builds auth can-i create jobs` | `yes` |
-| grade pool | `kubectl --context gke_theorem-agent-infra_us-west1-b_grade-us-west1 -n grade auth can-i create jobs` | `no`: a Legion pod submits grade Jobs as `grade-submit@` (the move census of INFRA-1433, row U15) |
+| grade pool | `kubectl --context gke_theorem-agent-infra_us-central1_theorem-us-central1 -n grade auth can-i create jobs` | `yes`: each team account submits a grade (R2 of dispatch://INFRA-4710) |
 | boxid paths | `CLOUDSDK_CONFIG=/mnt/nvme/sami/boxid/gcloud-box gcloud auth print-access-token` to tokeninfo; `kubectl --kubeconfig /mnt/nvme/sami/boxid/infra-kubeconfig -n builds auth can-i create jobs` (`installers/gcloud-boxid.sh`; the paths sami-rocqperf's scripts name) | dev-box@; `yes` |
 | secrets broker | `$AGENT_SECRETS_KEY_DIR/enrollment`; `https://secrets.tail12ec1c.ts.net/healthz` | an enrollment id; 200 |
 | secrets, agent tier | `secrets CERAMIC_API_KEY -- …` | a non-empty value |

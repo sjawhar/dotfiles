@@ -19,9 +19,10 @@
 # tells an agent session to export, and that file is merged in behind the shared one, whose
 # current context wins, and renamed over it. A file with no current context gets dispatch's, the
 # context every box doctor and the build pool use without naming one. A third field names one more
-# standalone file, ~/.kube/<name>.config, for a path tools name: sami-rocqperf had
-# ~/.kube/grade-us-west1.config, which agent-infra's spend/sizejob/README.md exports, and a box
-# without it made a private kubeconfig instead (dispatch://INFRA-993).
+# standalone file, ~/.kube/<name>.config, for a path that tools name: dispatch://INFRA-5067 names
+# ~/.kube/theorem-us-central1.config as the grade cluster's file in agent-infra's texts and in its
+# spend/sizejob/README.md. A box without such a file made a private kubeconfig instead
+# (dispatch://INFRA-993).
 #
 # Idempotent: installs only when the pinned version is not there, and writes a kubeconfig or a
 # context only when it lacks the cluster's context.
@@ -36,12 +37,15 @@ GCLOUD_SDK_SHA256=f865da648f6fdae2015abb5b32eaa0eb10520e88f0ca735cfb33795868c8d2
 GCLOUD_SDK_ROOT="$HOME/.gcloud"
 GCLOUD_SDK_BIN="$GCLOUD_SDK_ROOT/google-cloud-sdk/bin/gcloud"
 KUBE_PROJECT=theorem-agent-infra
-# dispatch: box doctors and the build pool (namespaces builds-*). grade-us-west1: the grade Jobs
-# of S3 (namespace grade). sami-rocqperf's ~/.kube/config on 2026-11-03 had these two and three
-# stockprobe-gke-* contexts, whose clusters no longer exist (`gcloud container clusters list`).
+# dispatch: box doctors and the build pool (namespaces builds-*). theorem-us-central1: the grade
+# Jobs of S3 (namespace grade), where grading runs since dispatch://INFRA-4464; each team account
+# may submit there (R2 of dispatch://INFRA-4710). The installer only adds: a machine that an
+# earlier version set up keeps its grade-us-west1 context and files. sami-rocqperf's
+# ~/.kube/config on 2026-11-03 had dispatch, grade-us-west1 and three stockprobe-gke-* contexts,
+# whose clusters no longer exist (`gcloud container clusters list`).
 KUBE_CLUSTERS=(
     "dispatch us-west1"
-    "grade-us-west1 us-west1-b grade-us-west1.config"
+    "theorem-us-central1 us-central1 theorem-us-central1.config"
 )
 KUBE_DEFAULT_CONTEXT="gke_${KUBE_PROJECT}_us-west1_dispatch"
 

@@ -28,7 +28,7 @@ import sys
 
 DEFAULT_CONTEXTS = (
     "gke_theorem-agent-infra_us-west1_dispatch",
-    "gke_theorem-agent-infra_us-west1-b_grade-us-west1",
+    "gke_theorem-agent-infra_us-central1_theorem-us-central1",
 )
 
 
@@ -118,7 +118,7 @@ def share(part: float, whole: float) -> str:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--context", action="append", dest="contexts",
-                        help="a kubectl context; repeatable (default: the farm and the grade cluster)")
+                        help="a kubectl context; repeatable (default: dispatch and theorem-us-central1)")
     parser.add_argument("--json", action="store_true", help="print the reading as JSON")
     options = parser.parse_args(argv)
     out = []

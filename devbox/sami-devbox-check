@@ -55,8 +55,9 @@ TAILNET=tail12ec1c.ts.net
 ACCOUNT="dev-box@theorem-agent-infra.iam.gserviceaccount.com"
 APPLIER_ACCOUNT="infra-applier@theorem-agent-infra.iam.gserviceaccount.com"
 KUBE_CONTEXT=gke_theorem-agent-infra_us-west1_dispatch
-# S3's grade Jobs: namespace grade of grade-us-west1 (installers/gcloud-sdk.sh, KUBE_CLUSTERS).
-GRADE_KUBE_CONTEXT=gke_theorem-agent-infra_us-west1-b_grade-us-west1
+# S3's grade Jobs: namespace grade of theorem-us-central1 (installers/gcloud-sdk.sh, KUBE_CLUSTERS).
+# The box's account, a team account, may submit there (R2 of dispatch://INFRA-4710).
+GRADE_KUBE_CONTEXT=gke_theorem-agent-infra_us-central1_theorem-us-central1
 # The box-identity paths scripts from sami-rocqperf name (installers/gcloud-boxid.sh); the box half
 # gets the directory at the same path (agentbox binds it into every box). Named from HOME, not
 # `id -un`: a box's user is not the host's (ubuntu), and its HOME is the host user's /home/<user>,
@@ -382,17 +383,19 @@ n6_check() {
     fi
 }
 
-# What the move census (dispatch://INFRA-1433, move-census.md) routes off the box, read from the
-# box: each is refused, and a failure that is not a refusal (REFUSED) fails the line.
-#   grade Jobs: a Legion pod acting as grade-submit@ (row U15);
-#   the farm's URL signer ossv-runs-signer@, its run bucket and its Jobs in builds-ossv: the farm's
-#   own pods (U05).
+# The grade pool: each team account may submit a grade in namespace grade (R2 of
+# dispatch://INFRA-4710), as the box submits builds in builds.
 grade_pool_check() {
     local where="$1" got
     got="$(kubectl --context "$GRADE_KUBE_CONTEXT" -n grade auth can-i create jobs 2>&1)"
-    refused "$got" && ok "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: no (a Legion pod submits as grade-submit@)" \
-        || fail "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: want no, got: $(tail -1 <<<"$got")"
+    [[ "$got" == yes ]] && ok "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: yes (a team account submits, R2 of dispatch://INFRA-4710)" \
+        || fail "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: want yes, got: $(tail -1 <<<"$got")"
 }
+
+# What the move census (dispatch://INFRA-1433, move-census.md) routes off the box, read from the
+# box: each is refused, and a failure that is not a refusal (REFUSED) fails the line.
+#   the farm's URL signer ossv-runs-signer@, its run bucket and its Jobs in builds-ossv: the farm's
+#   own pods (U05).
 # signer_try SA: mint SA's token and sign a blob as it. Sets sign_tok_rc, sign_tok_out (the token,
 # or the mint's error), sign_tok_note (what a line may print of it: a token's length, never the
 # token, or the mint's last error line), sign_rc, sign_out and sign_bytes (the signature's size).
