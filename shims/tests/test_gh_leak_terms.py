@@ -621,7 +621,7 @@ class GhLeakTerms(unittest.TestCase):
                 ("a term in the reply", [*reply, "body=see INFRA-1"], "--raw-field body", "INFRA-"),
                 ("theorem-labs, to sjawhar/ygo's issues", ["api", "repos/sjawhar/ygo/issues", "-F", "title=from {owner}"],
                  "--field title", "theorem-labs"),
-                ("a term in the branch's name", [*develop, "INFRA-1"], "--name", "INFRA-")):
+        ):
             with self.subTest(control=name):
                 self.setUp_calls()
                 self.assert_refused(self.run_gh(argv, env=env), field, matched, YGO_LIST, line=1)
@@ -919,6 +919,164 @@ class GhLeakTerms(unittest.TestCase):
             argv = ["api", "orgs/{owner}/repos", "-f", "name=notes", "-f", "visibility=public"]
             self.setUp_calls()
             self.assert_sent(self.run_gh(argv), argv)
+
+    def test_a_gh_api_call_that_makes_an_organization_s_repository_internal_or_private_is_judged_private(self) -> None:
+        # Approved by Sami for INFRA-4586 (spec v72 R2): a POST to an organization's `orgs/O/repos` that makes the new
+        # repository internal or private by its own -f or -F `visibility` field, or by its --input body's `visibility`
+        # member, makes a private repository of that organization, so its text goes out (gh_new_visibility). Until
+        # 2026-11-23 every such call was read as making a public repository, and was refused for a term in the
+        # organization's name and in its description.
+        owner = SCOPE.split("/")[0]
+        endpoint = f"orgs/{owner}/repos"
+        about = f"Notes on {SCOPED} for the team"
+        described = f"description={about}"
+        post = ["api", "-X", "POST", endpoint, "-f", "name=notes"]
+
+        def body(name: str, **members: str) -> str:
+            return self.file(name, json.dumps({"name": "notes", **members, "description": about}))
+
+        for row, argv, stdin in (
+                ("-f visibility=internal", [*post, "-f", "visibility=internal", "-f", described], b""),
+                ("-F visibility=private", [*post, "-F", "visibility=private", "-f", described], b""),
+                ("POST by default", ["api", endpoint, "-f", "name=notes", "-f", "visibility=internal", "-f", described],
+                 b""),
+                ("--input FILE",
+                 ["api", "-X", "POST", endpoint, "--input", body("internal.json", visibility="internal")], b""),
+                ("--input -", ["api", endpoint, "--input", "-"],
+                 json.dumps({"name": "notes", "visibility": "private", "description": about}).encode()),
+                ("two --input, the last, which gh sends, internal",
+                 ["api", "-X", "POST", endpoint, "--input", body("none.json"), "--input",
+                  body("internal.json", visibility="internal")], b""),
+                ("an organization named by a listed term",
+                 ["api", "-X", "POST", f"orgs/{CANARY}/repos", "-f", "name=notes", "-f", "visibility=internal"], b"")):
+            with self.subTest(row=row):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, stdin), argv, stdin)
+        # A create that says public, or says nothing, is public, and so is one whose `visibility=internal` stands only
+        # in the environment, in another field, in the endpoint's query string, in a file, in a field gh sends in the
+        # query string beside --input, in an --input body gh does not send, or beside a field or query member that says
+        # public or `private=false`, and one that says a visibility GitHub has not; a call that is no POST makes no
+        # repository.
+        gh_variables = {"GH_VISIBILITY": "internal", "GH_REPO_VISIBILITY": "internal",
+                        "GH_FIELDS": "visibility=internal"}
+        scoped = (SCOPED, f"the {SCOPE} list")
+        for row, argv, env, field, (matched, listed) in (
+                ("visibility=public", [*post, "-f", "visibility=public", "-f", described], {},
+                 "--raw-field description", scoped),
+                ("no visibility", [*post, "-f", described], {}, "--raw-field description", scoped),
+                ("--input visibility public", ["api", "-X", "POST", endpoint, "--input",
+                                               body("public.json", visibility="public")], {},
+                 "--input public.json .description", scoped),
+                ("--input with no visibility", ["api", "-X", "POST", endpoint, "--input", body("none.json")], {},
+                 "--input none.json .description", scoped),
+                ("only in GH_* variables", [*post, "-f", described], gh_variables, "--raw-field description", scoped),
+                ("only in GH_* variables, visibility=public", [*post, "-f", "visibility=public", "-f", described],
+                 gh_variables, "--raw-field description", scoped),
+                ("only in the description", [*post, "-f", f"description=visibility=internal {SCOPED}"], {},
+                 "--raw-field description", scoped),
+                ("in a second, unrelated -f", [*post, "-f", "visibility=public", "-f", "homepage=visibility=internal",
+                                               "-f", described], {}, "--raw-field description", scoped),
+                ("beside visibility=public", [*post, "-f", "visibility=internal", "-f", "visibility=public", "-f",
+                                              described], {}, "--raw-field description", scoped),
+                ("beside private=false", [*post, "-f", "visibility=internal", "-F", "private=false", "-f", described],
+                 {}, "--raw-field description", scoped),
+                ("in the endpoint's query string", ["api", "-X", "POST", f"{endpoint}?visibility=internal", "-f",
+                                                    "name=notes", "-f", described], {}, "--raw-field description",
+                 scoped),
+                ("-F visibility=@file", [*post, "-F", f"visibility=@{self.file('visibility.txt', 'internal')}", "-f",
+                                         described], {}, "--raw-field description", scoped),
+                ("-f beside --input, sent in the query string", ["api", "-X", "POST", endpoint, "-f",
+                                                                  "visibility=internal", "--input", body("none.json")],
+                 {}, "--input none.json .description", scoped),
+                ("visibility=secret", [*post, "-f", "visibility=secret", "-f", described], {}, "--raw-field description",
+                 scoped),
+                ("--input private beside -f visibility=public",
+                 ["api", "-X", "POST", endpoint, "-f", "visibility=public", "--input",
+                  body("private.json", visibility="private")], {}, "--input private.json .description", scoped),
+                ("--input private beside -F private=false",
+                 ["api", "-X", "POST", endpoint, "-F", "private=false", "--input",
+                  body("private.json", visibility="private")], {}, "--input private.json .description", scoped),
+                ("?visibility=public beside -f visibility=private",
+                 ["api", "-X", "POST", f"{endpoint}?visibility=public", "-f", "name=notes", "-f", "visibility=private",
+                  "-f", described], {}, "--raw-field description", scoped),
+                ("two --input, the last, which gh sends, saying nothing",
+                 ["api", "-X", "POST", endpoint, "--input", body("private.json", visibility="private"), "--input",
+                  body("none.json")], {}, "--input none.json .description", scoped),
+                ("-X PATCH", ["api", "-X", "PATCH", endpoint, "-f", "name=notes", "-f", "visibility=internal", "-f",
+                              described], {}, "--raw-field description", scoped),
+                ("an organization named by a listed term, public",
+                 ["api", "-X", "POST", f"orgs/{CANARY}/repos", "-f", "name=notes", "-f", "visibility=public"], {},
+                 "argument 1", (CANARY, GLOBAL))):
+            with self.subTest(row=row):
+                self.setUp_calls()
+                refused = self.run_gh(argv, env={**self.env, **env})
+                self.assert_refused(refused, field, matched, listed)
+                self.assertIn("a new repository the call makes, read as public", refused.stderr.decode())
+
+    def test_repo_create_internal_or_private_is_judged_private(self) -> None:
+        # `gh repo create OWNER/NAME --internal` or `--private` makes a private repository, so its text goes out; with
+        # `--public` it makes a public one, and a scoped term in its description is refused there.
+        name = f"{SCOPE.split('/')[0]}/notes"
+        about = f"Notes on {SCOPED} for the team"
+        for flag in ("--internal", "--private"):
+            with self.subTest(flag=flag):
+                argv = ["repo", "create", name, flag, "--description", about]
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+        with self.subTest(flag="--public"):
+            self.setUp_calls()
+            refused = self.run_gh(["repo", "create", name, "--public", "--description", about])
+            self.assert_refused(refused, "--description", SCOPED, f"the {SCOPE} list", line=1)
+
+    def test_a_knives_registry_term_in_a_branch_tag_or_identity_the_call_names_counts_for_nothing(self) -> None:
+        # A knives registry list reads no name (TermMatcher.names): a branch, a tag or an identity a call names
+        # (GH_NAME_TEXTS) may hold its term, as Legion's branch names and its App identities do, while the same term in
+        # a title is refused. The global list still reads a name.
+        fork = "cybermonklabs/oh-my-pi"
+        self.answer(fork, "public")
+        term = REGISTRY_TEST_TERMS["oh-my-pi"][0]
+        branch, login, mail = f"{term}-branch", f"{term}-bot", f"{term}-bot@example.invalid"
+        create = ["pr", "create", "-R", fork, "--title", "t", "--body", "b"]
+        for row, argv in (
+                ("pr create --head --base", [*create, "--head", branch, "--base", branch]),
+                ("pr create --assignee --reviewer", [*create, "--head", "h", "--assignee", login, "--reviewer", login]),
+                ("pr edit BRANCH --add-reviewer --remove-assignee",
+                 ["pr", "edit", branch, "-R", fork, "--add-reviewer", login, "--remove-assignee", login]),
+                ("pr comment BRANCH", ["pr", "comment", branch, "-R", fork, "--body", "b"]),
+                ("pr merge --author-email", ["pr", "merge", "1", "-R", fork, "--squash", "--author-email", mail]),
+                ("issue develop --name --base", ["issue", "develop", "1", "-R", fork, "--name", branch, "--base", branch]),
+                ("release create TAG --target",
+                 ["release", "create", f"v1-{term}", "-R", fork, "--target", branch, "--notes", "cut"]),
+                ("workflow run --ref", ["workflow", "run", "w.yml", "-R", fork, "--ref", branch]),
+                ("project create --owner", ["project", "create", "--owner", login, "--title", "t"]),
+                ("project copy --source-owner --target-owner",
+                 ["project", "copy", "1", "--source-owner", login, "--target-owner", login, "--title", "t"]),
+                ("repo fork --org", ["repo", "fork", fork, "--org", login]),
+                ("repo create --team", ["repo", "create", fork, "--public", "--team", login])):
+            with self.subTest(sent=row):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+        # Controls: the term in a text of each of those calls is refused, and the global list reads a branch and a
+        # reviewer.
+        for row, argv, field in (
+                ("pr create --title",
+                 ["pr", "create", "-R", fork, "--head", branch, "--title", f"Built with {term}", "--body", "b"],
+                 "--title"),
+                ("project create --title", ["project", "create", "--owner", login, "--title", f"Built with {term}"],
+                 "--title"),
+                ("repo fork --fork-name", ["repo", "fork", fork, "--org", login, "--fork-name", f"x-{term}"],
+                 "--fork-name"),
+                ("repo create --description",
+                 ["repo", "create", fork, "--public", "--team", login, "--description", f"Built with {term}"],
+                 "--description")):
+            with self.subTest(refused=row):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(argv), field, term, "the knives oh-my-pi list", line=1)
+        for option, value in (("--head", f"{CANARY}-branch"), ("--reviewer", f"{CANARY}-bot")):
+            with self.subTest(global_list=option):
+                self.setUp_calls()
+                refused = self.run_gh([*create, *(["--head", "h"] if option != "--head" else []), option, value])
+                self.assert_refused(refused, option, CANARY, GLOBAL, line=1)
 
     def test_the_text_gh_fills_into_an_api_field_is_read(self) -> None:
         # gh fills `{repo}` in an -F value from the base repository, here the checkout's private repository whose name
@@ -3001,6 +3159,17 @@ class Tables(unittest.TestCase):
                 self.assertEqual((group, sub) in module.GH_REPOSITORY_ARGUMENT, first == "<repository>", usage)
                 urls = {"<url>", "<urls>", "<discussion-url>", "<comment-url>"}
                 self.assertEqual((group, sub) in module.GH_URL_ARGUMENT, bool(urls.intersection(arguments)), usage)
+
+    def test_each_name_text_is_an_option_or_argument_of_its_command(self) -> None:
+        # GH_NAME_TEXTS names each text by the long spelling of a GH_TEXT_COMMANDS option, or `argument N`: a spelling
+        # that matches no option would leave that value read as text, and its name unread as one.
+        module = self.scanner()
+        for group, sub, option in module.GH_NAME_TEXTS:
+            with self.subTest(command=f"{group} {sub}", option=option):
+                self.assertIn((group, sub), module.GH_TEXT_COMMANDS)
+                if option.startswith("argument "):
+                    continue
+                self.assertIn(option, module.gh_long_names(module.GH_TEXT_COMMANDS[(group, sub)]).values())
 
     def test_the_placeholders_the_check_fills_are_the_installed_gh_s_own(self) -> None:
         # `gh api --help` lists the placeholders gh fills in the endpoint and in an -F value; the check fills each one

@@ -14,8 +14,9 @@ TEST_TERMS = ("Quillfeather Lane 9", "zorbleplex", "vintrapolis-canary-7")
 # A term listed for one set of repositories only (the list's `scoped` map): a push or gh text bound for a public
 # repository the pattern matches refuses it, and one bound for any other repository does not.
 SCOPED_TEST_TERMS = {"cybermonklabs/*": ("brindlewort-scoped-5",)}
-# The forbidden list of knives's fork registry entry oh-my-pi: a gh text bound for a public repository named oh-my-pi
-# refuses them, whatever its owner, and one bound for any other repository does not.
+# The forbidden list of knives's fork registry entry oh-my-pi: a push or a gh text bound for a public repository named
+# oh-my-pi, whatever its owner, and a `diff` or `message` given --repository OWNER/oh-my-pi refuse them; a text bound
+# for any other repository does not.
 REGISTRY_TEST_TERMS = {"oh-my-pi": ("knurlwick-registry-1", "plumbago-registry-2")}
 # Tokens that hold the scoped term and are allowed in one repository (the list's `allowed` map): a third-party npm
 # package as written and as a JavaScript regular expression escapes its slash.
