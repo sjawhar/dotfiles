@@ -117,8 +117,8 @@ PARTIAL_OUTPUT = {
 }
 # Each check that reads its command's stderr apart from its stdout when the command fails: its row, then the line of
 # stderr its detail is, then the line of stdout when stderr has no non-empty line. A line is the `first` or `last`
-# non-empty one, or the `whole` stream, which row() makes one line. kubectl's two commands each have an entry: whoami
-# runs only after current-context answers, and its detail starts with that context.
+# non-empty one, or the `whole` stream's non-empty lines, which row() makes one line. kubectl's two commands each have
+# an entry: whoami runs only after current-context answers, and its detail starts with that context.
 FAILURE_PICKS = {
     "aws": ("aws", "first", "first"),
     "anthropic_ant": ("anthropic_ant", "first", "first"),
