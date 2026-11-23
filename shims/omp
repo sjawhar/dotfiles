@@ -5,6 +5,14 @@
 # pinned release ("github:sjawhar/oh-my-pi" in mise.toml), or a local build ahead of ~/.mise/shims.
 set -euo pipefail
 
+# mise's config trust comes from the global mise config (paranoid = true,
+# dispatch://INFRA-5432). An inherited MISE_TRUSTED_CONFIG_PATHS (precedence rank 2)
+# would override it (rank 4), and an old omp session that still carries the old
+# narrow value would pass it to every session it starts through run-seat.sh, making
+# every ~/src config read "not trusted". Clear it so this session and its children
+# read the global config.
+unset MISE_TRUSTED_CONFIG_PATHS
+
 # mise_paths: mise as this machine runs it, whatever HOME and PATH the caller set
 # (shims/tests/test_shim_moved_home.py). A Legion test pane runs a shim with a
 # temporary HOME and the PATH <bin>:/usr/local/bin:/usr/bin:/bin, where every

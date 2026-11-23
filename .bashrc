@@ -38,9 +38,11 @@ export MISE_DATA_DIR="${HOME}/.mise"
 # trusted_config_paths), not here: it must apply to every mise invocation, not
 # only shells that source this file, because paranoid = true there turns off the
 # CI auto-trust that let any checkout's config run code (dispatch://INFRA-5432).
-# An env var here (precedence rank 2) would have overridden that global setting
-# (rank 4), so there is one source of truth. The config trusts ~/.dotfiles,
-# ~/.worktrees and ~/src, a superset of the paths this export used to name.
+# An env var here (precedence rank 2) would override that global setting (rank 4),
+# so unset any inherited one: before the fix a tmux server and old omp sessions
+# carried the old narrow value, and an inherited one makes every ~/src config read
+# "not trusted". The config trusts ~/.dotfiles, ~/.worktrees and ~/src.
+unset MISE_TRUSTED_CONFIG_PATHS
 
 if [ -x "${DOTFILES_DIR}/bin/mise" ]; then
     eval "$("${DOTFILES_DIR}/bin/mise" activate --shims "$DOTFILES_SHELL")"
