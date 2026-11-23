@@ -9,7 +9,7 @@ Sami approves every outside message by default.
 
 A kind of message stops needing his approval once a skill or template guides it and he has seen how the reader's project reacts. What decides is whether the message is a vetted routine or novel contact, not who the reader is.
 
-An outside message is one a person outside Theorem reads, not one that is only public. A reply in a bot-opened thread on a pull request Theorem authors is public, so the public leak check covers it (`public-leak-check.sh check-public-text <file>`).
+An outside message is one a person outside Theorem reads, not one that is only public. A reply in a bot-opened thread on a pull request Theorem authors is public. So the public leak check covers it (`public-leak-check.sh check-public-text <file>`).
 
 | A reply in a bot-opened thread on | Read by | Outside message |
 | --- | --- | --- |
@@ -61,7 +61,7 @@ Any one of these, except for Oh My Pi:
   - He reviews what it can post before it posts (to Oh My Pi too), its fixed text and the prompt behind any text a model writes.
   - Check both first for a promise nobody decided to make, such as a promise to publish proofs.
 
-A case between the two lists waits. The ask for such a case says which way it leaned and why.
+Treat a case between the two lists as one that waits. In the ask for such a case, say which way it leaned and why.
 
 A project we do not run that has not enrolled starts at "approve each". It moves to "no approval" for the captured routines only when Sami says so, once per project. Record his call where the project's stream keeps its enrollment record, so no agent promotes a project on its own judgement. A new enrollee or an enrolled project does not start there: its captured routines go without approval (above).
 
