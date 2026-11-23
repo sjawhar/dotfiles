@@ -142,7 +142,11 @@ ledger = "sjawhar/.knives-ledger"
 # PIN_FILES), so such an entry would claim a pin knives cannot see.
 # Internal names an upstream-bound diff must not add: knives audit reports each added line that
 # holds one (a fork-only branch is exempt). Not oh-my-pi's list: "notch" is a word of the fork's
-# own tests. scripts/leak-terms-check also refuses these terms in gh text bound for any public
+# own tests. scripts/leak-terms-check also refuses these terms, a fork-only branch's included, in a
+# push to any public repository named ygo (its messages, files and paths, but not its ref names,
+# tag names, identities, trailer keys or identity trailers: TermMatcher) and in a `diff` or
+# `message` given --repository OWNER/ygo, with no exception for a destination's own name; and in
+# gh text, but a branch, tag or identity it names (GH_NAME_TEXTS), bound for any public
 # repository named ygo. To the public theorem-labs/ygo, a term wholly inside that destination's
 # own name counts for nothing (gh_own_name): `-R theorem-labs/ygo`, its URL and its endpoint go
 # there, and so does `theorem-labs` as a whole word. A `theorem-labs` that begins a longer word is

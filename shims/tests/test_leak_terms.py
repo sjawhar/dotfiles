@@ -757,6 +757,117 @@ class ScanModes(LeakTestCase):
                 self.assertIn("OWNER/NAME", refused.stderr)
                 self.assert_hidden(refused)
 
+    def test_a_hand_run_check_reads_the_knives_registry_lists_of_the_repository_it_names(self) -> None:
+        # A knives registry entry's forbidden list is a scoped list of every repository named as the entry's upstream,
+        # origin or release, whatever its owner (knives_forbidden). Until 2026-11-23 only gh mode read it: `diff` and
+        # `message --repository cybermonklabs/oh-my-pi` passed the oh-my-pi entry's terms with exit 0.
+        for number, term in enumerate(REGISTRY_TEST_TERMS["oh-my-pi"], start=1):
+            texts = {
+                "diff": ("diff --git a/notes.md b/notes.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes.md\n"
+                         f"@@ -0,0 +1 @@\n+Built with {term} on the fork.\n"),
+                "message": f"Built with {term} on the fork.\n",
+            }
+            places = {"diff": "notes.md:1", "message": "commit message line 1"}
+            for mode, text in texts.items():
+                with self.subTest(term=number, mode=mode, repository="cybermonklabs/oh-my-pi"):
+                    line = self.assert_found(self.check(mode, text, "--repository", "cybermonklabs/oh-my-pi"),
+                                             places[mode])
+                    self.assertEqual(line, f'leak terms: {places[mode]}: "{term}" (the knives oh-my-pi list), '
+                                           f"in: Built with {term} on the fork.")
+                # Controls: an unrelated repository, of the same owner, and no repository (a commit) read no such list.
+                with self.subTest(term=number, mode=mode, repository="cybermonklabs/legion"):
+                    outside = self.check(mode, text, "--repository", "cybermonklabs/legion")
+                    self.assertEqual((outside.returncode, outside.stderr), (0, ""))
+                with self.subTest(term=number, mode=mode, repository=None):
+                    unnamed = self.check(mode, text, *(["--place-prefix", ""] if mode == "diff" else []))
+                    self.assertEqual((unnamed.returncode, unnamed.stderr), (0, ""))
+        term = REGISTRY_TEST_TERMS["oh-my-pi"][0]
+        message = f"Built with {term} on the fork.\n"
+        # A path is text: `diff` refuses the term in a file's path, and an unrelated repository takes it.
+        path = f"notes/{term}.md"
+        diff = f"diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+clean\n"
+        with self.subTest(mode="diff", text="a path", repository="cybermonklabs/oh-my-pi"):
+            line = self.assert_found(self.check("diff", diff, "--repository", "cybermonklabs/oh-my-pi"), path)
+            self.assertEqual(line, f'leak terms: {path}: "{term}" (the knives oh-my-pi list)')
+        with self.subTest(mode="diff", text="a path", repository="cybermonklabs/legion"):
+            outside = self.check("diff", diff, "--repository", "cybermonklabs/legion")
+            self.assertEqual((outside.returncode, outside.stderr), (0, ""))
+        # A message's trailer keys and identity trailers are names (git_trailer_names): Legion's trailer block goes to
+        # the fork, while the term in its body, in a trailer whose value names no one, or in a trailer-shaped line in
+        # mid-message is refused at its line.
+        role = f"{term.capitalize()}-Role: implementer"
+        bot = f"{term}[bot] <1+{term}[bot]@users.noreply.github.com>"
+        with self.subTest(mode="message", text="Legion's trailer block"):
+            sent = self.check("message", f"Fix the pool\n\nclean body\n\n{role}\nCo-authored-by: {bot}\n",
+                              "--repository", "cybermonklabs/oh-my-pi")
+            self.assertEqual((sent.returncode, sent.stderr), (0, ""))
+        for text, line in ((f"Fix the pool\n\nBuilt with {term}.\n\n{role}\nCo-authored-by: {bot}\n", 3),
+                           (f"Fix the pool\n\nclean body\n\nFixes: {term}\n", 5),
+                           (f"Fix the pool\n\n{role}\n\nclean body\n", 3)):
+            with self.subTest(mode="message", text=text):
+                refused = self.check("message", text, "--repository", "cybermonklabs/oh-my-pi")
+                found = self.assert_found(refused, f"commit message line {line}")
+                self.assertIn("(the knives oh-my-pi list)", found)
+                self.assertEqual(len([row for row in refused.stderr.splitlines() if "(the knives" in row]), 1,
+                                 refused.stderr)
+        # A machine with no registry has no such list.
+        with self.subTest(registry="missing"):
+            missing = {**self.env, "DOTFILES_LEAK_TERMS_KNIVES_DIR": str(self.root / "no-registry")}
+            result = self.check("message", message, "--repository", "cybermonklabs/oh-my-pi", env=missing)
+            self.assertEqual((result.returncode, result.stderr), (0, ""))
+        # A registry that cannot be read refuses a text that goes to a repository, and a commit, which has none, does
+        # not read it.
+        broken = self.root / "broken-registry"
+        broken.mkdir()
+        (broken / "repos.toml").write_text("[repos.oh-my-pi\n", encoding="utf-8")
+        unreadable = {**self.env, "DOTFILES_LEAK_TERMS_KNIVES_DIR": str(broken)}
+        with self.subTest(registry="unreadable", repository="cybermonklabs/oh-my-pi"):
+            result = self.check("message", message, "--repository", "cybermonklabs/oh-my-pi", env=unreadable)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("the knives registry", result.stderr)
+            self.assert_hidden(result)
+        with self.subTest(registry="unreadable", repository=None):
+            result = self.check("message", message, env=unreadable)
+            self.assertEqual((result.returncode, result.stderr), (0, ""))
+
+    def test_a_message_s_trailers_are_the_ones_git_interpret_trailers_parses(self) -> None:
+        # scan_message reads a message's trailer keys, and its identity trailers' values, as names: its trailers are
+        # git's own, as `git interpret-trailers --parse` lists them with no trailer configuration (git_trailers).
+        module = scanner_module()
+        environment = {**base_environment(), "HOME": str(self.root), "GIT_CONFIG_NOSYSTEM": "1",
+                       "GIT_CONFIG_GLOBAL": "/dev/null"}
+        messages = (
+            "subject\n\nbody\n\nLegion-Role: implementer\nCo-authored-by: Bot <b@example.invalid>\n",
+            # A trailer-shaped line in mid-message, and a title, are no trailers.
+            "subject\n\nLegion-Role: implementer\n\nmore body\n",
+            "Key: value\n",
+            # A continuation line, a key spaced from its `:`, trailing empty lines.
+            "subject\n\nbody\n\nFixes: x\n  folded value\nKey : spaced\n\n\n",
+            # A line that is no trailer: a block only with a line git writes and a quarter of trailers.
+            "subject\n\nbody\n\nnot a trailer\nSigned-off-by: A <a@example.invalid>\nKey: v\n",
+            "subject\n\nbody\n\nnot a trailer\nnot either\nKey: v\n",
+            "subject\n\nbody\n\n(cherry picked from commit 0123abc)\nKey name: v\nKey: w\n",
+            # Comment lines, and the patch divider.
+            "subject\n\nbody\n\nKey: v\n# a comment\nOther: w\n\n# a trailing comment\n",
+            "subject\n\nbody\n\nKey: v\n--- \npatch\n\nAfter: x\n",
+        )
+        listed = []
+        for message in messages:
+            with self.subTest(message=message):
+                parsed = self.launch(["/usr/bin/git", "interpret-trailers", "--parse"], input=message,
+                                     env=environment, cwd=self.root)
+                self.assertEqual(parsed.returncode, 0, parsed.stderr)
+                expected = []
+                for line in parsed.stdout.split("\n")[:-1]:
+                    key, _, value = line.partition(": ")
+                    expected.append((key, " ".join(value.split())))
+                read = [(message[key_start:key_end].strip(" \t"), " ".join(message[value_start:value_end].split()))
+                        for (key_start, key_end), (value_start, value_end) in module.git_trailers(message)]
+                self.assertEqual(read, expected)
+                listed.append(len(expected))
+        # The comparison can fail: git lists trailers for some messages and none for others.
+        self.assertTrue(any(listed) and not all(listed), listed)
+
     def test_scanner_staged_uses_the_outgoing_attribute_policy(self) -> None:
         repository = self.root / "staged"
         repository.mkdir()
@@ -5764,6 +5875,130 @@ class OutgoingLeaks(SinkRepositoryCase):
                 for url in (self.public_url, scoped_private):
                     self.set_url(url)
                     self.assert_pushed(self.git_push("origin", commit, self.unique("sent"), environment), url, commit)
+
+    def test_a_knives_registry_term_is_refused_in_a_push_to_a_public_repository_its_entry_names(self) -> None:
+        # The registry's oh-my-pi entry forbids its terms in every repository named oh-my-pi, whatever its owner
+        # (knives_forbidden): its origin still names sjawhar/oh-my-pi, and the public fork is cybermonklabs/oh-my-pi.
+        # Until 2026-11-23 only gh mode read the registry, and a push to the fork passed a file, a message, a path or a
+        # tag's message holding such a term, with exit 0. A ref name, a tag's name, an author, committer or tagger, a
+        # trailer's key and an identity trailer's value are names, which the registry's lists do not read
+        # (TermMatcher); the global list still reads them.
+        term = REGISTRY_TEST_TERMS["oh-my-pi"][0]
+        role = f"{term.capitalize()}-Role: implementer"
+        bot = f"{term}[bot] <1+{term}[bot]@users.noreply.github.com>"
+        fork = "https://github.com/cybermonklabs/oh-my-pi.git"
+        (self.cache / "cybermonklabs_oh-my-pi").write_text("public", encoding="utf-8")
+
+        def message_commit(message: str) -> str:
+            return self.commit(f"{self.unique('registry')}.txt", "clean", message, parent=self.base)
+
+        content = self.commit(f"{self.unique('registry')}.txt", f"Built with {term} on the fork.", "registry",
+                              parent=self.base)
+        content_place = f"commit {content[:12]} registry-{self.made}.txt:1"
+        message = message_commit(f"subject\n\nBuilt with {term}.")
+        # The body holds the term and a Legion trailer block ends the message: only the body's line is refused.
+        body = message_commit(f"subject\n\nBuilt with {term}.\n\n{role}\nCo-authored-by: {bot}")
+        # A trailer whose value is no identity is text.
+        fixes = message_commit(f"subject\n\nclean body\n\nFixes: {term}")
+        # A line shaped like a trailer in mid-message is no trailer: git's trailers are the final paragraph's.
+        middle = message_commit(f"subject\n\n{role}\n\nclean body")
+        path = f"{self.unique('registry')}/{term}.txt"
+        named = self.commit(path, "clean", "clean", parent=self.base)
+        tag_name, tag, tagged = self.annotated_tag("registry-tag", f"clean first line\n{term}\n")
+        # A `tag` header in a commit, and a tag object's `tag` line that git takes as no tag's name, are text.
+        headed = self.raw_commit(f"tag Codename {term} notes".encode())
+        free_name = self.unique("free-tag")
+        made = self.launch(["/usr/bin/git", "hash-object", "-t", "tag", "-w", "--literally", "--stdin"], cwd=self.repo,
+                           env=self.person, text=False,
+                           input=(f"object {self.base}\ntype commit\ntag Release {term} notes\n".encode() + b"tagger "
+                                  + self.PUSH_TEST_IDENTITY + b"\n\nclean message\n"))
+        self.assertEqual(made.returncode, 0, made.stderr)
+        free_tag = made.stdout.decode("ascii").strip()
+        self.real("update-ref", f"refs/tags/{free_name}", free_tag)
+        # (case, what is pushed, the tag's name for a tag, the one place refused, the objects the sink must not get)
+        texts = (
+            ("a file, on a new branch", content, None, content_place, (content,)),
+            ("a message", message, None, f"commit {message[:12]} message line 3", (message,)),
+            ("a body above a Legion trailer block", body, None, f"commit {body[:12]} message line 3", (body,)),
+            ("a trailer value that names no one", fixes, None, f"commit {fixes[:12]} message line 5", (fixes,)),
+            ("a trailer-shaped line in mid-message", middle, None, f"commit {middle[:12]} message line 3", (middle,)),
+            ("a path", named, None, f"commit {named[:12]} {path}", (named,)),
+            ("a tag's message", tagged, tag_name, f"tag {tag_name} message line 2", (tag, tagged)),
+            ("a commit's tag header", headed, None, f"commit {headed[:12]} header line 5", (headed,)),
+            ("a tag line that names no tag", self.base, free_name, f"tag {free_name} header line 3", (free_tag,)),
+        )
+        for case, commit, name, place, objects in texts:
+            with self.subTest(refused=case):
+                self.set_url(fork)
+                if name is None:
+                    result = self.assert_object_refused(
+                        lambda commit=commit: self.git_push("origin", commit, self.unique("new"), self.agent), place,
+                        fork, *objects)
+                else:
+                    result = self.assert_object_refused(
+                        lambda name=name: self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", self.agent),
+                        place, fork, *objects)
+                self.assertEqual(refusal_places(result.stderr, "error: "), [place], result.stderr)
+                self.assertIn("(the knives oh-my-pi list)", result.stderr)
+        # Controls: an unrelated public repository gets each of them.
+        for case, commit, name, _, objects in texts:
+            with self.subTest(control=case):
+                self.set_url(self.public_url)
+                if name is None:
+                    self.assert_pushed(self.git_push("origin", commit, self.unique("sent"), self.agent),
+                                       self.public_url, commit)
+                else:
+                    pushed = self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", self.agent)
+                    self.assert_objects_pushed(pushed, self.public_url, *objects)
+        # The same term only in a name goes to the fork. git's own output shows a ref's name, so it is not read for
+        # test terms here.
+        identity = f"{term} bot"
+        mail = f"{term}-bot@example.invalid"
+        by_author = self.identity_commit("registry-author", "clean subject",
+                                         {"GIT_AUTHOR_NAME": identity, "GIT_AUTHOR_EMAIL": mail})
+        by_committer = self.identity_commit("registry-committer", "clean subject",
+                                            {"GIT_COMMITTER_NAME": identity, "GIT_COMMITTER_EMAIL": mail})
+        clean = self.commit(f"{self.unique('registry-ref')}.txt", "clean", "clean", parent=self.base)
+        tagger_name = self.unique("registry-tagger")
+        tagger_commit = self.commit(f"{tagger_name}.txt", "clean", "clean", parent=self.base)
+        self.real("tag", "-a", tagger_name, "-m", self.clean_tag_message, tagger_commit,
+                  environment=self.person | {"GIT_COMMITTER_NAME": identity})
+        tagger_tag = self.real("rev-parse", f"refs/tags/{tagger_name}")
+        tag_named, named_tag, _ = self.annotated_tag("", self.clean_tag_message, target=clean, name=f"v1-{term}")
+        # Legion's trailer block, as `legion git` and its jj overlay end every commit: a role trailer whose key holds
+        # the term, and its App as co-author and signer.
+        legion = message_commit(f"subject\n\nclean body\n\n{role}\nCo-authored-by: {bot}\nSigned-off-by: {bot}")
+        coauthor = message_commit(f"subject\n\nclean body\n\nCo-authored-by: {bot}")
+        for case, source, ref, objects in (
+                ("an author", by_author, f"refs/heads/{self.unique('sent')}", (by_author,)),
+                ("a committer", by_committer, f"refs/heads/{self.unique('sent')}", (by_committer,)),
+                ("a ref name", clean, f"refs/heads/{term}-branch", (clean,)),
+                ("a tagger", f"refs/tags/{tagger_name}", f"refs/tags/{tagger_name}", (tagger_tag, tagger_commit)),
+                ("a tag's name", f"refs/tags/{tag_named}", f"refs/tags/{tag_named}", (named_tag,)),
+                ("a Legion trailer block", legion, f"refs/heads/{self.unique('sent')}", (legion,)),
+                ("a bot's Co-authored-by trailer", coauthor, f"refs/heads/{self.unique('sent')}", (coauthor,))):
+            with self.subTest(sent=case):
+                self.set_url(fork)
+                pushed = self.git_push_ref(source, ref, self.agent)
+                self.assertEqual(pushed.returncode, 0, pushed.stderr)
+                for object_id in objects:
+                    self.assertTrue(self.sink_holds(fork, object_id), pushed.stderr)
+        # Controls: the global list still reads a name, an author's, a ref's and an identity trailer's.
+        global_identity = {"GIT_AUTHOR_NAME": f"{TEST_TERMS[1]} bot"}
+        by_global_author = self.identity_commit("global-author", "clean subject", global_identity)
+        global_ref = f"{TEST_TERMS[1]}-branch"
+        global_trailer = message_commit(f"subject\n\nclean body\n\nCo-authored-by: {TEST_TERMS[1]} <b@example.invalid>")
+        for case, source, ref, place in (
+                ("an author", by_global_author, f"refs/heads/{self.unique('refused')}",
+                 f"commit {by_global_author[:12]} author"),
+                ("a ref name", self.base, f"refs/heads/{global_ref}", f"ref {global_ref}"),
+                ("a Co-authored-by trailer", global_trailer, f"refs/heads/{self.unique('refused')}",
+                 f"commit {global_trailer[:12]} message line 5")):
+            with self.subTest(global_list=case):
+                self.set_url(fork)
+                result = self.assert_object_refused(
+                    lambda source=source, ref=ref: self.git_push_ref(source, ref, self.agent), place, fork)
+                self.assertIn("(the global list)", result.stderr)
 
     def test_an_allowed_token_holds_a_scoped_term_only_whole_and_only_in_its_repository(self) -> None:
         # Term 20 of cybermonklabs/* is also a public npm organisation's name, and upstream oh-my-pi's browser-MCP
