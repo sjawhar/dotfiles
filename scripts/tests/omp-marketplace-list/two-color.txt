@@ -1,0 +1,4 @@
+[1mConfigured Marketplaces:[22m
+[1m[22m
+  [36magent-skills[39m  [2mtheorem-labs/verification-skills[22m
+  [36mtheorem-skills[39m  [2mtheorem-labs/verification-skills[22m
