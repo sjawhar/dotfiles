@@ -38,7 +38,7 @@ In `~/.dotfiles`, do not run `jj rebase` onto main, `git pull`, `git rebase`, `g
 
 - Personal vs. company boundary: company infrastructure repositories must not reference `~/.dotfiles`, and the dotfiles install is not part of company machine provisioning.
 - Envoy tools exist only in Sami's own sessions: do not tell anyone else to use them.
-- On the devbox the Dispatch token in a session's `envoy.json` is the shared token deployed for agent sessions, not Sami's personal credential: a session may read it there. Never commit it.
+- On the devbox the Dispatch token in a session's `envoy.json` is a personal token of Sami's own account, holding the `person` and `approve` scopes, copied there for agent sessions: a session may read it there, and a message, answer or approval made with it records as Sami's, naming only the token (dispatch://INFRA-4890 adds the agent's name). Never commit it.
 - systemd user lingering must stay enabled (`loginctl enable-linger <user>`): without it the user's services die with the last login session. Cleanup of "lingering processes" is unrelated; do not disable linger.
 - To show Sami a file on a dev box, send the URL `forward url <path>` prints. A `file://` link or a hand-written `localhost:12802` link opens the path on the wrong machine. `forward port <port>…` makes a port on a dev box, or in an agent box, reach his laptop's `localhost`.
 - A dev box reaches the laptop's YubiKey through forward's pcsc channel (`forward doctor` shows it). On the laptop, polkit refuses PC/SC to SSH-session processes and permits systemd `--user` ones: test with `systemd-run --user`, never a raw SSH shell.
