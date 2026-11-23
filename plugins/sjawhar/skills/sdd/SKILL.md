@@ -48,7 +48,7 @@ Each slice has one class (platform or application, infrastructure, task authorin
 - Use only names they print.
 - Load what planning needs yourself.
 - Pick the design, implementation, testing and infrastructure skills for the rest.
-- The plan's `## Skill catalog` maps each step to the skills its worker loads.
+- In the plan's `## Skill catalog`, map each step to the skills its worker loads.
 - Each brief names the skills its worker loads.
 - A step that adds or changes a CI workflow maps `developing-ci`: a workflow written without it runs the whole suite on every push.
   - That step reads `developing-ci` before the first workflow edit, for the same reason.
@@ -61,7 +61,7 @@ Each slice has one class (platform or application, infrastructure, task authorin
 - A research brief never asks for a plan.
 - Reuse an existing spec, plan or review: repair its gap.
 - Then have a `reviewer` check what the repair of a reused spec, plan or review affects.
-- The plan lives in the issue (its Dispatch document or GitHub issue body), not in a repo file or a PR.
+- Put the plan in the issue (its Dispatch document or GitHub issue body), not in a repo file or a PR.
 - Plan the full request.
 - Split parallel work into units no two workers edit: two workers who meet an interface mid-flight both rewrite it.
 - Name the shared contracts before dispatch, for the same reason.
@@ -70,7 +70,7 @@ Each slice has one class (platform or application, infrastructure, task authorin
 - **Read `references/slices.md` now:** what a slice is, what it merges as and ends in, how to cut, order and run slices, and a slice's tasks, contracts and scaffolding.
 - Cut over completely: migrate every caller and remove obsolete paths, shims, aliases and dead code, unless Sami requires compatibility.
 - Read `references/plan-sections.md` when you write the plan: its sections, workspaces, and a major design change.
-- A `reviewer` gates every new plan before implementation.
+- Have a `reviewer` gate every new plan before implementation.
 - A `reviewer` gates every later plan edit, before it is built, that changes a slice, a shared contract, an acceptance scenario or which requirement a step meets.
 - That `reviewer` checks the plan against the issue's goal and every requirement, not only whether it can be built.
 - A requirement the plan leaves out fails unless the requester recorded it as out of scope.
