@@ -1323,8 +1323,9 @@ class GhLeakTerms(unittest.TestCase):
         self.setUp_calls()
         self.assert_sent(self.run_gh(argv), argv)
 
-    def test_a_body_file_that_is_a_pipe_is_left_for_gh_to_read(self) -> None:
-        # /dev/stdin on a pipe is read from the shim's buffer, and gh gets the same bytes on its stdin.
+    def test_a_body_file_that_is_standard_input_on_a_pipe_is_read_whole(self) -> None:
+        # /dev/stdin on a pipe is read into the shim's buffer before the check, and gh gets the same bytes, through
+        # /dev/stdin and on its stdin. A process substitution is read the same way (test_gh_pipe_body.py).
         argv = ["pr", "edit", "11", "-R", PRIVATE, "--body-file", "/dev/stdin"]
         self.assert_sent(self.run_gh(argv, TEXT.encode()), argv, TEXT.encode())
         self.assertEqual((self.calls / "0.body").read_bytes(), TEXT.encode())
@@ -1332,24 +1333,7 @@ class GhLeakTerms(unittest.TestCase):
         self.setUp_calls()
         self.assert_sent(self.run_gh(argv, CLEAN.encode()), argv, CLEAN.encode())
         self.setUp_calls()
-        self.assert_refused(self.run_gh(argv, TEXT.encode()), "--body-file /dev/stdin (standard input)")
-        # Another pipe, a process substitution, is not read: gh reads it for a private repository, and for any other
-        # target the call is refused, since its text cannot be checked.
-        script = '"$GH" pr edit 11 -R "$REPO" --body-file <(printf %s "$BODY")'
-        for repo, body in ((PRIVATE, TEXT), (PUBLIC, CLEAN)):
-            with self.subTest(repo=repo):
-                self.setUp_calls()
-                result = subprocess.run(["bash", "-c", script], env={**self.env, "GH": str(GH), "REPO": repo, "BODY": body},
-                                        cwd=self.work, stdin=subprocess.DEVNULL, capture_output=True, timeout=240,
-                                        check=False)
-                stderr = result.stderr.decode("utf-8", "replace")
-                if repo == PRIVATE:
-                    self.assertEqual(result.returncode, 0, stderr)
-                    self.assertEqual((self.calls / "0.body").read_bytes(), body.encode())
-                else:
-                    self.assertEqual(result.returncode, 2, stderr)
-                    self.assertEqual(self.gh_calls(), [])
-                    self.assertIn(": a pipe or a device, which the check cannot read", stderr)
+        self.assert_refused(self.run_gh(argv, TEXT.encode()), "--body-file /dev/stdin")
 
     def test_a_graphql_mutation_is_read_as_public_whatever_repository_it_names(self) -> None:
         # createCommitOnBranch names its repository by name, in its document or in a variable, and a message may hold
