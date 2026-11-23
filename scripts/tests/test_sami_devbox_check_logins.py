@@ -193,5 +193,52 @@ class HostLoginsTest(unittest.TestCase):
                 self.assertNotIn("ok   logins: no application_default", "\n".join(lines))
 
 
+class LoginWalkGate(unittest.TestCase):
+    """A default run skips the login-file walk with a note naming its flag and still judges omp's own logins;
+    --mark-ready runs the walk (its marker says no person's login is on any disk); --logins runs the login lines
+    alone. host() is run with every function it calls replaced by one that names itself, and a stand-in agentbox."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / "dot/scripts").mkdir(parents=True)
+        (self.root / "dot/scripts/agentbox").write_text("#!/bin/sh\nexit 0\n")
+        (self.root / "dot/scripts/agentbox").chmod(0o755)
+        self.env = dict(os.environ, HOME=str(self.root), DOTFILES_DIR=str(self.root / "dot"))
+
+    def host(self, *args: str) -> str:
+        body = (f'source <(sed \'/^case "${{1:-}}" in/,$d\' {SCRIPT}); '
+                'for f in $(declare -F | awk \'{ print $3 }\'); do '
+                'case "$f" in host|ok|fail|note|stamp) ;; *) eval "$f() { echo CALLED $f; }" ;; esac; done; host "$@"')
+        return subprocess.run(["bash", "-c", body, "test", *args], env=self.env, cwd=self.root, capture_output=True,
+                              text=True, timeout=120).stdout
+
+    def test_a_default_run_skips_the_walk_and_names_its_flag(self) -> None:
+        out = self.host()
+        self.assertNotIn("CALLED host_logins", out)
+        self.assertIn("CALLED host_omp_logins", out)
+        self.assertRegex(out, r"(?m)^note logins: the login-file walk of / /mnt/nvme /mnt/durable /mnt/scratch is "
+                              r"skipped .* run it with: sami-devbox-check --logins$")
+
+    def test_mark_ready_runs_the_walk(self) -> None:
+        out = self.host("--mark-ready")
+        self.assertIn("CALLED host_logins", out)
+        self.assertNotIn("is skipped in a default run", out)
+
+    def test_the_logins_flag_runs_the_login_lines_alone(self) -> None:
+        # A sudo that answers every walk with nothing, so the four walks end at once; the run must still be the
+        # login lines, and only those.
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "sudo").write_text("#!/bin/sh\nexit 0\n")
+        (bin_dir / "sudo").chmod(0o755)
+        out = subprocess.run(["bash", str(SCRIPT), "--logins"], env={**self.env, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+                             cwd=self.root, capture_output=True, text=True, timeout=120).stdout
+        lines = out.splitlines()
+        self.assertTrue(lines and all(" logins: " in line for line in lines), out)
+        self.assertTrue(any(line.startswith("note logins: walks (one pruned find per disk") for line in lines), out)
+
+
 if __name__ == "__main__":
     unittest.main()
