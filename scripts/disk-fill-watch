@@ -514,15 +514,17 @@ def cmdline_of(pid: int) -> str:
 
 
 def comm_of(pid: int) -> str:
+    # Any process may name itself any bytes, and comm, stat and status all carry the name, so
+    # each read of them here decodes with replacement.
     try:
-        return Path(f"/proc/{pid}/comm").read_text().strip()
+        return Path(f"/proc/{pid}/comm").read_bytes().decode("utf8", "replace").strip()
     except OSError:
         return ""
 
 
 def ppid_of(pid: int) -> int:
     try:
-        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+        for line in Path(f"/proc/{pid}/status").read_bytes().decode("utf8", "replace").splitlines():
             if line.startswith("PPid:"):
                 return int(line.split()[1])
     except (OSError, ValueError, IndexError):
@@ -533,7 +535,7 @@ def ppid_of(pid: int) -> int:
 def age_of(pid: int) -> float:
     """Seconds since the process started, from /proc/<pid>/stat field 22 and the boot time."""
     try:
-        data = Path(f"/proc/{pid}/stat").read_text()
+        data = Path(f"/proc/{pid}/stat").read_bytes().decode("utf8", "replace")
         ticks = int(data[data.rfind(")") + 2 :].split()[19])
         with open("/proc/uptime") as handle:
             uptime = float(handle.read().split()[0])

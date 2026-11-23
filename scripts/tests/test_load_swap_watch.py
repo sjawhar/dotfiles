@@ -9,11 +9,15 @@ import argparse
 import importlib.machinery
 import importlib.util
 import os
+import sys
 import tempfile
 import time
 import unittest
 import unittest.mock
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from non_utf8_name import READ_AS, process_named  # noqa: E402 - found through the path above
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "load-swap-watch"
@@ -483,6 +487,31 @@ class ConsumerAttributionTest(unittest.TestCase):
 
     def test_swap_drain_rate_needs_two_samples(self) -> None:
         self.assertEqual(WATCH.swap_drain_rate([[time.time(), 1]], 3600), (None, 0.0))
+
+
+class ProcessNamedInNonUtf8Bytes(unittest.TestCase):
+    """Each reader of one process, over a real child named in bytes that are not UTF-8.
+
+    comm_of raised UnicodeDecodeError on it; the readers of its stat and status caught that as a
+    ValueError and returned their fallback, so its parent read as 0 and its CPU and memory as none.
+    """
+
+    def test_its_name_is_read(self) -> None:
+        with process_named() as named:
+            self.assertEqual(WATCH.comm_of(named.pid), READ_AS)
+
+    def test_its_stat_is_read(self) -> None:
+        with process_named() as named:
+            time.sleep(0.05)  # older than one clock tick, so its age cannot read as the fallback 0.0
+            self.assertEqual(WATCH.ppid_of(named.pid), os.getpid())
+            self.assertGreater(WATCH.age_of(named.pid), 0.0)
+            self.assertIsNotNone(WATCH.cpu_ticks_of(named.pid))
+            self.assertIsNotNone(WATCH._proc_ticks(WATCH.PROC / str(named.pid)))
+
+    def test_its_status_is_read(self) -> None:
+        with process_named() as named:
+            rss, _ = WATCH.memory_of(named.pid)
+            self.assertGreater(rss, 0)
 
 
 if __name__ == "__main__":

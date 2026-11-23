@@ -13,10 +13,14 @@ refusal on /mnt/nvme at 2026-11-02T16:21Z: 156.8 GiB free, holders of 25+40+4+2+
 
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from non_utf8_name import process_named  # noqa: E402 - found through the path above
 
 
 def fs_type(path: Path) -> str:
@@ -388,6 +392,18 @@ class DiskGateMeasurementTest(unittest.TestCase):
         self.assertIn("wrote 0.5 GiB", refused.stdout)
         granted = self.gate("reserve", "0.4", "next-lane", "--mount", str(self.mount), free=21)
         self.assertEqual(granted.returncode, 0, granted.stdout)
+
+    def test_a_holder_named_in_bytes_that_are_not_utf8_is_measured(self) -> None:
+        """The gate reads its caller's name, and a caller may name itself any bytes (prctl PR_SET_NAME).
+
+        A name that is not UTF-8 failed the gate's probe, which then recorded no caller to measure.
+        """
+        command = [str(SCRIPT), "reserve", "1", "odd-lane", "--mount", str(self.mount)]
+        with process_named(*command, env=dict(self.env, FAKE_FREE_GIB="100")) as holder:
+            self.assertEqual(holder.code, 0, holder.output)
+            status = self.status(self.mount, free=100)
+        self.assertIn(f"pid {holder.pid} (", status)
+        self.assertIn(f"wrote 0 GiB on {self.mount}, 1 GiB still counted", status)
 
 
 if __name__ == "__main__":
