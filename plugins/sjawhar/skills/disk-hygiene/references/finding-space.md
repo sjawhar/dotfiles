@@ -42,7 +42,7 @@ Read this before you size, rank or watch disk use, or before you delete by a pat
 
 ## Deleting by pattern or with `find`
 
-- Give every `find ... -delete` or `-exec rm` a `-mindepth 1`: `find` tests the starting directory too, and has deleted the directory it was told to clean inside.
+- Give every `find ... -delete` or `-exec rm` a `-mindepth 1`: `find` tests the starting directory too, so without it `find` deletes the directory it was told to clean inside.
 - A prefix is not ownership: `base_`, `now_`, `merged_`, `v1`, `emit` and `tmp` are names every session picks.
 - Never delete by a glob in a shared directory (such as `/tmp`) or in a box's own tree, whose bind-mount sources are live (`box-mounts.md`): name each entry you delete, or delete a directory you made.
 - Anywhere other than a shared directory or a box's own tree, where a cleanup must use a pattern, `ls` the matches and read them before you remove any: `rm` prints nothing it took.
