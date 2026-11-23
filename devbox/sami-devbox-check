@@ -457,8 +457,9 @@ ossv_tree_host_check() {
 # data_copy_check [NOW] -- the stream's data copy (TOOLS's loop 6, /mnt/durable/sami/tools-loops/data-copy.sh)
 # saved the live tree to Cloud Storage within 2 h: after each verified snapshot it writes its UTC time to
 # OSSV_DATA_COPY_OK. The loop starts here in the freeze of 2026-11-03, so before OSSV_DATA_COPY_FROM the line
-# is a note, neither ok nor FAIL. NOW is the Unix time to judge at (default: now).
-OSSV_DATA_COPY_OK=/mnt/nvme/sami/oss-verifier/ops.git/ossv-data-copy.ok
+# is a note, neither ok nor FAIL. NOW is the Unix time to judge at (default: now). The stamp is the one the
+# loop writes since 2026-11-06, in notes/: its old path in ops.git went with that retired directory.
+OSSV_DATA_COPY_OK=/mnt/nvme/sami/oss-verifier/notes/ossv-data-copy.ok
 OSSV_DATA_COPY_FROM=2026-11-04T00:30:00Z
 data_copy_check() {
     local now="${1:-$(date +%s)}" from got at
@@ -858,54 +859,111 @@ legacy_is_keyless() {
     done <<<"$out"
 }
 
+# LOGIN_JUDGE_PY: judge, as root, each login file named on stdin (one path a line) by what it holds,
+# and print `<verdict>TAB<path>[TAB<accounts>]` a line (a tab, so a path may hold spaces). Verdicts:
+#   person   a person's login or a long-lived secret: a JSON credential with a refresh_token or a
+#            private_key, a gh hosts.yml with a GitHub token (gho_, ghp_, ghu_, ghs_, ghr_,
+#            github_pat_), a credentialed_accounts.db (A2 names it), a gcloud credentials.db with an
+#            authorized_user row (its accounts follow);
+#   machine  a keyless external_account (an Azure box's identity: no refresh token, no key);
+#   empty    no credential at all: a JSON or hosts.yml with neither, a credentials.db with no row or no
+#            credentials table. Go tests leave such files behind by the thousand: on 2026-11-22, 7,174
+#            application_default_credentials.json holding only {"type": "authorized_user"} in
+#            TestCreateSignalHelper temp directories, each a FAIL while the check judged by name;
+#   error    a file that could not be read, which says nothing, so it fails the line.
+# credentials.db is read with immutable=1: a store gcloud left a journal beside is read as it is,
+# with no lock and no write (mode=ro alone answered "attempt to write a readonly database").
+LOGIN_JUDGE_PY='
+import json, os, re, sqlite3, sys
+SECRET = re.compile(r"\"(refresh_token|private_key)\"\s*:\s*\"[^\"]+")
+GH_TOKEN = re.compile(r"oauth_token:\s*[\x27\"]?(gh[opusr]_|github_pat_)")
+def say(*fields):
+    print("\t".join(fields))
+for path in (line.rstrip("\n") for line in sys.stdin):
+    if not path:
+        continue
+    name = os.path.basename(path)
+    try:
+        if name == "credentialed_accounts.db":
+            say("person", path)
+        elif name == "credentials.db":
+            con = sqlite3.connect("file:" + path + "?mode=ro&immutable=1", uri=True)
+            try:
+                rows = con.execute("select account_id, value from credentials").fetchall()
+            except sqlite3.OperationalError as e:
+                if "no such table" not in str(e):
+                    raise
+                rows = []
+            users = [a for a, v in rows if json.loads(v).get("type") == "authorized_user"]
+            say("person", path, ",".join(users)) if users else say("empty", path)
+        else:
+            text = open(path, errors="replace").read()
+            if name == "hosts.yml":
+                say("person" if GH_TOKEN.search(text) else "empty", path)
+            elif SECRET.search(text):
+                say("person", path)
+            else:
+                try:
+                    kind = json.loads(text).get("type")
+                except (ValueError, AttributeError):
+                    kind = None
+                say("machine" if kind == "external_account" else "empty", path)
+    except Exception as e:
+        say("error", path, type(e).__name__)
+'
+
+# login_paths_line ARRAY: the count of the paths in the array named ARRAY, the directories that hold
+# most of them, and the first five, so a line stays readable when there are thousands (run 2 of
+# 2026-11-22 printed one line of 1 MB).
+login_paths_line() {
+    local -n lp="$1"
+    printf '%s' "${#lp[@]}, mostly under $(printf '%s\n' "${lp[@]}" | awk -F/ '{ print "/" $2 "/" $3 "/" $4 "/" $5 }' \
+        | sort | uniq -c | sort -rn | head -3 | awk '{ printf "%s%s (%s)", (NR > 1 ? ", " : ""), $2, $1 }'); e.g. ${lp[*]:0:5}"
+}
+
 # No person's login on any mounted disk: the A2 file names, a gh login, and any gcloud or Azure
 # store that holds a user's login. Every local filesystem is walked once (-xdev per mount) for all
-# of these names together, past the trees LOGIN_PRUNE names (login_walks). Until 2026-11-22 it was
-# walked three times, once per kind of file, and the second and third walks skipped /mnt/scratch.
-# A2 names legacy_credentials as a person's login, and gcloud also writes that directory for the
-# machine's own accounts: a session's own CLOUDSDK_CONFIG that holds dev-sjawhar@'s keyless
-# external_account has one, and `agentbox move --to` carries it with the session (three on
-# 2026-11-03 05:25-05:39Z). So a legacy_credentials directory is judged by what it holds, as
-# credentials.db is below: one that legacy_is_keyless passes is a note, not a FAIL; every other
-# file of the list, and a service account key, is a FAIL.
+# of these names together, past the trees LOGIN_PRUNE names (login_walks), and each walk's time is a
+# note. Until 2026-11-22 it was walked three times, once per kind of file, and the second and third
+# walks skipped /mnt/scratch.
+# A file is judged by what it holds (LOGIN_JUDGE_PY), not by its name: A2 names the files, and gcloud,
+# Go tests and moved sessions write files of those names that hold no person's login. A
+# legacy_credentials directory is judged by legacy_is_keyless: gcloud writes it for the machine's
+# own accounts too, and `agentbox move --to` carries a session's own CLOUDSDK_CONFIG holding
+# dev-sjawhar@'s keyless external_account (three on 2026-11-03 05:25-05:39Z). Keyless and empty ones
+# are notes; a person's login, a key, and a file that could not be read are FAILs.
 host_logins() {
-    local -a names=() hits=() found=() person=() machine=() dbs=() profiles=()
-    local n f walked=1
+    local -a names=() hits=() files=() person=() machine=() empty=() unread=() profiles=() users=()
+    local n f verdict path rest walked=1
     for n in "${LOGIN_FILES[@]}"; do names+=(-name "$n" -o); done
     names+=(-path '*/.config/gh/hosts.yml' -o \( -name credentials.db -path '*gcloud*' \) -o -name azureProfile.json)
     login_walks hits "${names[@]}" || walked=0
+    note "logins: walks (one pruned find per disk, the four at once): ${LOGIN_WALK_TIMES%; }"
     for f in "${hits[@]}"; do
         case "${f##*/}" in
-            credentials.db) dbs+=("$f") ;;
             azureProfile.json) profiles+=("$f") ;;
-            *) found+=("$f") ;;
+            legacy_credentials) if legacy_is_keyless "$f"; then machine+=("$f"); else person+=("$f"); fi ;;
+            *) files+=("$f") ;;
         esac
     done
-    for f in "${found[@]}"; do
-        if [[ "${f##*/}" == legacy_credentials ]] && legacy_is_keyless "$f"; then machine+=("$f"); else person+=("$f"); fi
-    done
-    (( ${#machine[@]} )) && note "logins: legacy_credentials holding only keyless external_account credentials (no person's login, no key): ${machine[*]}"
+    while IFS=$'\t' read -r verdict path rest; do
+        case "$verdict" in
+            person) person+=("$path"); [[ -n "$rest" ]] && users+=("$path: $rest") ;;
+            machine) machine+=("$path") ;;
+            empty) empty+=("$path") ;;
+            *) unread+=("$path${rest:+ ($rest)}") ;;
+        esac
+    done < <((( ${#files[@]} )) && printf '%s\n' "${files[@]}" | sudo -n python3 -c "$LOGIN_JUDGE_PY" 2>&1)
+    (( ${#machine[@]} )) && note "logins: keyless external_account credentials (no person's login, no key): $(login_paths_line machine)"
+    (( ${#empty[@]} )) && note "logins: login-named files holding no credential: $(login_paths_line empty)"
+    (( ${#unread[@]} )) && fail "logins: login files that could not be read: $(login_paths_line unread)"
     if (( ${#person[@]} )); then
-        fail "logins: person's login files present: ${person[*]}"
-    elif (( walked )); then
-        ok "logins: no ${LOGIN_FILES[*]} or .config/gh/hosts.yml holding a person's login on ${LOGIN_MOUNTS[*]}, past package, build, git-object and container trees (walks: ${LOGIN_WALK_TIMES%; })"
+        fail "logins: a person's login or a key in $(login_paths_line person)${users:+; gcloud user rows: ${users[*]:0:3}}"
+    elif (( walked && ${#unread[@]} == 0 )); then
+        ok "logins: no ${LOGIN_FILES[*]}, gcloud credentials.db or .config/gh/hosts.yml holding a person's login on ${LOGIN_MOUNTS[*]}, past package, build, git-object and container trees"
     fi
-    # gcloud's own stores: a row whose credential is authorized_user is a person's login.
-    found=()
-    for f in "${dbs[@]}"; do
-        n="$(python3 - "$f" <<'PY' 2>&1
-import json, sqlite3, sys
-con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
-rows = con.execute("select account_id, value from credentials").fetchall()
-print(" ".join(a for a, v in rows if json.loads(v).get("type") == "authorized_user"))
-PY
-)"
-        [[ -n "$n" ]] && found+=("$f: $n")
-    done
-    if (( ${#found[@]} )); then fail "logins: gcloud user logins stored: ${found[*]}"
-    elif (( walked )); then ok "logins: no gcloud credentials.db holds an authorized_user row"; fi
     # Azure: a profile whose subscriptions name a user is a person's login.
-    found=()
+    local -a found=()
     for f in "${profiles[@]}"; do
         sudo -n cat "$f" 2>/dev/null | jq -e '[.subscriptions[]?.user.type] | any(. == "user")' >/dev/null 2>&1 && found+=("$f")
     done
@@ -914,12 +972,15 @@ PY
     host_omp_logins
 }
 
-# omp's own credential store on the host. Every live row is a person's login, with two exceptions:
-# the Slack MCP login, which the box half's "slack MCP" line judges, and Sami's own Anthropic login,
-# which he added himself at 2026-11-03 22:40Z (interactive /login in session 01a13dca's omp) while
-# he fixed the stalled sessions; that one row, matched by provider, account and creation time, is a
-# note. Any other row, or another Anthropic login, is a FAIL.
+# omp's own credential store on the host. Every live row is a person's login, with these exceptions:
+# the Slack MCP login, which the box half's "slack MCP" line judges, and two logins Sami added himself,
+# each matched by provider, account and creation time and a note: his Anthropic login of 2026-11-03
+# 22:40Z (interactive /login in session 01a13dca's omp, while he fixed the stalled sessions), and his
+# Codex login of 2026-11-11 00:53Z, which the implementation roles run on
+# (dispatch://INFRA-2212/comment/a2e7c2d6-c3bc-4153-964d-def0409b241e; devbox/sami-devbox-model-routes).
+# Any other row, or another login of either provider, is a FAIL.
 SAMI_ANTHROPIC_LOGIN="anthropic|email:sami@theorem.dev|1793745601"
+SAMI_CODEX_LOGIN="openai-codex|email:sami@theorem.dev|1794358386"
 host_omp_logins() {
     local out rc=0 row
     local -a other=()
@@ -937,6 +998,7 @@ PY
         case "$row" in
             "mcp_oauth:profile:default:https://mcp.slack.com/mcp|"*) ;;
             "$SAMI_ANTHROPIC_LOGIN") note "logins: omp agent.db holds Sami's own login, added by him 22:40Z while fixing the stall (anthropic, sami@theorem.dev, created 2026-11-03T22:40Z)" ;;
+            "$SAMI_CODEX_LOGIN") note "logins: omp agent.db holds Sami's own Codex login, added by him for the implementation roles (openai-codex, sami@theorem.dev, created 2026-11-11T00:53Z)" ;;
             *) other+=("$row") ;;
         esac
     done <<<"$out"
@@ -1157,19 +1219,6 @@ host_bwrap() {
     (( rc == 0 )) && ok "bwrap ${args[*]}: exit 0" || fail "bwrap ${args[*]}: exit $rc: $(tail -1 <<<"$out")"
 }
 
-# Movers (S3 and others) run scripts on sami-rocqperf over ssh after the move, so this machine
-# must reach it. Both are Sami's own nodes, so Tailscale SSH on sami-rocqperf takes the
-# connection as sami by the policy's accept rule for his own devices (dispatch://INFRA-1099).
-rocqperf_check() {
-    local out rc=0
-    out="$(ssh -o BatchMode=yes -o ConnectTimeout=15 sami@sami-rocqperf true </dev/null 2>&1)" || rc=$?
-    if (( rc == 0 )); then
-        ok "ssh sami-devbox -> sami-rocqperf: ssh -o BatchMode=yes sami@sami-rocqperf true exits 0"
-    else
-        fail "ssh sami-devbox -> sami-rocqperf: exit $rc: $(tail -1 <<<"$out")"
-    fi
-}
-
 # The public-text leak check: ~/.local/share/public-leak-check holds the tag of agent-infra's
 # leak-check/ that devbox/leak-check-tag.env names (sami-devbox-provision's step leakcheck installs
 # it), so its launcher, Python module, README and must-pass fixture must have that file's sha256.
@@ -1335,7 +1384,6 @@ host() {
     host_guard
     github_check "on the host"
     tq_check "on the host"
-    rocqperf_check
     leak_check_host_check
     prepush_hook_host_check
     global_hooks_host_check
