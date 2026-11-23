@@ -1,9 +1,14 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 """Check diffs, commit messages, outgoing commits and the text a gh call sends against the encrypted leak-term list.
 
 This is the one matcher: a caller (shims/git's hooks, shims/jj, jj-push-hooks, shims/gh) runs it and matches no term
 itself, and takes any nonzero exit for a refusal, except GH_STDIN_EXIT in `gh` mode, which asks for a second pass with
-the call's stdin. A refusal shows the text that matched (Finding)."""
+the call's stdin. A refusal shows the text that matched (Finding).
+
+It runs as /usr/bin/python3 in isolated mode (-I), never a python3 on PATH, and imports only the standard library:
+omp's bash tool sets CI=true, under which mise trusts every config file, so a checkout's `.mise.toml` reached
+mise's python3 shim, which ran its `[env] _.source` script and imported its `PYTHONPATH`'s sitecustomize.py inside
+this check (measured 2026-11-23). For the same reason sops runs from this script's own checkout (load_terms)."""
 from __future__ import annotations
 
 import argparse
@@ -120,16 +125,20 @@ def pinned_install(data: Path, pin: str) -> str | None:
 
 def sops_command(environment: Mapping[str, str]) -> str | None:
     """The sops to run: the first on PATH, except that mise's shim gives way to the pinned sops it would run; with no
-    sops on PATH, the pinned sops in mise's data dirs.
+    sops on PATH, the pinned sops in mise's data dirs. Only an absolute PATH entry counts: a relative one names a
+    directory of whatever checkout the check runs in.
 
     mise's shim takes its version from the caller's HOME (mise's global config) or from a mise.toml in the caller's
     directory, so a commit made with a test's HOME outside this checkout found no version and the shim exited 1
     (2026-11-16, every Legion fixture repository on sami-devbox). The pinned install sits in the same mise data
     directory as the shims directory, so finding it reads no HOME. With no exact pin in this checkout's mise.toml, or
-    no install of it there, the shim runs as found. A Legion test pane's PATH holds no sops at all
-    (`<bin>:/usr/local/bin:/usr/bin:/bin`), so every commit through shims/jj there was refused until 2026-11-17."""
+    no install of it there, the shim runs as found, from this checkout (load_terms). A Legion test pane's PATH holds no
+    sops at all (`<bin>:/usr/local/bin:/usr/bin:/bin`), so every commit through shims/jj there was refused until
+    2026-11-17."""
     pin = pinned_sops()
-    found = shutil.which("sops", path=environment.get("PATH", os.defpath))
+    path = os.pathsep.join(entry for entry in environment.get("PATH", os.defpath).split(os.pathsep)
+                           if os.path.isabs(entry))
+    found = shutil.which("sops", path=path)
     if found is None:
         if not pin:
             return None
@@ -276,20 +285,29 @@ def load_terms(environment: Mapping[str, str] | None = None, repositories: Seque
     only gh text read the registry's lists, so a push, and a `diff` or `message` given --repository, passed a term that
     only such a list holds."""
     environment = dict(os.environ if environment is None else environment)
-    source = term_file(environment)
+    # A relative path would move with the working directory sops runs in, below.
+    source = term_file(environment).absolute()
     if not source.is_file():
         raise list_error("the term list is missing; run scripts/dotfiles-sync local")
 
     sops = sops_command(environment)
     if sops is None:
         raise list_error(missing_sops(environment))
+    decrypting = sops_environment(environment)
+    if decrypting.get("SOPS_AGE_KEY_FILE"):
+        decrypting["SOPS_AGE_KEY_FILE"] = os.path.abspath(decrypting["SOPS_AGE_KEY_FILE"])
     try:
+        # sops runs from this script's own checkout, never from the checkout being checked: where sops_command finds
+        # only mise's shim, mise reads the project config of the directory the shim runs in, and with CI=true trusts
+        # it, so a checkout's `.mise.toml` would run its `[env] _.source` script; this checkout's mise.toml is the one
+        # that pins sops. sops also looks for a `.sops.yaml` from the directory it runs in.
         completed = subprocess.run(
             [sops, "--decrypt", "--output-type", "json", str(source)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            env=sops_environment(environment),
+            env=decrypting,
+            cwd=Path(__file__).resolve().parent.parent,
             timeout=30,
             check=False,
         )
@@ -378,12 +396,23 @@ def allowed_token(token: str) -> re.Pattern[str]:
     return re.compile(r"(?<![A-Za-z0-9._@/-])" + re.escape(token) + r"(?![A-Za-z0-9._/-])")
 
 
+# What parts the words of a term: a run of any in-line whitespace, so a term whose words a no-break space (U+00A0), a
+# thin space (U+2009), a narrow no-break space (U+202F), an em space (U+2003) or an ideographic space (U+3000) parts is
+# still the term, in a ref name, a path or a code line. Until 2026-11-23 only spaces and tabs parted them, so such a
+# term in a code line or a path matched nowhere (found on sjawhar/dotfiles#185, a87592e4). No line break parts them,
+# neither a line feed nor any other str.splitlines breaks at (a carriage return, \v, \f, U+001C to U+001E, U+0085,
+# U+2028, U+2029), so a code file still matches a line at a time; a prose run's line breaks are spaces in its paragraph
+# view (paragraph_view). U+001F, which str.splitlines does not break at, parts them as any in-line whitespace does.
+TERM_SEPARATOR = r"[^\S\n\r\x0b\x0c\x1c-\x1e\x85\u2028\u2029]+"
+
+
 class TermMatcher:
-    """Case-folded, whitespace-flexible matching while keeping source-string positions. SCOPED holds (Scope, terms) for
-    each scoped list read, and `scopes` maps each label to its Scope. A term two lists hold matches once for each,
-    since each list says where its terms may not go. ALLOWED holds (repository pattern, tokens): a match inside such
-    a token is not a term in that repository (a third-party name that holds one), and with REPOSITORIES, the places a
-    text goes, a match every one of them allows is dropped; otherwise each match says where it is allowed.
+    """Case-folded, whitespace-flexible matching while keeping source-string positions: a term's words match when any
+    run of in-line whitespace (TERM_SEPARATOR) parts them. SCOPED holds (Scope, terms) for each scoped list
+    read, and `scopes` maps each label to its Scope. A term two lists hold matches once for each, since each list says
+    where its terms may not go. ALLOWED holds (repository pattern, tokens): a match inside such a token is not a term in
+    that repository (a third-party name that holds one), and with REPOSITORIES, the places a text goes, a match every
+    one of them allows is dropped; otherwise each match says where it is allowed.
 
     A knives registry list (Scope.registry) reads text, not names: names() is this matcher without those lists, and
     spans() drops their matches inside the NAMES it is given. Legion's branch names, its GitHub App identities and the
@@ -398,8 +427,8 @@ class TermMatcher:
         self.scopes = {scope.label: scope for scope, _ in scoped}
         for label, listed in (("", terms), *((scope.label, listed) for scope, listed in scoped)):
             for number, term in enumerate(listed, start=1):
-                pieces = re.split(r"[ \t]+", term.casefold())
-                pattern = r"[ \t]+".join(re.escape(piece) for piece in pieces)
+                pieces = re.split(TERM_SEPARATOR, term.casefold())
+                pattern = TERM_SEPARATOR.join(re.escape(piece) for piece in pieces)
                 if pattern and (label, pattern) not in seen:
                     patterns.append((re.compile(pattern), number, label))
                     seen.add((label, pattern))
@@ -407,7 +436,8 @@ class TermMatcher:
         self._allowed = [(pattern, allowed_token(token)) for pattern, tokens in allowed for token in tokens]
         self._repositories = tuple(repositories) if repositories else ()
         named = [(scope, listed) for scope, listed in scoped if not scope.registry]
-        self._names = self if len(named) == len(scoped) else TermMatcher(terms, named, allowed, repositories)
+        self._names: TermMatcher = (self if len(named) == len(scoped)
+                                    else TermMatcher(terms, named, allowed, repositories))
 
     def names(self) -> TermMatcher:
         """This matcher without the knives registry's lists, for a text that is a name: an identity header (author,
@@ -474,6 +504,15 @@ def paragraph_view(text: str) -> str:
 
 
 def c_escape(text: str) -> str:
+    """TEXT as one line a terminal shows as written: a backslash doubled, a line feed, a carriage return and a tab as
+    `\\n`, `\\r` and `\\t`, any other ASCII control as `\\xNN`, and every other character str.isprintable refuses as
+    `\\uNNNN` (`\\UNNNNNNNN` past U+FFFF): the C1 controls U+0080 to U+009F, which a terminal can take as a command
+    (U+009B starts one), format characters such as U+202E, which reverses the text after it, separators other than the
+    space (a no-break space, U+2028), and the bytes surrogateescape keeps (U+DC80 to U+DCFF). A refusal's places,
+    names and lines pass through it, a gh text's JSON path included, and so do the text a caller types into an error: a
+    gh alias's name and why it is refused, and the reason of a list, editor or unreadable-text error. Until 2026-11-23
+    the unprintable characters past ASCII were shown raw (found on sjawhar/dotfiles#185, e0b66d48), and a gh JSON path,
+    which json.dumps writes with ensure_ascii=False, and those errors' text were not escaped at all."""
     escaped: list[str] = []
     for character in text:
         if character == "\\":
@@ -486,8 +525,12 @@ def c_escape(text: str) -> str:
             escaped.append("\\t")
         elif ord(character) < 32 or ord(character) == 127:
             escaped.append(f"\\x{ord(character):02x}")
-        else:
+        elif character.isprintable():
             escaped.append(character)
+        elif ord(character) <= 0xFFFF:
+            escaped.append(f"\\u{ord(character):04x}")
+        else:
+            escaped.append(f"\\U{ord(character):08x}")
     return "".join(escaped)
 
 
@@ -927,6 +970,24 @@ GIT_SPACE = " \t\n\r"
 GIT_GENERATED_TRAILERS = ("Signed-off-by: ", "(cherry picked from commit ")
 # The trailers whose value names a person, in any letter case: git's own and GitHub's co-author.
 IDENTITY_TRAILERS = frozenset(("signed-off-by", "co-authored-by"))
+# An identity as git writes one, `Name <email>`, alone on the first line of such a trailer's value: the name is what
+# the group holds. Any other value, and a value's folded lines, are text.
+IDENTITY_VALUE = re.compile(r"[ \t]*([^<>\s][^<>\n\r]* <[^<>\s]+>)[ \t\r]*")
+
+
+@lru_cache(maxsize=1)
+def configured_comment_char() -> str:
+    """The comment character git reads a message's trailers with in this repository (config.c, core.commentChar): the
+    one byte it is set to, else `#`, git's default and what `auto` leaves it at, also where git's configuration cannot
+    be read."""
+    try:
+        completed = subprocess.run(["git", "config", "--get", "core.commentChar"], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=git_environment(),
+                                   timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return "#"
+    value = completed.stdout.removesuffix(b"\n")
+    return value.decode("ascii") if completed.returncode == 0 and len(value) == 1 and value.isascii() else "#"
 
 
 def git_next_line(text: str, start: int) -> int:
@@ -965,12 +1026,12 @@ def git_trailer_separator(text: str, start: int) -> int:
     return -1
 
 
-def git_ignored_bytes(text: str, length: int) -> int:
-    """trailer.c ignored_log_message_bytes, with `#` comments: how many characters at the end of TEXT[:LENGTH] are
-    neither message nor trailers: from the scissors line on (wt_status_locate_end), and the run of comment lines, empty
-    lines and an old `Conflicts:` block before it."""
+def git_ignored_bytes(text: str, length: int, comment: str) -> int:
+    """trailer.c ignored_log_message_bytes, with the comment character COMMENT: how many characters at the end of
+    TEXT[:LENGTH] are neither message nor trailers: from the scissors line on (wt_status_locate_end), and the run of
+    comment lines, empty lines and an old `Conflicts:` block before it."""
     cutoff = length
-    scissors = f"\n# {SCISSORS}\n"
+    scissors = f"\n{comment} {SCISSORS}\n"
     if text.startswith(scissors[1:]):
         cutoff = 0
     elif (found := text.find(scissors)) >= 0 and found + 1 < length:
@@ -981,7 +1042,7 @@ def git_ignored_bytes(text: str, length: int) -> int:
     while start < cutoff:
         newline = text.find("\n", start, length)
         following = length if newline < 0 else newline + 1
-        if text.startswith("#", start, cutoff) or text[start] == "\n":
+        if text.startswith(comment, start, cutoff) or text[start] == "\n":
             # git keeps 0 for no run, so a run that starts the text is no run.
             run = run or start
         elif text.startswith("Conflicts:\n", start):
@@ -996,14 +1057,14 @@ def git_ignored_bytes(text: str, length: int) -> int:
     return length - run if run else length - cutoff
 
 
-def git_trailer_block_start(text: str, length: int) -> int:
-    """trailer.c find_trailer_block_start, with no trailer configuration and `#` comments: the start of the trailer
-    block of TEXT[:LENGTH], LENGTH for none. It is the last paragraph after the title whose lines are all trailers
-    (`Key: value`, and their continuation lines), or that holds a line git writes itself (GIT_GENERATED_TRAILERS) and
-    whose trailers are at least a quarter of its lines; comment lines count for nothing."""
+def git_trailer_block_start(text: str, length: int, comment: str) -> int:
+    """trailer.c find_trailer_block_start, with no trailer configuration and the comment character COMMENT: the start
+    of the trailer block of TEXT[:LENGTH], LENGTH for none. It is the last paragraph after the title whose lines are all
+    trailers (`Key: value`, and their continuation lines), or that holds a line git writes itself
+    (GIT_GENERATED_TRAILERS) and whose trailers are at least a quarter of its lines; comment lines count for nothing."""
     title_end = 0
     while title_end < length:
-        if not text.startswith("#", title_end, length) and git_blank_line(text, title_end):
+        if not text.startswith(comment, title_end, length) and git_blank_line(text, title_end):
             break
         title_end = git_next_line(text, title_end)
     only_spaces = True
@@ -1011,7 +1072,7 @@ def git_trailer_block_start(text: str, length: int) -> int:
     trailers = non_trailers = continuations = 0
     line = git_last_line(text, length)
     while line >= title_end:
-        if text.startswith("#", line, length):
+        if text.startswith(comment, line, length):
             non_trailers += continuations
             continuations = 0
         elif git_blank_line(text, line):
@@ -1038,23 +1099,25 @@ def git_trailer_block_start(text: str, length: int) -> int:
     return length
 
 
-def git_trailers(text: str) -> list[tuple[tuple[int, int], tuple[int, int]]]:
-    """The trailers of the message TEXT as git 2.43's `git interpret-trailers --parse` reads them with no trailer
-    configuration (trailer.c trailer_info_get and parse_trailers): each as the (start, end) in TEXT of its key and of
-    its value, which runs over its continuation lines. The message ends at a line that starts with `---` and
-    whitespace, and before its trailing comment and empty lines (git_ignored_bytes); a comment line in the block and a
-    line that is no `Key: value` are no trailer."""
+def git_trailers(text: str, divider: bool, comment: str) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """The trailers of the message TEXT as git 2.43 reads them with no trailer configuration and the comment character
+    COMMENT (trailer.c trailer_info_get and parse_trailers): each as the (start, end) in TEXT of its key and of its
+    value, which runs over its continuation lines. With DIVIDER, as `git interpret-trailers --parse` reads a file, the
+    message ends at a line that starts with `---` and whitespace; without, as git reads an object's own trailers
+    (`git log --format=%(trailers)`, `git interpret-trailers --parse --no-divider`), it does not. It ends before its
+    trailing comment and empty lines (git_ignored_bytes); a comment line in the block and a line that is no `Key: value`
+    are no trailer."""
     end = len(text)
     start = 0
-    while start < len(text):
+    while divider and start < len(text):
         if text.startswith("---", start) and start + 3 < len(text) and text[start + 3] in GIT_SPACE:
             end = start
             break
         start = git_next_line(text, start)
-    end -= git_ignored_bytes(text, end)
+    end -= git_ignored_bytes(text, end, comment)
     entries: list[list[int]] = []
     joins = False
-    start = git_trailer_block_start(text, end)
+    start = git_trailer_block_start(text, end, comment)
     while start < end:
         newline = text.find("\n", start, end)
         following = end if newline < 0 else newline + 1
@@ -1066,30 +1129,38 @@ def git_trailers(text: str) -> list[tuple[tuple[int, int], tuple[int, int]]]:
         start = following
     found: list[tuple[tuple[int, int], tuple[int, int]]] = []
     for first, last in entries:
-        separator = -1 if text.startswith("#", first) else git_trailer_separator(text, first)
+        separator = -1 if text.startswith(comment, first) else git_trailer_separator(text, first)
         if separator >= 1:
             found.append(((first, first + separator), (first + separator + 1, last)))
     return found
 
 
-def git_trailer_names(text: str) -> list[tuple[int, int]]:
-    """The (start, end) in the message TEXT of each name its trailers hold (git_trailers): each key, and the value of an
-    identity trailer (IDENTITY_TRAILERS). The rest of the message, every other value included, is text."""
+def git_trailer_names(text: str, divider: bool, comment: str) -> list[tuple[int, int]]:
+    """The (start, end) in the message TEXT of each name its trailers hold (git_trailers, with DIVIDER and COMMENT):
+    each key, and the identity on the first line of an identity trailer's value (IDENTITY_TRAILERS, IDENTITY_VALUE).
+    The rest of the message, every other value and a value's folded lines included, is text."""
     names: list[tuple[int, int]] = []
-    for key, value in git_trailers(text):
+    for key, (start, end) in git_trailers(text, divider, comment):
         names.append(key)
         if text[key[0]:key[1]].strip(" \t").lower() in IDENTITY_TRAILERS:
-            names.append(value)
+            newline = text.find("\n", start, end)
+            identity = IDENTITY_VALUE.fullmatch(text, start, end if newline < 0 else newline)
+            if identity:
+                names.append(identity.span(1))
     return names
 
 
 def scan_message(text: str, matcher: TermMatcher, cleanup: str, comment_char: str | None, cut_at_scissors: bool,
-                 place: str) -> list[Finding]:
+                 place: str, divider: bool) -> list[Finding]:
     """A commit, tag or jj message, cleaned as git or jj cleans it, read as prose: as line_findings reads one run of
-    lines, with the names its trailers hold (git_trailer_names) read as names (TermMatcher.spans)."""
+    lines, with the names its trailers hold (git_trailer_names, with DIVIDER and configured_comment_char) read as names
+    (TermMatcher.spans), which only a matcher with a knives registry list reads. An object's message has no divider, as
+    git reads its trailers; a hand-run `message` has one, as `git interpret-trailers` reads a file."""
     message = "\n".join(cleaned_message(text, cleanup, comment_char, cut_at_scissors))
+    names = (git_trailer_names(message, divider, configured_comment_char())
+             if any(scope.registry for scope in matcher.scopes.values()) else [])
     findings: list[Finding] = []
-    for span in matcher.spans(paragraph_view(message), git_trailer_names(message)):
+    for span in matcher.spans(paragraph_view(message), names):
         line = 1 + message.count("\n", 0, span.start)
         findings.append(Finding(f"{place} line {line}", *excerpt(message, span.start, span.end), span.scope))
     return findings
@@ -1327,7 +1398,7 @@ def jj_editor(path: str) -> int:
     try:
         text = Path(path).read_text(encoding="utf-8")
     except OSError as error:
-        print(f"leak terms: cannot read jj editor file: {error}", file=sys.stderr)
+        print(f"leak terms: cannot read jj editor file: {c_escape(str(error))}", file=sys.stderr)
         return 1
     line_number = 1
     for line in rust_lines(text):
@@ -1341,7 +1412,7 @@ def jj_editor(path: str) -> int:
     try:
         command, configured_environment = jj_editor_command(configured, path, line_number)
     except ValueError as error:
-        print(f"leak terms: {error}", file=sys.stderr)
+        print(f"leak terms: {c_escape(str(error))}", file=sys.stderr)
         return 1
     if editor_is_wrapper(command):
         print("leak terms: recursive jj editor wrapper refused", file=sys.stderr)
@@ -1349,7 +1420,7 @@ def jj_editor(path: str) -> int:
     try:
         matcher = load_terms()
     except ListError as error:
-        print(error, file=sys.stderr)
+        print(c_escape(str(error)), file=sys.stderr)
         return 1
 
     environment = {**os.environ, **(configured_environment or {}), EDITOR_GUARD: "1"}
@@ -1378,7 +1449,7 @@ def jj_editor(path: str) -> int:
     findings: list[Finding] = []
     for commit_id, description in sections:
         place = "commit message" if commit_id is None else f"description of {commit_id}"
-        findings.extend(scan_message(description, matcher, "verbatim", None, False, place))
+        findings.extend(scan_message(description, matcher, "verbatim", None, False, place, False))
     if not findings:
         return 0
     print_findings(findings)
@@ -1665,11 +1736,15 @@ def git_chunks(arguments: Sequence[str], standard_input: bytes) -> Iterator[byte
 
 
 def push_updates(text: str) -> tuple[list[tuple[str, str]], list[str]]:
-    """Read Git's pre-push updates: each sent object with the remote ref it goes to, and the remote's prior objects."""
+    """Read Git's pre-push updates: each sent object with the remote ref it goes to, and the remote's prior objects.
+    git writes each update as four fields joined by one space (transport.c run_pre_push_hook). A ref name holds no
+    ASCII space, but it can hold a no-break space or a line separator, which str.split() also split at, so until
+    2026-11-23 a push of such a ref was refused as a malformed update (found on sjawhar/dotfiles#185, 130d9a53). The
+    line is split at its last three spaces: only the first field, the source as the push named it, may hold one."""
     local: list[tuple[str, str]] = []
     remote: list[str] = []
     for line in newline_lines(text):
-        fields = line.split()
+        fields = line.rsplit(" ", 3)
         if len(fields) != 4 or not OBJECT_ID.fullmatch(fields[1]) or not OBJECT_ID.fullmatch(fields[3]):
             raise TextError("malformed pre-push update")
         if set(fields[1]) != {"0"}:
@@ -2081,7 +2156,7 @@ def object_findings(content: bytes, place: str, matcher: TermMatcher, is_tag: bo
     encoding = field_value(fields, b"encoding")
     findings = header_findings(fields, encoding, place, matcher, is_tag)
     findings.extend(texts_findings(git_texts(message, encoding), lambda text: scan_message(
-        text, matcher, "verbatim", None, False, f"{place} message")))
+        text, matcher, "verbatim", None, False, f"{place} message", False)))
     return findings
 
 
@@ -4455,7 +4530,7 @@ def gh_findings(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhTex
     for piece, text in contents:
         reader = matcher.names() if piece.is_name else matcher
         for path, value, both in gh_values(piece, text, graphql(piece)):
-            label = piece.shown() + (f" {path}" if path else "")
+            label = piece.shown() + (f" {c_escape(path)}" if path else "")
             views = [("", value)]
             if both and "\\" in value:
                 views.append(("escapes decoded", escapes_decoded(value)))
@@ -5170,7 +5245,7 @@ def gh_terms(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText],
     try:
         matcher = load_terms(repositories=EVERY_REPOSITORY)
     except ListError as error:
-        return None, str(error), []
+        return None, c_escape(str(error)), []
     return matcher, None, gh_findings(contents, graphql, matcher)
 
 
@@ -5205,7 +5280,7 @@ def gh_refusal(name: str, reached: Sequence[GhTarget], matcher: TermMatcher | No
     for found in kept_findings:
         print(f"leak terms: {name} to {target}: {found.finding}", file=sys.stderr)
     for piece, reason in unreadable:
-        print(f"leak terms: {name} to {target}: cannot read {piece.shown()}: {reason}", file=sys.stderr)
+        print(f"leak terms: {name} to {target}: cannot read {piece.shown()}: {c_escape(reason)}", file=sys.stderr)
     if list_problem:
         print(list_problem, file=sys.stderr)
         print(f"leak terms: {name} to {target}: its text cannot be checked without the list", file=sys.stderr)
@@ -5229,7 +5304,7 @@ def gh_check(arguments: Sequence[str]) -> int:
     try:
         command = gh_command(arguments, environment)
     except GhAliasError as error:
-        name, problem = error.args
+        name, problem = (c_escape(str(part)) for part in error.args)
         print(f"leak terms: gh {name}: {problem}", file=sys.stderr)
         print(f"leak terms: gh {name}: refused before gh ran, so nothing was sent.", file=sys.stderr)
         return TEXT_EXIT
@@ -5390,7 +5465,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     try:
         text = "" if args.mode == "staged" else read_stdin(args.encoding if args.mode == "message" else "utf-8")
     except TextError as error:
-        print(f"leak terms: cannot read text to check: {error}", file=sys.stderr)
+        print(f"leak terms: cannot read text to check: {c_escape(str(error))}", file=sys.stderr)
         return TEXT_EXIT
 
     if args.mode == "git-comment-char":
@@ -5417,12 +5492,13 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     print(SCOPED_NOTE, file=sys.stderr)
                 findings = scan_diff(text, matcher, args.place_prefix or "")
             else:
-                findings = scan_message(text, matcher, args.cleanup, args.comment_char, args.cut_at_scissors, args.place)
+                findings = scan_message(text, matcher, args.cleanup, args.comment_char, args.cut_at_scissors,
+                                        args.place, True)
     except ListError as error:
-        print(error, file=sys.stderr)
+        print(c_escape(str(error)), file=sys.stderr)
         return LIST_EXIT
     except TextError as error:
-        print(f"leak terms: cannot read text to check: {error}", file=sys.stderr)
+        print(f"leak terms: cannot read text to check: {c_escape(str(error))}", file=sys.stderr)
         return TEXT_EXIT
 
     if not findings:
