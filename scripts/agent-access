@@ -127,14 +127,19 @@ check_github_app() {
         "personal gh login is refused by design (shims/gh)"
 }
 
+# The login, the expiry and `expired` are matched in stdout and stderr together, since no run here has shown which
+# stream ant answers on and each is a fixed pattern; a failure reports stderr's first non-empty line, or stdout's when
+# stderr is empty.
 check_ant() {
-    local out rc email exp status
-    out="$(timeout "$TIMEOUT_S" ant auth status 2>&1)"
+    local out rc email exp status detail err="$tmp/ant.stderr"
+    out="$(timeout "$TIMEOUT_S" ant auth status 2>"$err")"
     rc=$?
     if ((rc != 0)); then
-        row anthropic_ant missing - - "ant auth status" "$(failure_detail "$rc" "$(first_line "$out")")"
+        detail="$(first_line "$(<"$err")")"
+        row anthropic_ant missing - - "ant auth status" "$(failure_detail "$rc" "${detail:-$(first_line "$out")}")"
         return
     fi
+    out+=$'\n'"$(<"$err")"
     email="$(grep -oP 'Logged in to .* as \K\S+' <<<"$out" || true)"
     exp="$(grep -oP 'expires:\s+\K\S+' <<<"$out" || true)"
     if grep -qi 'expired' <<<"$out"; then status=expired; else status=live; fi
@@ -237,21 +242,26 @@ check_gws() {
     wait
 }
 
+# The exit code alone decides a live row, whose identity is the email in ~/.fleet/config. A failure reports
+# stderr's last non-empty line, or stdout's last non-empty line when stderr is empty.
 check_fleetctl() {
-    local out rc email
-    out="$(timeout "$TIMEOUT_S" fleetctl get config --json 2>&1)"
+    local out rc email detail err="$tmp/fleetctl.stderr"
+    out="$(timeout "$TIMEOUT_S" fleetctl get config --json 2>"$err")"
     rc=$?
     email="$(awk -F': *' '/^ *email:/{print $2; exit}' "$HOME/.fleet/config" 2>/dev/null | tr -d '\r')"
     if ((rc == 0)); then
         row fleetctl live "${email:-unknown}" "n/a" "fleetctl get config"
     else
-        row fleetctl missing - - "fleetctl get config" "$(failure_detail "$rc" "$(last_line "$out")")"
+        detail="$(last_line "$(<"$err")")"
+        row fleetctl missing - - "fleetctl get config" "$(failure_detail "$rc" "${detail:-$(last_line "$out")}")"
     fi
 }
 
+# sentry-cli info prints its configuration on stdout and its error on stderr, so the User: line is read from stdout
+# alone; a failure reports stderr's first non-empty line, or stdout's when stderr is empty.
 check_sentry() {
-    local out rc user
-    out="$(timeout "$TIMEOUT_S" sentry-cli info 2>&1)"
+    local out rc user detail err="$tmp/sentry.stderr"
+    out="$(timeout "$TIMEOUT_S" sentry-cli info 2>"$err")"
     rc=$?
     user="$(grep -oP '^\s*User:\s*\K\S+' <<<"$out" || true)"
     if ((rc == 0)) && [[ -n "$user" ]]; then
@@ -260,13 +270,14 @@ check_sentry() {
         # An org auth token answers with no User: line; its first line (`Sentry Server: ...`) reads as an answer.
         row sentry missing - - "sentry-cli info" "no User: line in sentry-cli info"
     else
-        row sentry missing - - "sentry-cli info" "$(failure_detail "$rc" "$(first_line "$out")")"
+        detail="$(first_line "$(<"$err")")"
+        row sentry missing - - "sentry-cli info" "$(failure_detail "$rc" "${detail:-$(first_line "$out")}")"
     fi
 }
 
-# kubectl can write a warning to stderr, so the context is stdout alone; a failure of current-context reports
-# stderr's first non-empty line, or stdout's when stderr is empty. A context with no visible character is
-# `unknown`. `kubectl auth whoami` stays merged: its identity is the Username line, which grep picks out.
+# kubectl can write a warning to stderr, so the context and the Username line are read from stdout alone; a failure
+# of either call reports stderr's first non-empty line, or stdout's when stderr is empty. A context with no visible
+# character is `unknown`.
 check_kubectl() {
     local ctx rc out username detail err="$tmp/kubectl.stderr"
     ctx="$(timeout "$TIMEOUT_S" kubectl config current-context 2>"$err")"
@@ -278,13 +289,15 @@ check_kubectl() {
         return
     fi
     [[ "$ctx" =~ [^[:space:]] ]] || ctx=unknown
-    out="$(timeout "$TIMEOUT_S" kubectl auth whoami 2>&1)"
+    out="$(timeout "$TIMEOUT_S" kubectl auth whoami 2>"$err")"
     rc=$?
     if ((rc == 0)); then
         username="$(grep -oP '^Username\s+\K\S+' <<<"$out" || true)"
         row kubectl live "${username:-unknown} (context: $ctx)" "n/a (assumed-role session)" "kubectl auth whoami"
     else
-        row kubectl missing - - "kubectl auth whoami" "context: $ctx; $(failure_detail "$rc" "$(first_line "$out")")"
+        detail="$(first_line "$(<"$err")")"
+        row kubectl missing - - "kubectl auth whoami" \
+            "context: $ctx; $(failure_detail "$rc" "${detail:-$(first_line "$out")}")"
     fi
 }
 
@@ -329,17 +342,19 @@ check_secretsd() {
 }
 
 check_agent_secrets_broker() {
-    local out rc
-    out="$(timeout "$TIMEOUT_S" agent-secrets identity 2>&1)"
+    local out rc detail err="$tmp/agent-secrets.stderr"
+    out="$(timeout "$TIMEOUT_S" agent-secrets identity 2>"$err")"
     rc=$?
     if ((rc == 0)); then
         row agent_secrets_broker live "this process is a registered broker session" "n/a" "agent-secrets identity" \
             "secret-run uses the broker instead of secretsd for this session"
     else
-        # The detail is the whole output, which row makes one line; output with no visible character (CR is in
-        # [:space:]) gives the fallback.
-        [[ "$out" =~ [^[:space:]] ]] || out="no broker identity; secret-run falls back to secretsd"
-        row agent_secrets_broker missing - - "agent-secrets identity" "$(failure_detail "$rc" "$out")"
+        # The detail is the whole of stderr, else the whole of stdout, which row makes one line; a stream with no
+        # visible character (CR is in [:space:]) is passed over, and two such streams give the fallback.
+        detail="$(<"$err")"
+        [[ "$detail" =~ [^[:space:]] ]] || detail=$out
+        [[ "$detail" =~ [^[:space:]] ]] || detail="no broker identity; secret-run falls back to secretsd"
+        row agent_secrets_broker missing - - "agent-secrets identity" "$(failure_detail "$rc" "$detail")"
     fi
 }
 

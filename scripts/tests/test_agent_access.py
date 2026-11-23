@@ -99,8 +99,8 @@ TIMED_CHECKS = {
     "agent_secrets_broker": "agent-secrets",
     "dispatch": "dispatch",
 }
-# What each command has printed when `timeout` stops it, on a stream its check reads (some checks read stdout and
-# stderr merged, others apart). kubectl's current context answers, and `kubectl auth whoami` is the call that times out.
+# What each command has printed when `timeout` stops it, on a stream its check reads. kubectl's current context
+# answers, and `kubectl auth whoami` is the call that times out.
 PARTIAL_OUTPUT = {
     "aws": """echo '{"UserId": "AROA123:i-abc", "Arn": "arn:aws:sts::123:'""",
     "ant": 'echo "  Logged in to Example Org as"',
@@ -546,6 +546,40 @@ fi
                 (kubectl["status"], kubectl["detail"]), ("missing", "context: production; exit 3, no output")
             )
 
+    def test_ant_login_is_read_from_either_stream(self) -> None:
+        """ant's login and expiry are found whichever stream it answers on; no run here has shown which one it uses."""
+        login = 'echo "  Logged in to Example Org as sami@example.com"\necho "  expires:        2099-01-01T00:00:00Z"'
+        for stream, redirect in (("stdout", ""), ("stderr", " >&2")):
+            with self.subTest(stream=stream):
+                write_stub(self.stub_dir, "ant", "\n".join(line + redirect for line in login.splitlines()))
+                row = self.access_rows()["anthropic_ant"]
+                self.assertEqual(
+                    (row["status"], row["identity"], row["expiry"]),
+                    ("live", "sami@example.com", "2099-01-01T00:00:00Z"),
+                )
+
+    def test_failure_reports_the_stderr_error_not_the_stdout_text(self) -> None:
+        """A tool that exits 1 with text on stdout and its error on stderr gives the stderr error as the detail.
+
+        Each stub writes its stdout text before and after its error, so a check that reads the two streams merged
+        reads stdout text whether it takes the first line, the last line or the whole output. kubectl's current
+        context answers, and `kubectl auth whoami` is the call that fails.
+        """
+        for command in TIMED_CHECKS.values():
+            progress = f'echo "progress of {command} ..."'
+            body = f'{progress}\necho "ERR {command}: denied" >&2\n{progress}'
+            if command == "kubectl":
+                body = f'[[ "$1 $2" == "config current-context" ]] && {{ echo production; exit 0; }}\n{body}'
+            write_stub(self.stub_dir, command, f"{body}\nexit 1")
+        self.write_gws_registry("work")
+        rows = self.access_rows()
+        for name, command in TIMED_CHECKS.items():
+            detail = f"ERR {command}: denied"
+            if name == "kubectl":
+                detail = f"context: production; {detail}"
+            with self.subTest(check=name):
+                self.assertEqual((rows[name]["status"], rows[name]["detail"]), ("missing", detail))
+
     def test_failure_that_printed_text_never_reports_no_output(self) -> None:
         """A failed tool's text reaches the detail from whichever stream it wrote, never `exit <code>, no output`.
 
@@ -608,14 +642,19 @@ fi
 
     def test_vercel_identity_is_stdout_and_a_failure_reports_stderr(self) -> None:
         """vercel's notice on stderr is not the identity; a failure reports stderr's last line, else stdout's."""
+        vercel_logged_out = (
+            "> Run `vercel deploy --temporary` to create a temporary deployment you can claim later,"
+            " or `vercel login` to log in."
+        )
         cases = {
             "an update notice on stderr after the identity": (
                 "echo sami-2219\necho 'Run npm i -g vercel@latest to update.' >&2",
                 ("live", "sami-2219", ""),
             ),
-            "a failure with its error on stderr before stdout": (
-                "echo 'Error: No existing credentials found.' >&2\necho 'Vercel CLI 39.1.0'\nexit 1",
-                ("missing", "-", "Error: No existing credentials found."),
+            "a failure with vercel's banner, then its error, on stderr": (
+                "echo 'Vercel CLI 59.14.0 (Node.js 22.22.2)' >&2\necho '> Logged out.' >&2\n"
+                f"echo {shlex.quote(vercel_logged_out)} >&2\nexit 1",
+                ("missing", "-", vercel_logged_out),
             ),
             "a failure with its error on stdout only": (
                 "echo 'Error: not logged in'\nexit 1",
@@ -687,17 +726,41 @@ fi
                 )
 
     def test_sentry_answer_without_a_user_line_says_so(self) -> None:
-        """sentry-cli info that exits 0 with no `User:` line (an org auth token) is missing for that reason."""
+        """sentry-cli info with no `User:` line is missing: exit 0 (an org auth token) says so; a failure reports why.
+
+        Real sentry-cli with no login exits 1 with its configuration on stdout and, on stderr, its error, an empty
+        line and a hint; a failure with nothing on stderr reports stdout's first line.
+        """
+        auth_error = "error: Auth token is required for this request. Please run `sentry-cli login` and try again!"
         cases = {
-            "Sentry Server: https://sentry.io\nDefault Organization: example\n": (
+            "an org auth token": (
+                "Sentry Server: https://sentry.io\nDefault Organization: example\n",
+                "",
                 0,
                 "no User: line in sentry-cli info",
             ),
-            "error: API request failed\n  caused by: 401\n": (1, "error: API request failed"),
+            "a failure with its error on stdout only": (
+                "error: API request failed\n  caused by: 401\n",
+                "",
+                1,
+                "error: API request failed",
+            ),
+            "no login: the configuration on stdout, the error on stderr": (
+                "Sentry Server: https://sentry.io\nDefault Organization: -\nDefault Project: -\n\n"
+                "Authentication Info:\n  Method: Unauthorized\n",
+                f"{auth_error}\n\nAdd --log-level=[info|debug] or export SENTRY_LOG_LEVEL=[info|debug] to see more"
+                " output.\nPlease attach the full debug log to all bug reports.\n",
+                1,
+                auth_error,
+            ),
         }
-        for stdout, (code, detail) in cases.items():
-            with self.subTest(code=code):
-                write_stub(self.stub_dir, "sentry-cli", f"printf %s {shlex.quote(stdout)}\nexit {code}")
+        for case, (stdout, stderr, code, detail) in cases.items():
+            with self.subTest(case=case):
+                write_stub(
+                    self.stub_dir,
+                    "sentry-cli",
+                    f"printf %s {shlex.quote(stdout)}\nprintf %s {shlex.quote(stderr)} >&2\nexit {code}",
+                )
                 row = self.access_rows()["sentry"]
                 self.assertEqual((row["status"], row["detail"]), ("missing", detail))
 
@@ -733,7 +796,10 @@ fi
                 self.assertEqual((row["status"], row["detail"]), ("missing", detail))
 
     def test_kubectl_context_is_stdout_and_a_failure_reports_stderr(self) -> None:
-        """A kubectl warning on stderr is not part of the context; a current-context failure reports stderr's line."""
+        """A kubectl warning on stderr is not part of the context; a current-context failure reports stderr's line.
+
+        A current-context failure with nothing on stderr reports stdout's first line.
+        """
         # `kubectl auth whoami` answers; any call but `config current-context` exits 2.
         stub = (
             'if [[ "$1 $2" == "auth whoami" ]]; then\n'
@@ -748,6 +814,10 @@ fi
             ),
             "a failure with its error on stderr after stdout": (
                 "echo 'Fetching context'\necho 'error: current-context is not set' >&2\nexit 1",
+                ("missing", "-", "error: current-context is not set"),
+            ),
+            "a failure with its error on stdout only": (
+                "echo 'error: current-context is not set'\nexit 1",
                 ("missing", "-", "error: current-context is not set"),
             ),
         }
