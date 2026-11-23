@@ -53,7 +53,8 @@ Enrolled means the enrolling project's own record lists the project. The enrolli
 Any one of these, except for Oh My Pi:
 
 - Novel contact into a space we do not run: a first contact, or any contribution, to a project that has not enrolled, until Sami moves it to "no approval" (below).
-  - Send such a project one pull request, and no second one until Sami has seen how its maintainers reacted to the first. Put that reaction, or that they have not reacted yet, in the ask for the second.
+  - Send such a project one pull request, and no second one until Sami has seen how its maintainers reacted to the first.
+  - Put that reaction, or that they have not reacted yet, in the ask for the second.
 - No skill or template yet, or a send that departs from its template.
 - It commits him or represents his position: a promise, a deadline, a disclosure, a claim he would have to stand behind.
 - A program that will post to people outside the company (a CI review comment, a merge reply, a bot answer).
