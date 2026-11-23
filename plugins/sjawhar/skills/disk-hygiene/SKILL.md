@@ -5,11 +5,9 @@ description: Use when a shared dev box is low on disk or RAM, `df` exceeds what 
 
 # Disk hygiene
 
-The script does the mechanical part; you decide what is live and who owns it.
-
 **Done when:** you reported next to the ledger, with a ledger line for each manual action: space freed, by `du` of the removed paths (other sessions move `df`); what you kept and why (unpushed, holds, fresh); undescribed work in shared checkouts with its session or "unknown"; what you could not reclaim (locks, live owners). Give each sampled number its interval.
 
-Set `SKILL=~/.dotfiles/plugins/sjawhar/skills/disk-hygiene` and `S=$SKILL/scripts/disk_hygiene.py` (the skill URL does not resolve in bash). `python3 $S --help` lists the subcommands and the protected and releases file formats.
+Set `SKILL=~/.dotfiles/plugins/sjawhar/skills/disk-hygiene` and `S=$SKILL/scripts/disk_hygiene.py` (the skill URL does not resolve in bash). `python3 $S --help` lists the subcommands and the protected and releases file formats. The script does the mechanical part; you decide what is live and who owns it.
 
 ## When a shell hangs
 
