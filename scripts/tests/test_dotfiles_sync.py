@@ -327,6 +327,59 @@ class Machines(unittest.TestCase):
             self.assertNotEqual(destination.rsplit("@", 1)[-1], "oryx")
 
 
+class SystemPython(unittest.TestCase):
+    """The tools step's check that /usr/bin/python3 is Python 3.11 or later, which shims/jj and
+    scripts/leak-terms-check need for tomllib; `--python-check PYTHON` runs it alone on PYTHON."""
+
+    WHY = ("dotfiles needs Python 3.11 or later there: shims/git, shims/jj and scripts/leak-terms-check run it by "
+           "that path, and shims/jj and scripts/leak-terms-check import tomllib, which Python has from 3.11")
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+
+    def check(self, python: Path | str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["bash", str(SYNC), "--python-check", str(python)], capture_output=True, text=True,
+                              check=False)
+
+    def stub(self, output: str) -> Path:
+        stub = self.root / "python3"
+        stub.write_text(f"#!/bin/sh\nprintf '%s' '{output}'\n")
+        stub.chmod(0o755)
+        return stub
+
+    def test_an_interpreter_older_than_3_11_is_refused_with_its_version(self) -> None:
+        stub = self.stub("3.9.18\n")
+        result = self.check(stub)
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertEqual(result.stderr, f"dotfiles-sync: tools step: {stub} is Python 3.9.18; {self.WHY}\n")
+
+    def test_no_interpreter_or_no_version_is_refused(self) -> None:
+        missing = self.root / "none" / "python3"
+        result = self.check(missing)
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertEqual(result.stderr, f"dotfiles-sync: tools step: there is no executable {missing}; {self.WHY}\n")
+        silent = self.stub("")
+        result = self.check(silent)
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertEqual(
+            result.stderr, f"dotfiles-sync: tools step: {silent} is a program that gave no Python version; {self.WHY}\n"
+        )
+
+    def test_3_11_and_later_pass(self) -> None:
+        for version in ("3.11.0", "3.12.3", "4.0.0"):
+            with self.subTest(version=version):
+                stub = self.stub(f"{version}\n")
+                result = self.check(stub)
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (0, f"tools: {stub} is Python {version}\n", ""))
+        # This machine's own: the check can pass on a real interpreter, not only on a stub.
+        if Path("/usr/bin/python3").exists():
+            result = self.check("/usr/bin/python3")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertRegex(result.stdout, r"^tools: /usr/bin/python3 is Python 3\.(1[1-9]|[2-9][0-9])\.\d+\n$")
+
+
 PUBLISH = Path(__file__).resolve().parents[1] / "dotfiles-publish"
 
 

@@ -319,7 +319,7 @@ same_content() {
     [[ -f "$a" && -f "$b" ]] || return 1
     cmp -s "$a" "$b" && return 0
     [[ "$a" == *.json && "$b" == *.json ]] || return 1
-    python3 - "$a" "$b" <<'PY'
+    /usr/bin/python3 -I - "$a" "$b" <<'PY'
 import json, sys
 STAMPS = {"updatedAt", "updated_at", "fetchedAt", "fetched_at", "lastChecked", "checkedAt"}
 

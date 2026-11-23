@@ -2121,6 +2121,64 @@ class GitLeaks(LeakTestCase):
         self.assertEqual(control.returncode, 0, control.stderr)
         self.assertEqual(sorted(path.name for path in markers.iterdir()), ["python", "source"])
 
+    def test_secret_run_reason_runs_no_mise_config_of_the_checkout(self) -> None:
+        # An agent's gh call mints its App token through shims/gh-app-token, scripts/secret-run and the
+        # secret-run-reason it runs, which until 2026-11-23 began `#!/usr/bin/env python3`: mise's python3 shim, which
+        # under CI=true ran the checkout's `_.source` script and its PYTHONPATH's sitecustomize.py. It begins
+        # `#!/usr/bin/python3 -I` now: run in such a checkout it runs neither, while the same environment's `python3`
+        # runs both (the control).
+        mise = mise_shims()
+        if mise is None:
+            self.skipTest("no mise python3 shim on PATH, so a checkout's mise config cannot be shown to reach one here")
+        checkout = self.root / "hostile-reason"
+        checkout.mkdir()
+        markers = self.root / "reason-markers"
+        write_hostile_mise_config(checkout, markers)
+        environment = self.environment(False, CI="true",
+                                       PATH=os.pathsep.join([str(ROOT / "shims"), mise, os.environ["PATH"]]))
+        result = self.launch([str(ROOT / "scripts" / "secret-run-reason"), "--pid", str(os.getpid()), "--reason",
+                              "leak test", "--", "true"], cwd=checkout, env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sorted(path.name for path in markers.iterdir()), [],
+                         "secret-run-reason ran the checkout's mise config")
+        control = self.launch(["python3", "-c", "pass"], cwd=checkout, env=environment)
+        self.assertEqual(control.returncode, 0, control.stderr)
+        self.assertEqual(sorted(path.name for path in markers.iterdir()), ["python", "source"])
+
+    def test_an_agent_gh_call_runs_no_mise_config_of_the_checkout(self) -> None:
+        # The whole route: under CI=true, in a checkout whose `.mise.toml` names both markers, an agent's own
+        # `shims/gh api repos/<none>/x` mints its App token (gh-app-token, secret-run, secret-run-reason, and secrets
+        # for an owner the App does not cover) and runs neither marker, while the same environment's `python3` runs
+        # both (the control). Until 2026-11-23 secret-run-reason ran through mise's python3 shim and gh-app-token ran
+        # secrets in the checkout, and both markers fired. It needs this machine's own agent route, an omp session and
+        # the App's git configuration, and reads GitHub, so it runs only where that route is;
+        # test_secret_run_reason_runs_no_mise_config_of_the_checkout and test_gh_app_token's
+        # test_secret_run_and_secrets_run_in_the_shims_own_checkout check its parts without it.
+        mise = mise_shims()
+        app = subprocess.run(["/usr/bin/git", "config", "--get", "gh-app.agent.app-id"], capture_output=True,
+                             text=True, check=False)
+        if mise is None or not os.environ.get("OMP_SESSION_ID") or app.returncode != 0:
+            self.skipTest("this machine has no agent route that mints an App token (an omp session, "
+                          "gh-app.agent.app-id and mise's shims)")
+        checkout = self.root / "hostile-gh"
+        checkout.mkdir()
+        markers = self.root / "gh-markers"
+        write_hostile_mise_config(checkout, markers)
+        # This checkout's shims/ and scripts/ first, so gh-app-token runs this checkout's secret-run, then mise's shims,
+        # ahead of the python3 of the environment these tests run in.
+        environment = {**os.environ, "CI": "true",
+                       "PATH": os.pathsep.join([str(ROOT / "shims"), str(ROOT / "scripts"), mise,
+                                                os.environ["PATH"]])}
+        result = self.launch([str(ROOT / "shims" / "gh"), "api", "repos/tc-leak-test-none-0b1/x"], cwd=checkout,
+                             env=environment)
+        self.assertNotEqual(result.returncode, 0, "a repository nobody has was read")
+        self.assertIn("gh-app-token: minting token", result.stderr, "the call did not mint, so the row shows nothing")
+        self.assertEqual(sorted(path.name for path in markers.iterdir()), [],
+                         "the gh call ran the checkout's mise config")
+        control = self.launch(["python3", "-c", "pass"], cwd=checkout, env=environment)
+        self.assertEqual(control.returncode, 0, control.stderr)
+        self.assertEqual(sorted(path.name for path in markers.iterdir()), ["python", "source"])
+
     def test_git_term_reads_only_config_keys_for_the_hooks_path_exemption(self) -> None:
         for agent in (False, True):
             with self.subTest(agent=agent, case="unrelated-value"):
@@ -3111,6 +3169,25 @@ class JjLeaks(LeakTestCase):
         control = self.launch(["python3", "-c", "pass"], cwd=repository, env=self.environment(False, **environment))
         self.assertEqual(control.returncode, 0, control.stderr)
         self.assertEqual(sorted(path.name for path in markers.iterdir()), ["python", "source"])
+
+    def test_jj_alias_decoder_imports_no_module_of_the_checkout(self) -> None:
+        # shims/jj decodes an alias with `/usr/bin/python3 -I -c`, which imports tomllib. Without -I, `python3 -c` puts
+        # the working directory first on sys.path, so a checkout's tomllib.py would run inside the shim. In a checkout
+        # that holds one, which writes a marker when imported, an alias call runs and writes none, while the same
+        # interpreter without -I imports it there (the control).
+        repository = self.repository(False)
+        marker = self.root / "tomllib-imported"
+        (repository / "tomllib.py").write_text(
+            f"import pathlib\npathlib.Path({str(marker)!r}).write_text('imported')\n", encoding="utf-8")
+        configured = self.jj(repository, "config", "set", "--repo", "aliases.shown",
+                             '["log", "-r", "@", "--no-graph", "-T", "commit_id"]', agent=False, real=True)
+        self.assertEqual(configured.returncode, 0, configured.stderr)
+        result = self.jj(repository, "shown", agent=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(marker.exists(), "the alias decoder imported the checkout's tomllib.py")
+        control = self.launch(["/usr/bin/python3", "-c", "import tomllib"], cwd=repository, env=self.environment(False))
+        self.assertEqual(control.returncode, 0, control.stderr)
+        self.assertTrue(marker.exists(), "python3 -c did not import the checkout's tomllib.py, so the row shows nothing")
 
     def test_jj_message_refuses_an_unreadable_standard_input(self) -> None:
         directory = self.root / "description-directory"
