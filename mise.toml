@@ -3,6 +3,35 @@
 # All versions pinned for reproducibility
 
 [settings]
+# Agent shells set CI=true (omp's bash tool; Claude Code too), and under CI mise
+# trusts every checkout's config and runs its [env] values, PYTHONPATH
+# sitecustomize and _.source scripts through any shim (python3, sops, age...) the
+# moment a tool is called there. paranoid turns off that automatic trust,
+# including in CI, so an untrusted config fails closed ("Config files ... are not
+# trusted") instead of running (dispatch://INFRA-5432, decision
+# dispatch://INFRA-5432/comment/63a722b9-7872-4476-ab40-27fdfa49386b). Measured
+# 2026-11-23 on mise 2026.10.11: only the boolean form parses here -- the
+# paranoid = ["config"] category list the docs describe fails with "invalid type:
+# sequence, expected a boolean", and the string and MISE_PARANOID=config env forms
+# fail too (categories need a newer mise). = true enables all four categories
+# (config, env_files, plugins, provenance); config is the one the threat needs and
+# the others only add trust checks our own trusted paths already satisfy. A shim in
+# an untrusted checkout then exits non-zero rather than running its env, while a
+# bare /usr/bin/python3 is unaffected. global-only (a cloned repo cannot turn it off).
+paranoid = true
+# The checkout roots whose configs mise trusts by path, without a content hash, so
+# our own repos keep resolving tools under paranoid. mise trusts a config at or
+# below these paths and has no glob support (it compares each entry with the
+# config's canonical path), and our worktrees are arbitrary-named flat siblings
+# under ~/src, so these are the working roots, not per-repo leaves -- a 2026-11-23
+# census found no outside clone carrying a mise config under them (the only
+# third-party code, oss-verify's projects/pulumi and datadog-agent, is nested proof
+# material with no mise.toml). Deliberately NOT ~/ or the /mnt scratch roots: a
+# clone or tarball opened outside these paths stays untrusted. This REPLACES the
+# MISE_TRUSTED_CONFIG_PATHS export .bashrc used to set; mise reads this global
+# setting now, and its env var (precedence rank 2) would have overridden this
+# config (rank 4) had both been left set. global-only.
+trusted_config_paths = ["~/.dotfiles", "~/.worktrees", "~/src"]
 # 14d soak for third-party releases. The mise default (24h) let an accidental
 # blanket `mise upgrade --bump` (2026-08-25) pull bun 1.4.0 at 5 days old and
 # non-LTS node 26. Exact pins bypass this filter, so deliberate fresh installs
