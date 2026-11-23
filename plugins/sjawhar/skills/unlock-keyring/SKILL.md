@@ -5,6 +5,8 @@ description: "Use when the devbox GNOME keyring is locked, or after a devbox reb
 
 # Unlock the devbox keyring
 
+**Done when:** you check `Locked` once after each unlock: a D-Bus property read triggers the crash (see Relocks).
+
 This skill applies only to a machine with the `gnome-keyring` package. Check with `command -v gnome-keyring-daemon`.
 
 - Expect `unlock-keyring` to say there is no keyring to unlock on a machine without the package.
@@ -35,4 +37,3 @@ The unlocked daemon crashes (SIGABRT, a bug in Ubuntu's `gnome-keyring` package,
 
 - Unlock again.
 - Never poll `busctl get-property ... Locked` in a loop: a D-Bus property read triggers the crash.
-- Check `Locked` once after each unlock, for the same reason.
