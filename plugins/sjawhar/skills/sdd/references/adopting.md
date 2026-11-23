@@ -7,7 +7,8 @@ Read, from the tracker and the repo:
 - answered questions and settled decisions, with where each was decided;
 - rejected approaches, and why each was rejected, with where each was decided;
 - branch, diff, CI and review state, checked against the code, not the PR description;
-- unfinished acceptance items, naming the next one. Check each item marked done against the code.
+- unfinished acceptance items, naming the next one.
+  - Check each item marked done against the code.
 
 - An approved design stays approved.
 - Do not restart brainstorming, re-ask an answered question, re-propose a rejected approach or ask Sami to approve it again.

@@ -11,7 +11,7 @@
 - When a dataset, fixture or table the scenario names does not exist, or a probe matches zero records, mark the scenario `BLOCKED`.
 - When a dataset, fixture or table the scenario names does not exist, or a probe matches zero records, repair the plan against existing data.
 - When a dataset, fixture or table the scenario names does not exist, or a probe matches zero records, do not drop or narrow the scenario.
-- Verification describes an outcome a user can observe.
+- Make the verification describe an outcome a user can observe.
 - The reviewer rejects missing, proxy-only or internal-only verification.
 - Track implemented, integrated and acceptance-verified separately: an unresolved dependency does not make a slice complete.
 

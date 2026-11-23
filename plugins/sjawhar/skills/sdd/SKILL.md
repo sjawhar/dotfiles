@@ -65,7 +65,8 @@ Give each slice one class (platform or application, infrastructure, task authori
 - Plan the full request.
 - Split parallel work into units no two workers edit: two workers who meet an interface mid-flight both rewrite it.
 - Name the shared contracts before dispatch, for the same reason.
-- Check every claim about existing code against what it names. Treat a number read in a skill as a claim too.
+- Check every claim about existing code against what it names.
+- Treat a number read in a skill as a claim too.
 - Cite file:line for every claim about existing code.
 - **Read `references/slices.md` now:** what a slice is, what it merges as and ends in, how to cut, order and run slices, and a slice's tasks, contracts and scaffolding.
 - Cut over completely: migrate every caller and remove obsolete paths, shims, aliases and dead code, unless Sami requires compatibility.
