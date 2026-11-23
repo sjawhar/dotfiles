@@ -23,7 +23,7 @@ from pathlib import Path
 DOTFILES = Path(__file__).resolve().parents[2]
 INSTALLER = DOTFILES / "installers" / "theorem-session.sh"
 LIBRARY = DOTFILES / "installers" / "lib.sh"
-TAG = "theorem-session-v0.1.0"
+TAG = "theorem-session-v0.1.1"
 TOKEN = "ghs_STUB_READ_TOKEN"
 
 
