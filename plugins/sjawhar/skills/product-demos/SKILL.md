@@ -5,6 +5,8 @@ description: Use when making a product demo video, a narrated walkthrough or a p
 
 # Product demo videos
 
+**Done when:** you have kept `<video>.src/` next to the accepted final, not in `/tmp`: casts, EDL script, narration MP3s, and a README with exact rebuild steps.
+
 Read [references/pipeline.md](references/pipeline.md) when you install the tools or run a step below: it has the commands and settings.
 
 ## Production rules
@@ -102,6 +104,5 @@ Verdicts: PASS, CUT (with timestamps) or RESHOOT. Cuts are the expected result.
 
 - Before review, disclose each section's wall-clock and file duration, and any frame holds.
 - In a re-review, check the delta and every boundary the EDL change moved: an EDL change moves all downstream boundaries.
-- Keep `<video>.src/` next to the accepted final, not in `/tmp`: casts, EDL script, narration MP3s, and a README with exact rebuild steps.
 
 For an un-narrated PR demo, use pipeline.md's quick recipe. Post its `asciinema upload` URL in the PR.
