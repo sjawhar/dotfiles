@@ -2794,9 +2794,14 @@ detached() { setsid -w "$@"; }
 # Release every knives claim the session holds. Claims are keyed by the omp
 # session id (kind harness-session), so acting as that session releases them
 # without --force; knives forgets and removes the workspace itself and keeps
-# the commits. A claim's `repo` is its fork's lowercase upstream name
-# (`metr/hawk`), which `knives repos --json` reports as `upstream_name`
-# beside the checkout path.
+# the branch's commits. For a claim on a release name, knives 6.0.0 and later
+# then sweep the release's earlier writes once jj has no workspace of the
+# claim: they abandon each that is a head nothing keeps (a bookmark, tag,
+# workspace or jj's immutable rule), hide each earlier write or superseded
+# commit that this exposes, and abandon none while the release holds
+# conflicts; a failed sweep leaves the exit status as it is. A claim's `repo`
+# is its fork's lowercase upstream name (`metr/hawk`), which `knives repos
+# --json` reports as `upstream_name` beside the checkout path.
 finish_knives_claims() {
     local sid="$1" state="$HOME/.config/knives/state.json" repo branch path
     [[ -n "$sid" && -s "$state" ]] || return 0
