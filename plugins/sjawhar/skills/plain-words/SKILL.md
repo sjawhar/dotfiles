@@ -63,4 +63,4 @@ Look for the first phrase first: it is the commonest.
 
 ## References
 
-`asd-ste100` constrains grammar and vocabulary for a reader whose first language may not be English. `ce-noslop` removes AI writing tells. Run all three on an outside message, one that a person outside Theorem reads (`outside-message` defines it). Run this one on everything.
+`asd-ste100` constrains grammar and vocabulary for a reader whose first language may not be English, and `ce-noslop` removes AI writing tells. Run all three on an outside message, one that a person outside Theorem reads (`outside-message` defines it); run this one on everything.
