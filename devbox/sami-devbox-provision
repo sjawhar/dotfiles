@@ -272,6 +272,11 @@ step_leakcheck() {
         || die "could not copy $LEAK_CHECK_TAG to $VM; the slot stays held (TAKEN line in $LEAK_CHECK_RECORD)"
     # Copy only over the previous tag, or this one on a second run; a new machine has no files.
     # Each file is written as .<name>.new and moved over the installed one only when all are written.
+    # The lines marked `# bytecode` are INSTALL.md's home block lines of that mark (agent-infra
+    # leak-check/INSTALL.md, "The bytecode"): before any copy, the pair the previous install built
+    # must pass that install's own --check-bytecode, and a pair that does not is moved aside under
+    # names of its own and nothing is installed; the hash file goes before the files move; then a
+    # launcher that has the mode builds the bytecode and checks it.
     out="$(remote 'set -e; s=/tmp/plc-stage; d=$HOME/.local/share/public-leak-check
         test -x /usr/bin/python3 && /usr/bin/python3 -I -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" ||
             { echo "this machine needs an executable /usr/bin/python3 of 3.11 or newer (tomllib, which dotfiles shims/jj and scripts/leak-terms-check import); nothing was installed"; exit 1; }
@@ -280,19 +285,38 @@ step_leakcheck() {
         if [ -n "$have" ] && [ "$have" != "$(cat "$s/prev.sha256")" ] && [ "$have" != "$(cat "$s/tag.sha256")" ]; then
             echo "$d holds neither the previous tag nor this one, so nothing was copied:"; echo "$have"; exit 1
         fi
+        cache_tag=$(/usr/bin/python3 -I -c "import sys; print(sys.implementation.cache_tag)")   # bytecode
+        sums=$d/__pycache__/public_leak_check.$cache_tag.sha256   # bytecode
+        pyc=${sums%.sha256}.pyc   # bytecode
+        if [ -n "$have" ] && grep -q -- --check-bytecode "$d/public-leak-check.sh" &&   # bytecode
+            ! bash "$d/public-leak-check.sh" --check-bytecode; then   # bytecode
+            at=$(date -u +%Y%m%dT%H%M%SZ); moved=   # bytecode
+            for f in "$sums" "$pyc"; do   # bytecode
+                to=$f.refused.$at; i=0   # bytecode: a later refusal in the same second adds .1, .2, ...
+                while [ -e "$to" ]; do i=$((i + 1)); to=$f.refused.$at.$i; done   # bytecode
+                [ ! -e "$f" ] || { mv -- "$f" "$to" && moved="$moved $to"; }   # bytecode
+            done   # bytecode
+            echo "LEAK CHECK ERROR: $pyc did not pass --check-bytecode."   # bytecode
+            echo "Moved aside what existed:$moved."   # bytecode
+            echo "Runs compile the module from source, and nothing was installed."   # bytecode
+            echo "A person finds why, deletes the .refused files, and installs again."; exit 1   # bytecode
+        fi   # bytecode
         install -m 0555 "$s/public-leak-check.sh" "$d/.public-leak-check.sh.new"
         install -m 0444 "$s/public_leak_check.py" "$d/.public_leak_check.py.new"
         install -m 0644 "$s/README.md" "$d/.README.md.new"
         install -m 0644 "$s/must-pass-lines.txt" "$d/.must-pass-lines.txt.new"
+        rm -f "$sums"   # bytecode: the hash file first, for every tag, as INSTALL.md does
         for f in public_leak_check.py public-leak-check.sh README.md must-pass-lines.txt; do mv -f "$d/.$f.new" "$d/$f"; done
+        if grep -q -- --build-bytecode "$d/public-leak-check.sh"; then bash "$d/public-leak-check.sh" --build-bytecode; fi   # bytecode
         printf "%s\n" "$d/public-leak-check.sh" > "$HOME/.config/public-leak-check/path"
         (cd "$d" && sha256sum -c "$s/tag.sha256")
         test -x "$d/public-leak-check.sh"; echo "test -x public-leak-check.sh: exit 0"
+        if grep -q -- --check-bytecode "$d/public-leak-check.sh"; then bash "$d/public-leak-check.sh" --check-bytecode; fi   # bytecode
         rm -rf "$s"' 2>&1)" \
         || { echo "$out"; die "the install on $VM failed; the slot stays held (TAKEN line in $LEAK_CHECK_RECORD)"; }
     echo "$out"
     echo "INSTALLED $(stamp) by $who: $LEAK_CHECK_TAG in $VM:~/.local/share/public-leak-check: $(tr '\n' ' ' <<<"$out")" >> "$LEAK_CHECK_RECORD"
-    echo "RELEASED $(stamp) by $who: checks run: $LEAK_CHECK_TAG is $LEAK_CHECK_COMMIT, its files have the sha256 of devbox/leak-check-tag.env, the shared path holds them, $VM sha256sum -c and test -x passed; slot FREE" >> "$LEAK_CHECK_RECORD"
+    echo "RELEASED $(stamp) by $who: checks run: $LEAK_CHECK_TAG is $LEAK_CHECK_COMMIT, its files have the sha256 of devbox/leak-check-tag.env, the shared path holds them, $VM sha256sum -c, test -x and (where its launcher has the mode) --check-bytecode passed; slot FREE" >> "$LEAK_CHECK_RECORD"
     say "$VM holds $LEAK_CHECK_TAG; record lines appended to $LEAK_CHECK_RECORD"
 }
 

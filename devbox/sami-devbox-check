@@ -1235,6 +1235,9 @@ host_bwrap() {
 # The public-text leak check: ~/.local/share/public-leak-check holds the tag of agent-infra's
 # leak-check/ that devbox/leak-check-tag.env names (sami-devbox-provision's step leakcheck installs
 # it), so its launcher, Python module, README and must-pass fixture must have that file's sha256.
+# Where that tag's launcher has `--check-bytecode`, the bytecode an install built beside the module
+# (agent-infra leak-check/README.md, "The bytecode") must also be the one that launcher builds from
+# the module, byte for byte: a bytecode and hash file someone wrote together pass every sha256.
 leak_check_host_check() {
     local here d out rc=0
     # shellcheck source=leak-check-tag.env
@@ -1243,8 +1246,32 @@ leak_check_host_check() {
     [[ -x "$here" ]] || { fail "public-leak-check: the pointer names '$here', which is not an executable file here"; return; }
     d="$(dirname "$here")"
     out="$(cd "$d" && sha256sum -c <<<"$LEAK_CHECK_HOME_SHA256" 2>&1)" || rc=$?
-    (( rc == 0 )) && ok "public-leak-check: $d holds $LEAK_CHECK_TAG (${LEAK_CHECK_COMMIT:0:12}): $(tr '\n' ' ' <<<"$out")" \
-        || fail "public-leak-check: $d is not $LEAK_CHECK_TAG (sha256sum -c exit $rc): $(grep -v ': OK$' <<<"$out" | tr '\n' ' ')install it: sami-devbox-provision --only leakcheck"
+    (( rc == 0 )) || { fail "public-leak-check: $d is not $LEAK_CHECK_TAG (sha256sum -c exit $rc): $(grep -v ': OK$' <<<"$out" | tr '\n' ' ')install it: sami-devbox-provision --only leakcheck"; return; }
+    ok "public-leak-check: $d holds $LEAK_CHECK_TAG (${LEAK_CHECK_COMMIT:0:12}): $(tr '\n' ' ' <<<"$out")"
+    # A pair a check moved aside keeps this check red until a person reviews and deletes it, so
+    # forged code someone left stays visible (agent-infra leak-check/INSTALL.md, "The bytecode").
+    local refused
+    if refused="$(compgen -G "$d/__pycache__/*.refused.*")"; then
+        fail "public-leak-check bytecode: $d/__pycache__ holds files a bytecode check moved aside: $(tr '\n' ' ' <<<"$refused")a person reviews and deletes them, finds the cause, then runs sami-devbox-provision --only leakcheck"
+    fi
+    # Only now: the launcher run here is the one whose sha256 just passed. A tag from before the
+    # bytecode has no such mode, builds no bytecode and reads none.
+    grep -q -- --check-bytecode "$d/public-leak-check.sh" || return 0
+    local sums pyc f to at i moved=
+    rc=0
+    out="$(bash "$d/public-leak-check.sh" --check-bytecode 2>&1)" || rc=$?
+    (( rc == 0 )) && { ok "public-leak-check bytecode: $(tr '\n' ' ' <<<"$out")"; return; }
+    # As the install blocks do: a pair that does not pass is moved aside under names of its own, so
+    # runs compile the module from source, the code in it runs no more, and no evidence is replaced.
+    sums="$d/__pycache__/public_leak_check.$(/usr/bin/python3 -I -c 'import sys; print(sys.implementation.cache_tag)').sha256"
+    pyc="${sums%.sha256}.pyc"
+    at="$(date -u +%Y%m%dT%H%M%SZ)"
+    for f in "$sums" "$pyc"; do
+        to="$f.refused.$at"; i=0
+        while [[ -e "$to" ]]; do i=$((i + 1)); to="$f.refused.$at.$i"; done
+        [[ ! -e "$f" ]] || { mv -- "$f" "$to" && moved="$moved $to"; }
+    done
+    fail "public-leak-check bytecode: --check-bytecode exit $rc: $(tr '\n' ' ' <<<"$out")Moved aside what existed:$moved. Runs compile the module from source; a person reviews and deletes those files, finds the cause, then runs sami-devbox-provision --only leakcheck"
 }
 
 # The leak check's pre-push hook: every checkout under ~/src that pushes to a public repository has
