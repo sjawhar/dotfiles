@@ -11,8 +11,6 @@ description: >-
 
 You make the PR ready; auto-merge (`gh pr merge --auto`) merges it.
 
-**Done when:** production is proven (step 6).
-
 `ce-babysit-pr` runs the watch loop. Where it differs from this skill, this skill wins. `ce-babysit-pr`'s "looks ready" means check now, not merge.
 
 Read `references/repo-merge-rules.md` before you change an enabled auto-merge, merge in `trajectory-labs-pbc/agent-c`, `cybermonklabs/legion`, `theorem-labs/*` or a repo another person maintains, when GitHub refuses an admin action or an approval, and for a PR that adds or changes a database migration.
