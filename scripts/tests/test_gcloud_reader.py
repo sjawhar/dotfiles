@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """scripts/gcloud-reader: one Google read as an agent reader account, through the broker.
 
-gcloud-reader asks secret-run for METADATA_READ (a token of metadata-reader@theorem-agent-infra)
-or, under --as legion, LEGION_READ (a token of legion-reader@theorem-agent-infra), always with
---register and --ttl 1h: the broker refuses a request with no lifetime on a secret whose
+gcloud-reader asks the agent-secrets client for METADATA_READ (a token of
+metadata-reader@theorem-agent-infra) or, under --as legion, LEGION_READ (a token of
+legion-reader@theorem-agent-infra), always with --ttl 1h: the broker refuses a request with no lifetime on a secret whose
 max-grant is an hour. The broker releases a google-service-account secret as a bare access token
 (cybermonklabs/legion packages/envoy/internal/broker/secrets/googleserviceaccount.go, Minted{Value:
-token.AccessToken}), which the fake secret-run below hands over the same way. The token goes to
+token.AccessToken}), which the fake client below hands over the same way. The token goes to
 0600 files of a directory removed on exit, never into an argument list, and the command runs with
 CLOUDSDK_AUTH_ACCESS_TOKEN_FILE set to it, BIGQUERYRC naming a bigqueryrc that gives bq the token,
 core/check_gce_metadata off, a fresh CLOUDSDK_CONFIG and gcloud's file logging off. The real-bq
@@ -44,14 +44,16 @@ PRINT_TOKEN_AND_LIST_LOGS = (
     'exit 0'
 )
 
-# The fake secret-run logs each argument on its own line, then, unless SECRET_RUN_EXIT is set,
-# exports the requested key (the word before `--`) as the bare token and runs the command after
-# `--`, as secret-run does on the broker path.
-SECRET_RUN = r"""#!/bin/bash
-printf '%s\n' "$@" >> "$LOG/secret-run.argv"
-[[ -z "${SECRET_RUN_EXIT:-}" ]] || exit "$SECRET_RUN_EXIT"
-key=""
-while (( $# )) && [[ "$1" != -- ]]; do key="$1"; shift; done
+# The fake agent-secrets client logs each argument on its own line and the broker URL it was given,
+# then, unless AGENT_SECRETS_EXIT is set, exports the requested name (the first argument: the client
+# takes the names before its flags) as the bare token and runs the command after `--`, as the
+# client does.
+AGENT_SECRETS = r"""#!/bin/bash
+printf '%s\n' "$@" >> "$LOG/agent-secrets.argv"
+printf '%s\n' "${AGENT_SECRETS_URL:-}" > "$LOG/agent-secrets.url"
+[[ -z "${AGENT_SECRETS_EXIT:-}" ]] || exit "$AGENT_SECRETS_EXIT"
+key=$1
+while (( $# )) && [[ "$1" != -- ]]; do shift; done
 shift
 export "$key=$FAKE_TOKEN"
 exec "$@"
@@ -126,20 +128,19 @@ class _BigQueryHandler(http.server.BaseHTTPRequestHandler):
 
 
 def ttl_problems(script: Path, env_extra: dict[str, str] | None = None) -> list[str]:
-    """Runs script as gcloud-reader for each --as, and returns what secret-run's argv lacks."""
+    """Runs script as gcloud-reader for each --as, and returns what the client's argv lacks."""
     problems = []
     for as_args, key in (((), "METADATA_READ"), (("--as", "metadata"), "METADATA_READ"), (("--as", "legion"), "LEGION_READ")):
         with Fixture(script) as f:
             result = f.run(*as_args, "storage", "buckets", "list", env_extra=env_extra)
-            argv = f.secret_run_argv()
+            argv = f.client_argv()
             if result.returncode != 0:
                 problems.append(f"{as_args}: exit {result.returncode}: {result.stderr}")
             if "--ttl\n1h\n" not in "".join(a + "\n" for a in argv):
-                problems.append(f"{as_args}: secret-run got no --ttl 1h: {argv}")
-            if "--register" not in argv:
-                problems.append(f"{as_args}: secret-run got no --register: {argv}")
-            if key not in argv or argv[argv.index("--") - 1] != key:
-                problems.append(f"{as_args}: secret-run did not ask for {key} alone: {argv}")
+                problems.append(f"{as_args}: agent-secrets got no --ttl 1h: {argv}")
+            names = argv[: next((i for i, a in enumerate(argv) if a.startswith("-")), len(argv))]
+            if names != [key]:
+                problems.append(f"{as_args}: agent-secrets did not ask for {key} alone: {argv}")
     return problems
 
 
@@ -155,7 +156,7 @@ class Fixture:
         self.tmpdir = root / "tmp"
         for d in (self.bin, self.log, self.tmpdir):
             d.mkdir()
-        for name, body in (("secret-run", SECRET_RUN), ("gcloud", TOOL), ("bq", TOOL), ("gsutil", TOOL)):
+        for name, body in (("agent-secrets", AGENT_SECRETS), ("gcloud", TOOL), ("bq", TOOL), ("gsutil", TOOL)):
             path = self.bin / name
             path.write_text(body)
             path.chmod(path.stat().st_mode | stat.S_IEXEC)
@@ -171,14 +172,15 @@ class Fixture:
             "TMPDIR": str(self.tmpdir),
             "LOG": str(self.log),
             "FAKE_TOKEN": TOKEN,
+            "DOTFILES_DIR": str(DOTFILES),
         }
         if reason is not None:
             env["GCLOUD_READER_REASON"] = reason
         env.update(env_extra or {})
         return subprocess.run([str(self.script), *args], env=env, capture_output=True, text=True, timeout=30)
 
-    def secret_run_argv(self) -> list[str]:
-        path = self.log / "secret-run.argv"
+    def client_argv(self) -> list[str]:
+        path = self.log / "agent-secrets.argv"
         return path.read_text().splitlines() if path.exists() else []
 
     def tool_log(self) -> dict[str, str]:
@@ -192,20 +194,32 @@ class Fixture:
 
 
 class GcloudReaderTest(unittest.TestCase):
-    def test_asks_for_metadata_read_by_default_with_an_hour_and_register(self) -> None:
+    def test_asks_for_metadata_read_by_default_with_an_hour_and_the_reason(self) -> None:
         self.assertEqual(ttl_problems(SCRIPT), [])
         with Fixture(SCRIPT) as f:
             f.run("storage", "buckets", "list")
-            argv = f.secret_run_argv()
-            self.assertEqual(argv[: argv.index("--")], ["--register", "--ttl", "1h", "--reason", "INFRA-4748: the IAM policy of gs://theorem-build-io", "METADATA_READ"])
+            argv = f.client_argv()
+            self.assertEqual(argv[: argv.index("--")], ["METADATA_READ", "--ttl", "1h", "--reason", "INFRA-4748: the IAM policy of gs://theorem-build-io"])
 
     def test_as_legion_asks_for_legion_read(self) -> None:
         with Fixture(SCRIPT) as f:
             result = f.run("--as", "legion", "--", "gcloud", "organizations", "get-iam-policy", "123456789012")
             self.assertEqual(result.returncode, 0, result.stderr)
-            argv = f.secret_run_argv()
-            self.assertEqual(argv[argv.index("--") - 1], "LEGION_READ")
+            argv = f.client_argv()
+            self.assertEqual(argv[0], "LEGION_READ")
             self.assertNotIn("METADATA_READ", argv)
+
+    def test_the_client_gets_broker_env_s_url_when_the_caller_has_none(self) -> None:
+        """omp's eval kernel and a unit pass no AGENT_SECRETS_URL on, and the client refuses without one."""
+        committed = (DOTFILES / "agent-secrets" / "broker.env").read_text().split("AGENT_SECRETS_URL=", 1)[1].split()[0]
+        with Fixture(SCRIPT) as f:
+            result = f.run("storage", "buckets", "list")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((f.log / "agent-secrets.url").read_text().strip(), committed)
+        with Fixture(SCRIPT) as f:
+            result = f.run("storage", "buckets", "list", env_extra={"AGENT_SECRETS_URL": "https://broker.example.test"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((f.log / "agent-secrets.url").read_text().strip(), "https://broker.example.test")
 
     def test_a_copy_without_the_ttl_fails_the_ttl_check(self) -> None:
         """The negative control of the --ttl case: the broker refuses a request with no lifetime."""
@@ -223,7 +237,7 @@ class GcloudReaderTest(unittest.TestCase):
             result = f.run("--as", "other", "storage", "buckets", "list")
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn("--as", result.stderr)
-            self.assertEqual(f.secret_run_argv(), [])
+            self.assertEqual(f.client_argv(), [])
             self.assertEqual(f.tool_log(), {})
 
     def test_no_reason_exits_2_before_any_call(self) -> None:
@@ -231,21 +245,21 @@ class GcloudReaderTest(unittest.TestCase):
             result = f.run("storage", "buckets", "list", reason=None)
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn("GCLOUD_READER_REASON", result.stderr)
-            self.assertEqual(f.secret_run_argv(), [])
+            self.assertEqual(f.client_argv(), [])
 
     def test_help_and_no_command_ask_nothing(self) -> None:
         with Fixture(SCRIPT) as f:
             self.assertEqual(f.run("--help").returncode, 0)
             self.assertEqual(f.run().returncode, 2)
             self.assertEqual(f.run("--as", "legion").returncode, 2)
-            self.assertEqual(f.secret_run_argv(), [])
+            self.assertEqual(f.client_argv(), [])
 
     def test_a_refused_release_stops_before_any_call(self) -> None:
         with Fixture(SCRIPT) as f:
-            result = f.run("storage", "buckets", "list", env_extra={"SECRET_RUN_EXIT": "1"})
+            result = f.run("storage", "buckets", "list", env_extra={"AGENT_SECRETS_EXIT": "1"})
             self.assertEqual(result.returncode, 1)
             self.assertEqual(f.tool_log(), {})
-            result = f.run("storage", "buckets", "list", env_extra={"SECRET_RUN_EXIT": "77"})
+            result = f.run("storage", "buckets", "list", env_extra={"AGENT_SECRETS_EXIT": "77"})
             self.assertEqual(result.returncode, 77)
             self.assertEqual(f.tool_log(), {})
 
@@ -263,7 +277,7 @@ class GcloudReaderTest(unittest.TestCase):
             self.assertEqual(log["impersonate"], "")
             self.assertEqual(log["env_metadata"], "", "the command still holds METADATA_READ")
             self.assertNotIn(TOKEN, log["argv"])
-            self.assertNotIn(TOKEN, "\n".join(f.secret_run_argv()))
+            self.assertNotIn(TOKEN, "\n".join(f.client_argv()))
             self.assertNotIn(TOKEN, result.stdout + result.stderr)
 
     def test_a_first_word_that_is_no_command_runs_gcloud(self) -> None:

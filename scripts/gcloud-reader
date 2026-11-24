@@ -14,8 +14,8 @@
 #                  insights, Policy Troubleshooter, Support cases.
 #
 # The broker serves both to Sami's sessions alone, at once, for an hour at most, and refuses a
-# request that names no lifetime, so the request asks for --ttl 1h; --register gives a session the
-# helper never registered a broker identity for this one command. The broker releases a bare access
+# request that names no lifetime, so the request asks for --ttl 1h. A process outside a registered
+# session still gets its identity from the client (sign-in, then the machine). The broker releases a bare access
 # token (agent-infra bootstrap/metadataread.go). It goes to a 0600 file of a mktemp -d directory,
 # removed on exit, never to an argument list; the command runs with CLOUDSDK_AUTH_ACCESS_TOKEN_FILE
 # set to that file, a fresh CLOUDSDK_CONFIG, prompts off and file logging off, whatever the caller
@@ -33,8 +33,8 @@
 # runs gcloud. Give `gcloud`, `bq` or `sh -c '...'` to choose; a REST call reads the header from stdin:
 #   sh -c 'printf "header = \"Authorization: Bearer %s\"\n" "$(cat "$CLOUDSDK_AUTH_ACCESS_TOKEN_FILE")" | curl -sS -f -K - URL'
 #
-# Exit 2 for a usage error, before anything reaches the broker; secret-run's own status when the
-# broker gives no token (75 pending, 77 denied, 1 refused); the command's status otherwise.
+# Exit 2 for a usage error, before anything reaches the broker; the agent-secrets client's own status
+# when the broker gives no token (75 pending, 77 denied, 1 refused); the command's status otherwise.
 set -euo pipefail
 
 usage="usage: GCLOUD_READER_REASON='<key>: <read>' gcloud-reader [--as metadata|legion] [--] <command...>"
@@ -61,7 +61,10 @@ if [ "${GCLOUD_READER_INNER:-}" != 1 ]; then
     echo "gcloud-reader: set GCLOUD_READER_REASON to the issue key and each object the command reads ('INFRA-1234: the IAM policy of gs://theorem-build-io')" >&2
     exit 2
   }
-  GCLOUD_READER_INNER=1 exec secret-run --register --ttl 1h --reason "$GCLOUD_READER_REASON" "$secret" -- "$0" --as "$as" -- "$@"
+  # The client needs AGENT_SECRETS_URL, which omp's eval kernel and a unit do not pass on.
+  # shellcheck source=SCRIPTDIR/../agent-secrets/broker-url.sh
+  . "${DOTFILES_DIR:-$HOME/.dotfiles}/agent-secrets/broker-url.sh"
+  GCLOUD_READER_INNER=1 exec agent-secrets "$secret" --ttl 1h --reason "$GCLOUD_READER_REASON" -- "$0" --as "$as" -- "$@"
 fi
 
 token=${!secret:-}
