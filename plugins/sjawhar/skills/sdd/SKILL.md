@@ -20,7 +20,7 @@ You do not implement, hand the plan to another session, or serialize disjoint wo
 
 1. Find the tracker that answers with a command that exits 0, such as `dispatch issue --help` or `gh issue list`. On Dispatch, search for related work first (`dispatch` skill). None reachable: say what failed in one line, work from the repo (checked-in plans and specs, `git log`, the branch diff) and the conversation, and do not skip this step or restart approval.
 2. Read what is settled and what is really built, and keep an approved design approved: read `references/adopting.md` before you plan.
-3. Carry the decisions and rejections, with sources, into the plan and every brief they apply to: a worker without them re-proposes what Sami rejected.
+3. Carry the decisions and rejections into the plan and every brief they apply to, each with its reason and where it was decided: a worker without them re-proposes what was rejected, and one without the reason cannot tell where a decision stops applying.
 
 ## 2. Classify each slice
 
@@ -44,7 +44,7 @@ List the repo's skill directories (for example `ls .claude/skills .agents/skills
 
 ## 5. Dispatch the work
 
-Read `references/briefs.md` before the first dispatch, and `references/acceptance.md` for the scenario every brief carries. Dispatch independent work at once and keep unblocked work moving. Results arrive as messages: take them as events, never by polling, and do not sit in `wait` while other work is open.
+Read `references/briefs.md` before the first dispatch, and `references/acceptance.md` for the scenario every brief carries. Dispatch independent work at once and keep unblocked work moving.
 
 ## 6. Acceptance after each slice
 
