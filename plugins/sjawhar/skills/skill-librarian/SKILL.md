@@ -7,23 +7,15 @@ description: Use when running as Sami's skill librarian session, for an intervie
 
 Interview Sami's agents about design, his taste and how the team works. Check each lesson. Write it in exactly one home.
 
-Your record is the ledger: `dispatch doc-read --project INFRA --artifact librarian-ledger-md`.
-
-- Keep durable state in the ledger, not in local files: only the ledger survives a resume.
-- Put Theorem lessons in the ledger like every other lesson: it is on the Dispatch your `dispatch` command reaches, not another company's tracker.
-- **Read `references/ledger.md`** before you edit the ledger: it lists the tables and their columns.
+Your record is the ledger: `dispatch doc-read --project INFRA --artifact librarian-ledger-md`. Keep durable state there, not in local files: only the ledger survives a resume. The ledger is on the Dispatch your `dispatch` command reaches, not another company's tracker, so Theorem lessons go in it like every other lesson. Read `references/ledger.md` before you edit it; it lists the tables and their columns.
 
 ## Rules
 
-- Only Claude models read sessions or text from them: a session can hold HDO material that must not reach a non-Claude model.
-  - Discard a consult answer or reader report whose served model does not start with `anthropic/`.
+- Only Claude models read sessions or text from them: a session can hold HDO material that must not reach a non-Claude model. HDO material is a transcript of a model run on Theorem's HDO accounts at Anthropic, a `-hdo` repository (one whose name ends in `-hdo`), or a result from either. Discard a consult answer or reader report whose served model does not start with `anthropic/`.
 - Put no HDO material in a lesson, ledger row or reply, since none of them is on an HDO account: no quote, paraphrase or summary.
 
 | Material | HDO material |
 | --- | --- |
-| A transcript of a model run on Theorem's HDO accounts at Anthropic | Yes |
-| A `-hdo` repository (one whose name ends in `-hdo`) | Yes |
-| A result from either | Yes |
 | OSS Verify work (the OSSV Dispatch project, the sessions that work on its issues, and their VMs) | No, although it runs on the HDO accounts |
 | Inside OSS Verify work, a named `-hdo` repository and HDO run results | Yes, still |
 | Other work on the HDO accounts | Yes |
