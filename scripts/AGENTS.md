@@ -7,7 +7,7 @@
 ## Adding or changing a script
 
 - A secret never goes in a command's arguments: any user can read them from `/proc/<pid>/cmdline`. Pass it through the environment, a file or stdin (curl's `--config` or `-H @file`, `mcp-remote-from-env` for a URL).
-- A script that needs a secret runs `secret-run KEY… -- cmd`, not `secrets` or `agent-secrets`.
+- A script that needs a secret runs `secret-run --reason '<what and why>' KEY… -- cmd`, not `secrets` or `agent-secrets`. On the broker path secret-run refuses a request with no reason.
 - Test for a Google VM with `on-google-vm`, not a copy of its check.
 - A script that resumes an omp session runs `omp-session-live <id>` first and refuses while it exits 0.
 - Text that is data (a message body, a prompt) goes in a file passed by path (`--message-file`, `--body-file`). Inline, a shell runs its backticks, and `ssh` and `systemd-run` split it again. Where a tool has only an inline form, pass one `/bin/sh -c` whose whole command is one quoted argument, then read back what it stored (a unit's `ExecStart`).

@@ -5,7 +5,7 @@
 # Sami asked for, never for a read: a Google read goes through gcloud-reader (metadata-reader@ or,
 # with --as legion, legion-reader@), with no person's approval (dispatch://INFRA-4748).
 #
-#   gcloud-broker [--reason R] [--] <command...>        (gcloud-broker gcloud compute instances stop …)
+#   gcloud-broker --reason R [--] <command...>        (gcloud-broker --reason 'INFRA-1234: …' gcloud compute instances stop …)
 #
 # The broker releases a one-hour Google access token, never the refresh token. The command runs in
 # a throwaway CLOUDSDK_CONFIG, removed on exit, so no person's login and no box configuration is
@@ -15,7 +15,7 @@
 # (dispatch://INFRA-4824). Exit 75 means the grant is pending approval, 77 that it was denied.
 set -euo pipefail
 
-usage="usage: gcloud-broker [--reason R] [--] <command...>"
+usage="usage: gcloud-broker --reason R [--] <command...>"
 # Answered BEFORE anything reaches the broker. Everything below asks a PERSON to approve a
 # human-tier grant, and on 2026-11-05 at 09:35Z a bare `gcloud-broker --help` put a real approval
 # card in Sami's inbox for a question the script could answer itself.
@@ -23,15 +23,21 @@ case "${1:-}" in
   -h|--help) echo "$usage"; exit 0 ;;
 esac
 
-reason="gcloud-broker admin command"
-if [ "${1:-}" = --reason ]; then
-  reason=$2
-  shift 2
-fi
+reason=""
+case "${1:-}" in
+  --reason) [ $# -ge 2 ] || { echo "$usage" >&2; exit 2; }; reason=$2; shift 2 ;;
+  --reason=*) reason=${1#--reason=}; shift ;;
+esac
 [ "${1:-}" = -- ] && shift
 [ $# -gt 0 ] || { echo "$usage" >&2; exit 2; }
 
 if [ "${GCLOUD_BROKER_INNER:-}" != 1 ]; then
+  # The card shows R to the person who decides, so it is the caller's own: a reason made up here
+  # would name no act (dispatch://INFRA-1481, R5).
+  [ -n "${reason//[[:space:]]/}" ] || {
+    echo "gcloud-broker: refused, nothing requested: pass --reason with the issue key and what the command does ('INFRA-1234: stop instance x')" >&2
+    exit 2
+  }
   GCLOUD_BROKER_INNER=1 exec secret-run --reason "$reason" --ttl 1h --wait "${GCLOUD_BROKER_WAIT:-15m}" GCLOUD_SAMI -- "$0" -- "$@"
 fi
 

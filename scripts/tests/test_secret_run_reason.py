@@ -7,7 +7,9 @@ runes, none of category Cc, Cf, Cs, Co, Zl or Zp. The cases cover the session so
 variables and transcript, Envoy, Claude Code, none), what of a command may appear (its first words
 and the ids it targets, never a flag's value or anything that looks like a credential), and the
 length rule: the session, the command and the host are never cut, only the why shortens, and the
-builder refuses (exit 3) when the first three alone leave no room for it.
+builder refuses (exit 3) when the first three alone leave no room for it. A caller that gives no
+reason is refused too (exit 4): until 2026-11-23 the builder wrote "no reason given" in its place,
+so the broker's refusal of a human-tier request with no reason never fired (dispatch://INFRA-1481).
 """
 
 from __future__ import annotations
@@ -94,6 +96,20 @@ class Session(Base):
         export, text = self.build(PI_SESSION_FILE=str(self.subagent()))
         self.assertEqual(export, SESSION)
         self.assertIn(f'session: omp {SESSION} "TASKCOACH" subagent CarryCensus |', text)
+
+    def test_a_nested_subagent_is_named_once(self) -> None:
+        """omp keeps a nested subagent's transcript at <session>/<parent>/<parent>.<child>.jsonl: the file's
+        name is already the whole dotted name, so the card says `Fix1481.Prove1481`, not the parent twice."""
+        self.transcript()
+        nested = self.subagent("Fix1481/Fix1481.Prove1481")
+        _, text = self.build(PI_SESSION_FILE=str(nested))
+        self.assertIn(f'session: omp {SESSION} "TASKCOACH" subagent Fix1481.Prove1481 |', text)
+        flat = self.subagent("Outer/Inner")
+        _, text = self.build(PI_SESSION_FILE=str(flat))
+        self.assertIn(f'session: omp {SESSION} "TASKCOACH" subagent Outer.Inner |', text)
+        deep = self.subagent("A/A.B/A.B.C")
+        _, text = self.build(PI_SESSION_FILE=str(deep))
+        self.assertIn(f'session: omp {SESSION} "TASKCOACH" subagent A.B.C |', text)
 
     def test_a_top_level_session_file_has_no_subagent(self) -> None:
         export, text = self.build(PI_SESSION_FILE=str(self.transcript()))
@@ -240,7 +256,19 @@ class Text(Base):
     def test_the_caller_and_the_environment_reason_join(self) -> None:
         self.assertTrue(self.build(SECRET_RUN_REASON="  retitle tabs ")[1].startswith("gws theorem modify; retitle tabs |"))
         self.assertTrue(self.build(caller="", SECRET_RUN_REASON="retitle tabs")[1].startswith("retitle tabs |"))
-        self.assertTrue(self.build(caller="")[1].startswith("no reason given |"))
+        self.assertTrue(self.build(caller="\u200b", SECRET_RUN_REASON="retitle tabs")[1].startswith("retitle tabs |"))
+        self.assertTrue(self.build(caller="retitle tabs", SECRET_RUN_REASON="\u200b")[1].startswith("retitle tabs |"))
+
+    def test_no_reason_is_refused_never_made_up(self) -> None:
+        for caller, environment in (
+            ("", {}), ("  ", {"SECRET_RUN_REASON": "\t"}), ("\x01\u200b", {}),
+            ("\u200b", {"SECRET_RUN_REASON": "\u200b"}),
+            ("\x01", {"SECRET_RUN_REASON": "\u200b"}),
+        ):
+            with self.subTest(caller=caller, environment=environment):
+                with self.assertRaises(REASON.NoReason) as refused:
+                    self.build(caller, None, **environment)
+                self.assertIn("the request carries no reason. Pass --reason", str(refused.exception))
 
     def test_the_session_command_and_host_are_never_cut_and_only_the_why_shortens(self) -> None:
         # Each of these was cut until 2026-11-17: the command past 100 runes and the host past 32.
@@ -329,6 +357,19 @@ class Cli(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("secret-run-reason: the session, the command and the host are", result.stderr)
         self.assertIn(f"session: omp {session} |", result.stderr)
+
+    def test_no_reason_exits_4_in_one_line_and_prints_no_reason(self) -> None:
+        for args in (("--pid", "77", "--", "printenv", "KEY"), ("--pid", "77", "--reason", " ", "--", "printenv", "KEY")):
+            with self.subTest(args=args):
+                result = self.run_script(*args)
+                self.assertEqual(result.returncode, 4, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(
+                    result.stderr.splitlines(),
+                    ["secret-run-reason: refused, nothing requested: the request carries no reason. Pass --reason '<what "
+                     "you do and why>', or set SECRET_RUN_REASON for this one call; the approval card shows it to the "
+                     "person who decides."],
+                )
 
     def test_usage_errors_exit_2(self) -> None:
         for args in (("--pid",), ("--pid", "x"), ("--bogus",), ("--reason",)):

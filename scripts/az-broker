@@ -6,7 +6,7 @@
 # Azure read goes through az-reader, as the Azure legion-reader, with no person's approval
 # (dispatch://INFRA-4748).
 #
-#   az-broker [--reason R] [--] <command...>        (az-broker az vm deallocate --subscription …)
+#   az-broker --reason R [--] <command...>        (az-broker --reason 'INFRA-1234: …' az vm deallocate …)
 #
 # The broker releases {"tenant_id","client_id","federated_token","expires_at"}. The wrapper signs
 # in with `az login --service-principal --federated-token @FILE` in a throwaway AZURE_CONFIG_DIR,
@@ -15,22 +15,28 @@
 # pending approval, 77 that it was denied.
 set -euo pipefail
 
-usage="usage: az-broker [--reason R] [--] <command...>"
+usage="usage: az-broker --reason R [--] <command...>"
 # Answered BEFORE anything reaches the broker, for the reason in gcloud-broker: everything below
 # asks a PERSON to approve a human-tier grant, and a bare `--help` must never do that.
 case "${1:-}" in
   -h|--help) echo "$usage"; exit 0 ;;
 esac
 
-reason="az-broker admin command"
-if [ "${1:-}" = --reason ]; then
-  reason=$2
-  shift 2
-fi
+reason=""
+case "${1:-}" in
+  --reason) [ $# -ge 2 ] || { echo "$usage" >&2; exit 2; }; reason=$2; shift 2 ;;
+  --reason=*) reason=${1#--reason=}; shift ;;
+esac
 [ "${1:-}" = -- ] && shift
 [ $# -gt 0 ] || { echo "$usage" >&2; exit 2; }
 
 if [ "${AZ_BROKER_INNER:-}" != 1 ]; then
+  # The card shows R to the person who decides, so it is the caller's own: a reason made up here
+  # would name no act (dispatch://INFRA-1481, R5).
+  [ -n "${reason//[[:space:]]/}" ] || {
+    echo "az-broker: refused, nothing requested: pass --reason with the issue key and what the command does ('INFRA-1234: deallocate vm x')" >&2
+    exit 2
+  }
   AZ_BROKER_INNER=1 exec secret-run --reason "$reason" --ttl 1h --wait "${AZ_BROKER_WAIT:-15m}" AZURE_ADMIN -- "$0" -- "$@"
 fi
 

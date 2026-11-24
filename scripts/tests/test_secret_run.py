@@ -100,7 +100,10 @@ def write_stub(directory: Path, name: str, body: str) -> None:
 # other call prints its argv less `--reason R` and its URL, then either exits $STUB_BROKER_EXIT or
 # execs the command after `--`. R goes to stderr as `REASON R`, beside `SESSION_ID S`, the session
 # id the real client sends (OMP_SESSION_ID, else ENVOY_SESSION_ID, else CLAUDE_CODE_SESSION_ID).
+# With $STUB_LOG set, each call first appends its whole argv there as one line, so a test can read
+# every call secret-run made of the client: `identity` alone means nothing reached the broker.
 AGENT_SECRETS_STUB = r"""
+[[ -z "${STUB_LOG:-}" ]] || printf '%s\n' "$*" >> "$STUB_LOG"
 if [[ "$1" == identity ]]; then
     echo "identity-stdout"
     [[ -n "${STUB_IDENTITY_SILENT:-}" ]] || echo "identity: ${STUB_IDENTITY_MSG:-no broker identity}" >&2
@@ -211,6 +214,8 @@ class SecretRun(unittest.TestCase):
         )
 
     EXEC_ARGS = ("--reason", "skill: smoke", "--wait", "0", "AIRTABLE_TOKEN", "DD_API_KEY")
+    # Every broker request carries a reason; a test about something else gives this one.
+    WHY = ("--reason", "test: why")
     CMD = ("--", "sh", "-c", 'echo "via=$VIA"')
 
     def test_broker_identity_execs_agent_secrets(self) -> None:
@@ -248,7 +253,7 @@ class SecretRun(unittest.TestCase):
     def test_caller_url_is_kept(self) -> None:
         self.with_client()
         result = self.run_secret_run(
-            "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0", AGENT_SECRETS_URL="https://b.example"
+            *self.WHY, "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0", AGENT_SECRETS_URL="https://b.example"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("URL=https://b.example", result.stdout)
@@ -263,7 +268,7 @@ class SecretRun(unittest.TestCase):
                     env_local.unlink(missing_ok=True)
                 else:
                     env_local.write_text(f"AGENT_SECRETS_URL={local}\n", encoding="utf-8")
-                result = self.run_secret_run("AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0", **caller)
+                result = self.run_secret_run(*self.WHY, "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0", **caller)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(
                     result.stdout.splitlines()[0],
@@ -362,7 +367,7 @@ class SecretRun(unittest.TestCase):
         for the binary under $HOME/.mise and runs that, for identity and for the broker call."""
         self.with_mise_client()
         self.assertNotIn("MISE_DATA_DIR", self.env)
-        result = self.run_secret_run("AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0")
+        result = self.run_secret_run(*self.WHY, "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
@@ -376,7 +381,7 @@ class SecretRun(unittest.TestCase):
         """mise prints a WARN for an unknown config key (or MISE_VERBOSE/MISE_DEBUG output) on
         stderr and still exits 0: only its stdout is the path, and the warning reaches stderr."""
         self.with_mise_client()
-        result = self.run_secret_run("AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0", STUB_MISE_WARN="1")
+        result = self.run_secret_run(*self.WHY, "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0", STUB_MISE_WARN="1")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines()[-1], "via=broker")
         self.assertIn("mise WARN unknown field", result.stderr)
@@ -386,6 +391,7 @@ class SecretRun(unittest.TestCase):
         """A caller's own MISE_DATA_DIR wins over $HOME/.mise: the client is installed only there."""
         self.with_mise_client(data_dir="other-mise")
         result = self.run_secret_run(
+            *self.WHY,
             "AIRTABLE_TOKEN",
             *self.CMD,
             STUB_IDENTITY="0",
@@ -449,7 +455,7 @@ class SecretRun(unittest.TestCase):
         for code in ("69", "75", "77"):
             with self.subTest(exit=code):
                 result = self.run_secret_run(
-                    "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0", STUB_BROKER_EXIT=code
+                    *self.WHY, "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0", STUB_BROKER_EXIT=code
                 )
                 self.assertEqual(result.returncode, int(code))
                 self.assertNotIn("SECRETSD", result.stdout)
@@ -480,13 +486,13 @@ class SecretRun(unittest.TestCase):
 
     def test_ttl_reaches_the_broker_for_exec_and_request(self) -> None:
         self.with_client()
-        result = self.run_secret_run("--ttl", "2m", "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0")
+        result = self.run_secret_run(*self.WHY, "--ttl", "2m", "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines()[0],
             f'BROKER AIRTABLE_TOKEN --ttl 2m -- sh -c echo "via=$VIA" URL={BROKER_URL} MARK={BROKER_URL}',
         )
-        result = self.run_secret_run("request", "--ttl=5m", "DEEL_API_KEY", STUB_IDENTITY="0")
+        result = self.run_secret_run("request", *self.WHY, "--ttl=5m", "DEEL_API_KEY", STUB_IDENTITY="0")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
@@ -512,7 +518,7 @@ class SecretRun(unittest.TestCase):
 
     def test_github_narrowing_reaches_the_broker(self) -> None:
         self.with_client()
-        result = self.run_secret_run(*self.GITHUB_ARGS, "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="0")
+        result = self.run_secret_run(*self.WHY, *self.GITHUB_ARGS, "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="0")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines()[0],
@@ -526,7 +532,7 @@ class SecretRun(unittest.TestCase):
         mise's default data dir and fails there."""
         self.with_mise_client()
         self.assertNotIn("MISE_DATA_DIR", self.env)
-        result = self.run_secret_run(*self.GITHUB_ARGS, "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="0")
+        result = self.run_secret_run(*self.WHY, *self.GITHUB_ARGS, "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="0")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
@@ -576,7 +582,7 @@ class SecretRun(unittest.TestCase):
         """agent-open's relay, 2026-10-29: PATH held v17.5.0 directly; a narrowed call must reach the
         pinned client, never the old one."""
         self.with_stale_install()
-        result = self.run_secret_run(*self.GITHUB_ARGS, "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="0")
+        result = self.run_secret_run(*self.WHY, *self.GITHUB_ARGS, "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="0")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("STALE", result.stdout + result.stderr)
         self.assertEqual(
@@ -598,7 +604,7 @@ class SecretRun(unittest.TestCase):
         self.with_stale_install()
         self.with_helper_unit()
         result = self.run_secret_run(
-            "--register", *self.GITHUB_ARGS, "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="1"
+            "--register", *self.WHY, *self.GITHUB_ARGS, "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="1"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("STALE", result.stdout + result.stderr)
@@ -622,14 +628,14 @@ class SecretRun(unittest.TestCase):
         self.with_client()
         self.with_helper_unit()
         result = self.run_secret_run(
-            "--register", *self.GITHUB_ARGS, "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="1"
+            "--register", *self.WHY, *self.GITHUB_ARGS, "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="1"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
         self.assertEqual(len(self.register_lines(result)), 1, result.stdout)
         self.assertEqual(
             lines[0],
-            f"REGISTER --wait 10 --exec -- {SECRET_RUN} --github-owner sjawhar --github-repo proofs "
+            f"REGISTER --wait 10 --exec -- {SECRET_RUN} --reason test: why --github-owner sjawhar --github-repo proofs "
             '--github-repo=lean --github-read-only GITHUB_APP_SJAWHAR -- sh -c echo "via=$VIA"',
         )
         self.assertEqual(
@@ -647,7 +653,7 @@ class SecretRun(unittest.TestCase):
         self.with_mise_client()
         self.with_helper_unit()
         self.assertNotIn("MISE_DATA_DIR", self.env)
-        result = self.run_secret_run("--register", "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="1")
+        result = self.run_secret_run("--register", *self.WHY, "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="1")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.register_lines(result)), 1, result.stdout)
         self.assertEqual(result.stdout.splitlines()[-1], "via=broker")
@@ -670,7 +676,7 @@ class SecretRun(unittest.TestCase):
     def test_register_with_an_identity_goes_straight_to_the_broker(self) -> None:
         self.with_client()
         self.with_helper_unit()
-        result = self.run_secret_run("--register", "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="0")
+        result = self.run_secret_run("--register", *self.WHY, "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="0")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.register_lines(result), [])
         self.assertEqual(result.stdout.splitlines()[-1], "via=broker")
@@ -694,15 +700,20 @@ class SecretRun(unittest.TestCase):
         self.with_client()
         self.with_helper_unit()
         extra = {"STUB_IDENTITY": "1", "STUB_LOGIN": "none", "STUB_REGISTERED_IDENTITY": "1"}
-        result = self.run_secret_run("--register", "AIRTABLE_TOKEN", *self.CMD, **extra)
+        result = self.run_secret_run("--register", *self.WHY, "AIRTABLE_TOKEN", *self.CMD, **extra)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.register_lines(result), [f'REGISTER --exec -- {SECRET_RUN} AIRTABLE_TOKEN -- sh -c echo "via=$VIA"'])
+        self.assertEqual(
+            self.register_lines(result),
+            [f'REGISTER --exec -- {SECRET_RUN} --reason test: why AIRTABLE_TOKEN -- sh -c echo "via=$VIA"'],
+        )
         self.assertEqual(result.stdout.splitlines()[-1], "via=secretsd")
         self.assertEqual(
             [line for line in result.stderr.splitlines() if line.startswith(SECRETSD_READ)],
             [secretsd_read("AIRTABLE_TOKEN", "no broker identity")],
         )
-        result = self.run_secret_run("--register", "--github-owner=sjawhar", "GITHUB_APP_SJAWHAR", *self.CMD, **extra)
+        result = self.run_secret_run(
+            "--register", *self.WHY, "--github-owner=sjawhar", "GITHUB_APP_SJAWHAR", *self.CMD, **extra
+        )
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertEqual(len(self.register_lines(result)), 1)
         self.assertFalse([line for line in result.stdout.splitlines() if line.startswith("via=")], result.stdout)
@@ -711,7 +722,7 @@ class SecretRun(unittest.TestCase):
 
     def test_register_on_a_machine_without_the_helper_runs_unregistered(self) -> None:
         self.with_client()
-        result = self.run_secret_run("--register", "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="1")
+        result = self.run_secret_run("--register", *self.WHY, "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="1")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.register_lines(result), [])
         self.assertEqual(result.stdout.splitlines()[-1], "via=secretsd")
@@ -882,7 +893,7 @@ class SecretRun(unittest.TestCase):
         self.with_client()
         subagent = self.with_session()
         result = self.run_secret_run(
-            "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0", PI_SESSION_FILE=str(subagent),
+            *self.WHY, "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0", PI_SESSION_FILE=str(subagent),
             CLAUDE_CODE_SESSION_ID="claude-session-1",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -948,7 +959,7 @@ class SecretRun(unittest.TestCase):
 
     def test_dry_run_never_registers_or_runs_the_command(self) -> None:
         self.with_client()
-        result = self.run_secret_run("--dry-run", "--register", "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="1")
+        result = self.run_secret_run("--dry-run", "--register", *self.WHY, "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="1")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("store: the broker once --register enrolls this process, else secretsd", result.stdout)
         self.assertNotIn(NO_IDENTITY_NOTICE, result.stderr)
@@ -983,6 +994,169 @@ class SecretRun(unittest.TestCase):
             r"^gws theorem modify; line one line two \| session: unknown, secret-run-reason failed "
             rf"\| host: {re.escape(socket.gethostname())} pid \d+$",
         )
+
+    # dispatch://INFRA-1481, 2026-11-23: request c3de0b87 reached Sami's page as "no reason given",
+    # the text secret-run-reason wrote when the caller gave none, so the broker's refusal of a
+    # human-tier request with no reason (R5) never saw an empty one. secret-run now refuses first.
+    # secret-run and the builder print the same text, each behind its own name.
+    REFUSAL_TEXT = (
+        "refused, nothing requested: the request carries no reason. Pass --reason '<what you do and why>', "
+        "or set SECRET_RUN_REASON for this one call; the approval card shows it to the person who decides."
+    )
+    REFUSAL = f"secret-run: {REFUSAL_TEXT}"
+
+    def client_calls(self, log: Path) -> list[str]:
+        return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+    def test_a_broker_request_with_no_reason_is_refused_before_any_call(self) -> None:
+        """One line on stderr, exit 1, and the client hears `identity` alone: no request, no
+        registration, and the command never runs. A blank --reason or SECRET_RUN_REASON is no reason."""
+        self.with_client()
+        self.with_helper_unit()
+        log = Path(self.temp_dir.name) / "client.log"
+        cases = {
+            "exec": (("AIRTABLE_TOKEN", *self.CMD), {"STUB_IDENTITY": "0"}),
+            "request": (("request", "AIRTABLE_TOKEN"), {"STUB_IDENTITY": "0"}),
+            "dry run": (("--dry-run", "AIRTABLE_TOKEN", *self.CMD), {"STUB_IDENTITY": "0"}),
+            "register": (("--register", "GITHUB_APP_SJAWHAR", *self.CMD), {"STUB_IDENTITY": "1"}),
+            "blank reason": (("--reason", " \t ", "AIRTABLE_TOKEN", *self.CMD), {"STUB_IDENTITY": "0"}),
+            "blank environment reason": (
+                ("--reason=", "AIRTABLE_TOKEN", *self.CMD),
+                {"STUB_IDENTITY": "0", "SECRET_RUN_REASON": "  "},
+            ),
+        }
+        for case, (args, extra) in cases.items():
+            with self.subTest(case=case):
+                log.unlink(missing_ok=True)
+                result = self.run_secret_run(*args, STUB_LOG=str(log), **extra)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(result.stderr.splitlines(), [self.REFUSAL])
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(self.client_calls(log), ["identity"])
+
+    def test_the_same_requests_with_a_reason_reach_the_broker(self) -> None:
+        """The control for the refusal above: with a reason, from --reason or from SECRET_RUN_REASON
+        alone, the same calls reach the client past `identity`, so the log does see a request."""
+        self.with_client()
+        log = Path(self.temp_dir.name) / "client.log"
+        why = "INFRA-1481: k10 control"
+        cases: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
+            "--reason": (("--reason", why, "AIRTABLE_TOKEN", *self.CMD), {}),
+            "SECRET_RUN_REASON": (("AIRTABLE_TOKEN", *self.CMD), {"SECRET_RUN_REASON": why}),
+            "request": (("request", "--reason", why, "AIRTABLE_TOKEN"), {}),
+        }
+        for case, (args, extra) in cases.items():
+            with self.subTest(case=case):
+                log.unlink(missing_ok=True)
+                result = self.run_secret_run(*args, STUB_IDENTITY="0", STUB_LOG=str(log), **extra)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = self.client_calls(log)
+                self.assertEqual(len(calls), 2, calls)
+                self.assertEqual(calls[0], "identity")
+                self.assertTrue(self.reason_of(result).startswith(f"{why} | session: "), result.stderr)
+
+    def test_secretsd_needs_no_reason(self) -> None:
+        """secretsd reads no reason, so a process with no broker identity is served without one."""
+        self.with_client()
+        result = self.run_secret_run("AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['SECRETSD AIRTABLE_TOKEN -- sh -c echo "via=$VIA"', "via=secretsd"])
+        self.assertNotIn(self.REFUSAL, result.stderr)
+
+    def test_a_reason_that_cleans_to_nothing_is_refused_by_the_builder(self) -> None:
+        """A control and a format character pass secret-run's blank test, and the builder's cleaning
+        leaves nothing of them: it refuses in one line (exit 4), and secret-run exits 1 with no call
+        past identity."""
+        self.with_client()
+        log = Path(self.temp_dir.name) / "client.log"
+        result = self.run_secret_run(
+            "--reason", "\x01\u200b", "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0", STUB_LOG=str(log)
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stderr.splitlines(), [f"secret-run-reason: {self.REFUSAL_TEXT}"])
+        self.assertEqual(self.client_calls(log), ["identity"])
+
+    def test_cleaning_each_reason_part_cannot_create_a_reason_from_the_join(self) -> None:
+        self.with_client()
+        log = self.stub_dir / "client.log"
+        result = self.run_secret_run(
+            "--reason", "\u200b", "AIRTABLE_TOKEN", *self.CMD,
+            STUB_IDENTITY="0", STUB_LOG=str(log), SECRET_RUN_REASON="\u200b",
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(self.client_calls(log), ["identity"])
+
+    def test_register_refuses_a_cleaned_empty_reason_before_contacting_the_helper(self) -> None:
+        self.with_client()
+        self.with_helper_unit()
+        log = self.stub_dir / "client.log"
+        for locale in ("C", "C.UTF-8"):
+            for why in ("\u00a0", "\u2003", "\x01\u200b"):
+                with self.subTest(locale=locale, why=why):
+                    log.unlink(missing_ok=True)
+                    result = self.run_secret_run(
+                        "--register", "--reason", why, "AIRTABLE_TOKEN", *self.CMD,
+                        STUB_IDENTITY="1", STUB_LOG=str(log), LC_ALL=locale,
+                    )
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
+                    self.assertEqual(self.client_calls(log), ["identity"])
+
+    def test_a_failed_builder_refuses_reasons_that_ascii_cleaning_empties(self) -> None:
+        self.with_client()
+        copy = self.stub_dir / "copy"
+        copy.mkdir()
+        script = shutil.copy2(SECRET_RUN, copy / "secret-run")
+        log = self.stub_dir / "client.log"
+        for status in (1, 2, 127):
+            write_stub(copy, "secret-run-reason", f"exit {status}")
+            for why in ("\x01", "\u00a0", "\u200b"):
+                for where in ("--reason", "SECRET_RUN_REASON"):
+                    with self.subTest(status=status, why=why, where=where):
+                        log.unlink(missing_ok=True)
+                        args = ["--reason", why] if where == "--reason" else []
+                        extra = {"SECRET_RUN_REASON": why} if where == "SECRET_RUN_REASON" else {}
+                        result = subprocess.run(
+                            [str(script), *args, "AIRTABLE_TOKEN", *self.CMD],
+                            capture_output=True, text=True, timeout=30,
+                            env={**self.env, "STUB_IDENTITY": "0", "STUB_LOG": str(log), "LC_ALL": "C", **extra},
+                        )
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        self.assertEqual(result.stdout, "")
+                        self.assertEqual(result.stderr.splitlines(), [self.REFUSAL])
+                        self.assertEqual(self.client_calls(log), ["identity"])
+
+    def test_secretsd_dry_run_does_not_validate_an_unused_reason(self) -> None:
+        for has_client in (False, True):
+            if has_client:
+                self.with_client()
+            for why in ("\u00a0", "\u2003", "\x01\u200b", "a real reason"):
+                with self.subTest(has_client=has_client, why=why):
+                    result = self.run_secret_run(
+                        "--dry-run", "--reason", why, "AIRTABLE_TOKEN", *self.CMD,
+                        STUB_IDENTITY="1", LC_ALL="C", OMP_SESSION_ID="s" * 400,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("store: secretsd (", result.stdout)
+                    self.assertIn("reason: none (secretsd reads no reason)", result.stdout)
+                    self.assertNotIn("secret-run-reason:", result.stderr)
+                    for absent in ("BROKER", "SECRETSD", "via="):
+                        self.assertNotIn(absent, result.stdout)
+
+    def test_secretsd_dry_run_still_names_the_session_file_s_session(self) -> None:
+        """As on main, a secretsd dry run names the session PI_SESSION_FILE gives, with or without a reason."""
+        self.with_client()
+        subagent = self.with_session()
+        for args in ((), ("--reason", "a real reason")):
+            with self.subTest(args=args):
+                result = self.run_secret_run(
+                    "--dry-run", *args, "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="1", PI_SESSION_FILE=str(subagent)
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"session_id: {self.SESSION}", result.stdout.splitlines())
+                self.assertIn("reason: none (secretsd reads no reason)", result.stdout.splitlines())
 
 
 if __name__ == "__main__":
