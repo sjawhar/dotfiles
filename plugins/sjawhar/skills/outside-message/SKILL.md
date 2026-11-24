@@ -9,12 +9,7 @@ Sami approves every outside message by default.
 
 A kind of message stops needing his approval once a skill or template guides it and he has seen how the reader's project reacts. What decides is whether the message is a vetted routine or novel contact, not who the reader is.
 
-An outside message is one a person outside Theorem reads, not one that is only public. A reply in a bot-opened thread on a pull request Theorem authors is public. So run the public leak check on it (`public-leak-check.sh check-public-text <file>`).
-
-| A reply in a bot-opened thread on | Read by | Outside message |
-| --- | --- | --- |
-| A pull request Theorem authors | No outside person | No |
-| A contributor's pull request | That contributor | Yes |
+An outside message is one a person outside Theorem reads, not one that is only public. A reply in a bot-opened thread on a pull request Theorem authors is public, so the public leak check covers it (`public-leak-check.sh check-public-text <file>`), but no outside person reads it. The same thread on a contributor's pull request is read by that contributor, so it is an outside message.
 
 A narrower decision of his, where one exists, is recorded in the project's AGENTS.md or goals document with the ask that made it. Do not assume one without that record. `opening-a-pr` covers upstream pull requests.
 
@@ -68,16 +63,11 @@ A project we do not run that has not enrolled starts at "approve each". It moves
 ## The two steps
 
 1. Research the reader, then write in their conventions.
-
-   | Where | Read | Write |
-   | --- | --- | --- |
-   | On a repository | Its contributing guide, issue and pull-request templates and code of conduct; its last ten issues or pull requests and how the maintainers write there; and what was already discussed about your subject | Use their pull-request template for a pull request and their issue template for an issue. Match the thread for a reply. |
-   | Off a repository (an email, a Slack message to another company, a release note, a disclosure) | Every earlier message between Theorem and this reader; the page where they say how to contact them (a security policy, `SECURITY.md`, a contact page, disclosure rules); and how they write (release notes, blog, their messages in the thread) | An email answers the email it replies to. A first contact says in one line who is writing and why. |
-
+   - On a repository, read its contributing guide, issue and pull-request templates and code of conduct; its last ten issues or pull requests and how the maintainers write there; and what was already discussed about your subject. Use their pull-request template for a pull request and their issue template for an issue, and match the thread for a reply.
+   - Off a repository (an email, a Slack message to another company, a release note, a disclosure), read every earlier message between Theorem and this reader; the page where they say how to contact them (a security policy, `SECURITY.md`, a contact page, disclosure rules); and how they write (release notes, blog, their messages in the thread). An email answers the email it replies to; a first contact says in one line who is writing and why.
    - Where the stream that owns the relationship keeps form rules (in its project's `AGENTS.md`, `.claude/skills/` or brief), those rules decide how the message reads, over the writing skills below.
    - Send a change to the stream's form there, not into this skill.
-   - Run `asd-ste100`, `ce-noslop` and `plain-words` over the text.
-   - Avoid "we" (Sami's preference): name Theorem or the tool, or write the sentence with no actor.
+   - Run `asd-ste100`, `ce-noslop` and `plain-words` over the text. Avoid "we" (Sami's preference): name Theorem or the tool, or write the sentence with no actor.
 2. A fresh reviewer cuts it.
    - Give a session that did not write the message (the `astra` agent, or an Opus model where it is unavailable) the draft, the recipient's last message and, for text in Sami's name or on his behalf, the "Never write" list of `speaking-as-sami`, and nothing else.
    - It removes everything the reader does not need to understand the core message.
