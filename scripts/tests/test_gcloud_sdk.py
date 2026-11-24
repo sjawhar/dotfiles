@@ -20,16 +20,15 @@ get-credentials <cluster> --location <location> --project <project>` writes at $
 kubeconfig real gcloud writes: that cluster's one context, named as gcloud names it,
 gke_<project>_<location>_<cluster>; for the cluster STUB_MISSING_CLUSTER names, it fails as gcloud
 fails for a cluster that does not exist. A stand-in kubectl lists no context, so the installer
-asks for each file, and its merge into ~/.kube/config writes nothing. The metadata host is a
-closed port, so the Google VM branch (sudo) never runs. sami-devbox-check is read by sourcing it
-without its dispatch, as test_sami_devbox_check_identity.py does, and cluster-packing is loaded
-as test_cluster_packing.py loads it.
+asks for each file, and its merge leaves ~/.kube/config empty. The metadata host is a closed port,
+so the Google VM branch (sudo) never runs. A kubeconfig's context names are read with the pinned yq
+that test_omp_profile_links.py finds. sami-devbox-check is read by sourcing it without its
+dispatch, as test_sami_devbox_check_identity.py does, and cluster-packing's DEFAULT_CONTEXTS is
+read from the module test_cluster_packing.py loads.
 """
 
 from __future__ import annotations
 
-import importlib.machinery
-import importlib.util
 import re
 import stat
 import subprocess
@@ -38,10 +37,13 @@ import unittest
 from pathlib import Path
 from typing import cast
 
+from scripts.tests import test_omp_profile_links as links
+from scripts.tests.test_cluster_packing import mod
+
 DOTFILES = Path(__file__).resolve().parents[2]
 INSTALLER = DOTFILES / "installers" / "gcloud-sdk.sh"
 CHECK = DOTFILES / "devbox" / "sami-devbox-check"
-PACKING = DOTFILES / "scripts" / "cluster-packing"
+REAL_YQ = links.REAL_YQ
 _pin = re.search(r"^GCLOUD_SDK_VERSION=(\S+)$", INSTALLER.read_text(), re.M)
 assert _pin, f"{INSTALLER} pins no GCLOUD_SDK_VERSION"
 VERSION = _pin.group(1)
@@ -49,6 +51,7 @@ VERSION = _pin.group(1)
 CENTRAL = "theorem-us-central1"
 CENTRAL_CONTEXT = "gke_theorem-agent-infra_us-central1_theorem-us-central1"
 CENTRAL_CALL = "container clusters get-credentials theorem-us-central1 --location us-central1 --project theorem-agent-infra"
+DISPATCH_CALL = "container clusters get-credentials dispatch --location us-west1 --project theorem-agent-infra"
 
 GCLOUD = r"""#!/bin/bash
 printf '%s\n' "$*" >> "$LOG/gcloud.argv"
@@ -103,31 +106,14 @@ def executable(path: Path, body: str) -> None:
 
 
 def kubeconfig_contexts(path: Path) -> list[str]:
-    """The context names of a kubeconfig in the block style gcloud and kubectl write: each item of the top-level
-    `contexts:` list starts `- ` at column 0 with its own keys two columns in, so a `name:` there is a context's name
-    and the `cluster:` and `user:` of its `context:` map, deeper in, are not. No `contexts:` block holds none."""
-    lines = path.read_text(encoding="utf-8").splitlines()
-    if "contexts:" not in lines:
-        return []
-    names: list[str] = []
-    for line in lines[lines.index("contexts:") + 1:]:
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        if not line.startswith(("- ", "  ")):
-            break
-        if line[2:].startswith("name:"):
-            names.append(line[2:].removeprefix("name:").strip().strip("\"'"))
-    return names
+    """The context names of the kubeconfig at PATH, as the pinned yq prints them: each bare on its line."""
+    return subprocess.run([REAL_YQ, ".contexts[].name", str(path)], capture_output=True, text=True,
+                          check=True).stdout.splitlines()
 
 
-def packing_default_contexts() -> tuple[str, ...]:
-    """DEFAULT_CONTEXTS of scripts/cluster-packing, loaded as scripts/tests/test_cluster_packing.py loads the script."""
-    loader = importlib.machinery.SourceFileLoader("cluster_packing", str(PACKING))
-    spec = importlib.util.spec_from_loader("cluster_packing", loader)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return cast("tuple[str, ...]", module.DEFAULT_CONTEXTS)
+def listing(directory: Path) -> list[str]:
+    """Every entry under DIRECTORY, file or directory, as its path relative to DIRECTORY, sorted."""
+    return sorted(str(entry.relative_to(directory)) for entry in directory.rglob("*"))
 
 
 class GcloudSdkInstallerTest(unittest.TestCase):
@@ -206,18 +192,19 @@ class GcloudSdkInstallerTest(unittest.TestCase):
         kube = self.home / ".kube"
         calls = self.run_installer()
         asked = [call for call in calls if call.startswith("container clusters get-credentials ")]
-        # Once for ~/.kube/config.d/<cluster> and once for the named file: neither holds the context yet.
-        self.assertEqual([call for call in asked if call.split()[3:4] == [CENTRAL]], [CENTRAL_CALL] * 2, asked)
+        # dispatch has one file, ~/.kube/config.d/dispatch. The central cluster is asked once for
+        # ~/.kube/config.d/<cluster> and once for the named file: neither holds the context yet.
+        self.assertEqual(asked, [DISPATCH_CALL, CENTRAL_CALL, CENTRAL_CALL])
+        self.assertEqual(listing(kube), ["config", "config.d", "config.d/dispatch", "config.d/theorem-us-central1",
+                                         "theorem-us-central1.config"])
         for path in (kube / f"{CENTRAL}.config", kube / "config.d" / CENTRAL):
             with self.subTest(file=str(path.relative_to(self.home))):
-                self.assertTrue(path.is_file(), sorted(str(entry.relative_to(kube)) for entry in kube.rglob("*")))
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
                 self.assertEqual(kubeconfig_contexts(path), [CENTRAL_CONTEXT], path.read_text(encoding="utf-8"))
-        # No call, no path and no file under ~/.kube names the grade cluster before it.
+        # No gcloud call and no file under ~/.kube names the grade cluster before it.
         self.assertEqual([call for call in calls if "grade-us-west1" in call], [])
-        named = [str(entry.relative_to(kube)) for entry in sorted(kube.rglob("*"))
-                 if "grade-us-west1" in str(entry.relative_to(kube))
-                 or (entry.is_file() and "grade-us-west1" in entry.read_text(encoding="utf-8"))]
+        named = [entry for entry in listing(kube)
+                 if (kube / entry).is_file() and "grade-us-west1" in (kube / entry).read_text(encoding="utf-8")]
         self.assertEqual(named, [])
 
     def test_a_failed_get_credentials_leaves_no_scratch_directory(self) -> None:
@@ -228,7 +215,7 @@ class GcloudSdkInstallerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("ERROR: (gcloud.container.clusters.get-credentials) ResponseError: code=404", result.stderr)
         tmp = Path(self.env["TMPDIR"])
-        self.assertEqual(sorted(str(entry.relative_to(tmp)) for entry in tmp.rglob("*")), [])
+        self.assertEqual(listing(tmp), [])
 
     def test_a_machine_set_up_before_keeps_its_grade_us_west1_files(self) -> None:
         kube = self.home / ".kube"
@@ -246,9 +233,9 @@ class GcloudSdkInstallerTest(unittest.TestCase):
         for path in kept:
             with self.subTest(file=str(path.relative_to(self.home))):
                 self.assertEqual(path.read_bytes().decode(), earlier)
-        for path in (kube / f"{CENTRAL}.config", kube / "config.d" / CENTRAL):
-            with self.subTest(file=str(path.relative_to(self.home))):
-                self.assertTrue(path.is_file(), sorted(str(entry.relative_to(kube)) for entry in kube.rglob("*")))
+        self.assertEqual(listing(kube), ["config", "config.d", "config.d/dispatch", "config.d/grade-us-west1",
+                                         "config.d/theorem-us-central1", "grade-us-west1.config",
+                                         "theorem-us-central1.config"])
 
     def test_every_context_the_check_and_the_packing_script_read_is_one_the_installer_writes(self) -> None:
         _ = self.run_installer()
@@ -261,7 +248,7 @@ class GcloudSdkInstallerTest(unittest.TestCase):
         check = result.stdout.splitlines()
         self.assertEqual(len(check), 2, result.stdout)
         kube_context, grade_context = check
-        defaults = packing_default_contexts()
+        defaults = cast("tuple[str, ...]", mod.DEFAULT_CONTEXTS)
         reads = {"KUBE_CONTEXT": kube_context, "GRADE_KUBE_CONTEXT": grade_context,
                  **{f"DEFAULT_CONTEXTS[{i}]": context for i, context in enumerate(defaults)}}
         for name, context in reads.items():
