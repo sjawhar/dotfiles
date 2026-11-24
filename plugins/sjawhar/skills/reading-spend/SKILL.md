@@ -5,7 +5,7 @@ description: "Use when asked what a project, stream, repository, workflow, VM, m
 
 # Reading spend
 
-All of Theorem's spend is in the BigQuery dataset `theorem-agent-infra.agent_spend`, which every agent identity can read: do not ask a person for GitHub organization, billing or console access to see costs. The full guide, with a query per question and the meaning of every column, is theorem-labs/agent-infra `spend/README.md`, "For agents: reading your project's spend".
+All of Theorem's spend is in the BigQuery dataset `theorem-app-spend.agent_spend`, which every agent identity can read: do not ask a person for GitHub organization, billing or console access to see costs. The old `theorem-agent-infra.agent_spend` stopped loading on 2026-11-23 (dispatch://INFRA-4743 moved it); never read spend from it. The full guide, with a query per question and the meaning of every column, is theorem-labs/agent-infra `spend/README.md`, "For agents: reading your project's spend".
 
 ## Run a query
 
@@ -35,7 +35,7 @@ A project's week by platform:
 
 ```sql
 SELECT platform, ROUND(SUM(usd), 2) AS usd
-FROM `theorem-agent-infra.agent_spend.project_spend_daily_v`
+FROM `theorem-app-spend.agent_spend.project_spend_daily_v`
 WHERE project = 'BET' AND day >= DATE_SUB(CURRENT_DATE(), INTERVAL 6 DAY)
   AND kind NOT IN ('attributed_org_unknown', 'not_billed', 'colleague', 'caller_unknown', 'other_project', 'overhead', 'credit')
 GROUP BY platform ORDER BY usd DESC
@@ -49,7 +49,7 @@ GitHub Actions by `project`, `repository`, `workflow`, `runner` and `outcome`, w
 
 ```sql
 SELECT repository, workflow, runner, outcome, SUM(minutes) AS minutes, ROUND(SUM(usd), 2) AS usd
-FROM `theorem-agent-infra.agent_spend.project_actions_daily_v`
+FROM `theorem-app-spend.agent_spend.project_actions_daily_v`
 WHERE project = 'BET' AND day >= DATE_SUB(CURRENT_DATE(), INTERVAL 6 DAY)
 GROUP BY 1, 2, 3, 4 ORDER BY usd DESC LIMIT 20
 ```
