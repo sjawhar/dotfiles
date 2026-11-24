@@ -23,7 +23,7 @@ secret-run --register --reason '<what and why>' GITHUB_ADMIN_PAT -- sh -c 'GH_TO
 
 ## Approvals
 
-- An approval of a pull request is not an admin action. No approval uses a person's token, the admin token included.
+- An approval of a pull request is not an admin action. No approval uses a person's token, the admin token included, except in the two cases of INFRA-1481's R3 (dispatch://INFRA-1481/spec#b-r3@v29). Case one: a pull request that a person outside Theorem opened on theorem-labs/oss-verify, theorem-labs/oss-verify-proofs or theorem-labs/rocq-linux-process-semantics. Case two: any pull request on cybermonklabs/legion or theorem-labs/oss-verify-proofs-internal. In those cases an agent may post Sami's own code-owner approval with Sami's token from the broker ("Admin actions" names the tokens). It does so only after Sami answered yes on a Dispatch ask that asks whether an agent may post his approval of that pull request at that head, and the broker request's reason cites that answered ask. No person's token approves in any other case, at another head, on the agent's own judgment, or where the approval is not Sami's own as a code owner.
 - Where a code owner owns the files changed, the approval is that person's: ask them through Dispatch, with the pull request, its head and the review verdict it got.
 - You may approve a pull request your own session wrote when the work had cross-family review under `sdd` and Sami authorized the work.
 - An approval counts only at the head it names: a push after approval needs a new review and approval at the new head.

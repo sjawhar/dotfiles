@@ -20,7 +20,7 @@ environment, not into the persistent eval kernel. Run it between two eval cells:
     dump_turns_for_jev(session_dirs=[...], messages=["messages.jsonl"], out_path="turns.jsonl")
 
     # bash
-    secret-run TYPESAFE_AI_API_KEY -- sh -c '
+    secret-run --reason 'reflect: label turns with Jev' TYPESAFE_AI_API_KEY -- sh -c '
       export TYPESAFE_API_KEY=$TYPESAFE_AI_API_KEY
       uv run --with typesafe-sdk python3 ~/.dotfiles/plugins/sjawhar/skills/reflect/scripts/jev-turn-label.py \
         --turns turns.jsonl --out jev-labels.jsonl

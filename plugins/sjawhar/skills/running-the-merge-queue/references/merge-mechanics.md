@@ -1,6 +1,6 @@
 # Protected merge and literal evidence writes
 
-Read before you post evidence or merge. Write as the current approved identity, never with a reused personal token or `--admin`. Sami's admin token from the credential broker is for an admin action only ("Admin actions" in `landing-a-pr`'s repo merge rules); no approval uses a person's token, the admin token included. Load the skill for each tool before you use it: `dispatch` before a Dispatch write, `agent-secrets` before you use a credential.
+Read before you post evidence or merge. Write as the current approved identity, never with a reused personal token or `--admin`. Sami's admin token from the credential broker is for an admin action ("Admin actions" in `landing-a-pr`'s repo merge rules), and for one approval: his own code-owner approval of a pull request at a head, after his recorded yes on a Dispatch ask for that pull request and head, in a case that dispatch://INFRA-1481/spec#b-r3@v29 names ("Approvals" in the same rules lists the cases), with a broker request whose reason cites that ask. No other approval uses a person's token. Load the skill for each tool before you use it: `dispatch` before a Dispatch write, `agent-secrets` before you use a credential.
 
 ## Gate, then merge pinned
 
