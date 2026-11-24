@@ -263,6 +263,7 @@ mautrix-instagram = "github:mautrix/meta"
 op = "aqua:1password/cli"
 
 [tools.forward]
+# 3.8.4 or later: a pane's browser grant needs it under the hardened secretsd (sjawhar/forward#79)
 version = "3.8.5"  # no forward source change; bumps url and form_urlencoded, which forward links
 # Public releases are verified with GitHub build attestations during installation.
 platforms.linux-x64   = { asset_pattern = "forward-x86_64-unknown-linux-musl.tar.gz" }
@@ -311,12 +312,17 @@ platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.ta
 # v3.8.4 -- crates/proto` is empty), so this client was proven read-only against the running 3.8.3
 # daemon (`secrets grants`, `secrets get <human key> --no-request`). The daemon and `forward serve`
 # are restarted after the merge, at a time no grant is live and no OAuth callback is armed.
-# 3.8.5 (2026-11-23) makes `secrets grants` list requests that wait for a touch, receipts not yet
-# redeemed and capability grants beside the secret grants (sjawhar/forward#80), so its answer
-# shows everything a restart ends. Wire protocol is still 4 (PROTOCOL_VERSION is 4 at v3.8.4 and
-# v3.8.5; `git diff v3.8.4 v3.8.5 -- crates/proto` is empty), so this client was proven read-only
-# against the running 3.8.4 daemon (`secrets grants`, `secrets get <human key> --no-request`). The
-# daemon is restarted after the merge only when nothing that a restart ends is live.
+# 3.8.5 (2026-11-23): a 3.8.5 daemon's `secrets grants` lists requests that wait for a touch,
+# receipts not yet redeemed and capability grants beside the secret grants (sjawhar/forward#80), so
+# its `no active grants` means none of the four is live (a restart still drops the session
+# registrations, which it does not list). Wire protocol is still 4 (PROTOCOL_VERSION is 4 at v3.8.4
+# and v3.8.5), so this client was proven read-only against the running 3.8.4 daemon (`secrets
+# grants`, `secrets get <human key> --no-request`). A 3.8.4 daemon lists secret grants only, so the
+# restart onto 3.8.5 is made after the merge only when its journal and its open connections show
+# none of the four live. From 3.8.5 each `forward browser grant` leaves a capability grant for
+# SECRETSD_MAX_GRANT_SECS (12 h by default) after its redeem, and for that long
+# installers/secretsd.sh refuses a restart and stops install.sh; wait it out, or re-run with
+# SECRETSD_RESTART_WITH_GRANTS=1 after the box is told.
 version = "3.8.5"
 platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz" }
 
