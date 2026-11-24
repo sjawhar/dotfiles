@@ -7,7 +7,7 @@ description: Use when gcloud, az, a registry or a Google client is refused (PERM
 
 ## Which identity runs
 
-- gcloud runs as the machine's own identity, configuration `box` (project `autoformalization`), which needs no sign-in and does not expire. On an Azure VM that is the service account `dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com`. The header of `installers/gcloud-box.sh` says what that identity is on a Google VM and on an Azure VM.
+- gcloud runs as the machine's own identity, configuration `box` (project `autoformalization`), which needs no sign-in and does not expire. On an Azure VM that is the service account `dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com`; the header of `installers/gcloud-box.sh` says what it is on a Google VM and on an Azure VM.
 - In an agent session, Google client libraries and Pulumi act as that identity too:
   - On an Azure VM the session points `GOOGLE_APPLICATION_CREDENTIALS` at the keyless configuration `~/.config/gcloud/box_credential_config.json`.
   - On a Google VM they take that identity from the metadata server.
@@ -29,22 +29,11 @@ Take the first route that fits:
    - `references/reads.md` names the reader of each kind of object.
    - Your session's own work, and the resources your session creates and uses for its own task (a build VM, a file in a bucket), run as the box identity, with no other configuration or account selected.
    - A change to a resource that a program declares in code is a production change (route 2).
-2. **A production change:** merge it to main, and the CI apply workflow of its program (the directory with its own `Pulumi.yaml` that declares the resource) applies it.
-   - For a targeted, replace or refresh apply, start that workflow by hand (agent-infra, the GitHub repository `theorem-labs/agent-infra`: `bootstrap/README.md`, "Who applies by hand").
-   - Run as agent-infra's applier, `infra-applier@theorem-agent-infra.iam.gserviceaccount.com`, only a by-hand step that a program's README gives to that account.
-   - Impersonate the applier from the box identity for a by-hand step that a program's README gives to it: agent-infra `monitoring/README.md`, "The applier's session, for other programs' pages", has the two exports.
-   - Widen in agent-infra a grant the box, a CI account or the applier lacks: it is a code change there.
+2. A production change: merge it to main, and the CI apply workflow of its program (the directory with its own `Pulumi.yaml` that declares the resource) applies it. For a targeted, replace or refresh apply, start that workflow by hand (agent-infra, the GitHub repository `theorem-labs/agent-infra`: `bootstrap/README.md`, "Who applies by hand"). Run as agent-infra's applier, `infra-applier@theorem-agent-infra.iam.gserviceaccount.com`, only a by-hand step that a program's README gives to that account, impersonated from the box identity; agent-infra `monitoring/README.md`, "The applier's session, for other programs' pages", has the two exports. A grant the box, a CI account or the applier lacks is a code change in agent-infra: widen it there.
 3. **A step only a person can make:** it is on agent-infra `docs/break-glass.md`, with that person's steps.
    - Send that person a `dispatch ask` that names the step and cites the page.
    - Do not make the step with any identity.
-4. **Sami's own login** (configuration `theorem`): only for an apply none of the above can make yet, with `--configuration theorem` on that one command.
-   - Never select it for later commands (`CLOUDSDK_ACTIVE_CONFIG_NAME`, `GCLOUD_ACCOUNT`, `CLOUDSDK_CORE_ACCOUNT`).
-   - Never use it for these, which are his own steps, on the break-glass page:
-     - a seed credential (a program's first credential, which the program cannot mint for itself);
-     - a permission boundary (an organization policy, a deny policy, or a role or binding on the organization);
-     - a new project.
-   - Post no per-use note: Cloud audit logs record each use.
-   - In an agent session `~/.dotfiles/shims/gcloud` refuses a call that reaches his login without that explicit `--configuration`. Its refusal names routes 1 to 3.
+4. Sami's own login (configuration `theorem`) only for an apply none of the above can make yet: `--configuration theorem` on that one command. Never select it for later commands (`CLOUDSDK_ACTIVE_CONFIG_NAME`, `GCLOUD_ACCOUNT`, `CLOUDSDK_CORE_ACCOUNT`). Never use it for a seed credential (a program's first credential, which the program cannot mint for itself), a permission boundary (an organization policy, a deny policy, or a role or binding on the organization) or a new project: those are his own steps, on the break-glass page. Post no per-use note: Cloud audit logs record each use. In an agent session `~/.dotfiles/shims/gcloud` refuses a call that reaches his login without that explicit `--configuration`, and its refusal names routes 1 to 3.
 
 Refused by a registry, or by an environment that a customer shares with us (its platform):
 
@@ -58,12 +47,8 @@ Refused by a registry, or by an environment that a customer shares with us (its 
 
 ## A new VM or service
 
-- **No external address:** `gcloud compute instances create ... --no-address` or `az vm create ... --public-ip-address ""`.
-  - Reach it over IAP (`--tunnel-through-iap`) or the VPN. The VPN is Theorem's Tailscale network, the tailnet. The section "The tailnet" of agent-infra `root/README.md` says how a VM or a service joins the tailnet.
-  - First check that the subnet has Cloud NAT or Private Google Access, or the VM cannot reach apt, pip or a registry.
-- Label it with its owner and its work stream: `--labels owner=<person>,stream=<stream>`, where `<stream>` is the work stream that the VM's cost counts to, such as `rocq-speed` or `oss-verify`.
-  - Sami's agents use `owner=sjawhar`.
-  - An organization policy in projects `autoformalization` and `theorem-research` refuses a VM create with no `owner` label.
+- No external address: `gcloud compute instances create ... --no-address` or `az vm create ... --public-ip-address ""`; reach it over IAP (`--tunnel-through-iap`) or the VPN. The VPN is Theorem's Tailscale network, the tailnet; agent-infra `root/README.md`, "The tailnet", says how a VM or a service joins it. First check that the subnet has Cloud NAT or Private Google Access, or the VM cannot reach apt, pip or a registry.
+- Label it with its owner and its work stream: `--labels owner=<person>,stream=<stream>`, where `<stream>` is the work stream that the VM's cost counts to, such as `rocq-speed` or `oss-verify`. Sami's agents use `owner=sjawhar`. An organization policy in projects `autoformalization` and `theorem-research` refuses a VM create with no `owner` label.
 - To remove a VM's external address (`gcloud compute instances delete-access-config`), which also cuts its egress:
   1. **Prove access.** Prove IAP or VPN access and its outbound path.
   2. **Remove the address.** Remove the external address.
