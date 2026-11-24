@@ -1071,6 +1071,11 @@ refuse_instance_create_without_run_limit() {
 # another version). Each copy would take the other for the real one: at 06:23Z on 2026-11-03 a
 # scratch copy put ahead of shims/ on PATH and the installed shim called each other until the agent
 # box's 8192 processes were used up, and the box's omp stopped (dispatch://INFRA-993).
+# A wrapper ahead on PATH that calls this shim back by path is no copy, and was taken for the real
+# one the same way: at 18:05Z on 2026-11-24 a measurement's bin/gcloud, which execs shims/gcloud,
+# and the shim called each other 3,777 deep (over 18,000 processes) through the lock retry. So each
+# target this shim hands a call to is added to GCLOUD_SHIM_PASSED (exec_real_gcloud), and a call
+# that comes back through it skips that target and goes on down PATH.
 GCLOUD_SHIM_MARKER="# dotfiles gcloud shim: find_real_gcloud skips any file that holds this exact line."
 find_real_gcloud() {
     local self candidate resolved
@@ -1078,6 +1083,7 @@ find_real_gcloud() {
     while IFS= read -r candidate; do
         resolved="$(readlink -f "$candidate")"
         [[ "$resolved" == "$self" ]] && continue
+        [[ ":${GCLOUD_SHIM_PASSED:-}:" == *":$resolved:"* ]] && continue
         cmp -s "$resolved" "$self" && continue
         grep -qxF "$GCLOUD_SHIM_MARKER" "$resolved" 2>/dev/null && continue
         printf '%s\n' "$candidate"
@@ -1276,6 +1282,10 @@ drop_azure_credential_on_google_vm() {
 exec_real_gcloud() {
     local real_gcloud="$1"
     shift
+    # The target this call is handed to: a call that comes back to the shim from it skips it.
+    local passed_target
+    passed_target="$(readlink -f "$real_gcloud")"
+    export GCLOUD_SHIM_PASSED="${GCLOUD_SHIM_PASSED:+$GCLOUD_SHIM_PASSED:}$passed_target"
     export CLOUDSDK_CORE_DISABLE_FILE_LOGGING="${CLOUDSDK_CORE_DISABLE_FILE_LOGGING:-1}"
     drop_azure_credential_on_google_vm
     limit_storage_parallelism "$real_gcloud" "$@"
