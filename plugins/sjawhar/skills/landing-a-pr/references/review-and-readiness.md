@@ -15,7 +15,7 @@ Read when you find and close findings, or request a head-bound review. The repo'
   - Push only a blocking fix (one for a defect that would do harm once merged: wrong behavior, a security hole, bad data, or a false claim in shipped prose).
   - Fold the other valid fixes into that push.
   - Never push while a reviewer that must approve the current head judges it (SKILL.md step 3).
-  - Otherwise put the other valid fixes in one follow-up PR after the merge, cited as their disposition.
+  - Otherwise put them in one follow-up PR after the merge, cited as their disposition.
 - Converging reviewers locate a defect; they do not prove the remedy. Run a remedy the reviewer did not run against the contract before you adopt it. An executed counterexample justifies rejecting it.
 - Before you call a finding stale, check its definition, imports and live call sites at the head.
 - A follow-up PR schedules non-blocking fixes, with `fixed in <PR>` as their disposition.
@@ -58,7 +58,9 @@ gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<node
 - A delta review covers the change since the last reviewed head and every open finding.
 - "Findings: none" on a delta cancels no earlier finding.
 - An old verdict carries to a head it did not review only when the new head is a forward merge of the reviewed head, or `pr-gate`'s comparison of the PR's own old and new diffs ran. An identical diff needs a confirmation at the new head; a changed diff needs a review of the change. Acceptance still runs at the new head.
-- Run a delta review at high effort, scoped to the change since the last reviewed head plus open findings, with a tool-call budget and a deadline inside the gate's time cap. Use the highest effort for a first full review and for a changed diff on a rewritten head. A budget never turns an incomplete review into an approval.
+- Run a delta review at high effort, scoped to the change since the last reviewed head plus open findings, with a tool-call budget and a deadline inside the gate's time cap.
+- Use the highest effort for a first full review and for a changed diff on a rewritten head.
+- A budget never turns an incomplete review into an approval.
 - Tell the gate to write its findings to its verdict file early, marked `VERDICT: PARTIAL`, and to update it as it works.
 - A gate that ends at its cap with no verdict: read its transcript before you raise the cap or rerun it.
 
