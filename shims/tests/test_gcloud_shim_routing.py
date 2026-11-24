@@ -2339,6 +2339,32 @@ class GcloudShimCopiesOnPath(unittest.TestCase):
                                             timeout=300, check=False)
                     self.assertEqual((result.returncode, result.stdout), (0, "REAL-GCLOUD-RAN\n"), result.stderr)
 
+    def wrapper_calling(self, target: Path, name: str = "wrapper") -> Path:
+        """A caller's own gcloud ahead on PATH that execs TARGET by path, as a measurement run's did."""
+        directory = self.root / name
+        directory.mkdir()
+        wrapper = directory / "gcloud"
+        wrapper.write_text(f'#!/usr/bin/env bash\nexec {target} "$@"\n', encoding="utf-8")
+        wrapper.chmod(0o755)
+        return directory
+
+    def test_a_wrapper_that_calls_the_shim_back_reaches_the_real_gcloud(self) -> None:
+        """A wrapper is no copy of the shim, so the byte and marker tests pass it: at 18:05Z on
+        2026-11-24 a measurement's bin/gcloud, which execs shims/gcloud, and the shim called each
+        other 3,777 deep, over 18,000 processes in one scope (the box watch stopped it). The shim
+        now names each target it hands a call to in GCLOUD_SHIM_PASSED and skips it on the way
+        back in."""
+        wrapper = self.wrapper_calling(SHIMS / "gcloud")
+        env = {"PATH": f"{wrapper}:{SHIMS}:{self.real}:/usr/bin:/bin", "HOME": str(self.root / "home"),
+               "GCE_METADATA_HOST": "127.0.0.1:9"}
+        # Both orders: the wrapper first, as a caller's PATH has it, and the shim first, as a
+        # child of it would find. `version` runs by exec, so a loop is one process the timeout
+        # ends rather than a growing tree.
+        for first in (wrapper / "gcloud", SHIMS / "gcloud"):
+            result = subprocess.run([str(first), "version"], capture_output=True, text=True, env=env,
+                                    timeout=300, check=False)
+            self.assertEqual((result.returncode, result.stdout), (0, "REAL-GCLOUD-RAN\n"), result.stderr)
+
 
 class GcloudSessionConfig(unittest.TestCase):
     """An agent session's gcloud runs on its own copy of ~/.config/gcloud, at $AGENT_SESSION_SCRATCH/gcloud, made at
