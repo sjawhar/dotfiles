@@ -219,6 +219,15 @@ host_sshd_check() {
         || fail "ssh box -> $h sshd: exit $rc: $(tail -1 <<<"$out") (installers/agentbox-host-ssh.sh on the host; agentbox/box-ssh-config in the box)"
 }
 
+# The grade pool: each team account may submit a grade in namespace grade (R2 of
+# dispatch://INFRA-4710), as the box submits builds in builds.
+grade_pool_check() {
+    local where="$1" got
+    got="$(kubectl --context "$GRADE_KUBE_CONTEXT" -n grade auth can-i create jobs 2>&1)"
+    [[ "$got" == yes ]] && ok "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: yes (a team account submits, R2 of dispatch://INFRA-4710)" \
+        || fail "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: want yes, got: $(tail -1 <<<"$got")"
+}
+
 # Scripts written on sami-rocqperf (the cost lead's spend loaders, sre-reading, bqq) name
 # CLOUDSDK_CONFIG=/mnt/nvme/sami/boxid/gcloud-box and KUBECONFIG=/mnt/nvme/sami/boxid/infra-kubeconfig.
 # installers/gcloud-boxid.sh makes both here as the account the metadata server serves; through
@@ -381,15 +390,6 @@ n6_check() {
                 || fail "N6 farm in the box: $f is not bound from the host (findmnt: $(findmnt -n -o TARGET,SOURCE --target "$f" 2>&1))"
         done
     fi
-}
-
-# The grade pool: each team account may submit a grade in namespace grade (R2 of
-# dispatch://INFRA-4710), as the box submits builds in builds.
-grade_pool_check() {
-    local where="$1" got
-    got="$(kubectl --context "$GRADE_KUBE_CONTEXT" -n grade auth can-i create jobs 2>&1)"
-    [[ "$got" == yes ]] && ok "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: yes (a team account submits, R2 of dispatch://INFRA-4710)" \
-        || fail "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: want yes, got: $(tail -1 <<<"$got")"
 }
 
 # signer_try SA: mint SA's token and sign a blob as it. Sets sign_tok_rc, sign_tok_out (the token,

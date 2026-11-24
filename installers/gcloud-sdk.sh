@@ -148,22 +148,23 @@ if "$(dirname "${BASH_SOURCE[0]}")/../scripts/on-google-vm"; then
 fi
 
 # Writes the cluster's context alone into $1, unless $1 already holds it. A path that does not
-# exist yet: given an empty file, gcloud warns and leaves a backup of it. A failed step removes the
-# scratch directory and returns that step's status; the EXIT trap is the download's.
-write_kubeconfig() {
-    local file="$1" cluster="$2" location="$3" context="$4" one status=0
+# exist yet: given an empty file, gcloud warns and leaves a backup of it. It runs in a subshell, so
+# its own EXIT trap removes the scratch directory on every exit and the script's trap (the
+# download's) stays.
+write_kubeconfig() (
+    local file="$1" cluster="$2" location="$3" context="$4" one
     if KUBECONFIG="$file" kubectl config get-contexts -o name 2>/dev/null | grep -qxF "$context"; then
         echo "gcloud-sdk: $file already holds $context"
         return
     fi
     one="$(mktemp -d)"
+    trap 'rm -rf "$one"' EXIT
     KUBECONFIG="$one/config" PATH="$GCLOUD_SDK_ROOT/google-cloud-sdk/bin:$PATH" \
-        "$GCLOUD_SDK_BIN" container clusters get-credentials "$cluster" --location "$location" --project "$KUBE_PROJECT" &&
-        mkdir -p "$(dirname "$file")" && install -m 600 "$one/config" "$file" || status=$?
-    rm -rf "$one"
-    ((status == 0)) || return "$status"
+        "$GCLOUD_SDK_BIN" container clusters get-credentials "$cluster" --location "$location" --project "$KUBE_PROJECT"
+    mkdir -p "$(dirname "$file")"
+    install -m 600 "$one/config" "$file"
     echo "gcloud-sdk: wrote $file ($context)"
-}
+)
 
 kubeconfig="${KUBECONFIG:-$HOME/.kube/config}"
 contexts="$(kubectl config get-contexts -o name 2>/dev/null || true)"
