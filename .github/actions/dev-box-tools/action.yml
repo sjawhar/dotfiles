@@ -91,8 +91,8 @@ runs:
         done
     # The Google Cloud SDK at ~/.gcloud/google-cloud-sdk, where sami-devbox installs it: the version
     # and sha256 installers/gcloud-sdk.sh pins. That installer also sets the installation property
-    # core/disable_file_logging; this does not, so test_gcloud_reader.py's and
-    # test_gcloud_broker.py's test_the_real_gcloud_writes_no_log_file see what gcloud does without
+    # core/disable_file_logging; this does not, so test_gcloud_reader.py's
+    # test_the_real_gcloud_writes_no_log_file sees what gcloud does without
     # the property, which on sami-devbox would hide a caller that did not turn file logging off.
     - name: the Cloud SDK installers/gcloud-sdk.sh pins
       shell: bash

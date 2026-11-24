@@ -38,13 +38,16 @@
     "retell": {
       "lazy": true,
       "timeout": 300000,
-      "command": "secret-run",
+      "command": "sh",
       "args": [
+        "-c",
+        ". \"${DOTFILES_DIR:-$HOME/.dotfiles}/agent-secrets/broker-url.sh\" && exec agent-secrets \"$@\"",
+        "agent-secrets",
+        "RETELL_API_KEY",
         "--reason",
         "Retell MCP server (omp/mcp.json)",
         "--wait",
         "4m",
-        "RETELL_API_KEY",
         "--",
         "npx",
         "-y",

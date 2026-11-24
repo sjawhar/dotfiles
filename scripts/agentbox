@@ -113,8 +113,8 @@
 # an id that the host does not have. A detached process gets that id from the broker and revokes
 # it. A session's enrollments go to a detached waiter, which ends them after a grace unless
 # another box of the session uses them. A box started while the host's helper holds no live
-# launcher credential gets no identity at all (no key, no enrollment.pending). Its agents use
-# secretsd, and `new` says so (broker_ready). The same holds for a box whose first enrollment
+# launcher credential gets no identity at all (no key, no enrollment.pending). Its agents have no
+# broker identity of their own, and `new` reports that (broker_ready). The same holds for a box whose first enrollment
 # fails: enroll_failed removes its key.
 set -euo pipefail
 
@@ -923,7 +923,7 @@ close_box_disk() {
 # Whether a new box can get a broker identity: the client installed and the helper holding a live
 # launcher credential (which also means the helper answers and an operator logged in). Until then
 # (a host before its one `agent-secrets-login`, a helper restarted since) a box starts without
-# one: no key, no enrollment.pending, so its agents use secretsd. Sets BROKER_UNREADY when it
+# one: no key, no enrollment.pending, so its agents have no broker identity of their own. Sets BROKER_UNREADY when it
 # answers no, with login-status's own answer.
 broker_ready() {
     local status
@@ -1029,7 +1029,7 @@ copy_keyfile() {
 # How a box's enrollment ends when it does not end enrolled: the reason in enrollment.error, which
 # the box's `agentbox doctor --here` reports, and in ENROLL_ERROR, which the host's `agentbox
 # doctor` reports without reading the box-writable file. Then key.pem and the enrollment.pending
-# marker are removed, so the box has no broker identity and its agents use secretsd, as when the
+# marker are removed, so the box has no broker identity of its own, as when the
 # host could not enroll it.
 enroll_failed() {
     local keydir; keydir="$(box_keydir "$1")"
@@ -4213,7 +4213,7 @@ cmd_new() {
     box="agentbox-$(tr -d '-' </proc/sys/kernel/random/uuid | cut -c1-12)"
     echo "agentbox: box $box" >&2
     if (( ! use_broker )); then
-        echo "agentbox: $box starts without a secrets-broker identity, so its agents use secretsd: $BROKER_UNREADY" >&2
+        echo "agentbox: $box starts without a secrets-broker identity of its own: $BROKER_UNREADY" >&2
     fi
     tag="$(image_tag)"
     build_image "$tag"
@@ -10956,15 +10956,15 @@ jq -e ".auths[\"https://index.docker.io/v1/\"] != null or .credHelpers[\"https:/
 [ -z "${AGENT_SECRETS_HELPER_SOCK:-}" ] && [ ! -S "/run/user/$(id -u)/agent-secrets/helper.sock" ] && ok "no helper socket in the box (a box is not a host session)" || fail "helper socket reachable from the box"
 # A box with no broker identity is a supported state, not a defect: one started before the key
 # dir existed, or while the host could not enroll boxes (no key, no enrollment.error). Its agents
-# use secretsd.
+# have no broker identity of their own.
 kd="${AGENT_SECRETS_KEY_DIR:-}"
 if [ -z "$kd" ]; then
-    echo "note box: no broker identity (no AGENT_SECRETS_KEY_DIR: the box predates it); its agents use secretsd"
+    echo "note box: no broker identity (no AGENT_SECRETS_KEY_DIR: the box predates it)"
 elif [ -z "${AGENT_SECRETS_URL:-}" ] || [ "$kd" != "/run/user/$(id -u)/agent-secrets" ]; then
     fail "agent-secrets env: URL=${AGENT_SECRETS_URL:-unset} KEY_DIR=$kd"
 elif [ ! -e "$kd/key.pem" ] && [ ! -e "$kd/enrollment.error" ]; then
     ok "agent-secrets env (url, key dir)"
-    echo "note box: no broker identity (the host could not enroll boxes when this box started); its agents use secretsd"
+    echo "note box: no broker identity (the host could not enroll boxes when this box started)"
 else
     ok "agent-secrets env (url, key dir)"
     [ "$(stat -c %a "$kd/key.pem" 2>/dev/null)" = 600 ] && [ "$(stat -c %U "$kd/key.pem" 2>/dev/null)" = ubuntu ] && ok "box key 0600 ubuntu" || fail "box key: $(ls -l "$kd" 2>&1 | tr "\n" " ")"
@@ -11061,13 +11061,13 @@ cmd_doctor() {
     ensure_forwarders && ok "host: forwarders (imds, envoy, bus)"
     local host_forward; host_forward="$(timeout 20 forward doctor 2>&1 | grep -cE 'accepted|reachable|accepts' || true)"
     # The broker, host side. A host whose helper holds no live launcher credential gives boxes and
-    # host sessions no broker identity, and their agents use secretsd: a supported state, so a
+    # host sessions no broker identity of their own: a supported state, so a
     # note. Both helper checks run as a child of the user manager: doctor itself may be running
     # inside an agent session, which would make its own pid a session member.
     local helper_out
     if command -v agent-secrets >/dev/null 2>&1; then ok "host: agent-secrets on PATH"; else fail "host: agent-secrets not installed (mise install agent-secrets)"; fi
     if [[ ! -e "$HOME/.config/systemd/user/agent-secrets-helper.service" ]]; then
-        echo "note host: agent-secrets-helper is not installed here (bash installers/agent-secrets.sh); boxes and host sessions use secretsd"
+        echo "note host: agent-secrets-helper is not installed here (bash installers/agent-secrets.sh); boxes and host sessions get no broker identity from it"
     elif ! systemctl --user is-active --quiet agent-secrets-helper.service || [[ ! -S "/run/user/$UID_/agent-secrets/helper.sock" ]]; then
         fail "host: agent-secrets-helper not active (systemctl --user status agent-secrets-helper)"
     else
@@ -11079,7 +11079,7 @@ cmd_doctor() {
             helper_out="$(fresh_process agent-secrets register --exec --wait 30 -- agent-secrets whoami 2>&1 || true)"
             if jq -e '.kind == "session"' <<<"$helper_out" >/dev/null 2>&1; then ok "host: helper enrolls and signs for a fresh session (kind $(jq -r .kind <<<"$helper_out"), operator $(jq -r .operator <<<"$helper_out"))"; else fail "host: helper session: $(head -1 <<<"$helper_out")"; fi
         else
-            echo "note host: $BROKER_UNREADY; boxes and host sessions start without a broker identity and use secretsd"
+            echo "note host: $BROKER_UNREADY; boxes and host sessions start without a broker identity of their own"
         fi
     fi
     build_image "$tag"

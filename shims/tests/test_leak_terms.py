@@ -2123,39 +2123,14 @@ class GitLeaks(LeakTestCase):
         self.assertEqual(control.returncode, 0, control.stderr)
         self.assertEqual(sorted(path.name for path in markers.iterdir()), ["python", "source"])
 
-    def test_secret_run_reason_runs_no_mise_config_of_the_checkout(self) -> None:
-        # An agent's gh call mints its App token through shims/gh-app-token, scripts/secret-run and the
-        # secret-run-reason it runs, which until 2026-11-23 began `#!/usr/bin/env python3`: mise's python3 shim, which
-        # under CI=true ran the checkout's `_.source` script and its PYTHONPATH's sitecustomize.py. It begins
-        # `#!/usr/bin/python3 -I` now: run in such a checkout it runs neither, while the same environment's `python3`
-        # runs both (the control).
-        mise = mise_shims()
-        if mise is None:
-            self.skipTest("no mise python3 shim on PATH, so a checkout's mise config cannot be shown to reach one here")
-        checkout = self.root / "hostile-reason"
-        checkout.mkdir()
-        markers = self.root / "reason-markers"
-        write_hostile_mise_config(checkout, markers)
-        environment = self.environment(False, CI="true",
-                                       PATH=os.pathsep.join([str(ROOT / "shims"), mise, os.environ["PATH"]]))
-        result = self.launch([str(ROOT / "scripts" / "secret-run-reason"), "--pid", str(os.getpid()), "--reason",
-                              "leak test", "--", "true"], cwd=checkout, env=environment)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(sorted(path.name for path in markers.iterdir()), [],
-                         "secret-run-reason ran the checkout's mise config")
-        control = self.launch(["python3", "-c", "pass"], cwd=checkout, env=environment)
-        self.assertEqual(control.returncode, 0, control.stderr)
-        self.assertEqual(sorted(path.name for path in markers.iterdir()), ["python", "source"])
-
     def test_an_agent_gh_call_runs_no_mise_config_of_the_checkout(self) -> None:
         # The whole route: under CI=true, in a checkout whose `.mise.toml` names both markers, an agent's own
-        # `shims/gh api repos/<none>/x` mints its App token (gh-app-token, secret-run, secret-run-reason, and secrets
+        # `shims/gh api repos/<none>/x` mints its App token (gh-app-token, the agent-secrets client, and secrets
         # for an owner the App does not cover) and runs neither marker, while the same environment's `python3` runs
-        # both (the control). Until 2026-11-23 secret-run-reason ran through mise's python3 shim and gh-app-token ran
-        # secrets in the checkout, and both markers fired. It needs this machine's own agent route, an omp session and
-        # the App's git configuration, and reads GitHub, so it runs only where that route is;
-        # test_secret_run_reason_runs_no_mise_config_of_the_checkout and test_gh_app_token's
-        # test_secret_run_and_secrets_run_in_the_shims_own_checkout check its parts without it.
+        # both (the control). Until 2026-11-23 a python helper of the route ran through mise's python3 shim and
+        # gh-app-token ran secrets in the checkout, and both markers fired. It needs this machine's own agent route, an
+        # omp session and the App's git configuration, and reads GitHub, so it runs only where that route is;
+        # test_gh_app_token's test_the_client_and_secrets_run_in_the_shims_own_checkout checks its parts without it.
         mise = mise_shims()
         app = subprocess.run(["/usr/bin/git", "config", "--get", "gh-app.agent.app-id"], capture_output=True,
                              text=True, check=False)
@@ -2166,8 +2141,8 @@ class GitLeaks(LeakTestCase):
         checkout.mkdir()
         markers = self.root / "gh-markers"
         write_hostile_mise_config(checkout, markers)
-        # This checkout's shims/ and scripts/ first, so gh-app-token runs this checkout's secret-run, then mise's shims,
-        # ahead of the python3 of the environment these tests run in. It keeps this machine's HOME, whose mise config
+        # This checkout's shims/ and scripts/ first, then mise's shims (where gh-app-token finds agent-secrets and
+        # secrets), ahead of the python3 of the environment these tests run in. It keeps this machine's HOME, whose mise config
         # sets paranoid (mise.toml's [settings]): that refuses the checkout's config, so neither the route nor the
         # control could run a marker and the row would show nothing. MISE_PARANOID=0 turns it off for this row alone,
         # so the route is held to running no code of the checkout without paranoid's help.
