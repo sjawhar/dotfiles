@@ -12,7 +12,7 @@ Do not decide from `gh api repos/<owner>/<repo> -q .permissions`: it reports a u
 
 ## Admin actions
 
-A GitHub admin action that work Sami already asked for needs (an App permission or installation, an admin merge, a repository or branch setting) is yours to do with his admin token from the credential broker. Do not ask him to do it. `GITHUB_ADMIN_PAT` reaches theorem-labs repositories. `GITHUB_PERSONAL_ADMIN_PAT` reaches sjawhar's own. The broker puts the token in the variable of its own name and gh reads only `GH_TOKEN` or `GITHUB_TOKEN`, so pass it in the command:
+A GitHub admin action that work Sami already asked for needs (an App permission or installation, an admin merge, a repository or branch setting) is yours to do with his admin token from the credential broker; do not ask him to do it. `GITHUB_ADMIN_PAT` reaches theorem-labs repositories, `GITHUB_PERSONAL_ADMIN_PAT` sjawhar's own. The broker puts the token in the variable of its own name and gh reads only `GH_TOKEN` or `GITHUB_TOKEN`, so pass it in the command:
 
 ```sh
 secret-run --register --reason '<what and why>' GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh "$@"' gh <the call>
@@ -71,10 +71,7 @@ A guard that reads a diff cannot see the state: a repository can be clean on eve
 
 - Their own required checks and reviews.
 - Approvals as in "Approvals".
-- On `theorem-labs/agent-infra` the CI reviewer App (`theorem-labs-ci-review`) reviews each head, and its approval meets the merge rule:
-  - Push, and fix what it finds.
-  - Request no review App for your own reviewer.
-  - A cross-family review of your own is optional and posts as a comment.
+- On `theorem-labs/agent-infra` the CI reviewer App (`theorem-labs-ci-review`) reviews each head, and its approval meets the merge rule: push, fix what it finds, and request no review App for your own reviewer. A cross-family review of your own is optional and posts as a comment.
 
 ## A repository another person maintains
 
