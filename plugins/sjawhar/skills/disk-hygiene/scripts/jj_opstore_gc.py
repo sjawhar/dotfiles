@@ -303,7 +303,7 @@ def jj_processes() -> dict[int, float]:
     procs: dict[int, float] = {}
     for pid in out:
         try:
-            stat = Path(f"/proc/{pid}/stat").read_text()
+            stat = Path(f"/proc/{pid}/stat").read_bytes().decode("utf8", "replace")  # the name in it may be any bytes
         except OSError:
             continue
         rest = stat.rsplit(")", 1)[1].split()  # fields after comm: state is [0], starttime is [19]

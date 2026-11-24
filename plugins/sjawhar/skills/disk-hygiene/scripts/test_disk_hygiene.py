@@ -55,6 +55,11 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 SCRIPT = SCRIPTS_DIR / "disk_hygiene.py"
 sys.path.insert(0, str(SCRIPTS_DIR))
 import disk_hygiene  # noqa: E402 -- needs SCRIPTS_DIR on sys.path first
+import jj_opstore_gc
+
+sys.path.insert(0, str(SCRIPTS_DIR.parents[4] / "scripts" / "tests"))
+from non_utf8_name import READ_AS, process_named
+
 GIT_ID = ["-c", "user.email=reaper-test@local", "-c", "user.name=reaper-test"]
 
 
@@ -69,6 +74,29 @@ def sh(*cmd: str | Path, cwd: str | Path | None = None, check: bool = True,
 
 def script(*args: str | Path, check: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return sh(sys.executable, SCRIPT, *args, check=check, env=env)
+
+
+class ProcessNamedInNonUtf8Bytes(unittest.TestCase):
+    """Each reader of another process's name or stat, over a real child named in bytes that are not UTF-8.
+
+    Any process may name itself any bytes (prctl PR_SET_NAME), and comm and stat carry the name: each of these read
+    it as strict UTF-8 and raised UnicodeDecodeError, which none of them catches.
+    """
+
+    def test_its_name_and_stat_are_read(self) -> None:
+        with process_named() as named:
+            self.assertEqual(disk_hygiene._proc_comm(named.pid), READ_AS)
+            # Every field after the name, starttime [19] included; its state may be R or S at the moment it is read.
+            self.assertGreater(len(disk_hygiene._proc_stat_fields(str(named.pid)) or []), 19)
+            refs = ([(named.pid, "/odd/tree")], 0)
+            with unittest.mock.patch.object(disk_hygiene, "proc_path_refs", return_value=refs):
+                self.assertEqual(disk_hygiene.procs_under("/odd"), [(named.pid, READ_AS)])
+
+    def test_a_jj_so_named_is_listed(self) -> None:
+        with process_named() as named:
+            pgrep = subprocess.CompletedProcess(["pgrep", "-x", "jj"], 0, f"{named.pid}\n", "")
+            with unittest.mock.patch.object(jj_opstore_gc.subprocess, "run", return_value=pgrep):
+                self.assertIn(named.pid, jj_opstore_gc.jj_processes())
 
 
 class ReaperScenarioTest(unittest.TestCase):
