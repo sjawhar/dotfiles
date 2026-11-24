@@ -63,7 +63,8 @@ A project we do not run that has not enrolled starts at "approve each". It moves
 ## The two steps
 
 1. Research the reader, then write in their conventions.
-   - On a repository, read its contributing guide, issue and pull-request templates and code of conduct; its last ten issues or pull requests and how the maintainers write there; and what was already discussed about your subject. Use their pull-request template for a pull request and their issue template for an issue, and match the thread for a reply.
+   - On a repository, read its contributing guide, issue and pull-request templates and code of conduct; its last ten issues or pull requests and how the maintainers write there; and what was already discussed about your subject.
+     - Use their pull-request template for a pull request and their issue template for an issue, and match the thread for a reply.
    - Off a repository (an email, a Slack message to another company, a release note, a disclosure), read every earlier message between Theorem and this reader; the page where they say how to contact them (a security policy, `SECURITY.md`, a contact page, disclosure rules); and how they write (release notes, blog, their messages in the thread). An email answers the email it replies to; a first contact says in one line who is writing and why.
    - Where the stream that owns the relationship keeps form rules (in its project's `AGENTS.md`, `.claude/skills/` or brief), those rules decide how the message reads, over the writing skills below.
    - Send a change to the stream's form there, not into this skill.
