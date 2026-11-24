@@ -153,7 +153,9 @@ def boot_time() -> float:
 
 def cgroup_of(pid: int) -> str:
     """The cgroup v2 path of a process, or "" when it has none."""
-    for line in WATCH.read_text(f"/proc/{pid}/cgroup").splitlines():
+    # A cgroup name may hold any bytes but `/`, NUL and a line feed, which the kernel refuses, so a line feed alone
+    # ends a line here, and \x1c and the other separators str.splitlines breaks at stay in the path.
+    for line in WATCH.read_text(f"/proc/{pid}/cgroup").split("\n"):
         parts = line.split(":", 2)
         if len(parts) == 3 and parts[0] == "0":
             return parts[2]

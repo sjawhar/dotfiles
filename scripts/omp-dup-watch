@@ -306,8 +306,14 @@ def environment(base: Path, names: tuple[str, ...]) -> dict[str, str]:
 def deepest_unit(cgroup: str) -> str:
     """The innermost .service or .scope of the cgroup path: every process of a user manager sits
     under user@1000.service, which says nothing about what runs it."""
-    for line in cgroup.splitlines():
-        for part in reversed(line.rpartition(":")[2].split("/")):
+    # A cgroup name may hold any bytes but `/`, NUL and a line feed, which the kernel refuses, so a line feed alone
+    # ends a line here, and \x1c and the other separators str.splitlines breaks at stay in the path. The path is what
+    # follows the line's first two colons: a systemd unit name may hold a colon (`run-a:b.scope`).
+    for line in cgroup.split("\n"):
+        parts = line.split(":", 2)
+        if len(parts) < 3:
+            continue
+        for part in reversed(parts[2].split("/")):
             if part.endswith((".service", ".scope")):
                 return part
     return ""

@@ -466,7 +466,11 @@ def disk_phrase(mount: str) -> str:
     """A mount named with the device behind it, e.g. "/mnt/nvme (/dev/nvme47n1)", from
     /proc/self/mounts; the mount alone when it is not listed there."""
     try:
-        rows = [line.split() for line in Path("/proc/self/mounts").read_text().splitlines()]
+        # A mount point may hold any bytes, as a name may, so the table decodes with replacement. The kernel escapes a
+        # space, tab, line feed and backslash in it and nothing else, and str.splitlines and str.split also break at
+        # \x1c and U+2028: a line feed alone ends a line, and a space alone ends a field.
+        text = Path("/proc/self/mounts").read_bytes().decode("utf8", "replace")
+        rows = [line.split(" ") for line in text.split("\n")]
     except OSError:
         return mount
     sources = [row[0] for row in rows if len(row) > 1 and row[1] == mount]
@@ -524,7 +528,10 @@ def comm_of(pid: int) -> str:
 
 def ppid_of(pid: int) -> int:
     try:
-        for line in Path(f"/proc/{pid}/status").read_bytes().decode("utf8", "replace").splitlines():
+        # The Name: line holds the name raw but for a line feed, and str.splitlines also breaks at \x1c and the other
+        # separators a name may hold, so a process named `\x1cPPid:\t9` read as the child of 9. A line feed alone
+        # ends a line here.
+        for line in Path(f"/proc/{pid}/status").read_bytes().decode("utf8", "replace").split("\n"):
             if line.startswith("PPid:"):
                 return int(line.split()[1])
     except (OSError, ValueError, IndexError):
@@ -765,7 +772,9 @@ def session_phrase(pid: int, scope: str = "") -> str:
 def scope_of(pid: int) -> str:
     """The systemd scope name of a pid: what `systemd-run --user --scope` named its session."""
     try:
-        for line in Path(f"/proc/{pid}/cgroup").read_bytes().decode("utf8", "replace").splitlines():  # any bytes
+        # A cgroup name may hold any bytes but `/`, NUL and a line feed, which the kernel refuses, so a line feed
+        # alone ends a line here, and \x1c and the other separators str.splitlines breaks at stay in the path.
+        for line in Path(f"/proc/{pid}/cgroup").read_bytes().decode("utf8", "replace").split("\n"):
             parts = line.split(":", 2)
             if len(parts) == 3 and parts[0] == "0":
                 return parts[2].strip().rsplit("/", 1)[-1]

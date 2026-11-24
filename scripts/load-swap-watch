@@ -350,7 +350,11 @@ def _proc_ticks(base: Path) -> int | None:
 def _exec_start(base: Path) -> float | None:
     """`se.exec_start` from /proc/<pid>/sched: ms since boot when the task last ran on a CPU."""
     try:
-        for line in (base / "sched").read_bytes().decode("utf8", "replace").splitlines():
+        # Line 1 holds the name, which sched writes raw, a line feed included (status escapes one). str.splitlines
+        # also breaks at \x1c and the other separators a name may hold, so a process named `\x1cse.exec_start` read
+        # as never having run; split at line feeds alone. A name that starts a line with a line feed cannot carry a
+        # number: the kernel's 15-byte cap leaves ` (<pid>, #threads: N)` after it, so float() refuses.
+        for line in (base / "sched").read_bytes().decode("utf8", "replace").split("\n"):
             if line.startswith("se.exec_start"):
                 return float(line.split(":", 1)[1])
     except (OSError, ValueError, IndexError):
@@ -1269,7 +1273,9 @@ def memory_of(pid: int) -> tuple[int, int]:
     so no sudo). A kernel thread has neither line and reads (0, 0)."""
     rss = swap = 0
     try:
-        for line in Path(f"/proc/{pid}/status").read_bytes().decode("utf8", "replace").splitlines():
+        # As ppid_of in disk-fill-watch: the Name: line holds the name raw, so a line feed alone ends a line. A zombie
+        # has a Name: line and no Vm* lines, so `\x1cVmRSS:\t9999999` would stand as its memory.
+        for line in Path(f"/proc/{pid}/status").read_bytes().decode("utf8", "replace").split("\n"):
             if line.startswith("VmRSS:"):
                 rss = int(line.split()[1]) * 1024
             elif line.startswith("VmSwap:"):

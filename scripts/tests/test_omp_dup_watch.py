@@ -530,5 +530,16 @@ class OmpDupWatchTest(unittest.TestCase):
         self.assertTrue(recent.exists())
 
 
+class DeepestUnit(unittest.TestCase):
+    def test_a_cgroup_path_that_holds_a_line_separator_names_its_whole_unit(self) -> None:
+        """A cgroup name may hold any bytes but `/`, NUL and a line feed; str.splitlines broke it at \\x1c."""
+        self.assertEqual(WATCH.deepest_unit("0::/user.slice/a\x1cb.scope\n"), "a\x1cb.scope")
+
+    def test_a_unit_whose_name_holds_a_colon_is_named_whole(self) -> None:
+        """A systemd unit name may hold a colon; the path is what follows the line's first two colons."""
+        self.assertEqual(WATCH.deepest_unit("0::/user.slice/user@1000.service/app.slice/run-a:b.scope\n"),
+                         "run-a:b.scope")
+
+
 if __name__ == "__main__":
     unittest.main()

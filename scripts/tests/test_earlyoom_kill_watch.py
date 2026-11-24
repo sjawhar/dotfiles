@@ -806,5 +806,16 @@ class KillWatchTest(unittest.TestCase):
         self.assertTrue(recent.exists())
 
 
+class CgroupPath(unittest.TestCase):
+    def test_a_cgroup_path_that_holds_a_line_separator_is_read_whole(self) -> None:
+        """A cgroup name may hold any bytes but `/`, NUL and a line feed; str.splitlines broke it at \\x1c."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "4242").mkdir()
+            (root / "4242" / "cgroup").write_bytes(b"0::/user.slice/a\x1cb.scope\n")
+            watch = WATCH.Watch(proc_root=root, state_path=root / "state.json")
+            self.assertEqual(watch.cgroup(4242), "/user.slice/a\x1cb.scope")
+
+
 if __name__ == "__main__":
     unittest.main()

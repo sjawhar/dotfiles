@@ -387,7 +387,9 @@ class Watch:
         return [w for w in self.read(pid, "cmdline").decode("utf8", "replace").split("\0") if w]
 
     def cgroup(self, pid: int) -> str:
-        for line in self.read(pid, "cgroup").decode("utf8", "replace").splitlines():
+        # A cgroup name may hold any bytes but `/`, NUL and a line feed, which the kernel refuses, so a line feed
+        # alone ends a line here, and \x1c and the other separators str.splitlines breaks at stay in the path.
+        for line in self.read(pid, "cgroup").decode("utf8", "replace").split("\n"):
             if line.startswith("0::"):
                 return line[3:]
         return ""

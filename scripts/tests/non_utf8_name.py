@@ -17,6 +17,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Generator
 from pathlib import Path
 from typing import NamedTuple
@@ -88,3 +89,29 @@ def process_named(
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait()
+
+
+@contextlib.contextmanager
+def zombie_named(name: bytes, within: float = 10.0) -> Generator[int]:
+    """The pid of a child of this process named `name` that has exited and is not reaped yet, for the block.
+
+    A zombie keeps its name and the `Name:` line of its status, and has no `Vm*` lines. Raises
+    AssertionError when the kernel does not show it as a zombie with that name within `within`
+    seconds, so a test never passes on a process that is not what it says.
+    """
+    code = f"import ctypes; ctypes.CDLL(None).prctl(15, bytes.fromhex({name.hex()!r}), 0, 0, 0)"
+    # Held, never waited on, until the block ends: an unwaited Popen still referenced is not reaped.
+    child = subprocess.Popen([sys.executable, "-c", code])
+    try:
+        status = Path("/proc") / str(child.pid) / "status"
+        deadline = time.monotonic() + within
+        while b"\nState:\tZ" not in status.read_bytes():
+            if time.monotonic() > deadline:
+                raise AssertionError(f"the named child was not a zombie within {within:g} s")
+            time.sleep(0.01)
+        comm = (Path("/proc") / str(child.pid) / "comm").read_bytes()
+        if comm != name + b"\n":
+            raise AssertionError(f"the zombie is named {comm!r}, not {name!r}")
+        yield child.pid
+    finally:
+        child.wait()

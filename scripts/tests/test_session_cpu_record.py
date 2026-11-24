@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -262,6 +263,18 @@ class Retention(FakeBox):
         written = json.loads((self.dir / f"{today}.jsonl").read_text().splitlines()[-1])
         self.assertEqual([row["session"] for row in written["sessions"]], [ALPHA])
         self.assertIn("cg:/alpha.scope", written["counters"])
+
+
+class CgroupPath(unittest.TestCase):
+    def test_a_cgroup_path_that_holds_a_line_separator_is_read_whole(self) -> None:
+        """A cgroup name may hold any bytes but `/`, NUL and a line feed; str.splitlines broke it at \\x1c."""
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup = Path(directory) / "cgroup"
+            cgroup.write_bytes(b"0::/user.slice/a\x1cb.scope\n")
+            real_path = TOOL.WATCH.Path
+            stand_in = lambda path: real_path(cgroup if path == "/proc/4242/cgroup" else path)
+            with unittest.mock.patch.object(TOOL.WATCH, "Path", stand_in):
+                self.assertEqual(TOOL.cgroup_of(4242), "/user.slice/a\x1cb.scope")
 
 
 class ReadingItBack(unittest.TestCase):

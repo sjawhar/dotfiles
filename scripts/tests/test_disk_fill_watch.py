@@ -1747,6 +1747,44 @@ class ProcessNamedInNonUtf8Bytes(unittest.TestCase):
             self.addCleanup(setattr, WATCH, "Path", real_path)
             self.assertEqual(WATCH.scope_of(4242), f"{READ_AS}.scope")
 
+    def test_a_name_that_holds_a_line_separator_is_one_line_of_its_status(self) -> None:
+        """status writes the name raw but for a line feed, and str.splitlines also breaks at \\x1c: a process named
+        `\\x1cPPid:\\t9` read as the child of 9."""
+        with process_named(name=b"\x1cPPid:\t9") as named:
+            self.assertEqual(WATCH.ppid_of(named.pid), os.getpid())
+
+    def test_a_mount_point_that_is_not_utf8_is_read(self) -> None:
+        """A mount point may hold any bytes, as a name may; disk_phrase names an alert's device from the mount table."""
+        with tempfile.TemporaryDirectory() as directory:
+            mounts = Path(directory) / "mounts"
+            mounts.write_bytes(b"/dev/x /mnt/" + NAME + b" ext4 rw 0 0\n/dev/nvme0n1 /mnt/x ext4 rw 0 0\n")
+            real_path = WATCH.Path
+            stand_in = lambda path: real_path(mounts if path == "/proc/self/mounts" else path)
+            with unittest.mock.patch.object(WATCH, "Path", stand_in):
+                self.assertEqual(WATCH.disk_phrase("/mnt/x"), "/mnt/x (/dev/nvme0n1)")
+
+    def test_a_mount_point_that_holds_a_line_separator_is_one_line(self) -> None:
+        """The kernel escapes a line feed in a mount point but not \\x1c or U+2028, at which str.splitlines broke
+        the line, so that mount read as unlisted."""
+        odd = "/mnt/a\x1cb\u2028c"
+        with tempfile.TemporaryDirectory() as directory:
+            mounts = Path(directory) / "mounts"
+            mounts.write_bytes(f"/dev/x {odd} ext4 rw 0 0\n".encode())
+            real_path = WATCH.Path
+            stand_in = lambda path: real_path(mounts if path == "/proc/self/mounts" else path)
+            with unittest.mock.patch.object(WATCH, "Path", stand_in):
+                self.assertEqual(WATCH.disk_phrase(odd), f"{odd} (/dev/x)")
+
+    def test_a_scope_path_that_holds_a_line_separator_is_read_whole(self) -> None:
+        """A cgroup path may hold \\x1c, at which str.splitlines broke it, so the scope read as its first part."""
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup = Path(directory) / "cgroup"
+            cgroup.write_bytes(b"0::/user.slice/a\x1cb.scope\n")
+            real_path = WATCH.Path
+            stand_in = lambda path: real_path(cgroup if path == "/proc/4242/cgroup" else path)
+            with unittest.mock.patch.object(WATCH, "Path", stand_in):
+                self.assertEqual(WATCH.scope_of(4242), "a\x1cb.scope")
+
 
 if __name__ == "__main__":
     unittest.main()

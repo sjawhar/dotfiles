@@ -17,7 +17,7 @@ import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from non_utf8_name import NAME, READ_AS, process_named  # noqa: E402 - found through the path above
+from non_utf8_name import NAME, READ_AS, process_named, zombie_named  # noqa: E402 - found through the path above
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "load-swap-watch"
@@ -519,6 +519,18 @@ class ProcessNamedInNonUtf8Bytes(unittest.TestCase):
             cgroup = Path(directory) / "cgroup"
             cgroup.write_bytes(b"0::/user.slice/" + NAME + b".scope\n")
             self.assertEqual(WATCH.read_text(str(cgroup)), f"0::/user.slice/{READ_AS}.scope\n")
+
+    def test_a_name_that_holds_a_line_separator_leaves_its_sched_read(self) -> None:
+        """sched writes the name raw on its first line, and str.splitlines also breaks at \\x1c: a process named
+        `\\x1cse.exec_start` read as never having run on a CPU, so a blocked task showed no time blocked."""
+        with process_named(name=b"\x1cse.exec_start") as named:
+            self.assertIsNotNone(WATCH._exec_start(WATCH.PROC / str(named.pid)))
+
+    def test_a_zombie_named_like_a_memory_line_has_no_memory(self) -> None:
+        """A zombie keeps its name and its Name: line and has no Vm* lines, so with str.splitlines a name
+        `\\x1cVmRSS:\\t9999999` stood as about 10 GB of resident memory."""
+        with zombie_named(b"\x1cVmRSS:\t9999999") as pid:
+            self.assertEqual(WATCH.memory_of(pid), (0, 0))
 
 
 if __name__ == "__main__":

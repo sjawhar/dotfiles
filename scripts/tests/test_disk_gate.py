@@ -61,6 +61,45 @@ class ProbeReading(unittest.TestCase):
                 cgroup if path == "/proc/4242/cgroup" else path, *args, **kwargs)
             self.assertEqual(probe["scope_of"](4242), f"{READ_AS}.scope")
 
+    def test_a_mount_table_that_is_not_utf8_is_read_whole(self) -> None:
+        """A mount point may hold any bytes, as a name may: disk_kinds stopped at such a line, so every file system
+        after it read as unknown."""
+        probe = probe_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            mountinfo = Path(directory) / "mountinfo"
+            mountinfo.write_bytes(b"36 25 259:1 / /mnt/" + NAME + b" rw - ext4 /dev/x rw\n"
+                                  b"37 25 259:2 / /mnt/y rw - ext4 /dev/y rw\n")
+            real_open = open
+            probe["open"] = lambda path, *args, **kwargs: real_open(
+                mountinfo if path == "/proc/self/mountinfo" else path, *args, **kwargs)
+            kinds = probe["disk_kinds"]()  # type: ignore[operator]
+        self.assertEqual(kinds, {os.makedev(259, 1): True, os.makedev(259, 2): True})
+
+    def test_a_mount_point_that_holds_a_line_separator_leaves_the_table_whole(self) -> None:
+        """The kernel escapes a line feed in a mount point but not \\x1c or U+2028, at which str.splitlines broke
+        the line, so disk_kinds stopped there."""
+        probe = probe_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            mountinfo = Path(directory) / "mountinfo"
+            mountinfo.write_bytes("36 25 259:1 / /mnt/a\x1cb\u2028c rw - ext4 /dev/x rw\n"
+                                  "37 25 259:2 / /mnt/y rw - ext4 /dev/y rw\n".encode())
+            real_open = open
+            probe["open"] = lambda path, *args, **kwargs: real_open(
+                mountinfo if path == "/proc/self/mountinfo" else path, *args, **kwargs)
+            kinds = probe["disk_kinds"]()  # type: ignore[operator]
+        self.assertEqual(kinds, {os.makedev(259, 1): True, os.makedev(259, 2): True})
+
+    def test_a_scope_path_that_holds_a_line_separator_is_read_whole(self) -> None:
+        """A cgroup path may hold \\x1c, at which str.splitlines broke it, so the scope read as its first part."""
+        probe = probe_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup = Path(directory) / "cgroup"
+            cgroup.write_bytes(b"0::/user.slice/a\x1cb.scope\n")
+            real_open = open
+            probe["open"] = lambda path, *args, **kwargs: real_open(
+                cgroup if path == "/proc/4242/cgroup" else path, *args, **kwargs)
+            self.assertEqual(probe["scope_of"](4242), "a\x1cb.scope")  # type: ignore[operator]
+
 
 # The filesystem's size answers `--output=size` (the gate scales /mnt/nvme's floor by it); any
 # other call is the free space.

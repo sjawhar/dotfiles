@@ -177,8 +177,13 @@ def disk_kinds():
     """{st_dev: whether that file system holds disk bytes}, from the mount table."""
     kinds = {}
     try:
-        with open("/proc/self/mountinfo") as fh:
-            for line in fh:
+        # A mount point may hold any bytes, as a name may: a table that is not UTF-8 stopped this partway, and so did
+        # one whose mount point holds \x1c or U+2028 when str.splitlines broke the line there. The kernel escapes a
+        # line feed in a mount point, so a line feed alone ends a line.
+        with open("/proc/self/mountinfo", "rb") as fh:
+            for line in fh.read().decode("utf8", "replace").split("\n"):
+                if not line:
+                    continue
                 left, _, right = line.partition(" - ")
                 major, minor = left.split()[2].split(":")
                 kinds[os.makedev(int(major), int(minor))] = right.split()[0] not in VIRTUAL
@@ -230,7 +235,9 @@ def bound(pid, device, kinds):
 def scope_of(pid):
     try:
         with open(f"/proc/{pid}/cgroup", "rb") as fh:
-            path = fh.read().decode("utf8", "replace").splitlines()[0].split(":", 2)[2]
+            # A cgroup name may hold any bytes but `/`, NUL and a line feed, which the kernel refuses, so a line feed
+            # alone ends a line here, and \x1c and the other separators str.splitlines breaks at stay in the path.
+            path = fh.read().decode("utf8", "replace").split("\n")[0].split(":", 2)[2]
         return os.path.basename(path).replace("\t", " ").replace(",", " ") or "-"
     except (OSError, IndexError):
         return "-"

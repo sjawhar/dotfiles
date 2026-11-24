@@ -25,8 +25,16 @@ ALLOWED_TEST_TOKENS = {
 }
 
 
+# The directory the fixture runs age-keygen, sops and mise in: `/`, which holds no mise config, never the test's working
+# directory. With mise's paranoid mode on, a mise shim run where an untrusted mise.toml applies (a /mnt/scratch export
+# of this checkout) refuses with "not trusted", so every leak-terms test errored there; from `/` mise reads only its
+# global config, which pins these tools.
+TOOL_CWD = "/"
+
+
 def _run_age_keygen(destination: Path) -> None:
-    completed = subprocess.run(["age-keygen", "-o", str(destination)], capture_output=True, text=True, check=False)
+    completed = subprocess.run(["age-keygen", "-o", str(destination)], capture_output=True, text=True, check=False,
+                               cwd=TOOL_CWD)
     if completed.returncode != 0:
         raise RuntimeError("age-keygen could not create the test key")
 
@@ -56,6 +64,7 @@ def _encrypt_yaml(yaml_text: str, recipient: str) -> bytes:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
+        cwd=TOOL_CWD,
     )
     if completed.returncode != 0:
         raise RuntimeError("sops could not encrypt the test term list")
@@ -93,7 +102,7 @@ def real_sops() -> str:
         raise RuntimeError("sops is not on PATH")
     mise = shutil.which("mise")
     if mise is not None:
-        resolved = subprocess.run([mise, "which", "sops"], capture_output=True, text=True, check=False)
+        resolved = subprocess.run([mise, "which", "sops"], capture_output=True, text=True, check=False, cwd=TOOL_CWD)
         if resolved.returncode == 0 and resolved.stdout.strip():
             found = resolved.stdout.strip()
     return found
