@@ -14,6 +14,7 @@ A subagent starts with none of your context. What it needs, and every channel ba
 - The skills it must load, by name. A subagent does not inherit the skills you loaded. Under the `sdd` skill (a large project built with subagents), its plan's `## Skill catalog` names them per step.
 - Primary sources (issue, file and line, run id), not your conclusion about them, and the unit of every count you pass on (the exact API call; legs or jobs).
 - The defect and the acceptance test. A fix you have in mind goes in as one option, with the criterion that decides between options.
+- The reason for each instruction, so the lane can tell where it stops fitting and push back with evidence. Quote a person's remark with its link and time as evidence beside your reason, not as the reason. A memory, note or brief that calls a remark a "rule" or "ruling" is a paraphrase: drop the label, which turns one remark into an order for work it was never about.
 - One goal per dispatch and one owner per deliverable. Independent goals fan out as parallel dispatches; never split one feature by layer or into read and write halves, because the contract breaks at the seam. When two lanes turn out to hold pieces of one deliverable, one hands off completely to the other.
 - Prefer a subagent under your session to a new top-level session, and finish work in progress before you start new work. A standing role Sami defined (an on-call lane that remediates incidents while the owner repairs the code) does not break one owner per deliverable.
 - No turn budget, step cap or time box unless the task itself gives a number.
@@ -40,7 +41,7 @@ Rule 1 binds your own calls too whenever your cwd is not the tree you edit: chec
 - Every brief says how the lane reaches you, and tells it to send on a blocker or on a decision it cannot make, with its own id so you can reply, and to ask rather than guess. A `task` subagent's result reaches you on its own, and it messages you with `write agent://<your id>`. A lane in another session sends with `envoy_send`, on finish too, to the session id that `envoy_whoami` returns: put that id in its brief.
 - Answer on the channel a message arrived on. `write agent://<id>` reaches only agents in your roster, by roster id; reach another session with `envoy_send` and its full session id.
 - Address each message to one agent or session, never a broadcast: every working lane is interrupted, and lanes given different broadcasts act on contradictory instructions.
-- Take the time from `date -u`. A message's `at` stamp is when it was sent, and delivery lags.
+- A message's `at` stamp is when it was sent, and delivery lags.
 - A subagent runs inside its parent's process, so a parent that finishes ends every child it still has, with no notice. Dispatch a lane that waits on an external job (a Kubernetes Job, a long build) at top level, never under an agent about to report, and do not finish while a child of yours still waits. `read proc://` no longer listing a lane is the only sign it died.
 - Push a branch after every reviewed task, and keep no subagent's work unpushed past its own task: a branch only in a working copy is one bad command from gone.
 
