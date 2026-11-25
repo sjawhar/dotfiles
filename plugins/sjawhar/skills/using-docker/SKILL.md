@@ -10,6 +10,7 @@ description: Use when running docker, docker compose, buildx or depot, or when o
 Every agent on the machine shares one Docker daemon, its build cache, and depot's remote cache.
 
 - Stop or remove only containers this session started. Give each a `--name` (`<task>-$$`) and remove it when you finish; never sweep (`docker ps -q | xargs docker rm`).
+- Never start a second `dockerd` in the host's network namespace. A `dockerd` started with `--bridge=none` deletes the host's `docker0` bridge at startup, and every other session's containers on the default network lose their network until someone recreates it. Stopping such a daemon does not delete it. For a separate runtime or test daemon, run Docker-in-Docker in a container, which has its own network namespace.
 - Never pass `--no-cache`: it rebuilds every stage from scratch, which can take hours on a daemon and disk every session shares. Force one stage with `--no-cache-filter=<stage>`. Do not quote a cold-cache time as the build time.
 - `docker build`, `docker buildx build` and `depot build` can use different builders and caches: `docker buildx ls` shows which one you are on.
 - Never write `~/.docker/config.json`: every session pulls with it. `docker login`, `crane auth login` and `docker-credential-*` helpers write it unless you point them elsewhere:
