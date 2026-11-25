@@ -37,7 +37,7 @@ description: "Use when building a large project autonomously with subagents (sev
 2. **Read `references/adopting.md` before you plan,** to:
    - read what is settled and what is really built;
    - keep an approved design approved.
-3. **Carry the decisions and rejections,** with sources, into the plan and every brief they apply to: a worker without them re-proposes what Sami rejected.
+3. **Carry the decisions and rejections** into the plan and every brief they apply to, each with its reason and where it was decided: a worker without them re-proposes what was rejected, and one without the reason cannot tell where a decision stops applying.
 
 ## 2. Classify each slice
 
@@ -85,8 +85,6 @@ description: "Use when building a large project autonomously with subagents (sev
 - Read `references/acceptance.md` for the scenario every brief carries.
 - Dispatch independent work at once.
 - Keep unblocked work moving.
-- Take results as events, never by polling: they arrive as messages.
-- Do not sit in `wait` while other work is open, for the same reason.
 
 ## 6. Acceptance after each slice
 
