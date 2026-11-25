@@ -65,10 +65,11 @@ fi
 # There is no exception here for a machine that names gh-app.host-profile in its own git config
 # (sami-devbox, installers/gh-app-host.sh). An earlier draft kept the HOST route for a call whose
 # only agent evidence was the SSH rule, on the grounds that the agent route needs a broker session
-# an ssh command has not got. It does not: gh-app-token registers one itself (`secret-run
-# --register`, shims/gh-app-token), and that profile IS `agent`, so both routes mint the same
-# App token. The exception only lifted such a call out of the whole agent block below — past the
-# public-text leak check, past the refusal of `gh auth token`, and past the agent GH_CONFIG_DIR
+# an ssh command has not got. It does not: the agent-secrets client that gh-app-token runs acts
+# as the person signed in on the machine, or as the machine, outside a session, and that profile
+# IS `agent`, so both routes mint the same App token. The exception only lifted such a call out
+# of the whole agent block below — past the public-text leak check, past the refusal of `gh auth
+# token`, and past the agent GH_CONFIG_DIR
 # (review of INFRA-1538).
 
 # gh_shim_quote ARGV…: the call as a shell reads it, for the refusal of `gh auth` below.

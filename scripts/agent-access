@@ -347,13 +347,13 @@ check_agent_secrets_broker() {
     rc=$?
     if ((rc == 0)); then
         row agent_secrets_broker live "this process is a registered broker session" "n/a" "agent-secrets identity" \
-            "secret-run uses the broker instead of secretsd for this session"
+            "agent-secrets reaches the broker as this session"
     else
         # The detail is the non-empty lines of stderr, else of stdout, which row makes one line; a stream with no
         # non-empty line is passed over, and two such streams give the fallback.
         detail="$(awk '{ gsub(/\r/, "") } NF' <<<"$(<"$err")")"
         [[ -n "$detail" ]] || detail="$(awk '{ gsub(/\r/, "") } NF' <<<"$out")"
-        [[ -n "$detail" ]] || detail="no broker identity; secret-run falls back to secretsd"
+        [[ -n "$detail" ]] || detail="no broker identity"
         row agent_secrets_broker missing - - "agent-secrets identity" "$(failure_detail "$rc" "$detail")"
     fi
 }

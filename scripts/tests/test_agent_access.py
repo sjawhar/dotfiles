@@ -553,7 +553,7 @@ fi
         rows = self.access_rows()
         details = {name: "exit 3, no output" for name in TIMED_CHECKS}
         # The broker check's own text for an empty answer stays.
-        details["agent_secrets_broker"] = "no broker identity; secret-run falls back to secretsd"
+        details["agent_secrets_broker"] = "no broker identity"
         for name, detail in details.items():
             with self.subTest(check=name):
                 self.assertEqual((rows[name]["status"], rows[name]["detail"]), ("missing", detail))
@@ -829,17 +829,17 @@ fi
         for stream, redirect in (("stderr", " >&2"), ("stdout", "")):
             with self.subTest(stream=stream):
                 write_stub(
-                    self.stub_dir, "agent-secrets", f"printf '\\n \\nno session\\n\\r\\nhint: run under secret-run\\n'{redirect}\nexit 1"
+                    self.stub_dir, "agent-secrets", f"printf '\\n \\nno session\\n\\r\\nhint: run agent-secrets login\\n'{redirect}\nexit 1"
                 )
                 row = self.access_rows()["agent_secrets_broker"]
-                self.assertEqual((row["status"], row["detail"]), ("missing", "no session hint: run under secret-run"))
+                self.assertEqual((row["status"], row["detail"]), ("missing", "no session hint: run agent-secrets login"))
 
     def test_broker_failure_with_only_blank_output_gives_the_fallback_text(self) -> None:
         """`agent-secrets identity` failing with only blanks and CRs gives the fallback detail, not a blank one.
 
         A timeout still reports the timeout.
         """
-        fallback = "no broker identity; secret-run falls back to secretsd"
+        fallback = "no broker identity"
         cases = {
             "spaces, a tab and CRLF": ("printf ' \\r\\n\\t\\n'", 1, fallback),
             "a lone CRLF": ("printf '\\r\\n'", 1, fallback),
@@ -1054,7 +1054,7 @@ exit 2
             "agent-secrets",
             r"""
 [[ "$1" == identity ]] || exit 2
-printf 'agent-secrets: no broker session\nhint: run under secret-run\n'
+printf 'agent-secrets: no broker session\nhint: run agent-secrets login\n'
 exit 1
 """,
         )
@@ -1074,7 +1074,7 @@ exit 1
         broker = rows["agent_secrets_broker"]
         self.assertEqual(
             (broker["status"], broker["detail"]),
-            ("missing", "agent-secrets: no broker session hint: run under secret-run"),
+            ("missing", "agent-secrets: no broker session hint: run agent-secrets login"),
         )
 
         table = self.run_access()
@@ -1120,7 +1120,7 @@ exit 2
         write_stub(
             self.stub_dir,
             "agent-secrets",
-            "printf 'agent-secrets: no broker session\\r\\nhint: run under secret-run\\r\\n'\nexit 1",
+            "printf 'agent-secrets: no broker session\\r\\nhint: run agent-secrets login\\r\\n'\nexit 1",
         )
         script = self.private_check_script(
             "check_demo() { row demo_platform live $'id\\r\\none' $'exp\\r\\none' $'cmd\\r\\none' $'det\\r\\none'; }\n"
@@ -1130,7 +1130,7 @@ exit 2
         rows = self.access_rows(script)
         checks = {
             "kubectl": ("live", "arn:aws:sts::123:assumed-role/test/i-abc (context: production)", ""),
-            "agent_secrets_broker": ("missing", "-", "agent-secrets: no broker session hint: run under secret-run"),
+            "agent_secrets_broker": ("missing", "-", "agent-secrets: no broker session hint: run agent-secrets login"),
         }
         for name, expected in checks.items():
             with self.subTest(check=name):

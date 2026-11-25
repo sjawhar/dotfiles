@@ -85,7 +85,7 @@ if [[ -f "$cache" && -r "$cache" ]]; then
     fi
 fi
 # Invoke dotfiles' auth-routed gh by path, never whichever gh wins PATH, and from the dotfiles tree, never the
-# checkout the caller runs in: gh and the token helpers its agent config runs (secret-run-reason through python3,
+# checkout the caller runs in: gh and the token helpers its agent config runs (agent-secrets,
 # secrets) are reached through mise's shims, which read the project config of the directory they run in and, under
 # CI=true (omp's bash tool), trust it, so a checkout's `.mise.toml` ran its `_.source` script and its sitecustomize.py
 # inside processes that mint GitHub credentials (measured 2026-11-23). The call names its repository, so it needs no

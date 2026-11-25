@@ -53,8 +53,8 @@ refuse-owner is multi-valued and matches without regard to case. Add each owner 
   git config --file ~/.config/git/config --add gh-app.<profile>.refuse-owner <login>
 oryx refuses trajectory-labs-pbc for the agent profile (HOME-216).
 
-A machine with no agent-secrets helper has no broker identity, so the broker refuses every
-session there (installers/agent-secrets.sh says where the helper runs). Such a machine opts in
+A machine where the agent-secrets client finds no identity (no launcher key, no person's
+sign-in, no helper session, no machine identity) gets every mint refused. Such a machine opts in
 to minting here by setting key-secret in its own git config, `~/.config/git/config`, which no
 other machine reads, to the secretsd secret holding the App's private key (base64-encoded
 PEM), kept in that machine's gitignored secrets.local.env:

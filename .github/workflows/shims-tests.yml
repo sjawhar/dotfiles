@@ -60,7 +60,7 @@ jobs:
           skips: |
             # It needs this machine's own agent route, which a runner does not have: an omp session, the App's git
             # configuration (gh-app.agent.app-id) and a secrets-broker identity, and it reads GitHub with the token it
-            # mints. test_secret_run_reason_runs_no_mise_config_of_the_checkout, which runs here, checks its part.
+            # mints. test_gh_app_token.py's test_the_client_and_secrets_run_in_the_shims_own_checkout, which runs here, checks its part.
             shims/tests/test_leak_terms.py::GitLeaks::test_an_agent_gh_call_runs_no_mise_config_of_the_checkout
             # They need the installed public leak check, theorem-labs/agent-infra's leak-check/, which is private: the
             # public CI of this repository cannot fetch it. Each one's own skip message says what it needs. The ones
