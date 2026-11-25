@@ -6311,7 +6311,7 @@ class OutgoingLeaks(SinkRepositoryCase):
                 self.assertIn("(the global list)", result.stderr)
 
     def test_an_allowed_token_holds_a_scoped_term_only_whole_and_only_in_its_repository(self) -> None:
-        # Term 20 of cybermonklabs/* is also a public npm organisation's name, and upstream oh-my-pi's browser-MCP
+        # Term 16 of cybermonklabs/* is also a public npm organisation's name, and upstream oh-my-pi's browser-MCP
         # filter names one of its packages (upstream d5b28d6d, PR #13896). The list's `allowed` map lets that exact
         # token, as written and as a JavaScript regular expression escapes its slash, stand in cybermonklabs/oh-my-pi;
         # the bare term, the scope with another package and the token anywhere else stay refused.
