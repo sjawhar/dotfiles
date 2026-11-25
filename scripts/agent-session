@@ -42,6 +42,15 @@
 #     stderr, never stdout.
 set -euo pipefail
 
+# No session makes group- or other-writable files, whatever started the shell above it. A tmux
+# server started under the systemd user manager takes the manager's 0002 (pam_umask,
+# USERGROUPS_ENAB in login.defs), one started another way 0022, so the same command made
+# group-writable files in one session and not in the next: after the reset of 2026-11-25
+# (dispatch://INFRA-5874) every host session had 0002, and a test suite that refuses a
+# group-writable file failed on its own fixtures. A box's sessions run with docker's 0022.
+# This adds 022 to the caller's mask and keeps a stricter one (0077 stays 0077).
+umask "$(printf '%04o' $(( 8#$(umask) | 8#022 )))"
+
 # The dotfiles checkout this script is in, not the one under HOME: a caller may give the session a
 # HOME of its own (shims/tests/test_shim_moved_home.py), and shims/omp execs this script by its path.
 _agent_session_self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")"
