@@ -629,14 +629,27 @@ elif [[ -n "${OMP_MEMORY_MAX:-}" ]] && command -v systemd-run >/dev/null 2>&1; t
     mem_max="$OMP_MEMORY_MAX"
     unset OMP_MEMORY_MAX
     export OMP_MEMORY_SCOPE="$mem_max"
+    # The scope also gets a task ceiling, threads included: the 32768 an agent box gets
+    # (scripts/agentbox, BOX_PIDS), and OMP_TASKS_MAX=<n> for one launch, as AGENTBOX_PIDS is for
+    # a box. Without one a scope takes systemd's DefaultTasksMax, 15% of pid_max, which is 629,145
+    # on sami-devbox. On 2026-11-25 a host session's scope there filled with thousands of
+    # clitest.test processes, each sizing its Go runtime to the host's 288 CPUs; the box counted
+    # 669,042 tasks at 12:36Z, and nothing on it answered until a reset at 15:56Z
+    # (dispatch://INFRA-5874). At the ceiling a fork inside the scope fails, and the box goes on.
+    tasks_max=${OMP_TASKS_MAX:-32768}
+    unset OMP_TASKS_MAX
+    if [[ ! $tasks_max =~ ^[1-9][0-9]*$ ]]; then
+        echo "omp: OMP_TASKS_MAX=$tasks_max is not a number of tasks; using 32768." >&2
+        tasks_max=32768
+    fi
     # Under load the systemd user manager waits on the kernel's cgroup lock and a scope request
     # times out ("Failed to start transient scope unit: Connection timed out"): 5 of 7 tries did
     # between 05:04 and 05:20Z on 2026-11-02, at load 450-520. A session started then would run
     # with no ceiling and no OOMPolicy, so the probe tries once more after 10 s before falling
     # back. A box never reaches here: it took the branch above.
     scope_probe() {
-        systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 -p OOMPolicy=continue -- true \
-            >/dev/null 2>&1
+        systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 -p TasksMax="$tasks_max" \
+            -p OOMPolicy=continue -- true >/dev/null 2>&1
     }
     # The scope a background child runs in, once systemd-run has moved it out of this shell's cgroup.
     child_scope() {
@@ -675,7 +688,8 @@ elif [[ -n "${OMP_MEMORY_MAX:-}" ]] && command -v systemd-run >/dev/null 2>&1; t
         # job the wrapper's own stdin through a spare descriptor. With job control off the job
         # stays in this shell's process group, so it still owns the terminal.
         exec 3<&0
-        systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 -p OOMPolicy=continue \
+        systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 -p TasksMax="$tasks_max" \
+            -p OOMPolicy=continue \
             -- "$DOTFILES_DIR/scripts/agent-session" omp "$@" <&3 3<&- &
         omp_pid=$!
         omp_since=$(date +%s)

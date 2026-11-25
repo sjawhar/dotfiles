@@ -112,6 +112,30 @@ class OmpMemoryCeiling(unittest.TestCase):
         self.assertIn("the box's own cgroup", result.stderr)
         self.assertIn("AGENT omp", result.stdout, "the session did not start")
 
+    def task_ceilings(self, **extra: str) -> tuple[list[str], str]:
+        """The TasksMax of each scope the shim asks systemd for on sami-devbox, and its stderr."""
+        self.meminfo.write_text(f"MemTotal:       {DEVBOX_KB} kB\n", encoding="utf-8")
+        result = subprocess.run([str(SHIM), "--version"], capture_output=True, text=True,
+                                env={**self.env, **extra}, check=False, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls.read_text(encoding="utf-8").splitlines()
+        self.calls.unlink()
+        self.assertTrue(calls, result.stderr)
+        values = [next((w.split("=", 1)[1] for w in call.split() if w.startswith("TasksMax=")), "none")
+                  for call in calls]
+        return values, result.stderr
+
+    def test_every_scope_has_the_task_ceiling_of_an_agent_box(self) -> None:
+        """With no TasksMax a scope takes systemd's DefaultTasksMax, 629,145 on sami-devbox: on
+        2026-11-25 one session's scope filled the box until a reset (dispatch://INFRA-5874)."""
+        values, _ = self.task_ceilings()
+        self.assertEqual(set(values), {"32768"}, "the probe and the launch must both carry it")
+        values, _ = self.task_ceilings(OMP_TASKS_MAX="65536")
+        self.assertEqual(set(values), {"65536"})
+        values, stderr = self.task_ceilings(OMP_TASKS_MAX="infinity")
+        self.assertEqual(set(values), {"32768"})
+        self.assertIn("not a number of tasks", stderr)
+
     def machine_says(self, text: str) -> None:
         self.machine_file.parent.mkdir(parents=True, exist_ok=True)
         self.machine_file.write_text(text, encoding="utf-8")
