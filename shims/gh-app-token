@@ -1,10 +1,11 @@
-#!/usr/bin/python3
+#!/usr/bin/python3 -I
 """Owner-aware GitHub App credential helper.
 
 Interpreter is pinned to the system python3, NOT `env python3`: git invokes a credential
 helper with the caller's environment, so under any activated virtualenv (a uv run, an agent
 shell, a project venv) `env python3` can resolve to an interpreter the helper was never run
-under. It needs nothing past the standard library.
+under. It needs nothing past the standard library, so it runs isolated (-I): a PYTHONPATH,
+PYTHONSTARTUP or user site in that environment changes nothing here.
 
 Git credential-helper usage (wired up in gh-app-routes.gitconfig):
   gh-app-token <profile> get
@@ -52,8 +53,8 @@ refuse-owner is multi-valued and matches without regard to case. Add each owner 
   git config --file ~/.config/git/config --add gh-app.<profile>.refuse-owner <login>
 oryx refuses trajectory-labs-pbc for the agent profile (HOME-216).
 
-A machine with no agent-secrets helper has no broker identity, so the broker refuses every
-session there (installers/agent-secrets.sh says where the helper runs). Such a machine opts in
+A machine where the agent-secrets client finds no identity (no launcher key, no person's
+sign-in, no helper session, no machine identity) gets every mint refused. Such a machine opts in
 to minting here by setting key-secret in its own git config, `~/.config/git/config`, which no
 other machine reads, to the secretsd secret holding the App's private key (base64-encoded
 PEM), kept in that machine's gitignored secrets.local.env:
@@ -64,26 +65,21 @@ owner's token, narrowed as asked; the broker is never asked. Every rule below ho
 way, with the App's installation list in place of the broker's release.
 
 Without key-secret the helper never holds the App's key. On a cache miss it asks the secrets
-broker through secret-run, which mints the installation tokens:
-  secret-run --register --reason "gh-app-token <owner>" GITHUB_APP_<PERSON> -- printenv GITHUB_APP_<PERSON>
+broker through the broker's client, agent-secrets, which mints the installation tokens:
+  agent-secrets GITHUB_APP_<PERSON> --reason "gh-app-token <owner>" -- printenv GITHUB_APP_<PERSON>
 and reads the release from its stdout:
   {"installations": {"<owner>": {"installation_id": <int>, "token": "...",
   "expires_at": "<RFC 3339>"}}}
 Every owner's token in a release is cached, and every owner and installation id is merged
 into a covered-owner file that never shrinks.
 
---register makes this caller a broker session when it has none, which secret-run does not do
-for anyone else. secret-run's rule is that a process with no broker identity reads secretsd, and
-that is right for every key secretsd holds; GITHUB_APP_<PERSON> lives in the broker alone, so for
-this helper "no identity" could only end in a refusal. Its callers are not a list anyone can keep:
-the lane relays, units such as ossv-ops-sync, the speed services, and any job an agent detached,
-which systemd --user adopts once the tool call that started it exits, so it no longer descends
-from its session's registered root. Registering is what any of them can already do with one
-command (`agent-secrets register --exec`), under Sami's machine login, for his agent-tier secret
-on his box (dispatch://INFRA-688/ask/83bd712a). secret-run registers only when the client ran and
-answered "no identity"; a client that cannot run is still its hard error. It happens only on a
-cache miss, so the cache below bounds enrollments at one per miss, not one per call, and each
-session ends with the secret-run that made it.
+The client needs no registered session: outside one it acts as the person signed in on this
+machine, or as the machine itself (cybermonklabs/legion packages/envoy/cmd/cipher/chain.go).
+That serves the callers no list can keep: the lane relays, units such as ossv-ops-sync, the
+speed services, and any job an agent detached, which systemd --user adopts once the tool call
+that started it exits, so it no longer descends from its session's registered root. The client
+also needs AGENT_SECRETS_URL, which omp's eval kernel and such units do not pass on, so it runs
+after agent-secrets/broker-url.sh, which loads broker.env's URL when the caller has none.
 
 In an agent box the broker identity arrives after the box does, so a request waits while the
 launcher's enrollment.pending marker says one is still under way, up to 300 s
@@ -91,11 +87,14 @@ launcher's enrollment.pending marker says one is still under way, up to 300 s
 reads: AGENT_SECRETS_KEY_DIR, else $XDG_RUNTIME_DIR/agent-secrets, else
 /run/user/<uid>/agent-secrets. Nowhere else is there such a marker, so nothing else waits.
 
---repo and --read-only narrow the token of one owner (INFRA-322) to those repositories and to
-contents:read and metadata:read: secret-run passes them to the broker as --github-owner,
---github-repo and --github-read-only, which mints the narrowed token with GitHub's
-access_tokens body. A narrowed token has its own cache entry, so it never reuses or replaces
-the owner-wide one, and it never falls back to the personal token, which cannot be narrowed.
+--repo and --read-only narrow the token of one owner (INFRA-322). This helper passes the client
+--target <owner>, or --target <owner>/<repo> once for each --repo. --read-only asks for the
+profile's read secret, its broker-secret with _READ appended (GITHUB_APP_<PERSON>_READ, which
+holds contents:read and metadata:read), in place of broker-secret itself (GITHUB_APP_<PERSON>,
+which holds the App's own permissions): the broker serves each as a named profile and mints the
+narrowed token with GitHub's access_tokens body. A narrowed token has its own cache entry, so it
+never reuses or replaces the owner-wide one, and it never falls back to the personal token,
+which cannot be narrowed.
 
 The target owner comes from --owner, then GH_APP_OWNER, then the owner segment of the
 credential request's path (requires credential.useHttpPath). Whether an owner is covered is
@@ -334,6 +333,14 @@ def scope_key(scope: dict[str, Any] | None) -> str:
         return ""
     perms = ",".join(f"{k}={v}" for k, v in sorted(scope.get("permissions", {}).items()))
     return f"repos={','.join(scope.get('repositories', []))};perms={perms}"
+
+
+def broker_secret_for(profile: str, scope: dict[str, Any] | None) -> str:
+    """The broker profile a mint for scope asks for: broker-secret (GITHUB_APP_<PERSON>), or for a
+    read-only scope its read profile, broker-secret with _READ appended, which holds the scope's
+    contents:read and metadata:read."""
+    secret = git_config(f"gh-app.{profile}.broker-secret")
+    return f"{secret}_READ" if scope and scope.get("permissions") else secret
 
 
 def token_cache_file(profile: str, owner: str, scope: str = "") -> Path:
@@ -626,15 +633,26 @@ def secrets_executable() -> str:
     return shutil.which("secrets") or str(mise_shims() / "secrets")
 
 
-def secret_run_command() -> tuple[str, dict[str, str]]:
-    """secret-run on PATH, else the one in this shim's own checkout, and the environment to run
-    it in: the caller's, with mise's shims dir after its PATH, so secret-run finds
-    agent-secrets (the broker) and secrets where the caller's PATH lacks them (mise_shims), and
-    mise's data dir and configuration for those shims (mise_environment)."""
-    executable = shutil.which("secret-run") or str(Path(__file__).resolve().parents[1] / "scripts" / "secret-run")
+# The directory the client and secrets run in: this shim's own dotfiles tree, never the caller's checkout. Each can be
+# mise's shim, and mise reads the project config of the directory it runs in,
+# which under CI=true (omp's bash tool) it trusts, so a checkout's `.mise.toml` ran its `_.source` script and its
+# PYTHONPATH's sitecustomize.py while an App token was minted (measured 2026-11-23).
+OWN_CHECKOUT = Path(__file__).resolve().parents[1]
+
+
+# The file that gives the client its broker URL where the caller has none (omp's eval kernel and a unit pass none on,
+# and the client refuses without one).
+BROKER_URL_SH = OWN_CHECKOUT / "agent-secrets" / "broker-url.sh"
+
+
+def client_command() -> tuple[list[str], dict[str, str]]:
+    """The agent-secrets client, run by sh after BROKER_URL_SH, and the environment to run it in:
+    the caller's, with mise's shims dir after its PATH, so the client and secrets resolve where
+    the caller's PATH lacks them (mise_shims), and mise's data dir and configuration for those
+    shims (mise_environment)."""
     environment = {**os.environ, **mise_environment()}
     environment["PATH"] = os.pathsep.join(part for part in (environment.get("PATH", ""), str(mise_shims())) if part)
-    return executable, environment
+    return ["sh", "-c", '. "$0" && exec agent-secrets "$@"', str(BROKER_URL_SH)], environment
 
 
 def resolve_secret(name: str) -> str:
@@ -647,6 +665,7 @@ def resolve_secret(name: str) -> str:
             text=True,
             check=True,
             env={**os.environ, **mise_environment()},
+            cwd=OWN_CHECKOUT,
         )
     except (subprocess.CalledProcessError, FileNotFoundError) as error:
         detail = (getattr(error, "stderr", None) or "").strip() or str(error)
@@ -780,35 +799,33 @@ def wait_for_box_enrollment() -> None:
 def request_broker_installations(
     secret_name: str, owner: str, scope: dict[str, Any] | None = None
 ) -> dict[str, BrokerInstallation]:
-    """Ask the broker for a release of secret_name through secret-run, capturing its stdout
-    without logging it. With scope, the release is narrowed to owner's installation, its
-    repositories and its read-only permissions."""
+    """Ask the broker for a release of secret_name through its client, capturing its stdout
+    without logging it. With scope, the release is narrowed with --target to owner's installation,
+    or to each of its repositories; a read-only scope's secret_name is the read profile
+    (broker_secret_for)."""
     wait_for_box_enrollment()
-    executable, environment = secret_run_command()
+    client, environment = client_command()
     narrowing: list[str] = []
     if scope:
-        narrowing = ["--github-owner", owner]
-        for repository in scope.get("repositories", []):
-            narrowing += ["--github-repo", repository]
-        if scope.get("permissions"):
-            narrowing.append("--github-read-only")
+        targets = [f"{owner}/{repository}" for repository in scope.get("repositories", [])] or [owner]
+        for target in targets:
+            narrowing += ["--target", target]
     command = [
-        executable,
-        "--register",
+        *client,
+        secret_name,
         "--reason",
         f"gh-app-token {owner}",
         *narrowing,
-        secret_name,
         "--",
         "printenv",
         secret_name,
     ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=False, env=environment)
+        result = subprocess.run(command, capture_output=True, text=True, check=False, env=environment, cwd=OWN_CHECKOUT)
     except FileNotFoundError as error:
-        raise AppTokenError("secret-run is not available") from error
+        raise AppTokenError("sh is not available to run the agent-secrets client") from error
     except (OSError, UnicodeDecodeError) as error:
-        raise AppTokenError("failed to run secret-run") from error
+        raise AppTokenError("failed to run the agent-secrets client") from error
     if result.returncode == 75:
         raise AppTokenError(
             f"broker request for {secret_name} is pending; run agent-secrets-login before retrying"
@@ -997,7 +1014,7 @@ def get_token(
     if key_secret:
         covered, installations = mint_from_secretsd(key_secret, app_id, owner, scope)
     else:
-        installations = request_broker_installations(git_config(f"gh-app.{profile}.broker-secret"), owner, scope)
+        installations = request_broker_installations(broker_secret_for(profile, scope), owner, scope)
         covered = {name: installation["installation_id"] for name, installation in installations.items()}
     minted_at = utc_stamp(datetime.now(timezone.utc))
     remember_covered_owners(app_id, covered)
@@ -1052,7 +1069,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--read-only", action="store_true",
-        help="narrow the token to contents:read and metadata:read; never falls back to the personal token",
+        help="ask for the profile's read secret, its broker-secret with _READ appended (contents:read and "
+             "metadata:read), narrowed with --target to the owner or to each --repo; never falls back to "
+             "the personal token",
     )
     parser.add_argument(
         "--for-write", action="store_true",

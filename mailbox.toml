@@ -2,29 +2,30 @@ default_account = "personal"
 
 # The accounts of gws/accounts.json, with the same keys. Reads use the account's agent-tier key
 # from secretsd. Where the credential broker holds a write (gmail.modify) or send key, it comes
-# through `secret-run`: one Dispatch grant per session from the broker, or one YubiKey touch where
-# the broker does not serve the session. The other write and send keys come from secretsd, one
-# YubiKey touch per grant. The broker waits up to 4 minutes for a grant, so the credential
-# timeout is longer than that. The wren account is Wren's own mailbox: its write and send keys are
-# agent tier too, so none of its calls needs an approval.
+# through the broker's client, `agent-secrets`: one Dispatch grant per session from the broker.
+# The client runs after agent-secrets/broker-url.sh, which gives it the broker's URL where the
+# caller's environment has none. The other write and send keys come from secretsd, one YubiKey
+# touch per grant. The broker waits up to 4 minutes for a grant, so the credential timeout is
+# longer than that. The wren account is Wren's own mailbox: its write and send keys are agent tier
+# too, so none of its calls needs an approval.
 credential_timeout_secs = 300
 scrub_env = ["SECRETSD_SESSION_TOKEN_FILE"]
 scrub_env_patterns = ["GWS_*_OAUTH"]
 
 [accounts.personal]
 read_credential_cmd  = ["secrets", "GWS_PERSONAL_READ_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_PERSONAL_READ_OAUTH"]
-write_credential_cmd = ["secret-run", "--reason", "mailbox personal write", "--wait", "4m", "GWS_PERSONAL_MODIFY_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_PERSONAL_MODIFY_OAUTH"]
-write_label          = "broker grant on Dispatch (YubiKey touch outside the broker)"
-send_credential_cmd  = ["secret-run", "--reason", "mailbox personal send", "--wait", "4m", "GWS_PERSONAL_SEND_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_PERSONAL_SEND_OAUTH"]
-send_label           = "broker grant on Dispatch (YubiKey touch outside the broker)"
+write_credential_cmd = ["sh", "-c", '. "${DOTFILES_DIR:-$HOME/.dotfiles}/agent-secrets/broker-url.sh" && exec agent-secrets "$@"', "agent-secrets", "GWS_PERSONAL_MODIFY_OAUTH", "--reason", "mailbox personal write", "--wait", "4m", "--", "mailbox", "__mint", "--env", "GWS_PERSONAL_MODIFY_OAUTH"]
+write_label          = "broker grant on Dispatch"
+send_credential_cmd  = ["sh", "-c", '. "${DOTFILES_DIR:-$HOME/.dotfiles}/agent-secrets/broker-url.sh" && exec agent-secrets "$@"', "agent-secrets", "GWS_PERSONAL_SEND_OAUTH", "--reason", "mailbox personal send", "--wait", "4m", "--", "mailbox", "__mint", "--env", "GWS_PERSONAL_SEND_OAUTH"]
+send_label           = "broker grant on Dispatch"
 credential_env_passthrough = ["SECRETSD_SESSION_TOKEN_FILE"]
 
 [accounts.theorem]
-read_credential_cmd  = ["secret-run", "--reason", "mailbox theorem read", "GWS_THEOREM_READ_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_THEOREM_READ_OAUTH"]
-write_credential_cmd = ["secret-run", "--reason", "mailbox theorem write", "--wait", "4m", "GWS_THEOREM_MODIFY_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_THEOREM_MODIFY_OAUTH"]
-write_label          = "broker grant on Dispatch (YubiKey touch outside the broker)"
-send_credential_cmd  = ["secret-run", "--reason", "mailbox theorem send", "--wait", "4m", "GWS_THEOREM_SEND_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_THEOREM_SEND_OAUTH"]
-send_label           = "broker grant on Dispatch (YubiKey touch outside the broker)"
+read_credential_cmd  = ["sh", "-c", '. "${DOTFILES_DIR:-$HOME/.dotfiles}/agent-secrets/broker-url.sh" && exec agent-secrets "$@"', "agent-secrets", "GWS_THEOREM_READ_OAUTH", "--reason", "mailbox theorem read", "--", "mailbox", "__mint", "--env", "GWS_THEOREM_READ_OAUTH"]
+write_credential_cmd = ["sh", "-c", '. "${DOTFILES_DIR:-$HOME/.dotfiles}/agent-secrets/broker-url.sh" && exec agent-secrets "$@"', "agent-secrets", "GWS_THEOREM_MODIFY_OAUTH", "--reason", "mailbox theorem write", "--wait", "4m", "--", "mailbox", "__mint", "--env", "GWS_THEOREM_MODIFY_OAUTH"]
+write_label          = "broker grant on Dispatch"
+send_credential_cmd  = ["sh", "-c", '. "${DOTFILES_DIR:-$HOME/.dotfiles}/agent-secrets/broker-url.sh" && exec agent-secrets "$@"', "agent-secrets", "GWS_THEOREM_SEND_OAUTH", "--reason", "mailbox theorem send", "--wait", "4m", "--", "mailbox", "__mint", "--env", "GWS_THEOREM_SEND_OAUTH"]
+send_label           = "broker grant on Dispatch"
 credential_env_passthrough = ["SECRETSD_SESSION_TOKEN_FILE"]
 
 [accounts.wren]

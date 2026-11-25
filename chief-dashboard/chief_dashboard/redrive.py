@@ -129,7 +129,7 @@ def _omp_pid(root: int) -> int | None:
         for p in frontier:
             for c in _children(p):
                 try:
-                    if Path(f"/proc/{c}/comm").read_text().strip() == "omp":
+                    if Path(f"/proc/{c}/comm").read_bytes().decode("utf8", "replace").strip() == "omp":
                         return c
                 except OSError:
                     continue

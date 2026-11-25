@@ -4,16 +4,21 @@
 #
 #   sami-devbox-check               on sami-devbox, as sami: the host checks, then a new agent
 #                                   box that runs this script with --in-box; exit 0 only when
-#                                   every check of both passes.
-#   sami-devbox-check --mark-ready  the same, and on a pass writes the readiness marker that
-#                                   `agentbox move --to sami-devbox` requires before it moves
-#                                   any session (CUTOVER_DIR/target-ready).
+#                                   every check of both passes. The login-file walk of every disk
+#                                   (host_logins, about 80 min) is left out, with a note line
+#                                   that says so; omp's own login store is still judged.
+#   sami-devbox-check --mark-ready  the same with the login-file walk, and on a pass writes the
+#                                   readiness marker that `agentbox move --to sami-devbox`
+#                                   requires before it moves any session (CUTOVER_DIR/target-ready):
+#                                   the marker says no person's login is on any disk.
 #   sami-devbox-check --in-box      the box half; agentbox runs it, a person does not.
 #   sami-devbox-check --pins        only the pin lines (knives is mise.toml's pin, mise has every
 #                                   pin installed), on the host; scripts/dotfiles-follow runs it
 #                                   after each fast-forward. No log file, no marker.
 #   sami-devbox-check --root        only the root-disk lines (/ under 40 GiB, no directory over
 #                                   1 GiB outside the OS's own, /var/log under 4 GiB), on the
+#                                   host. No log file, no marker.
+#   sami-devbox-check --logins      only the login lines, with the walk of every disk, on the
 #                                   host. No log file, no marker.
 #
 # A2 asks that a NEW session on the machine runs in an agent box and reaches, from inside the
@@ -1230,6 +1235,9 @@ host_bwrap() {
 # The public-text leak check: ~/.local/share/public-leak-check holds the tag of agent-infra's
 # leak-check/ that devbox/leak-check-tag.env names (sami-devbox-provision's step leakcheck installs
 # it), so its launcher, Python module, README and must-pass fixture must have that file's sha256.
+# Where that tag's launcher has `--check-bytecode`, the bytecode an install built beside the module
+# (agent-infra leak-check/README.md, "The bytecode") must also be the one that launcher builds from
+# the module, byte for byte: a bytecode and hash file someone wrote together pass every sha256.
 leak_check_host_check() {
     local here d out rc=0
     # shellcheck source=leak-check-tag.env
@@ -1238,8 +1246,32 @@ leak_check_host_check() {
     [[ -x "$here" ]] || { fail "public-leak-check: the pointer names '$here', which is not an executable file here"; return; }
     d="$(dirname "$here")"
     out="$(cd "$d" && sha256sum -c <<<"$LEAK_CHECK_HOME_SHA256" 2>&1)" || rc=$?
-    (( rc == 0 )) && ok "public-leak-check: $d holds $LEAK_CHECK_TAG (${LEAK_CHECK_COMMIT:0:12}): $(tr '\n' ' ' <<<"$out")" \
-        || fail "public-leak-check: $d is not $LEAK_CHECK_TAG (sha256sum -c exit $rc): $(grep -v ': OK$' <<<"$out" | tr '\n' ' ')install it: sami-devbox-provision --only leakcheck"
+    (( rc == 0 )) || { fail "public-leak-check: $d is not $LEAK_CHECK_TAG (sha256sum -c exit $rc): $(grep -v ': OK$' <<<"$out" | tr '\n' ' ')install it: sami-devbox-provision --only leakcheck"; return; }
+    ok "public-leak-check: $d holds $LEAK_CHECK_TAG (${LEAK_CHECK_COMMIT:0:12}): $(tr '\n' ' ' <<<"$out")"
+    # A pair a check moved aside keeps this check red until a person reviews and deletes it, so
+    # forged code someone left stays visible (agent-infra leak-check/INSTALL.md, "The bytecode").
+    local refused
+    if refused="$(compgen -G "$d/__pycache__/*.refused.*")"; then
+        fail "public-leak-check bytecode: $d/__pycache__ holds files a bytecode check moved aside: $(tr '\n' ' ' <<<"$refused")a person reviews and deletes them, finds the cause, then runs sami-devbox-provision --only leakcheck"
+    fi
+    # Only now: the launcher run here is the one whose sha256 just passed. A tag from before the
+    # bytecode has no such mode, builds no bytecode and reads none.
+    grep -q -- --check-bytecode "$d/public-leak-check.sh" || return 0
+    local sums pyc f to at i moved=
+    rc=0
+    out="$(bash "$d/public-leak-check.sh" --check-bytecode 2>&1)" || rc=$?
+    (( rc == 0 )) && { ok "public-leak-check bytecode: $(tr '\n' ' ' <<<"$out")"; return; }
+    # As the install blocks do: a pair that does not pass is moved aside under names of its own, so
+    # runs compile the module from source, the code in it runs no more, and no evidence is replaced.
+    sums="$d/__pycache__/public_leak_check.$(/usr/bin/python3 -I -c 'import sys; print(sys.implementation.cache_tag)').sha256"
+    pyc="${sums%.sha256}.pyc"
+    at="$(date -u +%Y%m%dT%H%M%SZ)"
+    for f in "$sums" "$pyc"; do
+        to="$f.refused.$at"; i=0
+        while [[ -e "$to" ]]; do i=$((i + 1)); to="$f.refused.$at.$i"; done
+        [[ ! -e "$f" ]] || { mv -- "$f" "$to" && moved="$moved $to"; }
+    done
+    fail "public-leak-check bytecode: --check-bytecode exit $rc: $(tr '\n' ' ' <<<"$out")Moved aside what existed:$moved. Runs compile the module from source; a person reviews and deletes those files, finds the cause, then runs sami-devbox-provision --only leakcheck"
 }
 
 # The leak check's pre-push hook: every checkout under ~/src that pushes to a public repository has
@@ -1350,6 +1382,7 @@ dispatch_cli_check() {
     (( rc == 0 )) && ok "dispatch --help $where: exit 0" || fail "dispatch --help $where: exit $rc: $(head -1 <<<"$out")"
 }
 
+# host [--mark-ready]: the host half, then the box half. With --mark-ready it walks every disk for login files.
 host() {
     echo "== host $(hostname -s), $(stamp)"
     host_identity
@@ -1387,7 +1420,15 @@ host() {
     fi
     missing="$(yq '[.providers["model-gateway"].models[].id | select(test("^openai/"))] | length' "$HOME/.omp/agent/models.yml" 2>&1)"
     [[ "$missing" =~ ^[0-9]+$ && "$missing" -ge 2 ]] && ok "omp models.yml: model-gateway declares $missing openai/ models" || fail "omp models.yml: model-gateway's openai/ models: want 2 or more, got: $missing"
-    host_logins
+    # The login-file walk runs with --mark-ready (the marker says no person's login is on any disk) and
+    # alone with --logins. Its last measured run took 4,926 s (2026-11-23 04:12-05:34Z, at a load of 82
+    # to 131 on 288 CPUs), which made every default run take hours (dispatch://INFRA-5287).
+    if [[ "${1:-}" == --mark-ready ]]; then
+        host_logins
+    else
+        note "logins: the login-file walk of ${LOGIN_MOUNTS[*]} is skipped in a default run (its last run took 4,926 s, about 80 min, on 2026-11-23); run it with: sami-devbox-check --logins"
+        host_omp_logins
+    fi
     host_owners
     host_guard
     github_check "on the host"
@@ -1455,6 +1496,7 @@ case "${1:-}" in
     --in-box) in_box; exit $? ;;
     --pins) knives_check; mise_check; (( fails == 0 )); exit $? ;;
     --root) host_rootfs; (( fails == 0 )); exit $? ;;
+    --logins) host_logins; (( fails == 0 )); exit $? ;;
     ""|--mark-ready) ;;
     *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" >&2; exit 2 ;;
 esac
@@ -1463,7 +1505,7 @@ mkdir -p "$CUTOVER_DIR" || exit 1
 # An old marker says nothing about this run: remove it first, so a failed or crashed run leaves none.
 rm -f "$CUTOVER_DIR/target-ready" || exit 1
 log="$CUTOVER_DIR/a2-$(date -u +%Y%m%dT%H%M%SZ).log"
-host 2>&1 | tee "$log"
+host "${1:-}" 2>&1 | tee "$log"
 status=("${PIPESTATUS[@]}")
 fails="$(grep -c '^FAIL' "$log")"
 echo "log: $log"

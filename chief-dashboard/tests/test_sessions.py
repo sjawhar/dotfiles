@@ -5,11 +5,15 @@ the sessions outside the stream windows. No test reads a live /proc, tmux or doc
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from test_dashboard import NOW, snapshot
 
 from chief_dashboard import sessions, v2_model, v2_render
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "tests"))
+from non_utf8_name import NAME, READ_AS  # noqa: E402 - found through the path above
 
 DATA = Path(__file__).parent / "data"
 OMP = "~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3/bin/omp"
@@ -163,3 +167,26 @@ def test_a_stream_without_a_window_and_an_unmeasured_read_say_so():
     assert v.sessions is None and "sessions in tasks not measured" in v2_render.stream_section(v, page, [])
     v.windows = []
     assert "no tmux window of its own" in v2_render.stream_sessions(v)
+
+
+def test_a_process_named_in_bytes_that_are_not_utf8_is_read(tmp_path):
+    """Any process may name itself any bytes (prctl PR_SET_NAME), and its stat carries the name. One such process on
+    the host made every refresh fail, so the page kept its old snapshot."""
+    d = tmp_path / "4242"
+    d.mkdir()
+    (d / "cmdline").write_bytes(b"python3\0-c\0pass\0")
+    (d / "stat").write_bytes(b"4242 (" + NAME + b") S 1 4242 4242 0 -1 4194304\n")
+    read = [(p["pid"], p["ppid"], p["argv"]) for p in sessions.read_processes(tmp_path)]
+    assert read == [(4242, 1, ["python3", "-c", "pass"])]
+
+
+def test_an_omp_s_cgroup_path_that_is_not_utf8_is_read(tmp_path):
+    """A cgroup path may hold any bytes (a delegated scope names its own children). The cgroup of a process that looks
+    like omp is read, so one such path made every refresh fail, as a name in stat did."""
+    d = tmp_path / "4242"
+    d.mkdir()
+    (d / "cmdline").write_bytes(b"omp\0--resume\0x\0")
+    (d / "stat").write_bytes(b"4242 (omp) S 1 4242 4242 0 -1 4194304\n")
+    (d / "cgroup").write_bytes(b"0::/user.slice/" + NAME + b".scope\n")
+    read = [(p["pid"], p["cgroup"]) for p in sessions.read_processes(tmp_path)]
+    assert read == [(4242, f"0::/user.slice/{READ_AS}.scope")]

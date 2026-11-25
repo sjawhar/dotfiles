@@ -36,10 +36,32 @@ jobs:
       # in a transient scope of the user's systemd manager (`systemd-run --user --scope`) under a task limit.
       - name: a scope of the user manager
         run: systemd-run --user --scope --quiet --collect -p TasksMax=64 -- true
+      # A python3 shim in mise's shims dir, as sami-devbox has one (~/.mise/shims/python3, a link to mise): mise makes it
+      # for an install of python, here the 3.13.9 sami-devbox holds. The global config pins no python, so the shim runs
+      # the next python3 on PATH, with the env of the config of the directory it runs in. test_leak_terms.py's guards
+      # against a checkout's mise config need that shim on PATH, and skip without it. The shims dir goes last on the
+      # tests' PATH (path-after), so no command the tests run by name resolves to it.
+      - name: mise's python3 shim
+        id: python-shim
+        env:
+          MISE_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd /
+          "$GITHUB_WORKSPACE/bin/mise" install python@3.13.9
+          shim="$MISE_DATA_DIR/shims/python3"
+          [[ -L "$shim" && "$(basename "$(realpath "$shim")")" == mise ]] ||
+            { echo "mise made no python3 shim at $shim" >&2; exit 1; }
+          echo "dir=${shim%/*}" >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/pytest-guarded
         with:
           tests: shims/tests
+          path-after: ${{ steps.python-shim.outputs.dir }}
           skips: |
+            # It needs this machine's own agent route, which a runner does not have: an omp session, the App's git
+            # configuration (gh-app.agent.app-id) and a secrets-broker identity, and it reads GitHub with the token it
+            # mints. test_gh_app_token.py's test_the_client_and_secrets_run_in_the_shims_own_checkout, which runs here, checks its part.
+            shims/tests/test_leak_terms.py::GitLeaks::test_an_agent_gh_call_runs_no_mise_config_of_the_checkout
             # They need the installed public leak check, theorem-labs/agent-infra's leak-check/, which is private: the
             # public CI of this repository cannot fetch it. Each one's own skip message says what it needs. The ones
             # named <case>_with_the_installed_check are the installed-check forms of a case that runs here with the

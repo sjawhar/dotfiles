@@ -10,9 +10,13 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from non_utf8_name import READ_AS, process_named  # noqa: E402 - found through the path above
 
 MODULE = Path(__file__).resolve().parents[1] / "tmux-resurrect-omp"
 spec = importlib.util.spec_from_loader("tmux_resurrect_omp",
@@ -63,6 +67,13 @@ class MovedAway(unittest.TestCase):
         (self.index / self.SID).write_text("from=devbox\nto=oldbox\n", encoding="utf-8")
         self.assertFalse(resurrect.moved_away(self.SID),
                          "a marker the move copied to the target is inert there")
+
+
+class NameNotUtf8(unittest.TestCase):
+    def test_a_process_named_in_bytes_that_are_not_utf8_is_read(self) -> None:
+        """A pane's process may name itself any bytes (prctl PR_SET_NAME); the omp search reads past it."""
+        with process_named() as named:
+            self.assertEqual(resurrect.comm(named.pid), READ_AS)
 
 
 if __name__ == "__main__":

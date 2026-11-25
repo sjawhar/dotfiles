@@ -1,7 +1,8 @@
 # shellcheck shell=sh
 # Sourced, never run: exports AGENT_SECRETS_URL, the secrets broker's address (AGENTC-393), for
-# .bashrc (bash or zsh), scripts/agent-secrets-session, scripts/secret-run,
-# scripts/agent-secrets-login and scripts/agentbox. The rule is written here and nowhere else.
+# .bashrc (bash or zsh), scripts/agent-secrets-session, scripts/gcloud-reader, scripts/az-reader,
+# shims/gh-app-token, scripts/agent-secrets-login and scripts/agentbox. The rule is written here
+# and nowhere else.
 #
 # broker.env holds the committed URL, and ~/.config/agent-secrets/env.local (optional, uncommitted)
 # overrides it on one machine. A URL loaded from them is recorded in DOTFILES_AGENT_SECRETS_URL,

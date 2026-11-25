@@ -7,8 +7,8 @@
 #   AZ_READER_REASON='<key>: <each object read>' az-reader [--] <az args...>   (az-reader vm list -g SAMI -o table)
 #
 # It asks the broker for METADATA_READ, an access token of metadata-reader@ (an hour at most; the
-# broker refuses a request that names no lifetime, so --ttl 1h; --register gives a session the
-# helper never registered a broker identity for this one command). With that token it mints the
+# broker refuses a request that names no lifetime, so --ttl 1h; a process outside a registered
+# session still gets its identity from the client: sign-in, then the machine). With that token it mints the
 # account's identity token for the audience api://AzureADTokenExchange (iamcredentials'
 # generateIdToken; the account holds roles/iam.serviceAccountOpenIdTokenCreator on itself, agent-infra
 # bootstrap/metadatareader.go). legion-reader trusts that token through its federated credential
@@ -22,8 +22,8 @@
 # legion-reader= line of agent-infra's .github/azure-client-ids on main, with gh.
 #
 # Exit 2 for a usage error, before anything reaches the broker; 1 when gh gives no client id, before
-# anything reaches the broker; secret-run's own status when the broker gives no token (75 pending,
-# 77 denied, 1 refused); 1 when the mint is refused; az's status otherwise.
+# anything reaches the broker; the agent-secrets client's own status when the broker gives no token
+# (75 pending, 77 denied, 1 refused); 1 when the mint is refused; az's status otherwise.
 set -euo pipefail
 
 reader=metadata-reader@theorem-agent-infra.iam.gserviceaccount.com
@@ -48,7 +48,10 @@ if [ "${AZ_READER_INNER:-}" != 1 ]; then
     echo "az-reader: agent-infra's .github/azure-client-ids gave no legion-reader= client id" >&2
     exit 1
   }
-  AZ_READER_INNER=1 AZ_READER_CLIENT=$client exec secret-run --register --ttl 1h --reason "$AZ_READER_REASON" METADATA_READ -- "$0" -- "$@"
+  # The client needs AGENT_SECRETS_URL, which omp's eval kernel and a unit do not pass on.
+  # shellcheck source=SCRIPTDIR/../agent-secrets/broker-url.sh
+  . "${DOTFILES_DIR:-$HOME/.dotfiles}/agent-secrets/broker-url.sh"
+  AZ_READER_INNER=1 AZ_READER_CLIENT=$client exec agent-secrets METADATA_READ --ttl 1h --reason "$AZ_READER_REASON" -- "$0" -- "$@"
 fi
 client=${AZ_READER_CLIENT:-}
 [ -n "$client" ] || { echo "az-reader: no client id reached the inner run" >&2; exit 1; }

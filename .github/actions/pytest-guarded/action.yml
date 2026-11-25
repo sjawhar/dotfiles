@@ -13,6 +13,12 @@ inputs:
       (EXPECTED_SKIPS, as scripts/pytest-expected-skips reads it).
     required: false
     default: ""
+  path-after:
+    description: >-
+      A directory to put at the end of the tests' PATH, after every entry a step put there, so the
+      tests find it on PATH and no command they run by name resolves to it first.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -27,9 +33,11 @@ runs:
       env:
         TESTS: ${{ inputs.tests }}
         EXPECTED_SKIPS: ${{ inputs.skips }}
+        PATH_AFTER: ${{ inputs.path-after }}
         REPORT: ${{ runner.temp }}/pytest-junit.xml
       run: |
         rc=0
+        [[ -z "$PATH_AFTER" ]] || PATH="$PATH:$PATH_AFTER"
         uvx pytest@9.2.0 -p no:cacheprovider -rs -o junit_family=xunit1 --junitxml="$REPORT" "$TESTS" || rc=$?
         scripts/pytest-expected-skips "$REPORT" "$TESTS" || rc=1
         exit "$rc"

@@ -111,6 +111,9 @@ class HomeLinks(unittest.TestCase):
             "STUB_EXEC_LOG": str(self.exec_log),
             "AGENTBOX_BOXES": str(self.boxes),
             "AGENTBOX_DISKS": str(self.root / "disks"),
+            # The box's exit row, in the fixture and not in this host's
+            # /mnt/durable/<user>/agentbox-exits.tsv.
+            "AGENTBOX_EXITS": str(self.root / "agentbox-exits.tsv"),
             "AGENTBOX_DISK": "0",
             "AGENTBOX_RUN_BASE": str(self.root / "run"),
         }

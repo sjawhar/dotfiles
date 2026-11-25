@@ -1,43 +1,43 @@
 {
   "personal": {
-    "description": "sami@thecybermonk.com (formerly sami.n.jawhar@gmail.com), Sami's personal Google account, upgraded to Google Workspace on thecybermonk.com. The read, modify, send and admin tiers use the Internal Desktop client \"gws CLI\" in project thecybermonk-gws (its JSON is the agent-tier key GWS_PERSONAL_OAUTH_CLIENT). A secret-run tier's approval card shows SECRET_RUN_REASON: set it on the call to say why (SECRET_RUN_REASON='archive the triaged threads' gws ...)",
+    "description": "sami@thecybermonk.com (formerly sami.n.jawhar@gmail.com), Sami's personal Google account, upgraded to Google Workspace on thecybermonk.com. The read, modify, send and admin tiers use the Internal Desktop client \"gws CLI\" in project thecybermonk-gws (its JSON is the agent-tier key GWS_PERSONAL_OAUTH_CLIENT).",
     "tiers": {
       "read": {
         "command": ["secrets", "GWS_PERSONAL_READ_OAUTH", "--"],
         "description": "Read-only: Gmail, Calendar, Drive, Docs and Sheets (gmail.readonly, calendar.readonly, drive.readonly, documents.readonly, spreadsheets.readonly); reads, downloads and exports, and no change; a change goes on the modify tier"
       },
       "modify": {
-        "command": ["secret-run", "--reason", "gws personal modify", "--wait", "4m", "GWS_PERSONAL_MODIFY_OAUTH", "--"],
-        "description": "gmail.modify, calendar, drive, documents and spreadsheets: Gmail labels, archive, drafts, +reply, +forward, and changes to Calendar events, Drive files, Docs and Sheets. A Calendar change with sendUpdates other than none, or a Drive share, sends mail to other people. One approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
+        "command": ["sh", "-c", ". \"${DOTFILES_DIR:-$HOME/.dotfiles}/agent-secrets/broker-url.sh\" && exec agent-secrets \"$@\"", "agent-secrets", "GWS_PERSONAL_MODIFY_OAUTH", "--reason", "gws personal modify", "--wait", "4m", "--"],
+        "description": "gmail.modify, calendar, drive, documents and spreadsheets: Gmail labels, archive, drafts, +reply, +forward, and changes to Calendar events, Drive files, Docs and Sheets. A Calendar change with sendUpdates other than none, or a Drive share, sends mail to other people. One approval per session: a Dispatch grant from the credential broker"
       },
       "send": {
-        "command": ["secret-run", "--reason", "gws personal send", "--wait", "4m", "GWS_PERSONAL_SEND_OAUTH", "--"],
-        "description": "gmail.send only (+send; cannot read mail); one approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
+        "command": ["sh", "-c", ". \"${DOTFILES_DIR:-$HOME/.dotfiles}/agent-secrets/broker-url.sh\" && exec agent-secrets \"$@\"", "agent-secrets", "GWS_PERSONAL_SEND_OAUTH", "--reason", "gws personal send", "--wait", "4m", "--"],
+        "description": "gmail.send only (+send; cannot read mail); one approval per session: a Dispatch grant from the credential broker"
       },
       "admin": {
-        "command": ["secret-run", "--reason", "gws personal admin", "--wait", "4m", "GWS_PERSONAL_ADMIN_OAUTH", "--"],
-        "description": "Admin SDK Directory (users, groups, org units, domains read-only), Groups Settings and Licensing for thecybermonk.com, consented by sami@thecybermonk.com (a super admin). gws cannot call it: use the google-workspace skill's recipe for APIs gws lacks. One approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
+        "command": ["sh", "-c", ". \"${DOTFILES_DIR:-$HOME/.dotfiles}/agent-secrets/broker-url.sh\" && exec agent-secrets \"$@\"", "agent-secrets", "GWS_PERSONAL_ADMIN_OAUTH", "--reason", "gws personal admin", "--wait", "4m", "--"],
+        "description": "Admin SDK Directory (users, groups, org units, domains read-only), Groups Settings and Licensing for thecybermonk.com, consented by sami@thecybermonk.com (a super admin). gws cannot call it: use the google-workspace skill's recipe for APIs gws lacks. One approval per session: a Dispatch grant from the credential broker"
       }
     }
   },
   "theorem": {
-    "description": "sami@theorem.dev, Theorem's Workspace. OAuth client: the Internal Desktop client \"gws CLI\" in Theorem's theorem-gws-cli project. A secret-run tier's approval card shows SECRET_RUN_REASON: set it on the call to say why (SECRET_RUN_REASON='fix the headings in the Q3 plan' gws ...)",
+    "description": "sami@theorem.dev, Theorem's Workspace. OAuth client: the Internal Desktop client \"gws CLI\" in Theorem's theorem-gws-cli project.",
     "tiers": {
       "read": {
-        "command": ["secret-run", "--reason", "gws theorem read", "GWS_THEOREM_READ_OAUTH", "--"],
+        "command": ["sh", "-c", ". \"${DOTFILES_DIR:-$HOME/.dotfiles}/agent-secrets/broker-url.sh\" && exec agent-secrets \"$@\"", "agent-secrets", "GWS_THEOREM_READ_OAUTH", "--reason", "gws theorem read", "--"],
         "description": "Drive, Docs, Sheets, Slides and Calendar read-write; Gmail read-only"
       },
       "modify": {
-        "command": ["secret-run", "--reason", "gws theorem modify", "--wait", "4m", "GWS_THEOREM_MODIFY_OAUTH", "--"],
-        "description": "gmail.modify and gmail.settings.basic: labels, archive, trash, drafts, +reply, +forward, and Gmail filters; one approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
+        "command": ["sh", "-c", ". \"${DOTFILES_DIR:-$HOME/.dotfiles}/agent-secrets/broker-url.sh\" && exec agent-secrets \"$@\"", "agent-secrets", "GWS_THEOREM_MODIFY_OAUTH", "--reason", "gws theorem modify", "--wait", "4m", "--"],
+        "description": "gmail.modify and gmail.settings.basic: labels, archive, trash, drafts, +reply, +forward, and Gmail filters; one approval per session: a Dispatch grant from the credential broker"
       },
       "send": {
-        "command": ["secret-run", "--reason", "gws theorem send", "--wait", "4m", "GWS_THEOREM_SEND_OAUTH", "--"],
-        "description": "gmail.send, chat.messages.create and chat.spaces.readonly: +send, post Google Chat messages and list Chat spaces (cannot read mail or Chat messages); one approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
+        "command": ["sh", "-c", ". \"${DOTFILES_DIR:-$HOME/.dotfiles}/agent-secrets/broker-url.sh\" && exec agent-secrets \"$@\"", "agent-secrets", "GWS_THEOREM_SEND_OAUTH", "--reason", "gws theorem send", "--wait", "4m", "--"],
+        "description": "gmail.send, chat.messages.create and chat.spaces.readonly: +send, post Google Chat messages and list Chat spaces (cannot read mail or Chat messages); one approval per session: a Dispatch grant from the credential broker"
       },
       "admin": {
-        "command": ["secret-run", "--reason", "gws theorem admin", "--wait", "4m", "--ttl", "1h", "GWS_THEOREM_ADMIN_OAUTH", "--"],
-        "description": "Admin SDK Directory (users, groups, org units, roles) and Groups Settings, consented by sami@theorem.dev. gws cannot call it: use the google-workspace skill's recipe for APIs gws lacks. One approval per hour at most: a Dispatch grant from the credential broker that ends after one hour (--ttl 1h), or a YubiKey touch where the broker does not serve the session"
+        "command": ["sh", "-c", ". \"${DOTFILES_DIR:-$HOME/.dotfiles}/agent-secrets/broker-url.sh\" && exec agent-secrets \"$@\"", "agent-secrets", "GWS_THEOREM_ADMIN_OAUTH", "--reason", "gws theorem admin", "--wait", "4m", "--ttl", "1h", "--"],
+        "description": "Admin SDK Directory (users, groups, org units, roles) and Groups Settings, consented by sami@theorem.dev. gws cannot call it: use the google-workspace skill's recipe for APIs gws lacks. One approval per hour at most: a Dispatch grant from the credential broker that ends after one hour (--ttl 1h)"
       }
     }
   },

@@ -61,11 +61,12 @@ ensure_link "${DOTFILES_DIR}/omp/hooks"       "${OMP_AGENT_DIR}/hooks"
 
 # Extensions: dotfiles-owned sources are linked here; everything else is an OMP
 # plugin installed from GitHub or npm. The pins live in the committed omp/plugins/package.json and
-# bun.lock, and they change only by a commit (made in a clone, then pushed; every machine pulls).
+# bun.lock, and they change only by a commit: edit them in ~/.dotfiles in place, install, then
+# `jj commit` them by name and run scripts/dotfiles-publish (the root AGENTS.md); every machine pulls.
 # This installer installs exactly what they pin and writes no tracked file: `bun install
 # --frozen-lockfile` never rewrites bun.lock, and the marketplace step puts the committed
-# omp-plugins.lock.json back. On 2026-11-03 a hand upgrade that edited the pin in a following
-# machine's checkout (sami-devbox) stopped scripts/dotfiles-follow there.
+# omp-plugins.lock.json back. On 2026-11-03 a hand upgrade that rewrote the pin in a following
+# machine's checkout (sami-devbox) and was never committed stopped scripts/dotfiles-follow there.
 # jj snapshotting is omp/hooks/post/jj-snapshot.ts alone (its header says so);
 # a stale extension copy is pruned so no second, awaited snapshotter loads.
 if [ -L "${OMP_AGENT_DIR}/extensions" ]; then rm "${OMP_AGENT_DIR}/extensions"; fi

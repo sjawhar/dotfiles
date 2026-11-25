@@ -36,10 +36,17 @@
 # for each of the four commands its limit plus that 10 s kill grace. The sync lock is released
 # before the step, so an install does not hold off another move.
 #
+# The step starts with python_check: /usr/bin/python3 must be Python 3.11 or later, since shims/git,
+# shims/jj and scripts/leak-terms-check run it by that path, never a python3 on PATH, and shims/jj and
+# the check import tomllib, which Python has from 3.11. A machine without one fails each of them
+# closed. The check names the interpreter, the version it found and why; the step then still runs,
+# and returns the check's status.
+#
 # Internal modes: --here OLD is the move alone, which dotfiles-follow calls and follows with its
 # own render and tools steps (it reports a failed install as TOOLS NOT INSTALLED, not as a failed
 # move); --here-tools OLD is the move and then the step; --tools DIR is the step alone, which
-# dotfiles-publish runs after a rebase that moved the files.
+# dotfiles-publish runs after a rebase that moved the files; --python-check PYTHON is the step's
+# interpreter check alone, on PYTHON.
 #
 # A jj checkout keeps its working-copy change: it is rebased onto main, and the run refuses a
 # conflict instead of resolving it. The refusal comes before the rebase: a duplicate of the
@@ -191,8 +198,29 @@ tools_run() {
   return "$status"
 }
 
+# python_check PYTHON: true when PYTHON is an executable Python 3.11 or later (see the header); else
+# one line on stderr naming PYTHON, the version it reports, and why that version is needed.
+python_check() {
+  local python="$1" version="" major="" minor="" found why
+  why="dotfiles needs Python 3.11 or later there: shims/git, shims/jj and scripts/leak-terms-check run it by that path, and shims/jj and scripts/leak-terms-check import tomllib, which Python has from 3.11"
+  if [[ ! -f "$python" || ! -x "$python" ]]; then
+    printf 'dotfiles-sync: tools step: there is no executable %s; %s\n' "$python" "$why" >&2
+    return 1
+  fi
+  version="$("$python" -I -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null)" || version=""
+  IFS=. read -r major minor _ <<< "$version"
+  if [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] && (( major > 3 || (major == 3 && minor >= 11) )); then
+    printf 'tools: %s is Python %s\n' "$python" "$version"
+    return 0
+  fi
+  found="Python ${version}"
+  [[ -n "$version" ]] || found="a program that gave no Python version"
+  printf 'dotfiles-sync: tools step: %s is %s; %s\n' "$python" "$found" "$why" >&2
+  return 1
+}
+
 tools_step() (
-  local dir limit lock mise bun rules_status=0 render_status=0
+  local dir limit lock mise bun rules_status=0 render_status=0 python_status=0
   # The checkout as an absolute path: mise reads the pins of the directory it runs in, so the
   # install runs there whatever the caller's directory, and DIR/bin/mise must still name it.
   # shellcheck disable=SC1007
@@ -208,6 +236,7 @@ tools_step() (
     source "$dir/.bashrc" >/dev/null 2>&1
   fi
   set -eu
+  python_check /usr/bin/python3 || python_status=$?
 
   export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
   [[ "$MISE_DATA_DIR" = /* ]] || MISE_DATA_DIR="$PWD/$MISE_DATA_DIR"
@@ -248,6 +277,7 @@ tools_step() (
   DOTFILES_INSTALL_LOCK_HELD=1 tools_run "mise install" "$dir" "$limit" flock "$lock" "$mise" install || return $?
 
   if [[ ! -f "$dir/omp/plugins/package.json" ]]; then
+    ((python_status)) && return "$python_status"
     ((rules_status)) && return "$rules_status"
     return "$render_status"
   fi
@@ -257,6 +287,7 @@ tools_step() (
   fi
   [[ "$bun" = /* ]] || bun="$PWD/$bun"
   tools_run "bun install --frozen-lockfile" "$dir/omp/plugins" "$limit" "$bun" install --frozen-lockfile || return $?
+  ((python_status)) && return "$python_status"
   ((rules_status)) && return "$rules_status"
   return "$render_status"
 )
@@ -420,6 +451,11 @@ fi
 if [ "${1:-}" = --tools ]; then
   [[ $# -eq 2 ]] || { echo "--tools: require a checkout directory" >&2; exit 2; }
   tools_step "$2"
+  exit
+fi
+if [ "${1:-}" = --python-check ]; then
+  [[ $# -eq 2 ]] || { echo "--python-check: require an interpreter path" >&2; exit 2; }
+  python_check "$2"
   exit
 fi
 

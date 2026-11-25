@@ -101,7 +101,7 @@ def iso(epoch: float) -> str:
 def proc_stat_fields(pid: int) -> list[str]:
     """The fields of /proc/<pid>/stat after the comm, or [] when the process is gone."""
     try:
-        data = Path(f"/proc/{pid}/stat").read_text()
+        data = Path(f"/proc/{pid}/stat").read_bytes().decode("utf8", "replace")
     except OSError:
         return []
     cut = data.rfind(")")
@@ -179,14 +179,15 @@ def cgroup_memory(path: str, root: str = "/sys/fs/cgroup") -> int:
         return 0
 
 
-def agent_processes() -> dict[int, str]:
+def agent_processes(proc: str = "/proc") -> dict[int, str]:
     """{pid: comm} for every agent process on the box. The only full walk of /proc."""
     found = {}
-    for name in os.listdir("/proc"):
+    for name in os.listdir(proc):
         if not name.isdigit():
             continue
+        # Any process may name itself any bytes, so one name that is not UTF-8 must not end the walk.
         try:
-            comm = Path(f"/proc/{name}/comm").read_text().strip()
+            comm = Path(f"{proc}/{name}/comm").read_bytes().decode("utf8", "replace").strip()
         except OSError:
             continue
         if comm in AGENT_COMMS:

@@ -471,7 +471,7 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
         # human-tier keys from the Legion credential broker instead: the omp
         # tool secrets_request (forward's omp extension) and shims/secrets
         # refuse every agent request for a human-tier key and name the
-        # broker's secret-run command.
+        # broker's client, agent-secrets.
         case "$SECRETSD_VERSION" in
             1.*|2.0.*|2.1.*) ;;
             *)

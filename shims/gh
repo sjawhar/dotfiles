@@ -65,10 +65,11 @@ fi
 # There is no exception here for a machine that names gh-app.host-profile in its own git config
 # (sami-devbox, installers/gh-app-host.sh). An earlier draft kept the HOST route for a call whose
 # only agent evidence was the SSH rule, on the grounds that the agent route needs a broker session
-# an ssh command has not got. It does not: gh-app-token registers one itself (`secret-run
-# --register`, shims/gh-app-token), and that profile IS `agent`, so both routes mint the same
-# App token. The exception only lifted such a call out of the whole agent block below — past the
-# public-text leak check, past the refusal of `gh auth token`, and past the agent GH_CONFIG_DIR
+# an ssh command has not got. It does not: the agent-secrets client that gh-app-token runs acts
+# as the person signed in on the machine, or as the machine, outside a session, and that profile
+# IS `agent`, so both routes mint the same App token. The exception only lifted such a call out
+# of the whole agent block below — past the public-text leak check, past the refusal of `gh auth
+# token`, and past the agent GH_CONFIG_DIR
 # (review of INFRA-1538).
 
 # gh_shim_quote ARGV…: the call as a shell reads it, for the refusal of `gh auth` below.
@@ -314,6 +315,70 @@ gh_shim_stdin_to_gh() {
     _stdin_g=""
     _stdin_h=""
 }
+# A text file a call names by its descriptor (`--body-file <(…)`, which bash passes as /dev/fd/63, `-F body=@/dev/fd/N`,
+# `--input /dev/stdin`) is a stream when that descriptor is a pipe or a socket, and a check that read it would take the
+# bytes gh reads after it. So until 2026-11-23 the public text gate refused such a call, the leak-term check refused it
+# for any target not confirmed private, and a builder's `gh pr edit --body-file <(…)` never reached GitHub.
+# gh_shim_buffer_fds ARGV… reads each such stream, before any check, into a private file made and unlinked as
+# gh_shim_buffer_stdin makes its own, and points the same descriptor at that file: the argument stays as written, and
+# each check, then gh, opens /dev/fd/N anew and reads every byte from the start. Only a descriptor open for reading is
+# read (`gh release download -O >(…)` names one gh writes), never 1 or 2; a FIFO named by a path of its own (mkfifo) is
+# left to the checks. A read or write error, or more than 64 MiB, refuses the call.
+gh_shim_buffer_fds() {
+    local max=$((64 * 1024 * 1024)) option fd_path stdin_path a name fd key value flags buffer w size
+    # The path is the whole argument, or follows a short option (`-F/dev/fd/63`), a long one's `=`, or a field's `=@`.
+    option='^(-[A-Za-z]+|--[A-Za-z][A-Za-z0-9-]*=|.*=@)?'
+    fd_path="$option"'(/dev/fd/|/proc/self/fd/)(0|[1-9][0-9]*)$'
+    stdin_path="$option"'/dev/stdin$'
+    for a in "$@"; do
+        if [[ "$a" =~ $fd_path ]]; then
+            name="${BASH_REMATCH[2]}${BASH_REMATCH[3]}" fd="${BASH_REMATCH[3]}"
+        elif [[ "$a" =~ $stdin_path ]]; then
+            name=/dev/stdin fd=0
+        else
+            continue
+        fi
+        [[ "$fd" != [12] && ( -p "/dev/fd/$fd" || -S "/dev/fd/$fd" ) ]] || continue
+        flags=""
+        while read -r key value; do
+            [[ "$key" != flags: ]] || flags="$value"
+        done 2> /dev/null < "/proc/$$/fdinfo/$fd" || continue
+        [[ "$flags" =~ ^[0-7]+$ ]] || continue
+        (((8#$flags & 3) != 1)) || continue
+        buffer="$(mktemp "${TMPDIR:-/tmp}/gh-shim-fd.XXXXXX")" || {
+            echo "gh shim: refusing: cannot make a private file to hold $name for the leak check" >&2
+            exit 1
+        }
+        if ! exec {w}> "$buffer"; then
+            rm -f "$buffer"
+            echo "gh shim: refusing: cannot open the private file that holds $name for the leak check" >&2
+            exit 1
+        fi
+        rm -f "$buffer" || {
+            echo "gh shim: refusing: cannot unlink the private file that holds $name for the leak check" >&2
+            exit 1
+        }
+        head -c "$((max + 1))" <&"$fd" >&"$w" || {
+            echo "gh shim: refusing: cannot read $name into a file for the leak check" >&2
+            exit 1
+        }
+        # A redirection takes no variable for its own descriptor, so eval names it; $fd and $w are digits.
+        eval "exec $fd< /dev/fd/$w" || {
+            echo "gh shim: refusing: cannot point $name at the private file that holds its text" >&2
+            exit 1
+        }
+        exec {w}>&-
+        size="$(stat -L -c %s "/dev/fd/$fd")" || {
+            echo "gh shim: refusing: cannot read the size of the private file that holds $name" >&2
+            exit 1
+        }
+        if ((size > max)); then
+            echo "gh shim: refusing: $name is over 64 MiB, more than the leak check reads; pass the text in a file" >&2
+            exit 1
+        fi
+    done
+}
+gh_shim_buffer_fds "$@"
 if agent_context; then
     # The dotfiles checkout this file is in, through a link to it, not the one under HOME: a
     # caller may give gh a HOME of its own (shims/tests/test_shim_moved_home.py).

@@ -59,22 +59,25 @@ case "$2" in
 esac
 """
 
-# This is a controlled boundary double for the broker command. It receives the
+# This is a controlled boundary double for the agent-secrets client. It receives the
 # real argv issued by the shim, returns a complete broker release, and records
 # every argument separately so argument boundaries and command-line token leaks
-# cannot pass unnoticed. It also records the agent-secrets its PATH resolves,
-# which is how the real secret-run picks the broker.
-SECRET_RUN_STUB = """#!/bin/sh
+# cannot pass unnoticed. It also records the path it was run as and the broker URL
+# it was given.
+CLIENT_STUB = """#!/bin/sh
 for arg do
-  printf '%s\\n' "$arg" >> "$SECRET_RUN_STUB_LOG"
+  printf '%s\\n' "$arg" >> "$CLIENT_STUB_LOG"
 done
-command -v agent-secrets > "$SECRET_RUN_STUB_LOG.agent-secrets" || true
-if [ -n "${SECRET_RUN_STUB_EXIT:-}" ]; then
-  [ -z "${SECRET_RUN_STUB_STDERR:-}" ] || printf '%s\\n' "$SECRET_RUN_STUB_STDERR" >&2
-  exit "$SECRET_RUN_STUB_EXIT"
+printf '%s\\n' "$0" > "$CLIENT_STUB_LOG.path"
+printf '%s\\n' "${AGENT_SECRETS_URL:-}" > "$CLIENT_STUB_LOG.url"
+if [ -n "${CLIENT_STUB_EXIT:-}" ]; then
+  [ -z "${CLIENT_STUB_STDERR:-}" ] || printf '%s\\n' "$CLIENT_STUB_STDERR" >&2
+  exit "$CLIENT_STUB_EXIT"
 fi
-printf '%s' "$SECRET_RUN_STUB_RESPONSE"
+printf '%s' "$CLIENT_STUB_RESPONSE"
 """
+# The repository root: broker-url.sh loads its broker.env through DOTFILES_DIR.
+DOTFILES = MODULE_PATH.resolve().parents[1]
 
 
 def checked_now():
@@ -137,12 +140,12 @@ class GhAppTokenTests(unittest.TestCase):
         self.cache_dir = Path(self.temp_dir.name) / "cache"
         self.stub_dir = Path(self.temp_dir.name) / "bin"
         self.stub_dir.mkdir()
-        for name, contents in {"secrets": SECRETS_STUB, "secret-run": SECRET_RUN_STUB}.items():
+        for name, contents in {"secrets": SECRETS_STUB, "agent-secrets": CLIENT_STUB}.items():
             stub = self.stub_dir / name
             stub.write_text(contents)
             stub.chmod(0o700)
         self.secrets_log = Path(self.temp_dir.name) / "secrets.log"
-        self.secret_run_log = Path(self.temp_dir.name) / "secret-run.log"
+        self.client_log = Path(self.temp_dir.name) / "agent-secrets.log"
         self.github = GitHubStandIn()
         self.patches = [
             patch.object(gh_app_token, "CACHE_DIR", self.cache_dir),
@@ -155,8 +158,9 @@ class GhAppTokenTests(unittest.TestCase):
                 {
                     "PATH": f"{self.stub_dir}{os.pathsep}{os.environ['PATH']}",
                     "SECRETS_STUB_LOG": str(self.secrets_log),
-                    "SECRET_RUN_STUB_LOG": str(self.secret_run_log),
-                    "SECRET_RUN_STUB_RESPONSE": BROKER_RESPONSE,
+                    "CLIENT_STUB_LOG": str(self.client_log),
+                    "CLIENT_STUB_RESPONSE": BROKER_RESPONSE,
+                    "DOTFILES_DIR": str(DOTFILES),
                     "NO_PROXY": "127.0.0.1",
                     "no_proxy": "127.0.0.1",
                 },
@@ -203,24 +207,23 @@ class GhAppTokenTests(unittest.TestCase):
     def secrets_calls(self):
         return self.secrets_log.read_text().splitlines() if self.secrets_log.exists() else []
 
-    def secret_run_calls(self):
-        return self.secret_run_log.read_text().splitlines() if self.secret_run_log.exists() else []
+    def client_calls(self):
+        return self.client_log.read_text().splitlines() if self.client_log.exists() else []
 
     @staticmethod
-    def broker_command(owner, narrowing=()):
+    def broker_command(owner, narrowing=(), secret="GITHUB_APP_SJAWHAR"):
         return [
-            "--register",
+            secret,
             "--reason",
             f"gh-app-token {owner}",
             *narrowing,
-            "GITHUB_APP_SJAWHAR",
             "--",
             "printenv",
-            "GITHUB_APP_SJAWHAR",
+            secret,
         ]
 
     def set_broker_response(self, response):
-        os.environ["SECRET_RUN_STUB_RESPONSE"] = response
+        os.environ["CLIENT_STUB_RESPONSE"] = response
 
     # Every agent marker shims/gh and gh-app-token test for. A case that means "a person at
     # their own shell" must clear all of them, because the test process is itself an agent's.
@@ -266,27 +269,41 @@ class GhAppTokenTests(unittest.TestCase):
             )
 
     def test_the_broker_is_asked_through_mise_shims_when_the_caller_removed_them_from_path(self):
-        # The same INFRA-219 PATH reaches secret-run, which picks the broker by finding
-        # agent-secrets (and falls back to secrets): both are mise tools, so secret-run runs
-        # with mise's shims dir after the caller's PATH.
+        # The same INFRA-219 PATH reaches the agent-secrets client, a mise tool, so it runs with
+        # mise's shims dir after the caller's PATH.
         mise_data = Path(self.temp_dir.name) / "mise"
         (mise_data / "shims").mkdir(parents=True)
-        (mise_data / "shims" / "agent-secrets").write_text("#!/bin/sh\nexit 0\n")
+        (mise_data / "shims" / "agent-secrets").write_text(CLIENT_STUB)
         (mise_data / "shims" / "agent-secrets").chmod(0o700)
-        with patch.dict(
-            os.environ, {"PATH": f"{self.stub_dir}{os.pathsep}/usr/bin:/bin", "MISE_DATA_DIR": str(mise_data)}
-        ):
+        with patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "MISE_DATA_DIR": str(mise_data)}):
             rc, stdout, _ = self.run_main(["agent", "--owner", "sjawhar"])
         self.assertEqual((rc, stdout), (0, "broker-token-sjawhar\n"))
         self.assertEqual(
-            Path(f"{self.secret_run_log}.agent-secrets").read_text().strip(),
+            Path(f"{self.client_log}.path").read_text().strip(),
             str(mise_data / "shims" / "agent-secrets"),
         )
 
-    def test_secret_run_comes_from_this_checkout_when_path_lacks_it(self):
-        with patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}):
-            executable, _ = gh_app_token.secret_run_command()
-        self.assertEqual(Path(executable), MODULE_PATH.resolve().parents[1] / "scripts" / "secret-run")
+    def test_the_client_runs_after_this_checkout_s_broker_url_file(self):
+        client, _ = gh_app_token.client_command()
+        self.assertEqual(client[:3], ["sh", "-c", '. "$0" && exec agent-secrets "$@"'])
+        self.assertEqual(Path(client[3]), DOTFILES / "agent-secrets" / "broker-url.sh")
+
+    def test_the_client_gets_broker_env_s_url_when_the_caller_has_none(self):
+        # omp's eval kernel and a unit pass no AGENT_SECRETS_URL on, and the client refuses without one. HOME is a
+        # fresh directory, so a machine's own ~/.config/agent-secrets/env.local cannot stand in for broker.env.
+        committed = (DOTFILES / "agent-secrets" / "broker.env").read_text().split("AGENT_SECRETS_URL=", 1)[1].split()[0]
+        without = {name: value for name, value in os.environ.items() if not name.startswith(("AGENT_SECRETS_", "DOTFILES_AGENT_SECRETS"))}
+        without["HOME"] = self.temp_dir.name
+        with patch.dict(os.environ, without, clear=True):
+            rc, stdout, stderr = self.run_main(["agent", "--owner", "sjawhar"])
+        self.assertEqual((rc, stdout), (0, "broker-token-sjawhar\n"), stderr)
+        self.assertEqual(Path(f"{self.client_log}.url").read_text().strip(), committed)
+        self.client_log.unlink()
+        (self.cache_dir / gh_app_token.token_cache_file("agent", "sjawhar").name).unlink()
+        with patch.dict(os.environ, {**without, "AGENT_SECRETS_URL": "https://broker.example.test"}, clear=True):
+            rc, stdout, stderr = self.run_main(["agent", "--owner", "sjawhar"])
+        self.assertEqual((rc, stdout), (0, "broker-token-sjawhar\n"), stderr)
+        self.assertEqual(Path(f"{self.client_log}.url").read_text().strip(), "https://broker.example.test")
 
     def test_owner_precedence_uses_flag_then_env_then_path(self):
         request = {"path": "path-owner/repo.git"}
@@ -303,18 +320,18 @@ class GhAppTokenTests(unittest.TestCase):
 
         self.assertEqual((rc, stdout), (0, "broker-token-sjawhar\n"))
         self.assertNotIn("broker-token", stderr)
-        self.assertEqual(self.secret_run_calls(), self.broker_command("sjawhar"))
+        self.assertEqual(self.client_calls(), self.broker_command("sjawhar"))
         self.assertEqual(gh_app_token.get_cached_token("agent", "trajectory-labs-pbc"), "broker-token-trajectory")
         self.assertEqual(
             gh_app_token.covered_owners("3202636"),
             {"sjawhar": 111, "trajectory-labs-pbc": 222},
         )
         self.assertEqual(self.secrets_calls(), [])
-        self.assertNotIn("broker-token-sjawhar", self.secret_run_calls())
-        self.assertNotIn("broker-token-trajectory", self.secret_run_calls())
+        self.assertNotIn("broker-token-sjawhar", self.client_calls())
+        self.assertNotIn("broker-token-trajectory", self.client_calls())
         self.assertNotIn("broker-token", (self.cache_dir / "decisions.log").read_text())
 
-        with patch.dict(os.environ, {"SECRET_RUN_STUB_EXIT": "77"}):
+        with patch.dict(os.environ, {"CLIENT_STUB_EXIT": "77"}):
             rc, stdout, stderr = self.run_main(
                 ["agent", "get"], stdin="host=github.com\npath=trajectory-labs-pbc/agent-c.git\n\n"
             )
@@ -322,7 +339,7 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("password=broker-token-trajectory", stdout)
         self.assertEqual(stderr, "")
-        self.assertEqual(self.secret_run_calls(), self.broker_command("sjawhar"))
+        self.assertEqual(self.client_calls(), self.broker_command("sjawhar"))
 
     def test_cached_owner_does_not_call_broker_again(self):
         # This catches refreshing a valid cache entry and unnecessarily asking the broker.
@@ -333,7 +350,7 @@ class GhAppTokenTests(unittest.TestCase):
         rc, stdout, stderr = self.run_main(["agent", "--owner", "sjawhar"])
 
         self.assertEqual((rc, stdout, stderr), (0, "broker-token-sjawhar\n", ""))
-        self.assertEqual(self.secret_run_calls(), self.broker_command("sjawhar"))
+        self.assertEqual(self.client_calls(), self.broker_command("sjawhar"))
 
     def test_owner_never_covered_uses_only_the_fallback_pat_for_a_person(self):
         # This catches treating a missing installation as an App failure or
@@ -355,7 +372,7 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertIn("GH_PUBLIC_REPO_PAT", stderr)
         self.assertIn("personal", stderr)
         self.assertEqual(self.secrets_calls(), ["get GH_PUBLIC_REPO_PAT --value"])
-        self.assertEqual(self.secret_run_calls(), self.broker_command("metr"))
+        self.assertEqual(self.client_calls(), self.broker_command("metr"))
         self.assertEqual(
             gh_app_token.get_cached_token("agent", "trajectory-labs-pbc"),
             "broker-token-trajectory",
@@ -439,7 +456,7 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertIn("refusing", stderr)
         self.assertEqual(self.secrets_calls(), [])
         self.assertEqual(
-            self.secret_run_calls(),
+            self.client_calls(),
             self.broker_command("sjawhar") + self.broker_command("trajectory-labs-pbc"),
         )
 
@@ -579,7 +596,7 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("password=broker-token-sjawhar", stdout)
         self.assertNotIn("personal", stderr)
-        self.assertEqual(self.secret_run_calls(), self.broker_command("sjawhar"))
+        self.assertEqual(self.client_calls(), self.broker_command("sjawhar"))
         self.assertEqual(self.secrets_calls(), [])
 
     def assert_refusal_stops_every_token_path(self, credential_mode):
@@ -616,7 +633,7 @@ class GhAppTokenTests(unittest.TestCase):
         expected_stdout = "quit=1\n" if credential_mode else ""
         self.assertEqual((rc, stdout, stderr), (1, expected_stdout, detail + "\n"))
         self.assertEqual(self.secrets_calls(), [])
-        self.assertEqual(self.secret_run_calls(), [])
+        self.assertEqual(self.client_calls(), [])
         self.assertEqual(sorted(path.name for path in self.cache_dir.iterdir()), ["decisions.log"])
         self.assertFalse((old_cache_dir / gh_app_token.MOVED_NOTE).exists())
         self.assert_refusal_decision("agent", owner, detail)
@@ -644,7 +661,7 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertIn("password=cached-token", credential[1])
         self.assertEqual(credential[2], "")
         self.assertEqual(self.secrets_calls(), [])
-        self.assertEqual(self.secret_run_calls(), [])
+        self.assertEqual(self.client_calls(), [])
 
     def test_an_owner_wide_release_caches_no_token_for_a_refused_owner(self):
         # A mint for sjawhar gets the owner-wide release, which holds the refused owner's token
@@ -655,7 +672,7 @@ class GhAppTokenTests(unittest.TestCase):
         rc, stdout, stderr = self.run_main(["agent", "--owner", "sjawhar"])
 
         self.assertEqual((rc, stdout), (0, "broker-token-sjawhar\n"), stderr)
-        self.assertEqual(self.secret_run_calls(), self.broker_command("sjawhar"))
+        self.assertEqual(self.client_calls(), self.broker_command("sjawhar"))
         self.assertEqual(
             sorted(path.name for path in self.cache_dir.glob("token-*")),
             [gh_app_token.token_cache_file("agent", "sjawhar").name],
@@ -680,7 +697,7 @@ class GhAppTokenTests(unittest.TestCase):
 
         self.assertEqual(direct, (1, "", detail + "\n"))
         self.assertEqual(credential, (1, "quit=1\n", detail + "\n"))
-        self.assertEqual(self.secret_run_calls(), [])
+        self.assertEqual(self.client_calls(), [])
         self.assertEqual(self.secrets_calls(), [])
 
     def test_gh_app_owner_refusal_stops_the_direct_owner_override(self):
@@ -700,7 +717,7 @@ class GhAppTokenTests(unittest.TestCase):
         # machine-login remedy, or swapping identity to the personal token.
         for exit_code in ("75", "77"):
             with self.subTest(exit_code=exit_code), patch.dict(
-                os.environ, {"SECRET_RUN_STUB_EXIT": exit_code}
+                os.environ, {"CLIENT_STUB_EXIT": exit_code}
             ):
                 rc, stdout, stderr = self.run_main(
                     ["agent", "get"], stdin="host=github.com\npath=sjawhar/dotfiles.git\n\n"
@@ -713,7 +730,7 @@ class GhAppTokenTests(unittest.TestCase):
         # A broker outage must stop git with the reason agent-secrets gave, never fall back
         # to the personal token or to an App key in secretsd.
         cause = "agent-secrets: nothing answered at 127.0.0.1:9: the connection was refused"
-        with patch.dict(os.environ, {"SECRET_RUN_STUB_EXIT": "1", "SECRET_RUN_STUB_STDERR": cause}):
+        with patch.dict(os.environ, {"CLIENT_STUB_EXIT": "1", "CLIENT_STUB_STDERR": cause}):
             rc, stdout, stderr = self.run_main(
                 ["agent", "get"], stdin="host=github.com\npath=sjawhar/dotfiles.git\n\n"
             )
@@ -734,7 +751,7 @@ class GhAppTokenTests(unittest.TestCase):
             "agent-secrets: /run/user/1/agent-secrets/key.pem: not a PEM file (waited 20s while /run/user/1/agent-secrets/enrollment.pending was there)",
         ):
             with self.subTest(cause=cause), patch.dict(
-                os.environ, {"SECRET_RUN_STUB_EXIT": "1", "SECRET_RUN_STUB_STDERR": notices + cause}
+                os.environ, {"CLIENT_STUB_EXIT": "1", "CLIENT_STUB_STDERR": notices + cause}
             ):
                 rc, stdout, stderr = self.run_main(
                     ["agent", "get"], stdin="host=github.com\npath=sjawhar/dotfiles.git\n\n"
@@ -756,6 +773,29 @@ class GhAppTokenTests(unittest.TestCase):
             "no App installation for owner METR and no fallback-secret on profile agent", stderr
         )
         self.assertEqual(self.secrets_calls(), [])
+
+    def test_the_client_and_secrets_run_in_the_shims_own_checkout(self):
+        # The agent-secrets client and secrets can be mise's shims, and mise trusts the project config of the
+        # directory it runs in under CI=true; so each runs in this shim's own dotfiles tree, never in the caller's
+        # checkout. Until 2026-11-23 each ran in the caller's, and a checkout's `.mise.toml` ran while the token was
+        # minted.
+        log = Path(self.temp_dir.name) / "cwd.log"
+        for name in ("secrets", "agent-secrets"):
+            stub = self.stub_dir / name
+            recorder = f"#!/bin/sh\nprintf '{name} %s\\n' \"$PWD\" >> '{log}'\n"
+            stub.write_text(stub.read_text().replace("#!/bin/sh\n", recorder, 1))
+        caller = Path(self.temp_dir.name) / "caller-checkout"
+        caller.mkdir()
+        previous = os.getcwd()
+        os.chdir(caller)
+        try:
+            rc, _, stderr = self.run_main(["agent", "get"], stdin="host=github.com\npath=METR/hawk.git\n\n")
+        finally:
+            os.chdir(previous)
+        self.assertEqual(rc, 0, stderr)
+        own = MODULE_PATH.resolve().parents[1]
+        ran = sorted(set(log.read_text().splitlines()))
+        self.assertEqual(ran, [f"agent-secrets {own}", f"secrets {own}"], stderr)
 
     def test_uninstalled_owner_with_unreadable_fallback_secret_quits(self):
         self.git_config["gh-app.agent.fallback-secret"] = "GH_MISSING_TOKEN"
@@ -830,7 +870,7 @@ class GhAppTokenTests(unittest.TestCase):
         rc, stdout, _ = self.run_main(["agent", "--owner", "sjawhar"])
         # Then: the old App's token is not reused; the broker is asked for a fresh release.
         self.assertEqual((rc, stdout), (0, "broker-token-sjawhar\n"))
-        self.assertEqual(self.secret_run_calls(), self.broker_command("sjawhar"))
+        self.assertEqual(self.client_calls(), self.broker_command("sjawhar"))
 
     def test_a_cached_token_is_reused_only_with_the_life_the_caller_asks_for(self):
         # Given: a cached token with twelve minutes left, the way a long `gh run watch`
@@ -851,7 +891,7 @@ class GhAppTokenTests(unittest.TestCase):
         # half-hour caller gets a fresh release, which replaces the cached token.
         self.assertIn("password=cached-token", default_answer)
         self.assertIn("password=broker-token-sjawhar", long_answer)
-        self.assertEqual(self.secret_run_calls(), self.broker_command("sjawhar"))
+        self.assertEqual(self.client_calls(), self.broker_command("sjawhar"))
         self.assertEqual(gh_app_token.get_cached_token("agent", "sjawhar"), "broker-token-sjawhar")
 
     def test_a_fresh_broker_release_is_returned_when_the_request_exceeds_an_hour(self):
@@ -861,7 +901,7 @@ class GhAppTokenTests(unittest.TestCase):
                 gh_app_token.get_token("agent", "sjawhar", 10**9, refused=frozenset()),
                 "broker-token-sjawhar",
             )
-        self.assertEqual(self.secret_run_calls(), self.broker_command("sjawhar"))
+        self.assertEqual(self.client_calls(), self.broker_command("sjawhar"))
 
     def test_a_malformed_min_lifetime_refuses(self):
         with patch.dict(os.environ, {gh_app_token.MIN_LIFETIME_ENV: "an hour"}):
@@ -876,22 +916,50 @@ class GhAppTokenTests(unittest.TestCase):
         gh_app_token.write_cache_file(gh_app_token.token_cache_file("agent", "sjawhar"), {})
         self.assertEqual(gh_app_token.CACHE_DIR.stat().st_mode & 0o777, 0o700)
 
-    def test_a_repo_read_only_token_asks_the_broker_for_exactly_that_narrowing(self):
-        # 2026-10-25 (INFRA-322): the Lean VMs get a token that can only read one repository.
-        # The broker mints it with GitHub's access_tokens body; the shim names the narrowing.
-        self.set_broker_response(NARROWED_RESPONSE)
-        rc, stdout, _ = self.run_main(
-            ["agent", "--owner", "sjawhar", "--repo", "sjawhar/proofs-internal", "--read-only"]
-        )
-        self.assertEqual((rc, stdout), (0, "broker-token-sjawhar-narrowed\n"))
-        self.assertEqual(
-            self.secret_run_calls(),
-            self.broker_command(
-                "sjawhar",
-                ("--github-owner", "sjawhar", "--github-repo", "proofs-internal", "--github-read-only"),
+    def test_a_narrowed_token_asks_for_its_profile_with_a_target(self):
+        # 2026-10-25 (INFRA-322): the Lean VMs get a token that can only read one repository. The
+        # broker serves named profiles: --read-only asks for the profile's read secret
+        # (broker-secret with _READ appended), else broker-secret itself, and the narrowing is
+        # one --target, the owner alone or owner/repo for each --repo.
+        cases = {
+            "a repository, read-only": (
+                ["--owner", "sjawhar", "--repo", "sjawhar/proofs-internal", "--read-only"],
+                ("--target", "sjawhar/proofs-internal"),
+                "GITHUB_APP_SJAWHAR_READ",
             ),
-        )
+            "the owner, read-only": (
+                ["--owner", "Sjawhar", "--read-only"],
+                ("--target", "sjawhar"),
+                "GITHUB_APP_SJAWHAR_READ",
+            ),
+            "two repositories, the App's own permissions": (
+                ["--owner", "sjawhar", "--repo", "proofs", "--repo", "sjawhar/lean"],
+                ("--target", "sjawhar/lean", "--target", "sjawhar/proofs"),
+                "GITHUB_APP_SJAWHAR",
+            ),
+        }
+        self.set_broker_response(NARROWED_RESPONSE)
+        for name, (flags, narrowing, secret) in cases.items():
+            with self.subTest(case=name):
+                self.client_log.unlink(missing_ok=True)
+                for cached in self.cache_dir.glob("token-*"):
+                    cached.unlink()
+                rc, stdout, stderr = self.run_main(["agent", *flags])
+                self.assertEqual((rc, stdout), (0, "broker-token-sjawhar-narrowed\n"), stderr)
+                self.assertEqual(self.client_calls(), self.broker_command("sjawhar", narrowing, secret))
         self.assertEqual(self.secrets_calls(), [])
+
+    def test_help_says_read_only_asks_for_the_read_profile(self):
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), self.assertRaises(SystemExit):
+            gh_app_token.parse_args(["--help"])
+        help_text = " ".join(stdout.getvalue().split())
+        self.assertIn(
+            "--read-only ask for the profile's read secret, its broker-secret with _READ appended "
+            "(contents:read and metadata:read), narrowed with --target to the owner or to each --repo; "
+            "never falls back to the personal token",
+            help_text,
+        )
 
     def test_a_narrowed_token_and_the_owner_wide_token_never_share_a_cache_entry(self):
         owner_wide = {
@@ -911,14 +979,14 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertEqual(scoped[:2], (0, "broker-token-sjawhar-narrowed\n"))
         self.assertEqual(wide[:2], (0, "owner-wide-token\n"))
         self.assertEqual(again[:2], (0, "broker-token-sjawhar-narrowed\n"))
-        self.assertEqual(len([arg for arg in self.secret_run_calls() if arg == "--reason"]), 1)
+        self.assertEqual(len([arg for arg in self.client_calls() if arg == "--reason"]), 1)
         self.assertEqual(gh_app_token.get_cached_token("agent", "sjawhar"), "owner-wide-token")
 
     def test_a_narrowed_request_never_falls_back_to_the_personal_token(self):
         # The personal token cannot be narrowed: an owner the broker will not narrow a
         # token for (it refuses one github-owners does not list) and a release that
         # names no installation for the owner both refuse, never reading the PAT.
-        with patch.dict(os.environ, {"SECRET_RUN_STUB_EXIT": "1"}):
+        with patch.dict(os.environ, {"CLIENT_STUB_EXIT": "1"}):
             rc, stdout, stderr = self.run_main(
                 ["agent", "get", "--read-only"], stdin="host=github.com\npath=METR/hawk.git\n\n"
             )
@@ -950,7 +1018,7 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertLessEqual(checked, after)
 
     def broker_mints(self):
-        return len([arg for arg in self.secret_run_calls() if arg == "--reason"])
+        return len([arg for arg in self.client_calls() if arg == "--reason"])
 
     def test_a_cached_token_github_revoked_is_dropped_and_minted_once_afresh(self):
         # Given: a cached token GitHub has revoked since (2026-11-22: a leaked token's revoke left
@@ -964,7 +1032,7 @@ class GhAppTokenTests(unittest.TestCase):
         for name, argv, scope, response, fresh in cases:
             for checked in (61, None, -120):
                 with self.subTest(token=name, checked_seconds_ago=checked):
-                    self.secret_run_log.unlink(missing_ok=True)
+                    self.client_log.unlink(missing_ok=True)
                     self.github.requests.clear()
                     cache_file = self.cache_entry("sjawhar", "revoked-token", checked, scope)
                     self.github.revoked.add("revoked-token")
@@ -998,7 +1066,7 @@ class GhAppTokenTests(unittest.TestCase):
         # seen at the next check, at most a minute late, and a call in between costs nothing.
         self.assertEqual((rc, stdout, stderr), (0, "revoked-token\n", ""))
         self.assertEqual(self.github.requests, [])
-        self.assertEqual(self.secret_run_calls(), [])
+        self.assertEqual(self.client_calls(), [])
 
     def test_a_live_cached_token_is_checked_once_an_interval_and_the_check_recorded(self):
         cache_file = self.cache_entry("sjawhar", "live-token", 61)
@@ -1012,7 +1080,7 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertEqual(second[0], 0)
         self.assertIn("password=live-token", second[1])
         self.assertEqual(self.github.requests, [("/rate_limit", "live-token")])
-        self.assertEqual(self.secret_run_calls(), [])
+        self.assertEqual(self.client_calls(), [])
         self.assert_checked_between(cache_file, before, after)
 
     def test_any_answer_but_401_or_none_serves_the_cached_token_and_records_the_check(self):
@@ -1039,7 +1107,7 @@ class GhAppTokenTests(unittest.TestCase):
                 self.assertEqual(first, (0, "cached-token\n", ""))
                 self.assertEqual(second, (0, "cached-token\n", ""))
                 self.assertEqual(len(self.github.requests), 0 if answer is None else 1)
-                self.assertEqual(self.secret_run_calls(), [])
+                self.assertEqual(self.client_calls(), [])
                 self.assert_checked_between(cache_file, before, after)
 
     def test_a_github_that_does_not_answer_holds_the_call_only_for_the_timeout(self):
@@ -1055,7 +1123,7 @@ class GhAppTokenTests(unittest.TestCase):
 
         self.assertEqual(answer, (0, "cached-token\n", ""))
         self.assertLess((after - before).total_seconds(), 2.5)
-        self.assertEqual(self.secret_run_calls(), [])
+        self.assertEqual(self.client_calls(), [])
         self.assert_checked_between(cache_file, before, after)
 
     def test_a_check_never_replaces_an_entry_another_call_wrote_while_it_was_out(self):
@@ -1415,11 +1483,11 @@ class RefuseOwnerReadsOnlyTheMachinesOwnConfig(unittest.TestCase):
         self.legion_xdg_config_home.mkdir()
         stubs = self.root / "bin"
         stubs.mkdir()
-        for name, contents in {"secrets": SECRETS_STUB, "secret-run": SECRET_RUN_STUB}.items():
+        for name, contents in {"secrets": SECRETS_STUB, "agent-secrets": CLIENT_STUB}.items():
             (stubs / name).write_text(contents)
             (stubs / name).chmod(0o700)
         self.secrets_log = self.root / "secrets.log"
-        self.secret_run_log = self.root / "secret-run.log"
+        self.client_log = self.root / "agent-secrets.log"
         self.env = {
             "PATH": f"{stubs}{os.pathsep}/usr/bin:/bin",
             "HOME": str(self.home),
@@ -1427,8 +1495,9 @@ class RefuseOwnerReadsOnlyTheMachinesOwnConfig(unittest.TestCase):
             "GIT_CONFIG_NOSYSTEM": "1",
             "AGENT_SECRETS_KEY_DIR": str(self.root / "agent-secrets"),
             "SECRETS_STUB_LOG": str(self.secrets_log),
-            "SECRET_RUN_STUB_LOG": str(self.secret_run_log),
-            "SECRET_RUN_STUB_RESPONSE": BROKER_RESPONSE,
+            "CLIENT_STUB_LOG": str(self.client_log),
+            "CLIENT_STUB_RESPONSE": BROKER_RESPONSE,
+            "DOTFILES_DIR": str(DOTFILES),
         }
 
     def cache_token(self, owner, token):
@@ -1481,7 +1550,7 @@ class RefuseOwnerReadsOnlyTheMachinesOwnConfig(unittest.TestCase):
                     )
                 self.assertEqual(self.run_shim(env, "--owner", "allowed-owner"), (0, "ghs_cached_allowed\n", ""))
         self.assertEqual(self.calls(self.secrets_log), [])
-        self.assertEqual(self.calls(self.secret_run_log), [])
+        self.assertEqual(self.calls(self.client_log), [])
 
     def test_a_refuse_owner_only_the_global_config_holds_does_not_refuse(self):
         # GIT_CONFIG_GLOBAL stands in for ~/.gitconfig, which every machine with the dotfiles reads;
@@ -1518,7 +1587,7 @@ class RefuseOwnerReadsOnlyTheMachinesOwnConfig(unittest.TestCase):
         self.assertEqual(direct, (1, "", failure))
         self.assertEqual(credential, (1, "quit=1\n", failure))
         self.assertEqual(self.calls(self.secrets_log), [])
-        self.assertEqual(self.calls(self.secret_run_log), [])
+        self.assertEqual(self.calls(self.client_log), [])
         self.assertEqual([path.name for path in self.cache.iterdir() if path.name != "decisions.log"], [])
 
     @unittest.skipIf(os.geteuid() == 0, "root reads a file whatever its mode")
@@ -1546,7 +1615,7 @@ class RefuseOwnerReadsOnlyTheMachinesOwnConfig(unittest.TestCase):
         self.assertEqual(direct, (1, "", failure))
         self.assertEqual(credential, (1, "quit=1\n", failure))
         self.assertEqual(self.calls(self.secrets_log), [])
-        self.assertEqual(self.calls(self.secret_run_log), [])
+        self.assertEqual(self.calls(self.client_log), [])
 
     def test_a_machine_config_this_process_cannot_see_refuses_every_owner(self):
         # git exits 1 with nothing on stdout for a dangling link at the path, and for a file or a
@@ -1612,7 +1681,7 @@ class RefuseOwnerReadsOnlyTheMachinesOwnConfig(unittest.TestCase):
                     },
                 )
         self.assertEqual(self.calls(self.secrets_log), [])
-        self.assertEqual(self.calls(self.secret_run_log), [])
+        self.assertEqual(self.calls(self.client_log), [])
 
     def test_without_a_refuse_owner_for_the_profile_no_owner_is_refused(self):
         # Two machine configs refuse no owner: none at all, which is decided before git runs, and one
@@ -1688,7 +1757,7 @@ class RefuseOwnerReadsOnlyTheMachinesOwnConfig(unittest.TestCase):
                         self.run_shim(env, "--owner", "allowed-owner", cwd=cwd), (0, "ghs_cached_allowed\n", "")
                     )
         self.assertEqual(self.calls(self.secrets_log), [])
-        self.assertEqual(self.calls(self.secret_run_log), [])
+        self.assertEqual(self.calls(self.client_log), [])
 
 
 if __name__ == "__main__":

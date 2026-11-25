@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from disk_fill_watch_no_boxes import no_agent_boxes  # noqa: E402 - found through the path above
+from non_utf8_name import NAME, READ_AS, process_named  # noqa: E402 - found through the path above
 
 SCRIPT = Path(__file__).resolve().parents[1] / "disk-fill-watch"
 LOADER = importlib.machinery.SourceFileLoader("disk_fill_watch", str(SCRIPT))
@@ -1717,6 +1718,34 @@ class DiskFillWatchIopsCapTest(unittest.TestCase):
         WATCH.device_ops = lambda mount: None
         self.assertIn("no block device of its own", self.step(self.CAP))
         self.assertEqual([], self.messages())
+
+
+class ProcessNamedInNonUtf8Bytes(unittest.TestCase):
+    """Each reader of one process, over a real child named in bytes that are not UTF-8.
+
+    comm_of raised UnicodeDecodeError on it; ppid_of and age_of caught that as a ValueError and
+    returned their fallback, so its parent read as 0.
+    """
+
+    def test_its_name_is_read(self) -> None:
+        with process_named() as named:
+            self.assertEqual(WATCH.comm_of(named.pid), READ_AS)
+
+    def test_its_status_and_stat_are_read(self) -> None:
+        with process_named() as named:
+            time.sleep(0.05)  # older than one clock tick, so its age cannot read as the fallback 0.0
+            self.assertEqual(WATCH.ppid_of(named.pid), os.getpid())
+            self.assertGreater(WATCH.age_of(named.pid), 0.0)
+
+    def test_a_scope_path_that_is_not_utf8_is_read(self) -> None:
+        """A cgroup path may hold any bytes, as a name may; scope_of names a writer's scope in the alert."""
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup = Path(directory) / "cgroup"
+            cgroup.write_bytes(b"0::/user.slice/" + NAME + b".scope\n")
+            real_path = WATCH.Path
+            setattr(WATCH, "Path", lambda path: real_path(cgroup if path == "/proc/4242/cgroup" else path))
+            self.addCleanup(setattr, WATCH, "Path", real_path)
+            self.assertEqual(WATCH.scope_of(4242), f"{READ_AS}.scope")
 
 
 if __name__ == "__main__":

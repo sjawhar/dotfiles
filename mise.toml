@@ -3,6 +3,45 @@
 # All versions pinned for reproducibility
 
 [settings]
+# Agent shells set CI=true (omp's bash tool; Claude Code too), and under CI mise
+# trusts every checkout's config and runs its [env] values, PYTHONPATH
+# sitecustomize and _.source scripts through any shim (python3, sops, age...) the
+# moment a tool is called there. paranoid turns off that automatic trust,
+# including in CI, so an untrusted config fails closed ("Config files ... are not
+# trusted") instead of running (dispatch://INFRA-5432, decision
+# dispatch://INFRA-5432/comment/63a722b9-7872-4476-ab40-27fdfa49386b). Measured
+# 2026-11-23 on mise 2026.10.11: only the boolean form parses here -- the
+# paranoid = ["config"] category list the docs describe fails with "invalid type:
+# sequence, expected a boolean", and the string and MISE_PARANOID=config env forms
+# fail too (category selection needs a newer mise). = true turns on paranoid's
+# checks, not just config trust: a project config is refused unless its content is
+# trusted (CI no longer auto-trusts, trust binds to the file's hash, and
+# .tool-versions and idiomatic version files need trust too); a community
+# asdf/vfox plugin installed by short name is refused; install-time provenance is
+# re-verified; and a remote include must be pinned to a full commit sha. Config
+# trust is the check the threat needs; the rest add defence our trusted paths and
+# pinned tools already satisfy. A shim in an untrusted checkout then exits
+# non-zero rather than running its env; a bare /usr/bin/python3 is unaffected.
+# global-only (a cloned repo cannot turn it off).
+paranoid = true
+# The checkout roots whose configs mise trusts by path, without a content hash, so
+# our own repos keep resolving tools under paranoid. mise trusts a config at or
+# below these paths and has no glob support (it compares each entry with the
+# config's canonical path), and our worktrees are arbitrary-named flat siblings
+# under ~/src, so these are the working roots, not per-repo leaves. A 2026-11-23
+# census found outside clones under ~/src (upstream mirrors agents read) but none
+# carries a mise config, so nothing untrusted loads from them today. The residual:
+# no control at mise 2026.10.11 stops an outside clone under ~/src that carries a
+# mise config from being trusted by path (ignored_config_paths set in the global
+# miserc is lifted by a clone's own .miserc.toml; only MISE_IGNORED_CONFIG_PATHS,
+# naming known paths, holds). The remedies that hold are cloning such a repo
+# outside the trusted roots, where it fails closed, or MISE_IGNORED_CONFIG_PATHS
+# for a named clone (dispatch://INFRA-5432). Deliberately NOT ~/ or the /mnt
+# scratch roots: a clone or tarball opened outside these paths stays untrusted.
+# This REPLACES the MISE_TRUSTED_CONFIG_PATHS export .bashrc used to set; mise
+# reads this global setting now, and its env var (precedence rank 2) would have
+# overridden this config (rank 4) had both been left set. global-only.
+trusted_config_paths = ["~/.dotfiles", "~/.worktrees", "~/src"]
 # 14d soak for third-party releases. The mise default (24h) let an accidental
 # blanket `mise upgrade --bump` (2026-08-25) pull bun 1.4.0 at 5 days old and
 # non-LTS node 26. Exact pins bypass this filter, so deliberate fresh installs
@@ -74,8 +113,8 @@ credential_command = "gh-app-token agent --owner sjawhar"
 _.path = ['{{ env.DOTFILES_DIR | default(value=env.HOME ~ "/.dotfiles") }}/shims']
 
 [tools]
-"github:sjawhar/jj" = "0.46.0-sami.20261008-234600"  # upstream 0.46.0 + gitattr filter drivers (jj-vcs/jj#8719, LFS) + #10097 + #10130 + #10159 + #10160 + #10163 + #10164 + #10166 + sparse paths skip-worktree in colocated Git indexes; #10129 and #10127 dropped
-"github:sjawhar/knives" = "5.1.0"  # keep equal to the plugin tag in omp/plugins/package.json: the plugin runs whichever binary this installs
+"github:sjawhar/jj" = "0.46.0-sami.20261120-120102"  # upstream 0.46.0 + gitattr filter drivers (jj-vcs/jj#8719, LFS) + #10097 + #10130 + #10159 + #10160 + #10163 + #10164 + #10166 + sparse paths skip-worktree in colocated Git indexes + chunked pack mapping (sjawhar/jj#3: gix-pack maps packs in 8 MiB chunks under a 512 MiB budget, JJ_PACK_MAPPED_LIMIT); #10129 and #10127 dropped. cybermonklabs/legion's CI and worker image run this same release
+"github:sjawhar/knives" = "6.1.7"  # keep equal to the plugin tag in omp/plugins/package.json: the plugin runs whichever binary this installs
 "github:sjawhar/legion" = "legion-v10.3.0"  # the Go `legion` CLI on an agent session's PATH outside a Legion pane (a pane puts its daemon's own <state_dir>/bin/legion first); it shares the Go daemons' registry, ~/.local/state/legion/legions.json, which a TypeScript cli-v* `legion` would rewrite as an object no Go daemon can read. Speaks daemon API contract 17 (with @sjawhar/pi-legion 8.5.0): `legion controller start` refuses a daemon or a pi-legion of another contract
 # omp daily driver: fork releases built from the sami branch; the wrapper execs this.
 # upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec
@@ -224,7 +263,8 @@ mautrix-instagram = "github:mautrix/meta"
 op = "aqua:1password/cli"
 
 [tools.forward]
-version = "3.8.4"  # a pane's browser grant works under the hardened secretsd (sjawhar/forward#79)
+# 3.8.4 or later: a pane's browser grant needs it under the hardened secretsd (sjawhar/forward#79)
+version = "3.8.5"  # no forward source change; bumps url and form_urlencoded, which forward links
 # Public releases are verified with GitHub build attestations during installation.
 platforms.linux-x64   = { asset_pattern = "forward-x86_64-unknown-linux-musl.tar.gz" }
 platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.tar.gz" }
@@ -232,7 +272,7 @@ platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.ta
 # secretsd from the same forward release (consolidation: one repo,
 # one tag, three artefacts). Native glibc, x86_64 only, deliberately: it
 # depends on mlockall and pidfd behaviour a static musl build would change,
-# and it only ever runs on the devbox. Its archive ships bin/secrets plus the
+# and it runs on oryx and the devbox. Its archive ships bin/secrets plus the
 # systemd units, which installers/secretsd.sh reads straight out of this
 # install dir.
 [tools.secrets]
@@ -272,7 +312,18 @@ platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.ta
 # v3.8.4 -- crates/proto` is empty), so this client was proven read-only against the running 3.8.3
 # daemon (`secrets grants`, `secrets get <human key> --no-request`). The daemon and `forward serve`
 # are restarted after the merge, at a time no grant is live and no OAuth callback is armed.
-version = "3.8.4"
+# 3.8.5 (2026-11-23): a 3.8.5 daemon's `secrets grants` lists requests that wait for a touch,
+# receipts not yet redeemed and capability grants beside the secret grants (sjawhar/forward#80), so
+# its `no active grants` means none of the four is live (a restart still drops the session
+# registrations, which it does not list). Wire protocol is still 4 (PROTOCOL_VERSION is 4 at v3.8.4
+# and v3.8.5), so this client was proven read-only against the running 3.8.4 daemon (`secrets
+# grants`, `secrets get <human key> --no-request`). A 3.8.4 daemon lists secret grants only, so the
+# restart onto 3.8.5 is made after the merge only when its journal and its open connections show
+# none of the four live. From 3.8.5 each `forward browser grant` leaves a capability grant for
+# SECRETSD_MAX_GRANT_SECS (12 h by default) after its redeem, and for that long
+# installers/secretsd.sh refuses a restart and stops install.sh; wait it out, or re-run with
+# SECRETSD_RESTART_WITH_GRANTS=1 after the box is told.
+version = "3.8.5"
 platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz" }
 
 # The agent-secrets client and host helper (AGENTC-393), from sjawhar/legion's legion-envoy-v*
@@ -301,11 +352,11 @@ platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz
 # GitHub recorded at upload; bump them with the version
 # (gh api repos/cybermonklabs/legion/releases/tags/<tag> --jq '.assets[] | .name, .digest').
 [tools.agent-secrets]
-version = "legion-envoy-v32.28.1"  # The production secrets broker moves to legion-envoy-v32.28.1 (agent-infra#5363). Its #4512 (merge c980d91b540ece46364256983f24a3f5a63b3841) answers a secret reread that carries no proof with 202, which a client before legion-envoy-v32.24.3 reads as a refusal, so that client's `agent-secrets secret create|set|retag|restore` exit 1 after the write stands; this client takes the 202, and takes the 200 of the broker before it as before. Every client that holds #4512 also holds #4151 (merge 1a8990fa007037ce7080de928a17bd8efa4d7507, from legion-envoy-v30.45.0): `agent-secrets register` without --exec refuses an answer that names no root_pid, which every helper before #4151 gives, so against such a helper `register --session-id` (omp/extensions/session-env.ts, scripts/agent-secrets-name-session) exits 1 although the helper named the session. So the helper moves to this pin with the client: installers/agent-secrets.sh restarts it with AGENT_SECRETS_HELPER_RESTART_WITH_SESSIONS=1, which keeps each live session that the running helper recorded with its key (on 2026-11-21 every live session on the dev box was such a session). Checked between legion-envoy-v30.43.0 and this release: `agent-secrets NAME -- command` still takes its broker identity from the first of the same four sources (a launcher's key directory, the person's own `agent-secrets login`, the helper, the machine's own cloud identity) and exits 1 when none has one; `agent-secrets identity` keeps its exit codes (0 with an identity on disk or a helper session, 1 without, 2 on a usage error) and reads no sign-in and no machine cache, so scripts/secret-run's choice is unchanged; `agent-secrets --help` still shows `--github-token`. #4634 renamed the source paths (cmd/agent-secrets is now cmd/cipher, internal/broker is internal/cipher, internal/brokerclient is internal/cipherclient), not the binaries: the linux tarballs still ship bin/agent-secrets and bin/agent-secrets-helper. Earlier reasons that still apply: INFRA-3845 (merge bb4b0c95e0f877b35c3eb9b867d4c964ce79739b), which gave `agent-secrets NAME -- command` those four sources, so it works in a process the helper never saw; INFRA-3823 (merge f35483e5103e688559150dd07b59459c27951926) and INFRA-3844 (merge 467e5371b5f2d65dc207b13d5655c49b163af88c): `agent-secrets secret create` refuses before it asks, and every `agent-secrets secret` form takes its store credential from the environment, with no --profile flag. INFRA-3648 (merge 35d0212bb3eba3e131c3ad04461e7ca915e5b57f), with which the helper answers `enroll --helper`, `unenroll --helper` and the machine login call with the broker's outcome, and answers that the outcome is not known (ENROLL_OUTCOME_UNKNOWN, UNENROLL_OUTCOME_UNKNOWN, or LOGIN_FAILED with an error that says so) when the broker possibly got the request and its answer did not come back. `scripts/agentbox` reads the client's ENROLL_FAILED and DRAINING codes at each enroll call (enroll_attempts) as the only known enroll failures, and UNENROLL_FAILED (unenroll_revoke) as the only known unenroll failure. It reads every other failure as an outcome that is not known. No line of code that names one of these codes changed between legion-envoy-v30.21.1 and this release (packages/envoy/internal/cipher/helper/protocol.go, cmd/cipher, internal/cipherclient): from legion-envoy-v30.43.0 on, only test, comment and packages/envoy/AGENTS.md lines that name them changed. Before a later bump, make sure that these three codes still have that meaning. Also INFRA-3666 (merge df57176f7203463733cca417caf502d23ff60fa9), the secrets broker's airlock (merge 46c4162b, INFRA-1352; INFRA-1355, INFRA-3012), and the GitHub App narrowing fix f3960fa2d181, which `agent-secrets --help` shows as `--github-token`. The helper itself moves to a new version only when it restarts.
-platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:cb73116bda5e9ed0903397a71d0354c9e3e2a0b226b8c8cc98399de864df1f8b" }
-platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:d699626a60c45810651dab5e8dd9f04dfad24512ac07c43d482a91dcdef21116" }
-platforms.macos-x64   = { asset_pattern = "agent-secrets-darwin-amd64.tar.gz", checksum = "sha256:cec964312791be7b9135e49d49cbd8896b6ac7d77141b988afd59c2afda7fd4a" }
-platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", checksum = "sha256:c1925a0c406fe1b5b645ef7d591c10a22d6c825ac81a008578accdaa47b7f2d1" }
+version = "legion-envoy-v34.12.0"  # The same release as the production secrets broker's pin in theorem-labs/agent-infra#5156 (tag commit e9cc79a3bc148ed8e456f5fdfb162f4e0d9fb1d9). It holds cybermonklabs/legion#4595 (merge 118ec6e6bf4afc61315ce22f66a5618a0bb84da0), with which the broker serves named credential profiles and every GitHub App token is a profile's; #5063 (merge 3893b22585d39c5e0502d411dc116f3d83bac89f), the sign-in renewal fix: `agent-secrets` passes over a sign-in this machine cannot renew once its enrollment ends; #4696 (merge e96f1420b413e13fc13fc6b4b9e75fa8e6315c63), which reads a token endpoint's answer by its HTTP status alone; #4769 (merge 798e1d223b80748a6aa08c67f06337ff8a7ef1f3), with which a sign-in its issuer ended is final; and #5142 (merge 4f62e4ac7e0d2713950afba55575117045cb73c5), with which the broker's airlock refuses the IPv4-translated and ISATAP forms of a refused IPv4 address. #5142 changes the broker alone: between legion-envoy-v34.11.3 and this release no package the client or the helper builds from changed, nor go.mod or go.sum (`go list -deps ./cmd/cipher ./cmd/cipher-helper`, 32 packages of the module). This client exits 2 and sends nothing for `--github-owner`, `--github-repo`, `--github-read-only` and `--github-token`, and a broker that holds #4595 refuses the request field those flags made a client before it send (GITHUB_APP_FIELD_REMOVED). The `--target` that replaces them needs a broker that serves profiles: a broker from before #4595 (production runs legion-envoy-v33.7.0 until #5156 is applied) releases the whole profile without the target, and this client then exits 2 ("the broker is too old for --target") and runs nothing. So this pin moves only with its callers, at #5156's apply: scripts/secret-run passes `--target` through, and shims/gh-app-token asks for GITHUB_APP_<PERSON>_READ (--read-only) or GITHUB_APP_<PERSON>, narrowed with `--target`. The helper moves with the client at that apply: a helper from before `--target` signs a targeted request without its target, and this client refuses that request before it sends it ("restart the helper so it runs this release"), so until the helper restarts, gh-app-token's --repo and --read-only fail in a host session. installers/agent-secrets.sh restarts it with AGENT_SECRETS_HELPER_RESTART_WITH_SESSIONS=1, which keeps each live session that the running helper recorded with its key. This client also works against a legion-envoy-v34.3.0 broker: the one broker route it calls that legion-envoy-v34.3.0's client did not, GET /v1/enrollments/self, is served from legion-envoy-v33.7.0 on. Checked between legion-envoy-v32.28.1 and this release: `agent-secrets identity` keeps its exit codes (0 with an identity on disk or a helper session, 1 without, 2 on a usage error), so scripts/secret-run's choice is unchanged; `agent-secrets NAME -- command` takes its broker identity from the same four sources (a launcher's key directory, the person's own `agent-secrets login`, the helper, the machine's own cloud identity); a GitHub profile whose github.value is "installations" still puts {"installations": {<login>: {"installation_id", "token", "expires_at"}}} in the command's environment, which shims/gh-app-token reads; the two notices the client prints while a box's launcher is still enrolling it are the ones shims/gh-app-token skips (CLIENT_ENROLLMENT_NOTICES); and no line of code that names ENROLL_FAILED, DRAINING or UNENROLL_FAILED changed (packages/envoy/internal/cipher/helper/protocol.go, cmd/cipher, internal/cipherclient). Before a later bump, make sure that these three codes still have that meaning. The linux tarballs still ship bin/agent-secrets and bin/agent-secrets-helper. Earlier reasons that still apply: #4512 (merge c980d91b540ece46364256983f24a3f5a63b3841), which answers a secret reread that carries no proof with 202, which a client before legion-envoy-v32.24.3 reads as a refusal; #4151 (merge 1a8990fa007037ce7080de928a17bd8efa4d7507): `agent-secrets register` without --exec refuses a helper answer that names no root_pid, which every helper before #4151 gives, which is one more reason the helper moves with the client; INFRA-3845 (merge bb4b0c95e0f877b35c3eb9b867d4c964ce79739b), which gave `agent-secrets NAME -- command` those four sources, so it works in a process the helper never saw; INFRA-3823 (merge f35483e5103e688559150dd07b59459c27951926) and INFRA-3844 (merge 467e5371b5f2d65dc207b13d5655c49b163af88c): `agent-secrets secret create` refuses before it asks, and every `agent-secrets secret` form takes its store credential from the environment, with no --profile flag. INFRA-3648 (merge 35d0212bb3eba3e131c3ad04461e7ca915e5b57f), with which the helper answers `enroll --helper`, `unenroll --helper` and the machine login call with the broker's outcome, and answers that the outcome is not known (ENROLL_OUTCOME_UNKNOWN, UNENROLL_OUTCOME_UNKNOWN, or LOGIN_FAILED with an error that says so) when the broker possibly got the request and its answer did not come back. `scripts/agentbox` reads the client's ENROLL_FAILED and DRAINING codes at each enroll call (enroll_attempts) as the only known enroll failures, and UNENROLL_FAILED (unenroll_revoke) as the only known unenroll failure. It reads every other failure as an outcome that is not known. Also INFRA-3666 (merge df57176f7203463733cca417caf502d23ff60fa9) and the secrets broker's airlock (merge 46c4162b, INFRA-1352; INFRA-1355, INFRA-3012). The helper itself moves to a new version only when it restarts.
+platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:c11846c6dde4ff0a5223879b8a36eb56e605febad49230c0ac66316bc10a8691" }
+platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:32e3e3800707ff9621620867cc61241ec268a103f4e077cd10bebd225120a082" }
+platforms.macos-x64   = { asset_pattern = "agent-secrets-darwin-amd64.tar.gz", checksum = "sha256:3808a004f79eaa0fe155b40a531d36b829fe6d4b0152e6dcfa1129c68ef8cddb" }
+platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", checksum = "sha256:6ebf137e6872193b768c6d534ccf249374ab9c5be66980928c9dade1a2317ffa" }
 
 # Gmail triage CLI + TUI (agents use --json; humans get the bubbletea TUI).
 [tools."github:sjawhar/mailbox"]
