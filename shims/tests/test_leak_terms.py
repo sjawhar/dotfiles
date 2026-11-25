@@ -270,11 +270,15 @@ class LeakTestCase(unittest.TestCase):
         and in a cgroup of its own whose task limit is self.task_limit and whose memory limit is self.memory_limit
         (MEMORY_LIMIT unless a test sets it), with OOMPolicy=kill, stdin the descriptor STDIN, else /dev/null unless
         INPUT is given. A command that outlives TIMEOUT fails the test after its whole cgroup and process group are
-        killed, descendants holding its pipes included. A command killed by SIGKILL fails the test too, named as past
-        the memory limit only when its cgroup recorded an OOM kill: on the host the scope's Result=oom-kill, in a box
-        the shim's BOX_OOM_REPORT line. In a box shims/systemd-run ends by SIGKILL only after such an OOM kill and
-        passes every other status through, so a SIGKILL with no OOM kill reads as 137 there, the same as an exit of
-        137: launch fails a box run that returns 137 too, naming both."""
+        killed, descendants holding its pipes included. A command a signal ended fails the test as past the memory
+        limit when its cgroup recorded an OOM kill: on the host the scope's Result=oom-kill, in a box the shim's
+        BOX_OOM_REPORT line. Any signal, not only SIGKILL: on the host an OOM kill ends the command by the kernel's
+        group kill (memory.oom.group, SIGKILL) or by the user manager's stop of the unit (OOMPolicy=kill, SIGTERM),
+        whichever reaches it first. Under 8 parallel runs on sami-devbox on 2026-11-25 the SIGTERM came first in 6 of
+        80, and such a run, read as no kill at all, passed as a normal end. A command killed by SIGKILL with no OOM
+        kill fails the test too. In a box shims/systemd-run ends by SIGKILL only after such an OOM kill and passes
+        every other status through, so a SIGKILL with no OOM kill reads as 137 there, the same as an exit of 137:
+        launch fails a box run that returns 137 too, naming both."""
         if "=" in os.fspath(argv[0]):
             raise ValueError(f"env would read {argv[0]!r} as a variable, not a command")
         environment = os.environ if env is None else env
@@ -317,12 +321,13 @@ class LeakTestCase(unittest.TestCase):
             _, stderr = process.communicate(timeout=30)
             self.scope_result(unit)
             self.fail(f"{argv[0]} ran past {timeout} s; its cgroup and process group were killed: {stderr!r}")
-        if process.returncode == -signal.SIGKILL:
+        if process.returncode < 0:
             said = stderr if isinstance(stderr, str) else (stderr or b"").decode("utf-8", errors="replace")
             if self.scope_result(unit) == "oom-kill" or BOX_OOM_REPORT.search(said):
                 self.fail(f"{argv[0]} ran past MemoryMax={self.memory_limit}, and its cgroup's OOM policy killed the "
-                          f"whole command: {stderr!r}")
-            self.fail(f"{argv[0]} was killed by SIGKILL, and its cgroup recorded no OOM kill: {stderr!r}")
+                          f"whole command (signal {-process.returncode}): {stderr!r}")
+            if process.returncode == -signal.SIGKILL:
+                self.fail(f"{argv[0]} was killed by SIGKILL, and its cgroup recorded no OOM kill: {stderr!r}")
         if runner == BOX_SCOPE_RUNNER and process.returncode == 137:
             self.fail(f"{argv[0]} exited 137 (SIGKILL, or the command exited 137), and its cgroup recorded no OOM "
                       f"kill: {stderr!r}")
@@ -1038,6 +1043,33 @@ class ScanModes(LeakTestCase):
                 self.assertNotIn("\u202e", result.stderr)
                 self.assertIn("\\u009b", result.stderr)
                 self.assertIn("\\u202e", result.stderr)
+
+    def test_a_term_that_terminal_escape_sequences_part_is_found(self) -> None:
+        # A terminal shows no escape sequence, so a term that colour codes part is the term on the screen: a colour reset
+        # inside a path in pasted command output went unread until 2026-11-25 (the fork's scrub of its public text).
+        module = scanner_module()
+        term = TEST_TERMS[1]
+        cut = len(term) // 2
+        for name, sequence in (("a colour reset", "\x1b[0m"), ("a colour", "\x1b[1;31m"), ("an 8-bit CSI", "\x9b31m"),
+                               ("a hyperlink's OSC", "\x1b]8;;https://example.com/\x1b\\"),
+                               ("a character set", "\x1b(B")):
+            split = term[:cut] + sequence + term[cut:]
+            with self.subTest(sequence=name, text="a message line"):
+                self.assert_found(self.check("message", f"See {split} here\n"), "commit message line 1",
+                                  module.c_escape(split))
+            with self.subTest(sequence=name, text="a code line"):
+                line = self.check("diff", "diff --git a/code.py b/code.py\nnew file mode 100644\n--- /dev/null\n"
+                                  f"+++ b/code.py\n@@ -0,0 +1 @@\n+name = '{split}'\n", "--place-prefix", "")
+                self.assert_found(line, "code.py:1", module.c_escape(split))
+            with self.subTest(sequence=name, text="the span"):
+                self.assertEqual(module.TermMatcher([term]).spans(f"x {split}"), [module.Span(2, 2 + len(split))])
+        # Controls: a term between sequences matches once, not once for each view; a sequence in the place of one of the
+        # term's characters, and an escape sequence in a text with no term, leave no term on the screen.
+        matcher = module.TermMatcher([term])
+        self.assertEqual(matcher.spans(f"\x1b[31m{term}\x1b[0m"), [module.Span(5, 5 + len(term))])
+        self.assertEqual(matcher.spans(term[:cut] + "\x1b[0m" + term[cut + 1:]), [])
+        clean = self.check("message", "build \x1b[32mpassed\x1b[0m at /mnt/reflink/tmp\n")
+        self.assertEqual((clean.returncode, clean.stderr), (0, ""))
 
     def test_scanner_reads_git_hunks_and_added_plus_content(self) -> None:
         diff = """diff --git a/note.txt b/note.txt

@@ -12,8 +12,10 @@ import importlib.util
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from subprocess import Popen
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from non_utf8_name import READ_AS, process_named  # noqa: E402 - found through the path above
@@ -42,6 +44,80 @@ class NamedSession(unittest.TestCase):
                   f"2026-10-25T02-17-36-102Z_{self.SID}.jsonl")
         self.assertEqual(resurrect.named_session(f"omp --resume {nested}"), self.SID,
                          "a subagent's transcript sits under its parent's directory")
+
+
+class ProfileSurvivesRestore(unittest.TestCase):
+    """A named profile's pane must come back in that profile, in the form the restore list matches.
+
+    Before 2026-11-25 a theorem pane was saved as `omp --resume <id>`, which reopens the session in
+    the default profile as a fork of a stale copy; and a pane whose omp runs under the shim (memory
+    ceiling) is saved with `bash` as its command, which the hook skipped entirely.
+    """
+
+    SID = "01a19700-0000-7000-8000-0000000e0003"
+    RESTORE_LIST = "omp --resume"  # @resurrect-processes "~omp --resume" in .tmux.conf
+    temp: tempfile.TemporaryDirectory[str]
+    root: Path
+    fake_omp: Path
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        moved = self.root / "agentbox-moved"
+        moved.mkdir()
+        self.addCleanup(setattr, resurrect, "MOVED_INDEX", resurrect.MOVED_INDEX)
+        setattr(resurrect, "MOVED_INDEX", moved)
+        self.fake_omp = self.root / "omp"  # comm "omp", like the real binary
+        _ = self.fake_omp.write_bytes(Path("/bin/sleep").read_bytes())
+        self.fake_omp.chmod(0o755)
+
+    def pane_running_omp(self, session_dir: str) -> int:
+        """A shell (the pane) whose child, named omp, holds a session file open, as omp's writer does."""
+        session = self.root / session_dir / f"2026-11-25T15-00-00-000Z_{self.SID}.jsonl"
+        session.parent.mkdir(parents=True)
+        session.touch()
+        shell = Popen(["bash", "-c", f'exec 3<"{session}"; "{self.fake_omp}" 30 & wait'])
+        self.addCleanup(shell.wait)
+        self.addCleanup(lambda: Popen(["pkill", "-P", str(shell.pid)]).wait())
+        for _ in range(100):
+            if resurrect.find_omp(shell.pid) is not None:
+                return shell.pid
+            time.sleep(0.02)
+        self.fail("the stand-in omp never started")
+
+    def restored_command(self, pane_pid: int, command: str, full_command: str) -> str:
+        save = self.root / "save.txt"
+        save.write_text("\t".join(["pane", "dev", "2", "1", ":*", "1", "title", ":/home/u/src", "1",
+                                   command, ":" + full_command]) + "\n")
+        self.addCleanup(setattr, resurrect, "panes", resurrect.panes)
+        setattr(resurrect, "panes", lambda: {("dev", "2", "1"): (pane_pid, "%9")})
+        resurrect.rewrite(save)
+        return save.read_text().split("\n")[0].split("\t", 10)[10][1:]
+
+    def test_a_named_profile_session_under_the_shim_resumes_in_its_profile(self) -> None:
+        pid = self.pane_running_omp(".omp/profiles/theorem/agent/sessions/-src")
+        restored = self.restored_command(pid, "bash", "bash /home/u/.dotfiles/shims/omp --profile theorem")
+        self.assertEqual(restored, f"omp --resume {self.SID} --profile theorem")
+        self.assertIn(self.RESTORE_LIST, restored)
+
+    def test_a_default_profile_session_names_no_profile(self) -> None:
+        pid = self.pane_running_omp(".omp/agent/sessions/-src")
+        self.assertEqual(self.restored_command(pid, "omp", "omp"), f"omp --resume {self.SID}")
+
+    def test_an_idle_session_takes_its_profile_from_the_command_line(self) -> None:
+        shell = Popen(["sleep", "30"])  # a pane with no omp under it: argv is all there is
+        self.addCleanup(shell.wait)
+        self.addCleanup(shell.kill)
+        restored = self.restored_command(
+            shell.pid, "bash", f"bash /home/u/.dotfiles/shims/omp --profile=theorem --resume {self.SID}")
+        self.assertEqual(restored, f"omp --resume {self.SID} --profile theorem")
+
+    def test_a_pane_that_runs_no_omp_is_left_as_saved(self) -> None:
+        shell = Popen(["sleep", "30"])
+        self.addCleanup(shell.wait)
+        self.addCleanup(shell.kill)
+        self.assertEqual(self.restored_command(shell.pid, "bash", "nvim notes.md"), "nvim notes.md")
 
 
 class MovedAway(unittest.TestCase):

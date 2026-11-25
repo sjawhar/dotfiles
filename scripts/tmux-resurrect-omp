@@ -17,9 +17,16 @@ A session entered fresh, with `-c`, or through the in-app picker leaves nothing
 on the command line, and is resolvable only while its fd is open.
 
 Each omp pane line is rewritten to a command that resumes that session where it
-was running:
+was running, in the profile it ran in:
 
-- a pane running omp on the host becomes `omp --resume <id>`;
+- a pane running omp on the host becomes `omp --resume <id>`, with
+  `--profile <name>` after the id for a named profile (its session file sits
+  under ~/.omp/profiles/<name>/, else its argv names it). The id comes first
+  because `@resurrect-processes` matches `omp --resume`; omp reads `--profile`
+  anywhere before a subcommand. Without the profile, a named profile's session
+  came back in the default profile as a fork of a stale copy (2026-11-25).
+  A pane whose omp runs under a memory ceiling shows the shim as its command
+  (`bash …/shims/omp …`, which waits on the scope), not `omp`;
 - a pane running `agentbox new … -- …` (scripts/agentbox) shows the launcher
   as its command; the omp process lives in the box under another uid, so it is
   found by asking each box for omp processes whose TMUX_PANE names this pane,
@@ -54,7 +61,7 @@ SESSION_IN_NAME = re.compile(
     r"\d{4}-\d{2}-\d{2}T[0-9-]+Z_(?P<sid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl"
 )
 SESSION_FILE = re.compile(
-    r"/\.omp/agent/sessions/(?P<bucket>[^/]+)/"
+    r"/\.omp/(?:profiles/(?P<profile>[^/]+)/)?agent/sessions/(?P<bucket>[^/]+)/"
     r"\d{4}-\d{2}-\d{2}T[0-9-]+Z_(?P<sid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$"
 )
 # How a session was named on the command line that started this omp: a session
@@ -83,7 +90,7 @@ for p in $(pgrep -x omp); do
   for fd in /proc/$p/fd/*; do
     t="$(readlink "$fd" 2>/dev/null)" || continue
     case "$t" in
-      */.omp/agent/sessions/*.jsonl)
+      */.omp/agent/sessions/*.jsonl|*/.omp/profiles/*/agent/sessions/*.jsonl)
         printf 'fd\t%s\t%s\t%s\n' "$pane" "$(stat -c %Y "$t" 2>/dev/null || echo 0)" "$t" ;;
     esac
   done
@@ -144,9 +151,9 @@ def find_omp(pane_pid: int) -> int | None:
     return None
 
 
-def open_session(pid: int) -> str | None:
-    """Session id of the newest ~/.omp session file the process holds open."""
-    best: tuple[float, str] | None = None
+def open_session(pid: int) -> tuple[str, str | None] | None:
+    """(session id, profile or None) of the newest ~/.omp session file the process holds open."""
+    best: tuple[float, str, str | None] | None = None
     try:
         fds = os.listdir(f"/proc/{pid}/fd")
     except OSError:
@@ -164,8 +171,8 @@ def open_session(pid: int) -> str | None:
         except OSError:
             mtime = 0.0
         if best is None or mtime > best[0]:
-            best = (mtime, m.group("sid"))
-    return best[1] if best else None
+            best = (mtime, m.group("sid"), m.group("profile"))
+    return (best[1], best[2]) if best else None
 
 
 def named_session(command: str) -> str | None:
@@ -205,6 +212,39 @@ def named_session(command: str) -> str | None:
     return None
 
 
+def named_profile(command: str) -> str | None:
+    """The named profile a command line starts omp in: its last `--profile X` or `--profile=X`.
+
+    A whole argument only, as in `named_session`; `default` is no named profile.
+    """
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        words = command.split()
+    profile: str | None = None
+    for index, word in enumerate(words):
+        if word == "--profile" and index + 1 < len(words):
+            profile = words[index + 1]
+        elif word.startswith("--profile="):
+            profile = word.split("=", 1)[1]
+    return profile if profile and profile != "default" else None
+
+
+# A shebang script's process shows its interpreter as its name and first word.
+SCRIPT_RUNNERS = ("bash", "sh")
+
+
+def launches_omp(command: str) -> bool:
+    """True when a pane's saved command runs omp: the binary, or the omp shim run as a script."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        words = command.split()
+    if len(words) > 1 and os.path.basename(words[0]) in SCRIPT_RUNNERS:
+        words = words[1:]
+    return bool(words) and os.path.basename(words[0]) == "omp"
+
+
 # A session `agentbox move --to <machine>` took to another machine must never be resumed here:
 # the move leaves `agentbox-moved` in the session's own directory and as
 # ~/.omp/agentbox-moved/<id>, with `from=` the machine it left.
@@ -229,16 +269,19 @@ def cmdline(pid: int) -> str:
         return ""
 
 
-def host_session_for(pane_pid: int, full_command: str) -> str | None:
+def host_session_for(pane_pid: int, full_command: str) -> tuple[str, str | None] | None:
+    """(session id, profile or None) of the omp running under the pane."""
     omp = find_omp(pane_pid)
     if omp is not None:
-        sid = open_session(omp)
+        found = open_session(omp)
+        if found:
+            return found
+        command = cmdline(omp)
+        sid = named_session(command)
         if sid:
-            return sid
-        sid = named_session(cmdline(omp))
-        if sid:
-            return sid
-    return named_session(full_command)
+            return sid, named_profile(command)
+    sid = named_session(full_command)
+    return (sid, named_profile(full_command)) if sid else None
 
 
 # The bucket a boxed session lives in. omp names it after the working directory, so where the
@@ -248,19 +291,19 @@ def host_session_for(pane_pid: int, full_command: str) -> str | None:
 BOX_BUCKET = re.compile(r"-agentbox-[0-9a-f]{12}-(?P<repo>.+?)-*$")
 
 
-def box_sessions(boxes: list[str] | None = None) -> dict[str, tuple[str | None, str]]:
-    """pane id -> (repo or None, session id) for every omp running in the agentboxes named.
+def box_sessions(boxes: list[str] | None = None) -> dict[str, tuple[str | None, str, str | None]]:
+    """pane id -> (repo or None, session id, profile or None) for every omp in the agentboxes named.
 
-    Every running agentbox when `boxes` is None. An open session file names both; an idle
-    session's argv names only the id, and that pane is restorable only when its own launcher
-    line carries the repo (`rewrite`).
+    Every running agentbox when `boxes` is None. An open session file names all three; an idle
+    session's argv names the id and the profile, and that pane is restorable only when its own
+    launcher line carries the repo (`rewrite`).
     """
     if boxes is None:
         boxes = subprocess.run(
             ["docker", "ps", "--filter", "name=^agentbox-", "--format", "{{.Names}}"],
             capture_output=True, text=True, timeout=10,
         ).stdout.split()
-    best: dict[str, tuple[float, str | None, str]] = {}
+    best: dict[str, tuple[float, str | None, str, str | None]] = {}
     for box in boxes:
         # A wedged box must not stall every autosave (resurrect runs this hook inline).
         try:
@@ -283,6 +326,7 @@ def box_sessions(boxes: list[str] | None = None) -> dict[str, tuple[str | None, 
                 if not m:
                     continue
                 sid = m.group("sid")
+                profile = m.group("profile")
                 bucket = BOX_BUCKET.search(m.group("bucket"))
                 # A session started outside a box (resumed into one from a
                 # mounted directory) has no repo in its bucket.
@@ -291,27 +335,29 @@ def box_sessions(boxes: list[str] | None = None) -> dict[str, tuple[str | None, 
                 sid = named_session(target)
                 if sid is None:
                     continue
+                profile = named_profile(target)
             current = best.get(pane_id)
             # An open session file is the live answer and outranks the argv the
             # process started with, which is why `arg` lines carry mtime 0.
             if current is None or float(mtime) > current[0]:
-                best[pane_id] = (float(mtime), repo, sid)
-    return {pane: (repo, sid) for pane, (_, repo, sid) in best.items()}
+                best[pane_id] = (float(mtime), repo, sid, profile)
+    return {pane: (repo, sid, profile) for pane, (_, repo, sid, profile) in best.items()}
 
 
-def resume_command(spec: str | None, sid: str) -> str:
+def resume_command(spec: str | None, sid: str, profile: str | None = None) -> str:
     """The line a restored pane runs. A box's spec is what it was given when it started, so a
     --dir removed since then is left out (`agentbox new --drop-gone-dirs`) instead of refusing the
     whole resume, which is how 01a1798a's pane sat at a shell on 2026-11-02 at 16:23Z."""
+    resume = f"omp --resume {sid}" + (f" --profile {shlex.quote(profile)}" if profile else "")
     if not spec:
-        return f"omp --resume {sid}"
+        return resume
     drop = "" if "--drop-gone-dirs" in spec.split() else "--drop-gone-dirs "
-    return f"agentbox new {drop}{spec} -- omp --resume {sid}"
+    return f"agentbox new {drop}{spec} -- {resume}"
 
 
 def rewrite(save_file: Path) -> tuple[int, int]:
     pane_map = panes()
-    boxed: dict[str, tuple[str | None, str]] | None = None
+    boxed: dict[str, tuple[str | None, str, str | None]] | None = None
     lines = save_file.read_text().split("\n")
     rewritten = 0
     omp_panes = 0
@@ -323,7 +369,7 @@ def rewrite(save_file: Path) -> tuple[int, int]:
             continue
         command, full_command = fields[9], fields[10][1:]
         is_box = BOX_PANE.search(full_command) is not None
-        if command != "omp" and not is_box:
+        if command != "omp" and not is_box and not launches_omp(full_command):
             continue
         omp_panes += 1
         located = pane_map.get((fields[1], fields[2], fields[5]))
@@ -337,7 +383,7 @@ def rewrite(save_file: Path) -> tuple[int, int]:
             found = boxed.get(pane_id)
             if found is None:
                 continue
-            repo, sid = found
+            repo, sid, profile = found
             launch = LAUNCH_SPEC.search(full_command)
             spec = launch.group("spec") if launch else repo
             if spec is None:
@@ -346,13 +392,14 @@ def rewrite(save_file: Path) -> tuple[int, int]:
                 # outside its box, so the pane is left as saved.
                 continue
         else:
-            sid = host_session_for(pane_pid, full_command)
-            if sid is None:
+            found = host_session_for(pane_pid, full_command)
+            if found is None:
                 continue
+            sid, profile = found
         if moved_away(sid):
             # It runs on another machine now; the pane is left as saved.
             continue
-        fields[10] = ":" + resume_command(spec, sid)
+        fields[10] = ":" + resume_command(spec, sid, profile)
         lines[i] = FIELD_SEP.join(fields)
         rewritten += 1
     tmp = save_file.with_suffix(save_file.suffix + ".tmp")

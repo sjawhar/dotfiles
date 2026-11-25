@@ -56,11 +56,9 @@ A guard that reads a diff cannot see the state: a repository can be clean on eve
 
 ## cybermonklabs/legion
 
-- Work here goes to Legion, whose reviewer phase is the review.
-  - A dev-box session opens no new PR here.
 - Legion merges the work it produces.
 - GitHub needs one approving review from an identity other than the PR author's.
-- A PR a dev-box session already has open gets a full review at its head from a cross-family subagent its author dispatches.
+- A PR a dev-box session has open gets a full review at its head from a cross-family subagent its author dispatches.
   - The approval comes from Legion's own reviewer: ask the INFRA Legion controller (Envoy `notifications.role.legion-infra-controller`) which running Legion reviewer reads the repository.
   - Send that reviewer the PR and its head.
   - Ask for no review issue.
