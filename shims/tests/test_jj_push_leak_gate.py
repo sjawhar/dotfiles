@@ -196,7 +196,13 @@ exec @SERVER@ "${prog#git-}" "$sink"
 # repository's visibility through gh when the cache has no fresh answer, and no test may send that read to GitHub.
 # Each line is the call's arguments, then (after \x1e) the arguments of the process that ran it, \x1f-separated, so a
 # read can be traced to the check run for one push and the URL it was given (gh_calls() returns the arguments alone).
-FAKE_GH = ('#!/bin/bash\nprintf \'%s\\036%s\\n\' "$*" "$(tr \'\\000\' \'\\037\' < /proc/$PPID/cmdline 2> /dev/null)" >> "@GHLOG@"\n'
+# A line feed inside either is written as \x1d, so each call is one line. The installed check's launcher
+# (public-leak-check.sh, as installed on 2026-11-24) runs the check as `python3 -I -c <a program of many lines>
+# public_leak_check.py <remote> <url>`. Until 2026-11-25 each line of that program was read as a call of its own, and
+# the check's reads of another remote lost the arguments that name the check, so every installed-check case that
+# counts gh calls failed on sami-devbox.
+FAKE_GH = ('#!/bin/bash\nprintf \'%s\\036%s\\n\' "$(printf \'%s\' "$*" | tr \'\\n\' \'\\035\')" '
+           '"$(tr \'\\000\\n\' \'\\037\\035\' < /proc/$PPID/cmdline 2> /dev/null)" >> "@GHLOG@"\n'
            'exit 1\n')
 
 # A visibility read as gh gets it, OWNER/NAME filled in: the check's own (public_leak_check.py vis_of), and word for word
