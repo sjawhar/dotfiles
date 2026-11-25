@@ -1039,6 +1039,33 @@ class ScanModes(LeakTestCase):
                 self.assertIn("\\u009b", result.stderr)
                 self.assertIn("\\u202e", result.stderr)
 
+    def test_a_term_that_terminal_escape_sequences_part_is_found(self) -> None:
+        # A terminal shows no escape sequence, so a term that colour codes part is the term on the screen: a colour reset
+        # inside a path in pasted command output went unread until 2026-11-25 (the fork's scrub of its public text).
+        module = scanner_module()
+        term = TEST_TERMS[1]
+        cut = len(term) // 2
+        for name, sequence in (("a colour reset", "\x1b[0m"), ("a colour", "\x1b[1;31m"), ("an 8-bit CSI", "\x9b31m"),
+                               ("a hyperlink's OSC", "\x1b]8;;https://example.com/\x1b\\"),
+                               ("a character set", "\x1b(B")):
+            split = term[:cut] + sequence + term[cut:]
+            with self.subTest(sequence=name, text="a message line"):
+                self.assert_found(self.check("message", f"See {split} here\n"), "commit message line 1",
+                                  module.c_escape(split))
+            with self.subTest(sequence=name, text="a code line"):
+                line = self.check("diff", "diff --git a/code.py b/code.py\nnew file mode 100644\n--- /dev/null\n"
+                                  f"+++ b/code.py\n@@ -0,0 +1 @@\n+name = '{split}'\n", "--place-prefix", "")
+                self.assert_found(line, "code.py:1", module.c_escape(split))
+            with self.subTest(sequence=name, text="the span"):
+                self.assertEqual(module.TermMatcher([term]).spans(f"x {split}"), [module.Span(2, 2 + len(split))])
+        # Controls: a term between sequences matches once, not once for each view; a sequence in the place of one of the
+        # term's characters, and an escape sequence in a text with no term, leave no term on the screen.
+        matcher = module.TermMatcher([term])
+        self.assertEqual(matcher.spans(f"\x1b[31m{term}\x1b[0m"), [module.Span(5, 5 + len(term))])
+        self.assertEqual(matcher.spans(term[:cut] + "\x1b[0m" + term[cut + 1:]), [])
+        clean = self.check("message", "build \x1b[32mpassed\x1b[0m at /mnt/reflink/tmp\n")
+        self.assertEqual((clean.returncode, clean.stderr), (0, ""))
+
     def test_scanner_reads_git_hunks_and_added_plus_content(self) -> None:
         diff = """diff --git a/note.txt b/note.txt
 index 0000000..1111111 100644

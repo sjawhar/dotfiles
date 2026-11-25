@@ -405,6 +405,34 @@ def allowed_token(token: str) -> re.Pattern[str]:
 # view (paragraph_view). U+001F, which str.splitlines does not break at, parts them as any in-line whitespace does.
 TERM_SEPARATOR = r"[^\S\n\r\x0b\x0c\x1c-\x1e\x85\u2028\u2029]+"
 
+# A terminal escape sequence: a CSI (ESC [ or the 8-bit U+009B, then parameters and one final byte: colours, cursor
+# moves), an OSC (ESC ], ended by BEL, ESC \ or U+009C: a window title, a hyperlink), or any other ESC sequence (a
+# character set, a keypad mode). A terminal shows none of it, so a term that such sequences part is the term on the
+# screen: a colour reset inside a path in pasted command output went unread here until 2026-11-25 (the fork's scrub of
+# its public text). terminal_view reads a text without them.
+TERMINAL_SEQUENCE = re.compile(
+    r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
+    r"|\x1b\][^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)?"
+    r"|\x1b[ -/]*[0-~]"
+)
+
+
+def terminal_view(text: str) -> tuple[str, list[int]] | None:
+    """TEXT as a terminal shows it, without its escape sequences (TERMINAL_SEQUENCE), and the index in TEXT of each
+    character kept; None when TEXT holds no such sequence, so a text without ESC or U+009B pays for nothing more."""
+    if "\x1b" not in text and "\x9b" not in text:
+        return None
+    kept: list[int] = []
+    last = 0
+    for sequence in TERMINAL_SEQUENCE.finditer(text):
+        kept.extend(range(last, sequence.start()))
+        last = sequence.end()
+    if last == 0:
+        return None
+    kept.extend(range(last, len(text)))
+    return "".join(text[index] for index in kept), kept
+
+
 
 class TermMatcher:
     """Case-folded, whitespace-flexible matching while keeping source-string positions: a term's words match when any
@@ -412,7 +440,9 @@ class TermMatcher:
     read, and `scopes` maps each label to its Scope. A term two lists hold matches once for each, since each list says
     where its terms may not go. ALLOWED holds (repository pattern, tokens): a match inside such a token is not a term in
     that repository (a third-party name that holds one), and with REPOSITORIES, the places a text goes, a match every
-    one of them allows is dropped; otherwise each match says where it is allowed.
+    one of them allows is dropped; otherwise each match says where it is allowed. A text that holds terminal escape
+    sequences is read twice: as written, and as a terminal shows it (terminal_view), so a term they part matches too;
+    its span covers the sequences inside it.
 
     A knives registry list (Scope.registry) reads text, not names: names() is this matcher without those lists, and
     spans() drops their matches inside the NAMES it is given. Legion's branch names, its GitHub App identities and the
@@ -454,24 +484,35 @@ class TermMatcher:
         return origins
 
     def spans(self, text: str, names: Sequence[tuple[int, int]] = ()) -> list[Span]:
-        """The matches in TEXT, but a match of a knives registry list that lies wholly inside one of NAMES, (start, end)
-        ranges of TEXT that are names (git_trailer_names)."""
-        folded = text.casefold()
-        matches = [
-            (match, number, scope)
-            for pattern, number, scope in self._patterns
-            for match in pattern.finditer(folded)
-            if match.start() != match.end()
-        ]
-        if not matches:
+        """The matches in TEXT, as written and as a terminal shows it (terminal_view), each (start, end) once, but a
+        match of a knives registry list that lies wholly inside one of NAMES, (start, end) ranges of TEXT that are names
+        (git_trailer_names)."""
+        shown = terminal_view(text)
+        located: dict[tuple[int, int, int, str], None] = {}
+        for view, kept in ((text, None), *((shown,) if shown else ())):
+            folded = view.casefold()
+            matches = [
+                (match, number, scope)
+                for pattern, number, scope in self._patterns
+                for match in pattern.finditer(folded)
+                if match.start() != match.end()
+            ]
+            if not matches:
+                continue
+            # Only a view that holds a term pays for the per-character offset map.
+            origins = self._origins(view)
+            for match, number, scope in matches:
+                start, end = origins[match.start()], origins[match.end() - 1] + 1
+                if kept is not None:
+                    start, end = kept[start], kept[end - 1] + 1
+                located[(start, end, number, scope)] = None
+        if not located:
             return []
-        # Only a text that holds a term pays for the per-character offset map and the allowed tokens.
-        origins = self._origins(text)
+        # Only a text that holds a term pays for the allowed tokens.
         tokens = [(pattern, token.start(), token.end()) for pattern, regex in self._allowed
                   for token in regex.finditer(text)]
         found = []
-        for match, number, scope in matches:
-            start, end = origins[match.start()], origins[match.end() - 1] + 1
+        for start, end, number, scope in located:
             if scope and self.scopes[scope].registry and any(first <= start and end <= last for first, last in names):
                 continue
             allowed_in = tuple(sorted({pattern for pattern, first, last in tokens if first <= start and end <= last}))
