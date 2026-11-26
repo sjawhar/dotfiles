@@ -32,6 +32,4 @@
 
 - Run as non-root: a user with explicit UID/GID, `USER` before `CMD`, `COPY --chown`.
 - Use exec-form `CMD`/`ENTRYPOINT` (`["bin", "arg"]`). With shell form, PID 1 gets no signals, so `docker stop` takes exactly 10 s and then sends SIGKILL.
-- Entrypoint scripts need the exec bit, a correct shebang and LF line endings. If the container exits at once, run `docker logs <c>` and `docker inspect --format '{{.Config.Cmd}} {{.Config.Entrypoint}}' <img>`.
 - If compose uses `depends_on: condition: service_healthy`, add a `HEALTHCHECK`. Its probe binary (curl, wget) must be in the image, or the check never passes. Install it, or probe with a binary the image has.
-- A file is missing in the container: `.dockerignore` excluded it, or the image is stale. Check `.dockerignore`, then rebuild.

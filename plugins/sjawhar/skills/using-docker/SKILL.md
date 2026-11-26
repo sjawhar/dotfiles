@@ -16,9 +16,11 @@ Every agent on this machine shares one Docker daemon, its cache, and depot's rem
 - Never write `~/.docker/config.json`: every session pulls with it, and a bad write breaks them all. `docker login`, `crane auth login` and `docker-credential-*` helpers write it unless you send them elsewhere:
 
   ```bash
-  # `secrets list` names the available tokens
-  DOCKER_CONFIG=$(mktemp -d) secrets <TOKEN> -- docker login <registry> -u x --password-stdin
+  export DOCKER_CONFIG=$(mktemp -d)   # later docker calls in this shell use it
+  secrets <KEY> -- sh -c 'printf %s "$<KEY>" | docker login <registry> -u x --password-stdin'
   ```
+
+  `secrets list` names the keys.
 
 - On `denied` or a scope error, repeat that login with a token whose scope covers the image. If the shared credentials themselves stopped working, send the user the command and its output; do not edit the file.
 
@@ -52,6 +54,8 @@ Docker, depot and registry access work on this machine. Before you say one of th
 - `-p 8080:8080` publishes the port on every address the host has, its public one included, and Docker's rules run before the host firewall, so a `ufw deny` does not close it. Publish to the loopback (`-p 127.0.0.1:8080:8080`) and give your own people and machines the service over the VPN (`tailscale serve`), because they already reach each other there. Publish on a public address only for a named caller outside the organization that cannot join the VPN, and name that caller in the repo's docs.
 - Docker Engine before 28.0 lets hosts on the local network reach even a loopback-published port, through 127.0.0.1 and through the container's own address on the Docker bridge network. Check `docker version`. On an older engine, this rule in the `DOCKER-USER` chain, which Docker runs before its own rules, closes only the 127.0.0.1 route: `sudo iptables -I DOCKER-USER -m conntrack --ctorigdst 127.0.0.0/8 -j DROP`. The full fix is to update the engine to 28.0 or later. Ask the user first: the update restarts the daemon and every session's containers.
 - Container fails or answers wrongly: read `docker logs <c>`, then look inside with `docker exec <c> sh -c 'ps; curl -s localhost:<port>'` (no `-it`: an agent session has no TTY) before you propose a cause.
+- A container exits at once: read `docker logs <c>` and `docker inspect --format '{{.Config.Cmd}} {{.Config.Entrypoint}}' <img>`. An entrypoint script needs the exec bit, a correct shebang and LF line endings.
+- A file is missing in the container: `.dockerignore` excluded it, or the image is stale. Check `.dockerignore`, then rebuild.
 - Copy files out of an image with no CMD: `docker create --name <n> <img> true`, `docker cp <n>:<path> <dest>`, `docker rm <n>`. Without the `true`, `docker create` fails with "no command specified".
 
 ## Commands that never return
