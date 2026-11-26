@@ -60,7 +60,7 @@ Docker, depot and registry access work on this machine. Before you say one is un
 ## Containers
 
 - Never pair `-d` with `--rm`: a crash takes the logs with it. Use `-d`, read `docker logs`, then `docker rm`.
-- Start a `docker run` you may interrupt with `--init`: killing the client (`timeout`, Ctrl-C) leaves the container running when PID 1 has no signal handler.
+- Start any `docker run` you may interrupt with `--init`: killing the client (`timeout`, Ctrl-C) leaves the container running when its PID 1 is a shell or script with no signal handler.
 - Stop your containers with `docker rm -f <name>`.
 - Publish to `127.0.0.1:8080:8080`. `-p 8080:8080` publishes on every host address, the public one included. Docker's rules run before the host firewall, so `ufw deny` does not close it.
 - Serve our own people and machines over the VPN (`tailscale serve`).
