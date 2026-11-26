@@ -120,26 +120,30 @@ _.path = ['{{ env.DOTFILES_DIR | default(value=env.HOME ~ "/.dotfiles") }}/shims
 # upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec
 # them for hub/worker spawns.
 #
-# v18.18.6-sami.20261119-162325 (commit b40fd3c3), the build dispatch://INFRA-4638 pins for INFRA's
-# pods, carries 230bc2fa (cybermonklabs/oh-my-pi#48, dispatch://INFRA-4512): after a classifier
-# refusal, no fallback in the same turn sends the request again to the model that refused it, by
-# any name, route or provider, and the walk keeps its retry budget and provider exclusion past a
-# spent fallback. The pin before it, v18.18.6-sami.20261117-053702, lacked it, and new sessions
-# multiplied OpenAI cyber_policy refusals (dispatch://INFRA-1484). Over 053702 it also brings: the
-# fallback walk passes over a model in cooldown or with spent usage (#19); a turn whose `!command`
-# key prints nothing is retried, and `--restore` continues it (#22); subagents share Hindsight's
-# recall pause (#28); `--session-id <uuid>`; model discovery yields the event loop every 10 ms; and
-# fixes to the shell builtins (rm, mv, find, grep), the directory walker and robomp. Its session-store
-# changes (SQL leases, PostgreSQL writes opened read-write) apply only under `session.storage: sql`,
-# which no config here sets, and its `secrets.maskSessionStore` is off by default. A `!command` value
-# now runs in a session of its own with no terminal; scripts/gateway-token and
-# scripts/gcloud-token-fast each print a token so (measured 2026-11-21). It keeps the 11-17 probe fix
-# (dispatch://INFRA-4027), the 11-10 memory-leak fix (dispatch://INFRA-1876) and setup version 3.
-# The linux-x64 asset (sha256 9fd84e4ff44cddef87f323100e5cb30ca235284033c8a05192f90c69481fea68) is
-# smoke-tested: `omp --version` gives omp/18.18.6 and `omp --smoke-test` gives `smoke-test: ok`.
-# packages/mnemopi changed only to keep mnemopi's state under OMP_CONFIG_ROOT when that is set, and
-# nothing here sets it, so "npm:@oh-my-pi/pi-mnemopi" below stays 18.18.6.
-# Release: https://github.com/cybermonklabs/oh-my-pi/releases/tag/v18.18.6-sami.20261119-162325
+# v18.18.6-sami.20261126-110039 (commit 34021711, Cut14) carries two fixes of dispatch://HOME-311
+# that the pin before it, v18.18.6-sami.20261119-162325, lacked:
+# - one memory row with no text id or no text (SQLite's `.recover` wrote such a row into the
+#   theorem profile's Mnemopi database on 2026-10-30) no longer turns memory off at every start:
+#   the embedding rebuild skips it with a warning (fork member 941ae277, upstream
+#   can1357/oh-my-pi#20613);
+# - a /resume or /move to another directory while memory is already off moves the session there
+#   with a warning, instead of closing it (fork member e89d9e3d). A move from a directory where
+#   memory ran is still refused when memory cannot start in the destination.
+# 20261119 (b40fd3c3) is an ancestor of it, so it keeps the classifier-refusal fallback fix
+# (230bc2fa, dispatch://INFRA-4512), the 11-17 probe fix (dispatch://INFRA-4027), the 11-10
+# memory-leak fix (dispatch://INFRA-1876) and setup version 3. Its other cuts since then also bring
+# dispatch://INFRA-3530's session-memory change (Cut12), obash no longer waiting for ever on a
+# subshell that a fatal expansion error ends (Cut13, #301: Cut7 to Cut12 hung there on Linux), and
+# grep -o / rg --null-data anchor fixes (#295). Its release notes say not to set
+# `task.disabledAgents` yet; no config here sets it.
+# The linux-x64 asset (sha256 5a87f1737b1fd6c01884f907c69b95a4fc3705d8f9b783036faa2e8525b3e797) is
+# smoke-tested: `omp --version` gives omp/18.18.6 and `omp --smoke-test` gives `smoke-test: ok`. On
+# a private copy of the theorem database with the bad row, it logs one skip warning for rowid
+# 1374389534721 where 20261119 logs "backend startup failed" (measured 2026-11-26).
+# packages/mnemopi changed in the fork (the row fix, guarded model calls, a banks.ts refactor that
+# keeps the bank layout) with no schema change, so "npm:@oh-my-pi/pi-mnemopi" below stays 18.18.6.
+# That upstream CLI keeps the row bug until upstream ships #20613.
+# Release: https://github.com/cybermonklabs/oh-my-pi/releases/tag/v18.18.6-sami.20261126-110039
 #
 # There is NO macOS split here, and do not add one. The fork's CI builds and smoke-tests a
 # darwin-arm64 asset on a macos-15 runner, but no Mac of Sami's runs it. On 2026-11-10 this file
@@ -147,11 +151,12 @@ _.path = ['{{ env.DOTFILES_DIR | default(value=env.HOME ~ "/.dotfiles") }}/shims
 # plainly that he does not have a Mac and runs Linux (dispatch://INFRA-1876/ask/6ad5d62f). The hold
 # protected nobody and would have rotted into a permanently stale second pin.
 #
-# This release is an Actions build: run 44565315084 of "Build sami branch"
-# (https://github.com/cybermonklabs/oh-my-pi/actions/runs/44565315084) built and smoke-tested
-# linux-x64 on ubuntu-22.04 and darwin-arm64 on macos-15. GitHub records no build attestation for
-# its assets (`gh attestation verify` answers 404), so the digest above is the check.
-"github:sjawhar/oh-my-pi" = "18.18.6-sami.20261119-162325"
+# This release is an Actions build: run 45806183787 of "Build sami branch"
+# (https://github.com/cybermonklabs/oh-my-pi/actions/runs/45806183787) built and smoke-tested
+# linux-x64 on ubuntu-22.04 and darwin-arm64 on macos-15, and run 45809997588 published it. Its
+# linux-x64 archive has a build attestation: `gh attestation verify <archive> --owner cybermonklabs`
+# finds one, from sami-build.yml on release-candidate.
+"github:sjawhar/oh-my-pi" = "18.18.6-sami.20261126-110039"
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
 # broker asset and gives it its own install dir alongside forward's.
