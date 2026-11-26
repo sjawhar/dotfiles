@@ -422,9 +422,33 @@ describe("where the guard acts", () => {
 		}
 	});
 
-	test("eval agent() spawns are not looked at", async () => {
+	test("an eval agent() or workpool() spawn in the lane: non-Claude is refused, Claude starts, and no GitHub call is made", async () => {
 		const g = bind();
-		expect(await g.spawn("sol", SOL, "EvalAgent", LANE, "eval")).toBeUndefined();
+		const refused = await g.spawn("sol", SOL, "EvalAgent", LANE, "eval");
+		expect(refused?.block).toBe(true);
+		expect(refused?.reason).toContain("comes from eval `agent()` or `workpool()`");
+		expect(refused?.reason).toContain("fresh Claude reader");
+		expect((await g.spawn("deep", DEEP, "Pool-1", LANE, "eval"))?.block).toBe(true);
+		expect(await g.spawn("task", CLAUDE, "EvalClaude", LANE, "eval")).toBeUndefined();
+		expect(g.calls).toEqual([]);
+		expect(g.lines.map(l => [l.event, l.spawnKey, l.outcome])).toEqual([
+			["eval-spawn", "EvalAgent", "refuse"],
+			["eval-spawn", "Pool-1", "refuse"],
+			["eval-spawn", "EvalClaude", "pass"],
+		]);
+	});
+
+	test("an eval spawn uses up no waiting task item, even under the same id", async () => {
+		const g = bind();
+		g.task([{ name: "A", agent: "sol", task: "Review #3831." }]);
+		expect(await g.spawn("sol", CLAUDE, "A", LANE, "eval")).toBeUndefined();
+		expect(await g.spawn("sol", SOL, "A")).toBeUndefined();
+		expect(g.lines.at(-1)).toMatchObject({ event: "spawn", outcome: "pass", why: "no guarded pull request" });
+	});
+
+	test("another session's non-Claude eval spawn starts untouched", async () => {
+		const g = bind();
+		for (const ctx of [session(OTHER_ID, OTHER_FILE), session(SUB_ID, OTHER_SUB_FILE, "sub")]) expect(await g.spawn("sol", SOL, "EvalAgent", ctx, "eval")).toBeUndefined();
 		expect(g.lines).toEqual([]);
 	});
 });

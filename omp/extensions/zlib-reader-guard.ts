@@ -31,6 +31,11 @@
 //   SPAWN_DEADLINE_MS (omp gives this event 30 s, then starts the spawn), or the guard holds no record
 //   of the spawn's text. A number that is not a pull request of GUARDED_REPO passes once the
 //   repository itself reads, so a 404 from a token that cannot see the repository refuses instead.
+// - An eval `agent()` or `workpool()` spawn in the lane: omp fires the same event for it
+//   (eval/agent-bridge.ts and task/workpool.ts call runStructuredSubagent, whose applySpawnHook
+//   emits it with invocationKind "eval"), but the event carries no text and an eval cell can build
+//   the text at run time, so the guard cannot read it: a non-Claude one is refused and a Claude one
+//   starts. A non-Claude reader goes through the task tool, where its text is checked.
 // - A `write` to `agent://<id>`, a follow-up message, in the lane: when this thread saw <id> start
 //   as a non-Claude spawn, the message is checked the same way and refused before it is sent.
 //
@@ -42,10 +47,10 @@
 // a waiting item without a guarded reference before one with it. A call's items are dropped when its
 // tool result shows no spawn is still to come (no background job).
 //
-// Not covered: eval `agent()` and `workpool()` spawns (their text never reaches this event);
-// `seance` spawns (omp skips this event for them); a reader's later reads that its task did not name;
-// fallbacks in retry.fallbackChains (today every chain keyed by a Claude model lists only Claude);
-// follow-ups to agents that started before the guard loaded or in another worker thread.
+// Left out on purpose: `seance` spawns (omp starts them without this event, and they read past
+// transcripts, not pull requests); reads a reader makes later that its task did not name; and
+// follow-ups to readers that started before the guard loaded, or in another worker thread. Fallbacks
+// in retry.fallbackChains are not read: today every chain keyed by a Claude model lists only Claude.
 //
 // Each decision in the lane is one JSON line in ~/.omp/zlib-reader-guard.jsonl (pull request
 // numbers and verdicts, no task text), written after the decision and not awaited. A failure inside
@@ -418,16 +423,38 @@ export function createZlibReaderGuard(overrides: Partial<GuardDeps> = {}): (pi: 
 			if (items.length > 0) remember(event.toolCallId, items);
 		};
 
+		/** Remembers how a spawn in the lane runs, for the follow-up message check. */
+		const noteStarted = (scope: Scope, key: string | undefined, run: Started) => {
+			if (key === undefined) return;
+			deps.started.set(`${scope.root}\0${key}`, run);
+			while (deps.started.size > MAX_STARTED) deps.started.delete(deps.started.keys().next().value as string);
+		};
+		const spawnSubject = (event: SpawnEvent, run: Started) =>
+			`the ${event.agent} subagent${event.spawnKey ? ` ${event.spawnKey}` : ""} was not started. It would run on ${run.models.join(", ")}, which is not Claude only`;
+		const instead = "Dispatch a fresh Claude reader instead (for example agent `task` or `reviewer`), or leave the reference out if this reader does not need it.";
+
+		/** An eval `agent()` or `workpool()` spawn: omp gives the guard no text for it, so a non-Claude one is refused. */
+		const checkEvalSpawn = (event: SpawnEvent, ctx: Ctx, scope: Scope): Refusal | undefined => {
+			const run = classifyModels(event.patterns, ctx);
+			noteStarted(scope, event.spawnKey, run);
+			const base = { ...scope, event: "eval-spawn", agent: event.agent, spawnKey: event.spawnKey, models: run.models, claude: run.claude };
+			if (run.claude) {
+				record({ ...base, outcome: "pass", why: "Claude only" });
+				return undefined;
+			}
+			record({ ...base, outcome: "refuse", why: "eval spawn text unreadable" });
+			return {
+				block: true,
+				reason: `zlib reader guard: ${spawnSubject(event, run)}, and it comes from eval \`agent()\` or \`workpool()\`, whose task text omp does not give the guard, so it cannot check which pull requests that text names and refuses it. ${RULE} Dispatch it with the task tool instead, where the guard reads its text, or use a fresh Claude reader (for example agent \`task\` or \`reviewer\`).`,
+			};
+		};
+
 		const checkSpawn = async (event: SpawnEvent, ctx: Ctx, scope: Scope): Promise<Refusal | undefined> => {
 			const run = classifyModels(event.patterns, ctx);
-			if (event.spawnKey !== undefined) {
-				deps.started.set(`${scope.root}\0${event.spawnKey}`, run);
-				while (deps.started.size > MAX_STARTED) deps.started.delete(deps.started.keys().next().value as string);
-			}
+			noteStarted(scope, event.spawnKey, run);
 			const items = candidates(event.agent, event.spawnKey, run.claude ? "claude" : "other");
 			const base = { ...scope, event: "spawn", agent: event.agent, spawnKey: event.spawnKey, models: run.models, claude: run.claude, matched: items.length };
-			const subject = `the ${event.agent} subagent${event.spawnKey ? ` ${event.spawnKey}` : ""} was not started. It would run on ${run.models.join(", ")}, which is not Claude only`;
-			const instead = "Dispatch a fresh Claude reader instead (for example agent `task` or `reviewer`), or leave the reference out if this reader does not need it.";
+			const subject = spawnSubject(event, run);
 			if (run.claude) {
 				consume(items, item => item.refs.length > 0);
 				record({ ...base, outcome: "pass", why: "Claude only" });
@@ -533,11 +560,10 @@ export function createZlibReaderGuard(overrides: Partial<GuardDeps> = {}): (pi: 
 		});
 
 		pi.on("before_subagent_spawn", async (event: SpawnEvent, ctx: Ctx) => {
-			if (event.invocationKind !== "task") return undefined;
 			const scope = scopeOrNone(ctx);
 			if (!scope) return undefined;
 			try {
-				return await checkSpawn(event, ctx, scope);
+				return event.invocationKind === "task" ? await checkSpawn(event, ctx, scope) : checkEvalSpawn(event, ctx, scope);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				record({ ...scope, event: "spawn", agent: event.agent, spawnKey: event.spawnKey, outcome: "refuse", why: "error", error: message });
