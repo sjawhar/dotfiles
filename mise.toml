@@ -379,11 +379,11 @@ platforms.macos-arm64 = { asset_pattern = "ctx-aarch64-apple-darwin.tar.gz" }
 # ~/.mise/shims, the shared tool store. Digests are the ones GitHub recorded at upload (`gh release
 # view v<version> -R colbymchenry/codegraph --json assets`); bump them with the version.
 [tools."github:colbymchenry/codegraph"]
-version = "1.5.0"
-platforms.linux-x64   = { asset_pattern = "codegraph-linux-x64.tar.gz", checksum = "sha256:2ba65e87a1210b706bb1e67d5e48b5fc4a1935e43dbb3fb5f31c5597840d2e58" }
-platforms.linux-arm64 = { asset_pattern = "codegraph-linux-arm64.tar.gz", checksum = "sha256:9f17750aedf45d51f68caae39ed21d6e2a7290b2326e5c53f95a165918ebd1d8" }
-platforms.macos-x64   = { asset_pattern = "codegraph-darwin-x64.tar.gz", checksum = "sha256:0a0ccc29bf7da9d10be1458d89d7e15c55927ae24cd95e9fa3de4bdfea059dde" }
-platforms.macos-arm64 = { asset_pattern = "codegraph-darwin-arm64.tar.gz", checksum = "sha256:cf5ee435a6e44d097b2f98f2b7b8b9422bb1094844404efed82519c5da1af2cf" }
+version = "1.6.4"
+platforms.linux-x64   = { asset_pattern = "codegraph-linux-x64.tar.gz", checksum = "sha256:8477f3841cba6ac8c45847d42eb5254f1f2d7fbc3045baf333e1cbe92267022d" }
+platforms.linux-arm64 = { asset_pattern = "codegraph-linux-arm64.tar.gz", checksum = "sha256:e9cd2bebb29ce6aa83b4489755f76a36f3e22658beac5ebef023b874be7cfce1" }
+platforms.macos-x64   = { asset_pattern = "codegraph-darwin-x64.tar.gz", checksum = "sha256:f16a56e5df375a1652ed717ce8bd0fb466725e64b52a53dc0070d6e8c281363c" }
+platforms.macos-arm64 = { asset_pattern = "codegraph-darwin-arm64.tar.gz", checksum = "sha256:daa9142732eefed5b6d187aa82a2ca9c4f3ebce10d394fb79cf6c45b367618cc" }
 
 # Device management CLI (osquery/MDM). Each fleetdm/fleet release bundles two
 # binaries — fleet (server) + fleetctl — so asset_pattern selects the fleetctl
