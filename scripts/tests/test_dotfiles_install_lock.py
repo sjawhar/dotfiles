@@ -8,15 +8,16 @@ not for the lock; a knives call made under a holder's `mise install` carries
 DOTFILES_INSTALL_LOCK_HELD=1 and so does not wait on the lock its ancestor holds.
 
 Technique: every party runs for real (shims/knives, scripts/dotfiles-follow's `install_tools`,
-`scripts/dotfiles-sync --tools`, scripts/agent-session, installers/mise.sh and
-installers/librarian-harness-host.sh) with one stand-in `mise` (STAND_IN_MISE) first on PATH. The
-stand-in's `install` marks itself in progress with `mkdir <state>/installing`; an install that
-starts while another runs fails there, as the knives install of 2026-11-20 15:34Z did, and logs
-`overlap <role>`. Two installs meet because the test makes them meet: a gate file holds the first
-install until the test creates its release file, after the second party has signalled (the shim's
-wait line, its exit, or its own install's outcome). Each wait of the test has a bound of 60 s,
-which only detects a failure. Every process gets an environment built from nothing, under this
-test's temporary directory. Standard library only; no git and no systemd-run anywhere.
+`scripts/dotfiles-sync --tools`, scripts/agent-session, installers/mise.sh,
+installers/librarian-harness-host.sh and `oryx/install.sh op`) with one stand-in `mise`
+(STAND_IN_MISE) first on PATH. The stand-in's `install` marks itself in progress with
+`mkdir <state>/installing`; an install that starts while another runs fails there, as the knives
+install of 2026-11-20 15:34Z did, and logs `overlap <role>`. Two installs meet because the test
+makes them meet: a gate file holds the first install until the test creates its release file, after
+the second party has signalled (the shim's wait line, its exit, or its own install's outcome). Each
+wait of the test has a bound of 60 s, which only detects a failure. Every process gets an
+environment built from nothing, under this test's temporary directory. Standard library only; no git
+and no systemd-run anywhere.
 
 Each test is a row of the plan's state table (dispatch://INFRA-4798/artifact/plan-md, "The R1
 test"); a row marked "each holder" is one test per entry of HOLDERS.
@@ -47,6 +48,7 @@ SYNC = REPO / "scripts" / "dotfiles-sync"
 SESSION = REPO / "scripts" / "agent-session"
 MISE_INSTALLER = REPO / "installers" / "mise.sh"
 LIBRARIAN_INSTALLER = REPO / "installers" / "librarian-harness-host.sh"
+ORYX_INSTALLER = REPO / "oryx" / "install.sh"
 
 PIN = "9.9.9"
 # Every wait of the test: a failure detector, never what makes two installs meet.
@@ -73,12 +75,12 @@ WAIT_LINE_PART = "is held by another install; waiting up to"
 # hold the lock around it. `grep -rn 'mise install\|dotfiles-install.lock' scripts shims
 # installers` found them: scripts/dotfiles-follow (`install_tools`), scripts/dotfiles-sync
 # (`tools_step`) and scripts/agent-session. The same search finds the shim's own install
-# (shims/knives `install_pin`) and two installers that ran `mise install` with no lock before
-# this change and now take it, installers/mise.sh and installers/librarian-harness-host.sh; those
-# two are in INSTALLERS and have rows of their own (L11, L12, L14). A new writer of mise's data dir
-# goes into this list, or into a row of its own.
+# (shims/knives `install_pin`) and three installers that ran `mise install` with no lock before
+# this change and now take it, installers/mise.sh, installers/librarian-harness-host.sh and
+# oryx/install.sh's op step; those three are in INSTALLERS and have rows of their own (L11, L12,
+# L14 and L15). A new writer of mise's data dir goes into this list, or into a row of its own.
 HOLDERS = ("follow", "sync", "session")
-INSTALLERS = ("mise_sh", "librarian")
+INSTALLERS = ("mise_sh", "librarian", "oryx_op")
 
 # Follow's tools commands, each run with install_tools' `environment` (scripts/dotfiles-follow
 # `install_tools`), which holds the MISE_CACHE_DIR of the checkout's .bashrc: `mise install`,
@@ -407,7 +409,7 @@ class InstallLock(unittest.TestCase):
         return self.start("shim", [str(SHIM), "--version"], self.env() if env is None else env)
 
     def start_holder(self, holder: str, env: dict[str, str] | None = None) -> Party:
-        """A holder of the lock, or one of the two installers, run as its callers run it."""
+        """A holder of the lock, or one of the three installers, run as its callers run it."""
         env = self.env() if env is None else env
         if holder == "follow":
             argv = [sys.executable, "-c", FOLLOW_CODE, str(FOLLOW), str(self.checkout)]
@@ -428,6 +430,15 @@ class InstallLock(unittest.TestCase):
             env = {**env, "DOTFILES_DIR": str(self.checkout)}
         elif holder == "librarian":
             argv = ["bash", str(LIBRARIAN_INSTALLER)]
+        elif holder == "oryx_op":
+            hostname_bin = self.root / "oryx-op-bin"
+            _ = executable(hostname_bin / "hostname", "#!/bin/bash\nprintf 'oryx\\n'\n")
+            argv = ["bash", str(ORYX_INSTALLER), "op"]
+            env = {
+                **env,
+                "DOTFILES_DIR": str(self.checkout),
+                "PATH": os.pathsep.join([str(hostname_bin), env["PATH"]]),
+            }
         else:
             raise ValueError(holder)
         return self.start(holder, argv, env)
@@ -699,7 +710,7 @@ class InstallLock(unittest.TestCase):
             self.assertIn("Some tools failed to install", output, self.describe())
             self.assert_succeeded(party)
         else:
-            self.assertNotEqual(party.returncode, 0, self.describe())
+            self.assertEqual(party.returncode, 1, self.describe())
 
     # ------------------------------------------------------------------------- rows of one party
 
@@ -901,6 +912,30 @@ class InstallLock(unittest.TestCase):
         self.assertEqual(self.starts(), ["tools"] * 3, self.describe())
         self.assertEqual([line for line in self.events() if line.startswith("exit ")], ["exit 75 tools"] * 3, self.describe())
         self.assert_succeeded(party)
+
+    def test_l15a_oryx_op_holds_the_lock_and_the_shim_waits(self) -> None:
+        """L15 (a): oryx's op step runs under the install lock, as L1."""
+        self.row_l1("oryx_op")
+
+    def test_l15b_oryx_op_under_a_caller_that_holds_the_lock(self) -> None:
+        """L15 (b)."""
+        self.row_installer_with_the_lock_held_by_its_caller("oryx_op")
+
+    def test_l15c_oryx_op_under_a_callers_lock_reports_mises_75_as_a_failed_install(self) -> None:
+        """L15 (c): as L14b, but oryx's op step maps its stand-in mise's 75 to exit 1."""
+        self.flag("exit-75-tools")
+        self.data.mkdir(parents=True, exist_ok=True)
+        with self.lock.open("a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            party = self.start_holder("oryx_op", self.env(**{MARKER: "1"}))
+            self.finish(party, "oryx_op")
+            self.assertEqual(self.probe(self.lock), 75, f"control: the test holds {self.lock}\n{self.describe()}")
+        output = party.stdout() + party.stderr()
+        self.assertEqual(party.returncode, 1, self.describe())
+        self.assertEqual([line for line in output.splitlines() if LOCK_NAME in line], [], self.describe())
+        self.assert_no_overlap()
+        self.assertEqual(self.starts(), ["tools"], self.describe())
+        self.assertEqual([line for line in self.events() if line.startswith("exit ")], ["exit 75 tools"], self.describe())
 
 
 def each(row: str, parties: tuple[str, ...], name: str) -> None:
