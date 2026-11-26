@@ -261,6 +261,8 @@ source "${LAPTOP_DIR}/cosmic-greeter-fork.sh"
 source "${LAPTOP_DIR}/cosmic-comp-fork.sh"
 # shellcheck source=laptop/xdg-desktop-portal-cosmic-fork.sh
 source "${LAPTOP_DIR}/xdg-desktop-portal-cosmic-fork.sh"
+# shellcheck source=laptop/local-kernel.sh
+source "${LAPTOP_DIR}/local-kernel.sh"
 
 echo "--- Laptop setup complete ---"
 echo "Next steps:"
