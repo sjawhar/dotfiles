@@ -70,6 +70,12 @@ class GitWorktreeShimTest(unittest.TestCase):
             subprocess.run(cmd, cwd=path, env=self.plain, check=True, capture_output=True)
         return path
 
+    def add_remote(self) -> None:
+        """Give self.repo a remote, so it is no throwaway repository (scripts/throwaway-repository.sh), whose commit
+        the shim runs without the leak-term hooks."""
+        subprocess.run(["/usr/bin/git", "remote", "add", "origin", "https://example.invalid/shim-test.git"], cwd=self.repo,
+                       env=self.plain, check=True, capture_output=True)
+
     def use_shared_store(self) -> None:
         """Point self.tmp and self.repo under ~/src, where a prune must stay refused."""
         SRC.mkdir(exist_ok=True)
@@ -149,6 +155,7 @@ class GitWorktreeShimTest(unittest.TestCase):
 
     def test_an_agents_commit_over_ssh_names_the_ssh_rule(self):
         # `git commit` takes the leak-term hooks ahead of the other agent-session rules; the notice still comes first.
+        self.add_remote()
         result = run_without_tty(["git", "commit", "-q", "--allow-empty", "-m", "over ssh"], cwd=self.repo,
                                  env={**self.plain, "SSH_CONNECTION": SSH_CONNECTION})
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -393,6 +400,7 @@ class GitWorktreeShimTest(unittest.TestCase):
         fake.mkdir()
         (fake / "git").write_text(f"#!/bin/sh\nexec '{SHIMS / 'git'}' \"$@\"\n")
         (fake / "git").chmod(0o755)
+        self.add_remote()
         (self.repo / "leak.txt").write_text("zorbleplex\n")
         subprocess.run(["/usr/bin/git", "add", "leak.txt"], cwd=self.repo, env=self.plain, check=True)
         head = subprocess.run(["/usr/bin/git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
@@ -435,6 +443,7 @@ class GitWorktreeShimTest(unittest.TestCase):
         # that names the caller's own pid (the pid the shim runs in, by exec), or a hop count one below the
         # limit, is scanned like any other; at the limit the shim refuses with the hop count's named error,
         # and commits nothing.
+        self.add_remote()
         env_path = leak_check_environment(os.pathsep.join([str(SHIMS), "/usr/bin", "/bin"]))
         head = subprocess.run(["/usr/bin/git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
         rows = (("its own pid", '$$ 0 /nonexistent/git'), ("a hop count one below the limit", "1 7 /usr/bin/git"),

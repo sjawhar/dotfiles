@@ -149,6 +149,10 @@ class GitInATestPane(MovedHome):
         repo = self.root / "repo"
         repo.mkdir()
         self.assertEqual(self.launch(["git", "init", "-q"], cwd=repo, env=env).returncode, 0)
+        # A remote, so the repository is no throwaway one (scripts/throwaway-repository.sh), whose commit runs without
+        # the leak-term hooks.
+        self.assertEqual(self.launch(["git", "remote", "add", "origin", "https://example.invalid/moved-home.git"], cwd=repo,
+                                     env=env).returncode, 0)
         (repo / "clean.txt").write_text("clean\n", encoding="utf-8")
         self.launch(["git", "add", "clean.txt"], cwd=repo, env=env)
         clean = self.launch(["git", "commit", "-q", "-m", "a clean commit"], cwd=repo, env=env)

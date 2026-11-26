@@ -3,14 +3,14 @@
 # dispatching; in an agent session, refuse a bare `git worktree prune` outside a
 # throwaway repository, lock every `git worktree add`, let `git worktree remove` past a
 # lock of ours and no further, give every `git commit` without a command-line hooks path
-# the leak-term hooks, give every commit an omp session makes its Omp-Session trailer where
-# it does now, refuse every `git push`, the one jj runs included, that would create on the
-# remote a branch whose name starts with a person token (scripts/person-branch-guard), run
-# the shared public leak check where no hook of the checkout runs it (an agent's push, and a
-# person's verified push where the check is installed), run the encrypted leak-term
-# check on every `git push` but one from an unguarded checkout to a configured remote (its
-# hook scans a public or unknown GitHub URL),
-# and keep a pruning `git fetch` from deleting the destination of a short-named refspec.
+# the leak-term hooks outside a throwaway repository (scripts/throwaway-repository.sh), give
+# every commit an omp session makes its Omp-Session trailer where it does now, refuse every
+# `git push`, the one jj runs included, that would create on the remote a branch whose name
+# starts with a person token (scripts/person-branch-guard), run the shared public leak check
+# where no hook of the checkout runs it (an agent's push, and a person's verified push where
+# the check is installed), run the encrypted leak-term check on every `git push` but one from
+# an unguarded checkout to a configured remote (its hook scans a public or unknown GitHub
+# URL), and keep a pruning `git fetch` from deleting the destination of a short-named refspec.
 # From inside an agent box every other box's worktree path looks missing, so a
 # prune there deletes live sessions' registrations in the shared store
 # (AGENTC-431: 17 bare prunes on 2026-09-26, from five boxes). A locked
@@ -619,12 +619,24 @@ commit_scan_state() {
     printf 'cleanup=%s verbose=%s status=%s verify=%s' "$cleanup" "$verbose" "$status" "$verify"
 }
 
+# A commit in a throwaway repository runs without the leak-term hooks: one a test made, with mkdtemp or a clone of another
+# it made, whose common directory lies under a temporary root and whose remotes, if any, are all local paths under one,
+# by the one test in scripts/throwaway-repository.sh, which scripts/omp-session-trailer shares. Its commits reach no
+# network remote but by a push to a URL, and every push to a public or unreadable GitHub repository is scanned below, a
+# push from such a repository included. The hooks fork sops, python and git: a test's commit took 0.5 to 1.3 s with them
+# against about 0.01 s without, and under load honest test commits failed in them (`cannot fork()`, `sops could not read
+# the term list`; dispatch://INFRA-4003). A repository that test cannot read, or a test that cannot be read, keeps the
+# hooks.
 scan_commit=0
 unset DOTFILES_GIT_COMMIT_SCAN
+throwaway_test="$_shim_dir/../scripts/throwaway-repository.sh"
 if [[ "${args[i]:-}" == commit && $caller_hooks_path -eq 0 ]]; then
-    scan_commit=1
-    DOTFILES_GIT_COMMIT_SCAN="$(commit_scan_state)"
-    export DOTFILES_GIT_COMMIT_SCAN
+    # shellcheck source=SCRIPTDIR/../scripts/throwaway-repository.sh
+    if ! { [[ -r "$throwaway_test" ]] && . "$throwaway_test" && throwaway_repository "$_real" "${args[@]:0:i}"; }; then
+        scan_commit=1
+        DOTFILES_GIT_COMMIT_SCAN="$(commit_scan_state)"
+        export DOTFILES_GIT_COMMIT_SCAN
+    fi
 fi
 
 is_agent=0
@@ -644,13 +656,15 @@ fi
 # jj commits get the same trailer from its JJ_CONFIG overlay. A missing or
 # malformed id adds nothing: attribution may be absent, never wrong.
 # scripts/omp-session-trailer says yes everywhere unless the checkout sets
-# `git config omp.sessionTrailer false`, or the repository is a throwaway one (no
-# remote, and its common directory under a temporary root, such as a test's mkdtemp).
+# `git config omp.sessionTrailer false`, or the repository is a throwaway one (its
+# common directory under a temporary root, such as a test's mkdtemp, and no remote but
+# local paths under one: scripts/throwaway-repository.sh).
 # - `git commit`: git's own --trailer adds it, so the repository's hooks and
 #   commit signing run exactly as they would without it, and
 #   `ifexists=addIfDifferent` keeps an amend from repeating it. A commit without a
 #   command-line `core.hooksPath` gets it here, with the leak-term hooks; one with
-#   such a hooks path gets it in the case below.
+#   such a hooks path, or in a throwaway repository (where the trailer needs
+#   `omp.sessionTrailer true`), gets it in the case below, with no hooks of ours.
 # - `git merge`, `pull`, `cherry-pick`, `revert` take no --trailer, so they run
 #   with `core.hooksPath` at shims/git-hooks/, whose prepare-commit-msg adds the
 #   same line; then every hook name there runs the hook git would have run

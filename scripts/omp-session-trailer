@@ -12,16 +12,15 @@
 # (skill://fork-work). A checkout opts out with `git config omp.sessionTrailer false`,
 # and `true` keeps it on everywhere.
 #
-# The one other exception is a throwaway repository, such as one a test makes with
-# mkdtemp: no remote (`git remote` prints nothing) AND its common directory, resolved
-# through symlinks, under a temporary root by whole path components: $TMPDIR, /tmp,
-# /var/tmp, or /mnt/nvme/<user>/session-tmp (/mnt/scratch/<user>/session-tmp on
-# sami-devbox). Such a commit can never reach a remote, and a test that asserts its
-# own commit message exactly failed in every agent session (oh-my-pi's pi-vcs
-# read_objects_logs_and_refs; librarian ledger L1123). A new repository under ~/src
-# keeps its trailer from its first commit, and a /tmp worktree of a repository with a
-# remote keeps it. Anything this cannot read keeps the trailer: attribution may be
-# absent only where nothing can be attributed.
+# The one other exception is a throwaway repository, one a test makes with mkdtemp or
+# clones from another it made: its common directory under a temporary root, and no remote
+# but local paths under one, by the one test in scripts/throwaway-repository.sh, which the
+# commit of shims/git shares. Such a commit can never reach a remote but by a push, and a
+# test that asserts its own commit message exactly failed in every agent session
+# (oh-my-pi's pi-vcs read_objects_logs_and_refs; librarian ledger L1123). A new repository
+# under ~/src keeps its trailer from its first commit, and a /tmp worktree of a repository
+# with a GitHub remote keeps it. Anything this cannot read keeps the trailer: attribution
+# may be absent only where nothing can be attributed.
 #
 # That exception is for a trailer that leaked into a test from the agent session running it.
 # A trailer whose overlays all lie under a temporary root too is the trailer of a session the
@@ -32,6 +31,15 @@
 # ~/.cache/omp/jj, Legion its state dir), so that trailer still stays out of a throwaway
 # repository; `omp.sessionTrailer false` still takes off either.
 set -euo pipefail
+
+here="${BASH_SOURCE[0]}"
+[[ ! -L "$here" ]] || here="$(readlink -f -- "$here")"
+[[ "$here" == */* ]] || here="./$here"
+# shellcheck source=SCRIPTDIR/throwaway-repository.sh
+. "${here%/*}/throwaway-repository.sh" || {
+    echo "on: the throwaway test ${here%/*}/throwaway-repository.sh cannot be read"
+    exit 0
+}
 
 overlays=()
 while [[ "${1:-}" == --overlay ]]; do
@@ -44,51 +52,24 @@ case "$("${git[@]}" config --type=bool --get omp.sessionTrailer 2>/dev/null || t
     true) echo "on: omp.sessionTrailer is true"; exit 0 ;;
 esac
 
-if ! remotes="$("${git[@]}" remote 2>/dev/null)"; then
-    echo "on: omp.sessionTrailer is unset and git remote failed"
-    exit 0
-fi
-if [[ -n "$remotes" ]]; then
-    echo "on: omp.sessionTrailer is unset and the repository has a remote"
-    exit 0
-fi
-if ! common="$("${git[@]}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
-    ! common="$(realpath -e -- "$common" 2>/dev/null)"; then
-    echo "on: omp.sessionTrailer is unset and the git common directory cannot be read"
-    exit 0
-fi
-user="$(id -un)"
-roots=()
-for root in ${TMPDIR:+"$TMPDIR"} /tmp /var/tmp "/mnt/nvme/$user/session-tmp" "/mnt/scratch/$user/session-tmp"; do
-    real="$(realpath -e -- "$root" 2>/dev/null)" || continue
-    # A root that resolves to / would take in every repository.
-    if [[ "$real" != / ]]; then roots+=("$real"); fi
-done
-# temporary_root PATH: prints the temporary root PATH, resolved through symlinks, lies under.
-temporary_root() {
-    local path real
-    path="$(realpath -m -- "$1" 2>/dev/null)" || return 1
-    for real in ${roots[@]+"${roots[@]}"}; do
-        if [[ "$path" == "$real"/* ]]; then
-            printf '%s\n' "$real"
-            return 0
-        fi
-    done
-    return 1
-}
-if repo_root="$(temporary_root "$common")"; then
+if throwaway_repository "${git[@]}"; then
     if ((${#overlays[@]})); then
         for overlay in "${overlays[@]}"; do
-            temporary_root "$overlay" > /dev/null || {
-                echo "off: no remote, and the git common directory $common is under the temporary root $repo_root"
+            throwaway_temporary_root "$overlay" || {
+                echo "off: $throwaway_remotes, and the git common directory $throwaway_common is under the temporary root $throwaway_root"
                 exit 1
             }
         done
-        echo "on: no remote and the git common directory $common is under the temporary root $repo_root, but every overlay of the trailer is under a temporary root too: a session the test made"
+        echo "on: $throwaway_remotes and the git common directory $throwaway_common is under the temporary root $throwaway_root, but every overlay of the trailer is under a temporary root too: a session the test made"
         exit 0
     fi
-    echo "off: no remote, and the git common directory $common is under the temporary root $repo_root"
+    echo "off: $throwaway_remotes, and the git common directory $throwaway_common is under the temporary root $throwaway_root"
     exit 1
 fi
-echo "on: omp.sessionTrailer is unset; no remote, but the git common directory $common is under no temporary root"
+case "$throwaway" in
+    remote-unread) echo "on: omp.sessionTrailer is unset and git remote failed" ;;
+    remote) echo "on: omp.sessionTrailer is unset and the repository has a remote that is not a local path under a temporary root" ;;
+    common-unread) echo "on: omp.sessionTrailer is unset and the git common directory cannot be read" ;;
+    *) echo "on: omp.sessionTrailer is unset; $throwaway_remotes, but the git common directory $throwaway_common is under no temporary root" ;;
+esac
 exit 0
