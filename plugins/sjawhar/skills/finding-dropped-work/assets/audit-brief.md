@@ -16,10 +16,7 @@ You are read-only. Write nothing except the report file. Send no message to any 
 
 ## Tools
 
-- Read skill://using-transcript-store, then use `tq` (recipe below) to find the user's messages, the session's reports and its tool calls.
-- Open the raw transcript only at the FILE:LINE that `tq` gives.
-- The store holds only the hosts that `tq sql "SELECT host, count() FROM sessions GROUP BY host"` lists. Read another host's session in its raw file, and say so.
-- Read the raw file after the store's last line for the tail. `tq` warns about a stale host only if it expects that host to load.
+- Read skill://using-transcript-store, then use `tq` (recipe below) to find the user's messages, the session's reports and its tool calls. Open the raw transcript only at the FILE:LINE that `tq` gives. The store holds only the hosts `tq sql "SELECT host, count() FROM sessions GROUP BY host"` lists: read another host's session in its raw file, and say so. Read the raw file after the store's last line for the tail; `tq` warns about a stale host only if it expects that host to load.
 - `dispatch read --issue KEY`, `dispatch open-asks`, `dispatch search --query '...'` to check whether an item reached Dispatch. A `dispatch ask` tool call in the transcript is an ask the session opened.
 - `gh pr view`, `git log` to check a claim of "merged" or "committed".
 - Read only this session's transcript and its own subagents' transcripts. Do not read other audits of this session.
@@ -35,7 +32,7 @@ F. Each long project (several slices, or more than a day) the session ran withou
 
 ## Outcome of each row
 
-- DONE: delivered. Give the evidence (commit, merged PR, artifact, message, measured number) with its id or link. "Written into a spec", "approval requested", "sent to an agent" and "a todo closed" are not DONE unless the request was for exactly that. When the result is a document, artifact, report or draft for the user, it is DONE only if an open ask links it and asks the user's next step with it, or the user has already acted on it. The open ask is an ask block in that document, or a `dispatch ask`. Creating or updating a document or artifact notifies nobody and puts nothing in their queue.
+- DONE: delivered. Give the evidence (commit, merged PR, artifact, message, measured number) with its id or link. "Written into a spec", "approval requested", "sent to an agent" and "a todo closed" are not DONE unless the request was for exactly that. When the result is a document, artifact, report or draft for the user, it is DONE only if an open ask (an ask block in that document, or a `dispatch ask`) links it and asks the user's next step with it, or the user has already acted on it: creating or updating a document or artifact notifies nobody and puts nothing in their queue.
 - UNSURFACED: the result exists, but only a chat reply, a transcript line, a peer message or an artifact upload carries it, with no open ask. Count these rows with the dropped ones.
 - TRACKED: an open Dispatch ask, or a Dispatch issue that another session claims. An issue this session filed for later, or claims itself, is not TRACKED. Name it.
 - DROPPED: no action after it, work abandoned with no record, the request answered as a different question, or a todo closed without the work.
