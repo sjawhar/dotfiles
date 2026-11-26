@@ -32,18 +32,17 @@ Every agent on the machine shares one Docker daemon, its build cache, and depot'
 
 ## Check, never guess
 
-Docker, depot and registry access work on this machine. Before you say one is unavailable, quote the output of the command you ran.
+Docker, depot and registry access work on this machine. Before you say one of them is unavailable, quote the output of the command you ran. Before you say the repo has no Docker setup, search it from the root (`fd -HI Dockerfile`, `fd -HI 'compose.*ya?ml'`) and read its CI workflows.
 
 | Before you | Run |
-| --- | --- |
-| say a repo has no Docker setup | search from its root (`fd -HI Dockerfile`, `fd -HI 'compose.*ya?ml'`) and read its CI workflows |
-| reuse a container id from an earlier step | `docker ps` first: it may have exited or been removed |
+|---|---|
+| reuse a container id from an earlier step | `docker ps` (it may have exited or been auto-removed) |
 | name an image tag or registry path | `docker images`, `docker manifest inspect` |
 | pass `-f <compose file>` or name a service | read that file |
 | run a binary in a container | `docker exec <c> which <bin>` |
 | describe where or how a build runs | `docker buildx inspect` |
 | say Docker or its daemon is missing | `docker version` |
-| say a build is or is not running | read its process or its log; `docker ps` lists only containers |
+| say a build is or isn't running | read its process (`ps aux \| grep build`) or its log; `docker ps` lists only containers |
 
 ## Builds
 
