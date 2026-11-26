@@ -1,6 +1,6 @@
 ---
 name: squash-stack
-description: Use when a multi-PR sdd plan reaches its end, or when a gh-stack PR stack is complete and every stacked PR has its review, to collapse the stack into one PR for main. Also use when asked to collapse, consolidate or squash a stack into one PR.
+description: Use when a gh-stack PR stack is complete and every stacked PR has its review. Also use when asked to collapse, consolidate or squash a stack into one PR, or at the end of a multi-PR sdd plan.
 ---
 
 # Squash Stack
