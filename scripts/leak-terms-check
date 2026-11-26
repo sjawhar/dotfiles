@@ -27,6 +27,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import tempfile
 import threading
 import sys
 import tomllib
@@ -1819,61 +1820,80 @@ def push_destination(remote: str, url: str) -> str:
     return url
 
 
-# git's message, untranslated under LC_ALL=C, when a read with lazy fetch off needs an object the clone lacks and an
-# object the clone received from its promisor names it (local_object_ids).
-PROMISOR_NAMED_MISSING = re.compile(
-    r"^fatal: could not fetch ([0-9a-f]{40}(?:[0-9a-f]{24})?) from promisor remote$", re.M
-)
+# The variables that choose a repository, its work tree, index or object directory, or how git reads its history. The
+# read of what this repository holds (local_object_ids) sets its own GIT_DIR and GIT_OBJECT_DIRECTORY instead.
+REPOSITORY_VARIABLES = frozenset((
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE", "GIT_PREFIX",
+    "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE",
+))
 
 
 def local_object_ids(candidates: Sequence[str]) -> set[str]:
     """Return the advertised IDs that this repository actually has, as a full clone with the same refs has them.
 
-    git is asked with lazy fetch off (GIT_NO_LAZY_FETCH=1). With it on, in a partial clone, each advertised ID the clone
-    lacks started its own fetch from the promisor, each carrying the whole history that ID reaches: on 2026-11-21 a push
-    through the shims from a blobless clone stalled for many minutes that way, as the shared leak check did before
-    dispatch://INFRA-4682. A fetched ID also counted as held where a full clone holds nothing. An ID the clone lacks
-    excludes nothing, so more is scanned, never less.
+    An ID the clone lacks excludes nothing, so more is scanned, never less, and git never fetches one here: with lazy
+    fetch on, in a partial clone, each advertised ID the clone lacked started its own fetch from the promisor, each
+    carrying the whole history that ID reaches (on 2026-11-21 a push through the shims from a blobless clone stalled for
+    many minutes that way, as the shared leak check did before dispatch://INFRA-4682), and a fetched ID counted as held
+    where a full clone holds nothing.
 
-    A git that carries the variable only with its CVE-2024-32465 fix (Ubuntu 24.04's 1:2.43.0-1ubuntu7.4) reads such an
-    ID as missing too, unless an object the clone received from its promisor names it (an older commit's file, a
-    submodule's commit): then git stops with exit 128 and `fatal: could not fetch <id> from promisor remote` after the
-    answers for the IDs before it (dispatch://INFRA-4891, dispatch://INFRA-4945). The clone lacks that ID, so it is not
-    held, and the read goes on from the next one. Any other failure refuses."""
+    git is asked through a git directory of its own, empty and with no configuration, over this repository's object
+    directory, its alternates included: it reads every object this repository holds and knows no promisor remote, so an
+    ID the clone lacks reads `missing` at once. Asked of a partial clone itself, even with lazy fetch off
+    (GIT_NO_LAZY_FETCH=1), git answers such an ID only after it has read every object of every promisor pack
+    (promisor-remote.c, is_promisor_object), and stops with exit 128 where an object it holds names the ID
+    (dispatch://INFRA-4891, dispatch://INFRA-4945). In the blobless clone of cybermonklabs/legion that agents push from,
+    with 11,266 promisor packs, that took 167 s for one such ID, and 235 s of a 246 s check of a one-commit push
+    (2026-11-26); through the empty git directory the same ID took 0.3 s. Any failure refuses."""
     pending = list(dict.fromkeys(candidates))
-    held: set[str] = set()
-    environment = {**git_environment(), "GIT_NO_LAZY_FETCH": "1", "LC_ALL": "C"}
+    if not pending:
+        return set()
     failure = "git could not check which advertised objects this repository holds"
-    while pending:
-        try:
+    location = git_output(
+        ["rev-parse", "--path-format=absolute", "--git-path", "objects", "--show-object-format"], b"", failure
+    ).decode("utf-8", errors="surrogateescape").split("\n")
+    if len(location) != 3 or location[2] or not location[0].startswith("/") or location[1] not in {"sha1", "sha256"}:
+        raise TextError(failure)
+    objects, object_format = location[:2]
+    environment = {
+        **{name: value for name, value in git_environment().items()
+           if name not in REPOSITORY_VARIABLES and not name.startswith("GIT_CONFIG")},
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "LC_ALL": "C",
+    }
+    try:
+        with tempfile.TemporaryDirectory(prefix="leak-terms-objects-") as view:
+            made = subprocess.run(
+                ["git", "init", "--quiet", "--bare", "--template=", f"--object-format={object_format}", view],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=environment,
+                check=False,
+            )
+            if made.returncode:
+                raise TextError(failure)
             completed = subprocess.run(
                 ["git", "cat-file", "--batch-check=%(objectname) %(objecttype)"],
                 input=("\n".join(pending) + "\n").encode(),
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=environment,
+                stderr=subprocess.DEVNULL,
+                env={**environment, "GIT_DIR": view, "GIT_OBJECT_DIRECTORY": objects, "GIT_NO_LAZY_FETCH": "1"},
                 check=False,
             )
-        except OSError as error:
-            raise TextError(failure) from error
-        lines = completed.stdout.decode("utf-8", errors="surrogateescape").split("\n")
-        # Each answer ends with a newline, so the last piece is empty unless an answer was cut off.
-        if lines.pop() != "" or len(lines) > len(pending):
-            raise TextError("git gave an incomplete object advertisement")
-        for candidate, line in zip(pending, lines):
-            fields = line.split()
-            if len(fields) < 2 or not OBJECT_ID.fullmatch(fields[0]):
-                raise TextError("git gave a malformed object advertisement")
-            if fields[1] != "missing":
-                held.add(candidate)
-        if completed.returncode == 0:
-            if len(lines) != len(pending):
-                raise TextError("git gave an incomplete object advertisement")
-            return held
-        named = PROMISOR_NAMED_MISSING.findall(completed.stderr.decode("utf-8", errors="surrogateescape"))
-        if completed.returncode != 128 or len(lines) == len(pending) or named != [pending[len(lines)].lower()]:
-            raise TextError(failure)
-        pending = pending[len(lines) + 1 :]
+    except OSError as error:
+        raise TextError(failure) from error
+    if completed.returncode:
+        raise TextError(failure)
+    lines = completed.stdout.decode("utf-8", errors="surrogateescape").split("\n")
+    # Each answer ends with a newline, so the last piece is empty unless an answer was cut off.
+    if lines.pop() != "" or len(lines) != len(pending):
+        raise TextError("git gave an incomplete object advertisement")
+    held: set[str] = set()
+    for candidate, line in zip(pending, lines):
+        fields = line.split()
+        if len(fields) < 2 or not OBJECT_ID.fullmatch(fields[0]):
+            raise TextError("git gave a malformed object advertisement")
+        if fields[1] != "missing":
+            held.add(candidate)
     return held
 
 
