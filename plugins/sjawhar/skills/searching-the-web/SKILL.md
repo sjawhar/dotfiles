@@ -34,7 +34,7 @@ Rewrite a natural-language question into keywords before you search.
 
 Searches are cheap, so run several variants instead of one perfect query:
 
-1. **Write variants.** Write 2–4 keyword variants (for climate impact on agriculture: `climate change agriculture impact`, `global warming crop yields`, `developing countries farming climate effects`).
-2. **Run them in parallel.**
-3. **Merge the results.** Drop duplicate URLs.
-4. **Rank the results.** Rank pages that several queries returned first.
+1. Write 2–4 keyword variants (for climate impact on agriculture: `climate change agriculture impact`, `global warming crop yields`, `developing countries farming climate effects`).
+2. Run them in parallel.
+3. Merge the results and drop duplicate URLs.
+4. Rank pages that several queries returned first.
