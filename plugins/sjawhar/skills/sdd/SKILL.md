@@ -114,7 +114,7 @@ Run each on the branch tip the one before it left:
 - Send the merge packet (`running-the-merge-queue`).
 - **Judge the result against the issue's goal and every requirement,** not only the plan's scenarios.
   - Say so in each review brief.
-- What passes, and what the `reviewer`'s verdict must hold: `references/review-and-merge.md`, "Judging the result".
+- Read `references/review-and-merge.md`, "Judging the result", for what passes and what the `reviewer`'s verdict must hold.
 
 ## 8. Keep the issue status current
 

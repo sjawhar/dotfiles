@@ -11,6 +11,9 @@ Read, from the tracker and the repo:
   - Check each item marked done against the code.
 
 - An approved design stays approved.
-- Do not restart brainstorming, re-ask an answered question, re-propose a rejected approach without new evidence against the reason it was rejected, or ask for the approval again.
+- Do not restart brainstorming.
+- Do not re-ask an answered question.
+- Do not re-propose a rejected approach without new evidence against the reason it was rejected.
+- Do not ask for the approval again.
 - Edits that record the approver's answers or measured corrections do not reopen it.
 - Ask again only when your plan changes what was approved, and say what the approval is for.
