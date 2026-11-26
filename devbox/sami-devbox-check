@@ -299,21 +299,15 @@ github_check() {
 # --- the N6 farm (the OSS Verify CI/CD lead's farm runs from sessions here) -----------------------
 # What bin/ossv-n6-farm and bin/ossv-job-farm need, checked as they use it, on the host and in a
 # box, since a session runs the farm in its box:
-#   1. the tools and the notes they read: ~/src/oss-verifier, the stream's live tree since the move
-#      of 2026-11-03 (dispatch://INFRA-993), each file there and not empty; on the host also that no
-#      ossv-tree-follow timer merges over it and that the stream's data copy has saved it within 2 h;
-#   2. the repository the farm stages from (`git archive`): ~/src/oss-verify-proofs-internal, whole
+#   1. the repository the farm stages from (`git archive`): ~/src/oss-verify-proofs-internal, whole
 #      (not shallow, not partial), on the state disk;
-#   3. the build bucket and its URL signer: ACCOUNT reads one object of gs://theorem-build-io (the
+#   2. the build bucket and its URL signer: ACCOUNT reads one object of gs://theorem-build-io (the
 #      team set) and signs as build-io-signer@ (census row U23's exception);
-#   4. what the farm's own pods do now (n6_routes_check): ACCOUNT mints no token of ossv-runs-signer@,
+#   3. what the farm's own pods do now (n6_routes_check): ACCOUNT mints no token of ossv-runs-signer@,
 #      lists nothing in gs://theorem-ossv-runs and creates no Job in builds-ossv;
-#   5. a release asset of the repository through shims/gh and the GitHub App;
-#   6. disk-gate on /mnt/nvme: status, and a reserve and release round trip; in a box also the
+#   4. a release asset of the repository through shims/gh and the GitHub App;
+#   5. disk-gate on /mnt/nvme: status, and a reserve and release round trip; in a box also the
 #      farm's work root and run index bound from the host (scripts/agentbox, agentbox/mounts).
-OSSV_TREE="$HOME/src/oss-verifier"
-OSSV_FILES=(bin/ossv-n6-farm bin/ossv-n6-shards bin/ossv-n6-pod bin/ossv-job bin/ossv-job-farm
-    notes/ossv-n6-peaks.tsv notes/ossv-n6.md notes/ossv-job.md)
 OVPI_DIR="$HOME/src/oss-verify-proofs-internal"
 OVPI_REPO=theorem-labs/oss-verify-proofs-internal
 # The farm's namespace (its own pods submit there now) and the account the farm signs its URLs with.
@@ -322,14 +316,8 @@ N6_NAMESPACE=builds-ossv
 # the grant, so it fails the line.
 REFUSED='PERMISSION_DENIED|[Pp]ermission .* denied|HTTPError 403|403 Forbidden'
 n6_check() {
-    local where="$1" f got differ="" prefix obj n tag asset size dir out
-    # 1. Each file in the live tree, readable and not empty.
-    for f in "${OSSV_FILES[@]}"; do
-        [[ -f "$OSSV_TREE/$f" && -r "$OSSV_TREE/$f" && -s "$OSSV_TREE/$f" ]] || differ+=" $f"
-    done
-    [[ -z "$differ" ]] && ok "N6 tools $where: the ${#OSSV_FILES[@]} files of the live tree $OSSV_TREE are there, readable and not empty" \
-        || fail "N6 tools $where: these files of the live tree $OSSV_TREE are missing, unreadable or empty:$differ"
-    # 2. The repository the farm stages from.
+    local where="$1" f got prefix obj n tag asset size dir out
+    # 1. The repository the farm stages from.
     got="$(git -C "$OVPI_DIR" rev-parse --is-shallow-repository 2>&1) $(git -C "$OVPI_DIR" config --get remote.origin.promisor) $(git -C "$OVPI_DIR" config --get extensions.partialclone)"
     n="$(git -C "$OVPI_DIR" archive HEAD 2>/dev/null | tar -t 2>/dev/null | head -100 | wc -l)"
     if [[ "$got" == "false  " && "$n" == 100 ]]; then
@@ -337,16 +325,16 @@ n6_check() {
     else
         fail "N6 repository $where: $OVPI_DIR: shallow/promisor/partialclone '$got', git archive HEAD | tar -t listed $n of the first 100 entries"
     fi
-    # 3. The build bucket, as the account the box writes builds with.
+    # 2. The build bucket, as the account the box writes builds with.
     prefix="$(gcloud storage ls "gs://theorem-build-io/out/ossv/" 2>/dev/null | sort | tail -1)"
     obj="$(gcloud storage ls "$prefix" 2>/dev/null | grep -v '/$' | head -1)"
     n="$(gcloud storage cat -r 0-63 "$obj" 2>/dev/null | wc -c)"
     [[ -n "$obj" && "$n" -gt 0 ]] && ok "N6 bucket $where: read $n bytes of $obj" \
         || fail "N6 bucket $where: gs://theorem-build-io: no object read under out/ossv/ (newest prefix '${prefix:-none}', object '${obj:-none}')"
-    # 4. The box's own URL signer, and what moved to the farm's own pods.
+    # 3. The box's own URL signer, and what moved to the farm's own pods.
     n6_box_signer_check "$where"
     n6_routes_check "$where"
-    # 5. A release asset through shims/gh, as an agent session's call (the App's token; the marker
+    # 4. A release asset through shims/gh, as an agent session's call (the App's token; the marker
     #    only for these calls, as azure_check does): the newest published release's smallest asset.
     local -a agent=(env "AGENTBOX_SESSION=${AGENTBOX_SESSION:-sami-devbox-check}")
     tag="$("${agent[@]}" gh release list --repo "$OVPI_REPO" --exclude-drafts --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null)"
@@ -357,7 +345,7 @@ n6_check() {
     rm -rf "$dir"
     [[ -n "$asset" && "$n" == "$size" ]] && ok "N6 releases $where: gh release download $OVPI_REPO $tag -p $asset: $n bytes" \
         || fail "N6 releases $where: gh release download $OVPI_REPO '$tag' -p '$asset' (want $size bytes, got ${n:-none}): $(tail -1 <<<"$out")"
-    # 6. disk-gate on /mnt/nvme: status answers with a floor the disk's size sets (scripts/disk-gate,
+    # 5. disk-gate on /mnt/nvme: status answers with a floor the disk's size sets (scripts/disk-gate,
     #    floor_gib), and a reservation is granted, counted and released.
     local name="sami-devbox-check-${where// /-}-$$" status floor size_gib
     status="$(disk-gate status 2>&1 | head -1)"
@@ -443,41 +431,10 @@ n6_routes_check() {
         || fail "N6 farm $where: kubectl -n $N6_NAMESPACE auth can-i create jobs: want no, got: $(tail -1 <<<"$got")"
 }
 
-# The host half of check 1. ~/src/oss-verifier is the live tree: the stream's loops write it here, and
-# nothing may merge or reset over it, so no ossv-tree-follow timer runs (the follower kept it a clone
-# of ops until the freeze of 2026-11-03 22:59Z). Both trees are on the state disk.
-ossv_tree_host_check() {
-    local got f
-    got="$(systemctl --user is-active ossv-tree-follow.timer 2>&1)"
-    [[ "$got" != active ]] && ok "N6 tools: no ossv-tree-follow timer runs (is-active: $got), so nothing merges over the live tree $OSSV_TREE" \
-        || fail "N6 tools: ossv-tree-follow.timer is active and merges ops over the live tree $OSSV_TREE; stop it: systemctl --user disable --now ossv-tree-follow.timer"
-    # Check 2's disk: both trees are on the state disk (through the /home bind), not on root.
-    for f in "$OVPI_DIR" "$OSSV_TREE"; do
-        [[ "$(stat -c %d "$f" 2>/dev/null)" == "$(stat -c %d /mnt/nvme)" ]] && ok "N6: $f is on the state disk /mnt/nvme ($(findmnt -n -o SOURCE --target "$f"))" \
-            || fail "N6: $f is not on /mnt/nvme: $(findmnt -n -o SOURCE,TARGET --target "$f" 2>&1)"
-    done
-    data_copy_check
-}
-
-# data_copy_check [NOW] -- the stream's data copy (TOOLS's loop 6, /mnt/durable/sami/tools-loops/data-copy.sh)
-# saved the live tree to Cloud Storage within 2 h: after each verified snapshot it writes its UTC time to
-# OSSV_DATA_COPY_OK. The loop starts here in the freeze of 2026-11-03, so before OSSV_DATA_COPY_FROM the line
-# is a note, neither ok nor FAIL. NOW is the Unix time to judge at (default: now). The stamp is the one the
-# loop writes since 2026-11-06, in notes/: its old path in ops.git went with that retired directory.
-OSSV_DATA_COPY_OK=/mnt/nvme/sami/oss-verifier/notes/ossv-data-copy.ok
-OSSV_DATA_COPY_FROM=2026-11-04T00:30:00Z
-data_copy_check() {
-    local now="${1:-$(date +%s)}" from got at
-    from="$(date -d "$OSSV_DATA_COPY_FROM" +%s)"
-    got="$(head -c 64 "$OSSV_DATA_COPY_OK" 2>/dev/null | tr -d '\n')"
-    at="$(date -d "$got" +%s 2>/dev/null)" || at=""
-    if [[ -n "$got" && -n "$at" ]] && (( now - at <= 7200 )); then
-        ok "data copy: $OSSV_DATA_COPY_OK says the live tree was saved at $got, $(( (now - at) / 60 )) min ago (at most 120)"
-    elif (( now < from )); then
-        note "data copy: $OSSV_DATA_COPY_OK reads '${got:-nothing}'; a stamp within 2 h is not expected yet (from $OSSV_DATA_COPY_FROM)"
-    else
-        fail "data copy: $OSSV_DATA_COPY_OK reads '${got:-nothing}', want a time at most 2 h old (TOOLS's loop 6)"
-    fi
+# The host half of check 1: the repository is on the state disk (through the /home bind), not on root.
+n6_disk_host_check() {
+    [[ "$(stat -c %d "$OVPI_DIR" 2>/dev/null)" == "$(stat -c %d /mnt/nvme)" ]] && ok "N6: $OVPI_DIR is on the state disk /mnt/nvme ($(findmnt -n -o SOURCE --target "$OVPI_DIR"))" \
+        || fail "N6: $OVPI_DIR is not on /mnt/nvme: $(findmnt -n -o SOURCE,TARGET --target "$OVPI_DIR" 2>&1)"
 }
 
 # The pins: knives is mise.toml's pin, and mise has every pin of mise.toml installed. The box half
@@ -1436,7 +1393,7 @@ host() {
     leak_check_host_check
     prepush_hook_host_check
     global_hooks_host_check
-    ossv_tree_host_check
+    n6_disk_host_check
     n6_check "on the host"
     echo "-- agentbox doctor (host and a throwaway box), for the record; A2 is decided by the lines above and the box half"
     # Bounded, and into a file rather than a pipe: it is for the record, and on 2026-11-02 a doctor

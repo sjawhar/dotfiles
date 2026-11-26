@@ -499,7 +499,7 @@ class TheRunsCallTheIdentityChecks(WholeRunCase):
 
     HOST_UNRELATED = ("host_disks host_rootfs host_units host_packages host_bwrap host_nofile dispatch_cli_check "
                       "mise_check host_logins host_omp_logins host_owners host_guard github_check tq_check "
-                      "leak_check_host_check prepush_hook_host_check global_hooks_host_check ossv_tree_host_check n6_check "
+                      "leak_check_host_check prepush_hook_host_check global_hooks_host_check n6_disk_host_check n6_check "
                       "host_kernel")
     BOX_UNRELATED = ("moved_gcloud_config_check gateway_check tools_check github_check tq_check n6_check host_sshd_check "
                      "dispatch_cli_check")

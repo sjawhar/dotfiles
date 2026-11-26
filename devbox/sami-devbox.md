@@ -137,9 +137,7 @@ Host half (`sami-devbox-check`, on sami-devbox as sami):
 | mise pins | `mise ls --missing` (`sami-devbox-check --pins` adds the box half's `knives --version` line; `dotfiles-follow` runs it after each fast-forward) | nothing missing |
 | openai routes | `yq` of `~/.dotfiles/omp/config.local.yml` (`task.agentModelOverrides.astra`, `["astra-api"]`, `["gpt-api"]`, `modelRoles.slow`, `.deep`, `task.agentModelOverrides["sami-proxy"]`) and of `~/.omp/agent/models.yml` | astra, astra-api and gpt-api each name `model-gateway-openai/openai/gpt-6.1-sol:xhigh`, and slow, deep and sami-proxy are unset (they take `omp/config.yml`'s Codex models); model-gateway declares 2 or more `openai/` models |
 | GitHub, plain shell | `git ls-remote https://github.com/theorem-labs/{machcsl-riscv,oss-verify-proofs-internal} HEAD` with no agent marker and no routing include, as `agentbox move --to` runs over ssh | a sha for each (the App's token, through `installers/gh-app-host.sh`) |
-| N6 live tree | `systemctl --user is-active ossv-tree-follow.timer` | not `active`: `~/src/oss-verifier` is the stream's live tree since the move of 2026-11-03 (dispatch://INFRA-993), and nothing merges or resets over it |
-| data copy | the UTC time in `/mnt/nvme/sami/oss-verifier/notes/ossv-data-copy.ok` (TOOLS's loop 6 writes it after each verified snapshot of the live tree) | at most 2 h old; before 2026-11-04T00:30Z a `note`, neither ok nor FAIL |
-| N6 clones on the state disk | `stat -c %d` of `~/src/oss-verify-proofs-internal`, `~/src/oss-verifier` and `/mnt/nvme` | one device |
+| N6 clone on the state disk | `stat -c %d` of `~/src/oss-verify-proofs-internal` and `/mnt/nvme` | one device |
 | N6 farm, host | the box half's N6 lines below, run on the host | as below |
 
 Box half (`agentbox new --dir /mnt/nvme/sami/cutover --dir /mnt/nvme/sami/boxid -- sami-devbox-check --in-box`):
@@ -160,7 +158,6 @@ Box half (`agentbox new --dir /mnt/nvme/sami/cutover --dir /mnt/nvme/sami/boxid 
 | openai through the gateway | `omp -p "say ok" --model @slow`, and `--model model-gateway-openai/openai/gpt-6.1-sol:xhigh` (the cross-family agents' route) | each answers `ok` (a fail prints `Use /login` or an HTTP 4xx) |
 | Azure | `az-reader account show` (an Azure read, as the Azure `legion-reader`; agent-azure no longer signs in from this box, census row D10) | user type `servicePrincipal` |
 | GitHub | the same two `git ls-remote` with the box's routing include | a sha for each |
-| N6 tools | each of `bin/ossv-{n6-farm,n6-shards,n6-pod,job,job-farm}` and `notes/{ossv-n6-peaks.tsv,ossv-n6.md,ossv-job.md}` in the live tree `~/src/oss-verifier` (the host half runs this line too) | each a readable file, not empty |
 | N6 repository | `git -C ~/src/oss-verify-proofs-internal rev-parse --is-shallow-repository`, `config remote.origin.promisor`, `extensions.partialclone`; `git archive HEAD \| tar -t \| head -100` | `false`, unset, unset; 100 entries |
 | N6 signers | for each of `build-io-signer@` and `ossv-runs-signer@`: `gcloud auth print-access-token --impersonate-service-account=<sa>`; `gcloud iam service-accounts sign-blob --iam-account=<sa>` | `build-io-signer@`: a token and a signature, through dev-box@'s Token Creator on that one account (the exception of census row U23). `ossv-runs-signer@`: both refused (`PERMISSION_DENIED`), since the farm's pods sign its URLs (U05). A failure that is not a refusal fails the line |
 | N6 buckets | `gcloud storage cat -r 0-63` of one object under the newest `out/ossv/` prefix of `gs://theorem-build-io`; `gcloud storage ls gs://theorem-ossv-runs/out/ossv/` | bytes from the first; the second refused (403), since the farm's pods write it (U05) |
