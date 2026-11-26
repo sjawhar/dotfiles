@@ -34,16 +34,16 @@ Every agent on the machine shares one Docker daemon, its build cache, and depot'
 
 Docker, depot and registry access work on this machine. Before you say one is unavailable, quote the output of the command you ran.
 
-| Situation | Check |
+| Before you | Run |
 | --- | --- |
-| Saying a repo has no Docker setup | Search from its root (`fd -HI Dockerfile`, `fd -HI 'compose.*ya?ml'`) and read its CI workflows |
-| Reusing a container id from an earlier step | `docker ps` first: it may have exited or been removed |
-| Naming an image tag or registry path | `docker images`, `docker manifest inspect` |
-| Passing `-f <compose file>` or naming a service | Read that file |
-| Running a binary in a container | `docker exec <c> which <bin>` |
-| Describing where or how a build runs | `docker buildx inspect` |
-| Saying Docker or its daemon is missing | `docker version` |
-| Saying a build is or is not running | Read its process or its log; `docker ps` lists only containers |
+| say a repo has no Docker setup | search from its root (`fd -HI Dockerfile`, `fd -HI 'compose.*ya?ml'`) and read its CI workflows |
+| reuse a container id from an earlier step | `docker ps` first: it may have exited or been removed |
+| name an image tag or registry path | `docker images`, `docker manifest inspect` |
+| pass `-f <compose file>` or name a service | read that file |
+| run a binary in a container | `docker exec <c> which <bin>` |
+| describe where or how a build runs | `docker buildx inspect` |
+| say Docker or its daemon is missing | `docker version` |
+| say a build is or is not running | read its process or its log; `docker ps` lists only containers |
 
 ## Builds
 
