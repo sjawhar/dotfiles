@@ -43,7 +43,7 @@ gh run rerun <run-id> -R <owner>/<repo> --failed
 
 - Checks can run a cached test-merge. When the PR's result depends on what the base holds (a migration chain, or a file both the PR and the base change), read the checkout line and the test-merge parents. A test-merge on an older base is normal, so do not hold every PR until its test-merge uses the latest base; act only when the base commits it lacks touch those files.
 - A rerun can replay the cached merge with its old base and workflow. Compare the tested head and base with the intended ones before another retry. An identical failure is a reason to inspect that input, not proof of a stale base or a flake. For failures in untouched files, reproduce at the exact head and a pristine base.
-- A conflicted PR can get no `pull_request` run: read mergeability before you blame webhooks. A mergeable head with zero runs: check trigger and path filters and commit-message skip directives. To get a run, add commits on top; do not rewrite published commits other than by a rebase.
+- A conflicted PR can get no `pull_request` run: read mergeability before you blame webhooks. A mergeable head with zero runs: check trigger and path filters and commit-message skip directives. To get a run, add commits on top; do not rewrite published commits.
 - Count the CI app's suites, not another integration's queued empty suite. Re-snapshot after UNKNOWN mergeability computes. Read the gate's code before you claim how it treats UNKNOWN.
 
 ## Reproduce the workflow literally
