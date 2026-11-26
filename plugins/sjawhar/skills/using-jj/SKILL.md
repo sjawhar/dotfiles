@@ -49,13 +49,14 @@ Read `references/commands.md` for a command or revset you do not know, bookmark 
 3. Run the push with `--dry-run` first. Push one bookmark: `jj git push --named <name>=<rev>` for a new one, `jj git push --bookmark <name>` for an existing one. Go on only if the dry-run shows `add to <your commit>`, or `move forward from <the remote's commit> to <your commit>`. `--all` and `--tracked` push other sessions' bookmarks.
 4. Check that `jj log -r '<name>@origin' --no-graph -T commit_id` is the recorded ID: a push that published nothing can print `Nothing changed.` and exit 0.
 5. Chain `jj new` after the push with `&&`, so later edits cannot amend the published head. Gate every command that depends on the one before it with `&&`, never `;`, which runs on after a failure.
-6. Read `references/publishing-details.md` before you rebase published work, and when a push fails or publishes nothing, when you delete a remote bookmark, or when a push chain meets a divergent change.
+6. Rebase published work only if the repository's docs or owner allow it. Read `references/publishing-details.md` for that proof, and when a push fails or publishes nothing, when you delete a remote bookmark, or when a push chain meets a divergent change.
 
 ## 5. Rebase, stacks, conflicts
 
 - A `jj rebase` with no `-r`, `-s` or `-b` means `-b @`: the whole branch, with any commits other sessions stacked on it. `-r` re-parents descendants onto the old parents. `jj rebase --help` has each flag's effect and the diagrams.
 - A rebase that succeeds can record conflicts, and a refusal is not success: read `jj log` after every rebase.
-- If your private, unpublished chain conflicts at every commit, squash it to one commit, or to the layers that help review (Conflict chains in `references/stack-and-conflict-details.md` says when), then rebase and resolve once. Never rewrite another owner's chain as cleanup. Never rewrite a published chain as cleanup, other than by a rebase.
+- Do not rebase only because main moved: the rewrite moves descendants and voids the review.
+- If your private, unpublished chain conflicts at every commit, squash it to one commit, or to the layers that help review (Conflict chains in `references/stack-and-conflict-details.md` says when), then rebase and resolve once. Never rewrite another owner's chain or a published chain as cleanup.
 - Before you resolve a conflict, read jj's conflict markers in `references/commands.md`, then follow the `resolve-conflicts` skill for what to keep.
 - Before you restructure a stack, read `references/stack-and-conflict-details.md` and `jj rebase --help`: to restack after a squash merge, move a child stack, publish from a stack other sessions share, or fix a divergent change.
 
