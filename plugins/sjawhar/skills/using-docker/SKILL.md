@@ -7,28 +7,20 @@ description: Use when running docker, docker compose, buildx or depot, or when o
 
 ## One daemon, many sessions
 
-Every agent on the machine shares one Docker daemon, its build cache, and depot's remote cache.
+Every agent on this machine shares one Docker daemon, its cache, and depot's remote build cache.
 
-- Stop or remove only containers this session started.
-- Give each container this session starts a `--name` (`<task>-$$`): `docker stop` returns before `--rm` removal finishes, so a reused `--name` can collide.
-- Remove each container this session starts when you finish.
-- Never sweep (`docker ps -q | xargs docker rm`).
-- Never start a second `dockerd` in the host's network namespace. A `dockerd` started with `--bridge=none` deletes the host's `docker0` bridge at startup, and every other session's containers on the default network lose their network until someone recreates it. Stopping such a daemon does not delete it.
-  - For a separate runtime or test daemon, run Docker-in-Docker in a container, which has its own network namespace.
-- Never pass `--no-cache`: it rebuilds every stage from scratch, which can take hours on a daemon and disk every session shares.
-- Force one stage with `--no-cache-filter=<stage>`.
-- Do not quote a cold-cache time as the build time.
-- `docker build`, `docker buildx build` and `depot build` can use different builders and caches: `docker buildx ls` shows which one you are on.
-- Never write `~/.docker/config.json`: every session pulls with it. `docker login`, `crane auth login` and `docker-credential-*` helpers write it unless you point them elsewhere:
+- Stop or remove only the containers you started in this session. `docker kill` or `docker rm -f` on another session's container destroys its work, and a sweep (`docker ps -q | xargs docker rm`) hits every session. Give each container a `--name`, and remove yours when you finish; `--rm` is safe only on a foreground run.
+- Never start a second `dockerd` in the host's network namespace. A `dockerd` started with `--bridge=none` deletes the host's `docker0` bridge at startup, and every other session's containers on the default network lose their network until someone recreates it. Stopping such a daemon does not delete it. For a separate runtime or test daemon, run Docker-in-Docker in a container, which has its own network namespace.
+- Never pass `--no-cache`: it throws away a cache every session shares, and later builds miss too, because the layer ids they look for are gone. Force one stage with `--no-cache-filter=<stage>`. Never quote a cold-cache time as the build time.
+- Each builder has its own cache, and `docker build`, `docker buildx build` and `depot build` can use different ones: run `docker buildx ls` to see which you are on.
+- Never write `~/.docker/config.json`: every session pulls with it, and a bad write breaks them all. `docker login`, `crane auth login` and `docker-credential-*` helpers write it unless you send them elsewhere:
 
   ```bash
-  export DOCKER_CONFIG=$(mktemp -d)   # later docker calls in this shell use it
-  secrets <KEY> -- sh -c 'printf %s "$<KEY>" | docker login <registry> -u x --password-stdin'
+  # `secrets list` names the available tokens
+  DOCKER_CONFIG=$(mktemp -d) secrets <TOKEN> -- docker login <registry> -u x --password-stdin
   ```
 
-  - `secrets list` names the keys.
-  - On `denied` or a scope error, log in again with a token whose scope covers the image.
-  - If the shared credentials stopped working, send the user the command and its output; do not edit the file.
+- On `denied` or a scope error, repeat that login with a token whose scope covers the image. If the shared credentials themselves stopped working, send the user the command and its output; do not edit the file.
 
 ## Check, never guess
 
@@ -46,55 +38,26 @@ Docker, depot and registry access work on this machine. Before you say one of th
 
 ## Builds
 
-- Run the build before you call an image change done.
-- Run the build again after every source edit that goes into the image.
-- Tests do not replace the build.
-- Find a full build's usual time (CI logs, the repo's docs): a full build can take hours.
-- Run a full build in the background.
-- Keep working while a full build runs.
-- If a full build still runs after 30 minutes, tell the user its last log line and keep working.
-- After a push, refer to the image as `<repo>@sha256:<digest>` (the digest `docker push` prints). Modal and compose cache an image by its tag, so a re-pushed `:main` is not pulled again.
-- Run the project the way the repo does (its make target, compose service or CI step). Hand-roll `docker run` only when the repo defines none.
+- Run the build before you report an image change done; tests do not replace it. Rebuild after every source edit that goes into the image.
+- A full image build can run for hours, so find its expected time first (CI logs, the repo's docs), start it in the background and keep working. If it runs 30 minutes, tell the user its last log line and keep working while it runs.
+- Modal and compose cache an image by its tag string, so a re-pushed `:main` is not pulled again. After you push, refer to the image as `<repo>@sha256:<digest>` (the digest `docker push` prints) wherever you run it.
+- Run the project the way the repo does: its make target, compose service or CI step. Hand-roll a `docker run` only when the repo defines none, because an ad-hoc container tests a different environment.
 
 ## Containers
 
-- Never pair `-d` with `--rm`: a crash takes the logs with it. Use `-d`, read `docker logs`, then `docker rm`.
-- Start any `docker run` you may interrupt with `--init`: killing the client (`timeout`, Ctrl-C) leaves the container running when its PID 1 is a shell or script with no signal handler.
-- Stop your containers with `docker rm -f <name>`.
-- Publish to `127.0.0.1:8080:8080`. `-p 8080:8080` publishes on every host address, the public one included. Docker's rules run before the host firewall, so `ufw deny` does not close it.
-- Serve our own people and machines over the VPN (`tailscale serve`).
-- Publish publicly only for a named outside caller that cannot join the VPN.
-- Name each outside caller you publish publicly for in the repo's docs.
-- Check `docker version`: Docker Engine before 28.0 lets hosts on the local network reach even a loopback-published port, through 127.0.0.1 and through the container's own address on the Docker bridge network.
-- On an engine before 28.0, this rule in the `DOCKER-USER` chain, which Docker runs before its own rules, closes only the 127.0.0.1 route: `sudo iptables -I DOCKER-USER -m conntrack --ctorigdst 127.0.0.0/8 -j DROP`.
-- For the full fix, update the engine to 28.0 or later. Ask the user first: the update restarts the daemon and every session's containers.
-- Copy files out of an image with no CMD: `docker create --name <n> <img> true`, `docker cp <n>:<path> <dest>`, `docker rm <n>`. Without `true`, `docker create` fails with "no command specified".
+- Never pair `-d` with `--rm`: a crash takes the logs with the container. Use `-d`, read `docker logs`, then `docker rm`.
+- `docker stop` returns before `--rm` removal finishes, so a reused `--name` collides. Name each container for your own session (`<task>-$$`); `docker rm -f` an old one only if this session started it.
+- Start any `docker run` you may interrupt with `--init`: killing the client (`timeout`, Ctrl-C) leaves the container running when its PID 1 is a shell or script with no signal handler. Stop your own with `docker rm -f <name>`.
+- Port unreachable: the app must bind `0.0.0.0` in the container, not `127.0.0.1`. Then check `docker port <c>` against your `-p host:container` argument.
+- `-p 8080:8080` publishes the port on every address the host has, its public one included, and Docker's rules run before the host firewall, so a `ufw deny` does not close it. Publish to the loopback (`-p 127.0.0.1:8080:8080`) and give your own people and machines the service over the VPN (`tailscale serve`), because they already reach each other there. Publish on a public address only for a named caller outside the organization that cannot join the VPN, and name that caller in the repo's docs.
+- Docker Engine before 28.0 lets hosts on the local network reach even a loopback-published port, through 127.0.0.1 and through the container's own address on the Docker bridge network. Check `docker version`. On an older engine, this rule in the `DOCKER-USER` chain, which Docker runs before its own rules, closes only the 127.0.0.1 route: `sudo iptables -I DOCKER-USER -m conntrack --ctorigdst 127.0.0.0/8 -j DROP`. The full fix is to update the engine to 28.0 or later. Ask the user first: the update restarts the daemon and every session's containers.
+- Container fails or answers wrongly: read `docker logs <c>`, then look inside with `docker exec <c> sh -c 'ps; curl -s localhost:<port>'` (no `-it`: an agent session has no TTY) before you propose a cause.
+- Copy files out of an image with no CMD: `docker create --name <n> <img> true`, `docker cp <n>:<path> <dest>`, `docker rm <n>`. Without the `true`, `docker create` fails with "no command specified".
 
-| Situation | Check |
-| --- | --- |
-| Port unreachable | The app must bind `0.0.0.0` inside the container; then compare `docker port <c>` with your `-p` |
-| A container fails or answers wrongly | Read `docker logs <c>`, then `docker exec <c> sh -c 'ps; curl -s localhost:<port>'` (no `-it`: an agent session has no TTY) before you propose a cause |
-| A container exits at once | Read `docker logs <c>` and `docker inspect --format '{{.Config.Cmd}} {{.Config.Entrypoint}}' <img>`. An entrypoint script needs the exec bit, a correct shebang and LF line endings |
-| A file is missing in the container | `.dockerignore` excluded it, or the image is stale. Check `.dockerignore`, then rebuild |
+## Commands that never return
 
-## Dockerfiles
+A `docker rm -f` or `docker inspect` still running after a minute: read [references/hangs.md](references/hangs.md) before you retry it or restart the daemon, because both make it worse.
 
-Read `references/dockerfile.md` when you write or review a Dockerfile.
+## Dockerfile authoring
 
-## A `docker rm -f` or `docker inspect` that never returns
-
-If `docker ps -a` still answers, the daemon is alive and is stuck in the kernel unmounting that container's filesystem. Seccomp is not the cause: a dropped seccomp listener returns ENOSYS at once, while a stuck unmount waits. Confirm the stuck unmount (expect `wchan=sync_inodes_sb`, `syscall=166`, which is `umount2`):
-
-```bash
-for t in /proc/$(pgrep -x dockerd)/task/*; do
-  awk '$3=="D"{f=1} END{exit !f}' "$t/stat" &&
-    echo "$t wchan=$(cat "$t/wchan") syscall=$(sudo -n cut -d' ' -f1 "$t/syscall")"
-done
-```
-
-- Do not retry the removal: each try blocks another daemon thread.
-- Do not restart the daemon: it stops every session's containers.
-- `docker ps` can still say "healthy": `grep -l <container-id> /proc/[0-9]*/cgroup` printing nothing means its init is gone.
-- Send the user the container id and the thread line.
-- Leave the container: it clears when the unmount finishes, or at a reboot.
-- Go on with the rest of your task.
+Writing or reviewing a Dockerfile: read [references/dockerfile.md](references/dockerfile.md).
