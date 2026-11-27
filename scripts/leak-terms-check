@@ -16,7 +16,6 @@ import codecs
 import ctypes
 import errno
 import fnmatch
-import glob
 import html
 import io
 import json
@@ -2904,8 +2903,9 @@ GH_STDIN = "DOTFILES_LEAK_TERMS_GH_STDIN"
 # Every gh command whose text the check reads, with its options as `gh <command> <subcommand> --help` lists them at gh
 # 2.106.0, the version mise.toml pins: (the options that take a value, the options that take none), a short and a long
 # spelling joined by `/`. shims/tests/test_gh_leak_terms.py compares the tables with the gh on PATH, so an upgrade that
-# adds an option fails that test until the table has it. `gh api` is ("api", ""). Every other command of gh is in
-# GH_QUIET_COMMANDS or GH_REFUSED_COMMANDS.
+# adds an option fails that test until the table has it. `gh api` is ("api", ""). Every other command `gh help` lists is
+# in GH_QUIET_COMMANDS or GH_REFUSED_COMMANDS, each other command of gh the check lets go is in GH_HIDDEN_COMMANDS, and
+# a call of a command none of them names is refused (gh_command).
 GH_TEXT_COMMANDS: dict[tuple[str, str], tuple[str, str]] = {
     ("pr", "create"): (
         "-a/--assignee --attach -B/--base -b/--body -F/--body-file -H/--head -l/--label -m/--milestone -p/--project "
@@ -3082,7 +3082,12 @@ GH_TEXT_COMMANDS: dict[tuple[str, str], tuple[str, str]] = {
 # list` sends only a value from a closed list. shims/tests/test_gh_leak_terms.py walks the command tree of the gh on
 # PATH, and fails for a command in none of GH_TEXT_COMMANDS, this table and GH_REFUSED_COMMANDS, or in more than one,
 # and for an entry that gh does not list. When gh 2.106.0 added `issue artifact`, which uploads files, nothing failed:
-# no table listed every command, and neither shims/gh nor the check knew it.
+# no table listed every command, and neither shims/gh nor the check knew it. The check reads this table as it runs: a
+# call of a command in it goes to gh unread, and a call of a command no table names is refused (gh_command), so a
+# command gh adds is refused until a table sorts it. Until the rulings on the tester's findings at 1c15219b
+# (dispatch://INFRA-4957) nothing read this table at run time, and on a machine whose gh was not the pin a command in
+# none of the tables went to gh unchecked. shims/gh lets the one- and two-word commands here go without starting the
+# check (gh_shim_is_quiet).
 GH_QUIET_COMMANDS: dict[str, str] = {
     "auth login": "local: signs in to a GitHub host and stores its token on this machine",
     "auth logout": "local: revokes the account's gh token and removes it from this machine",
@@ -3253,7 +3258,7 @@ GH_QUIET_COMMANDS: dict[str, str] = {
     "variable list": "read: lists Actions variables",
     "variable set": "private: sets an Actions variable, which only collaborators can read",
 }
-# The gh 2.106.0 commands the check refuses before gh runs, whatever their target (gh_refuse, GhUnjudgedError), each
+# The gh 2.106.0 commands the check refuses before gh runs, whatever their target (gh_command, GhUnjudgedError), each
 # with the message of its refusal: each sends text that a public place shows, which the check does not read. `issue
 # artifact create` (its alias `new`) and `edit` upload Markdown and HTML documents, links and files (`[<file>[#<name>]
 # | <url>]...`, --attach, --body, --body-file). `label clone` copies the label names and descriptions of the source
@@ -3263,8 +3268,9 @@ GH_QUIET_COMMANDS: dict[str, str] = {
 # key and its armored text, which holds its user IDs ("Lists the GPG keys for a user. This information is accessible
 # by anyone", docs.github.com, "REST API endpoints for GPG keys", read 2026-11-27, its `name` and `raw_key`), and the
 # title of an SSH signing key: on 2026-11-27 an unauthenticated `GET users/sjawhar/ssh_signing_keys` gave each key's
-# `title`, and `GET users/sjawhar/keys`, the authentication keys, gave none. A call of a command GH_REFUSED_OPTIONS
-# names goes out where it sends none of that (gh_refusal_lifted).
+# `title`, and `GET users/sjawhar/keys`, the authentication keys, gave none. A call of one with gh's help flag on, which
+# prints the command's help and sends nothing, goes out, and so does a call of a command GH_REFUSED_OPTIONS names where
+# it sends none of that (gh_refusal_lifted).
 GH_ARTIFACT_REFUSAL = ("gh 2.106.0's preview `issue artifact` uploads documents and files the check does not read, so "
                        "the check refuses the call")
 GH_REFUSED_COMMANDS: dict[str, str] = {
@@ -3287,27 +3293,67 @@ GH_REFUSED_COMMANDS: dict[str, str] = {
 # The options, as GH_TEXT_COMMANDS gives them, of each refused command some of whose calls send nothing a public place
 # shows, which gh_refusal_lifted reads to let those calls go: `skill publish` with --dry-run or --fix on ("Validate
 # without publishing", "Auto-fix issues where possible without publishing", `gh skill publish --help`), and
-# `ssh-key add` of an authentication key, whose title only the account sees. shims/tests/test_gh_leak_terms.py
-# compares them with the gh on PATH.
+# `ssh-key add` of an authentication key, whose title only the account sees. With them it reads gh's help flag as gh
+# does (gh_help); for a refused command not here it reads each option as one that may take the next word as its value.
+# shims/tests/test_gh_leak_terms.py compares them with the gh on PATH.
 GH_REFUSED_OPTIONS: dict[str, tuple[str, str]] = {
     "skill publish": ("--tag", "--dry-run --fix --help"),
     "ssh-key add": ("-t/--title --type", "--help"),
 }
-# gh's own aliases of those commands, by the words of the command above each, and its top-level commands with theirs:
-# a first word that is none of them can be a gh alias of the user's (config.yml's `aliases`), which is read as the
-# command it expands to.
-GH_GROUP_ALIASES = {"agent": "agent-task", "agent-tasks": "agent-task", "agents": "agent-task", "skills": "skill"}
-GH_SUBCOMMAND_ALIASES = {
-    ("gist", "new"): "create", ("issue", "new"): "create", ("pr", "new"): "create", ("release", "new"): "create",
-    ("repo", "new"): "create", ("issue artifact", "new"): "create", ("repo autolink", "new"): "create",
+# gh 2.106.0's aliases of its commands, as the ALIASES section of `gh <command> --help` lists them: of a top-level
+# command (`gh cs` is `gh codespace`), and of a subcommand by the words of the command above it (`gh pr co` is `gh pr
+# checkout`). gh_command reads a call's words through them, so a call by an alias is judged as the command it names; an
+# alias missing here would be refused as a command no table names. shims/tests/test_gh_leak_terms.py compares them with
+# the gh on PATH.
+GH_GROUP_ALIASES = {
+    "a11y": "accessibility", "agent": "agent-task", "agent-tasks": "agent-task", "agents": "agent-task",
+    "at": "attestation", "cs": "codespace", "ext": "extension", "extensions": "extension", "rs": "ruleset",
+    "skills": "skill",
 }
-GH_COMMANDS = frozenset((
-    "agent", "agent-task", "agent-tasks", "agents", "alias", "api", "at", "attestation", "auth", "browse", "cache",
-    "codespace", "completion", "config", "copilot", "cs", "discussion", "event", "ext", "extension", "extensions",
-    "gist", "gpg-key", "help", "issue", "label", "licenses", "org", "pr", "preview", "project", "release", "repo",
-    "rs", "ruleset", "run", "search", "secret", "skill", "skills", "ssh-key", "status", "variable", "version",
-    "workflow",
-))
+GH_SUBCOMMAND_ALIASES = {
+    ("alias", "ls"): "list", ("cache", "ls"): "list", ("codespace", "ls"): "list", ("config", "ls"): "list",
+    ("discussion", "ls"): "list", ("event subscription", "ls"): "list", ("extension", "ls"): "list",
+    ("extension", "uninstall"): "remove", ("gist", "ls"): "list", ("gist", "new"): "create", ("gpg-key", "ls"): "list",
+    ("issue", "ls"): "list", ("issue", "new"): "create", ("issue artifact", "ls"): "list",
+    ("issue artifact", "new"): "create", ("label", "ls"): "list", ("org", "ls"): "list", ("pr", "co"): "checkout",
+    ("pr", "ls"): "list", ("pr", "new"): "create", ("project", "ls"): "list", ("release", "ls"): "list",
+    ("release", "new"): "create", ("repo", "ls"): "list", ("repo", "new"): "create", ("repo autolink", "ls"): "list",
+    ("repo autolink", "new"): "create", ("repo deploy-key", "ls"): "list", ("repo gitignore", "ls"): "list",
+    ("repo license", "ls"): "list", ("ruleset", "ls"): "list", ("run", "ls"): "list", ("secret", "ls"): "list",
+    ("secret", "remove"): "delete", ("skill", "add"): "install", ("skill", "ls"): "list", ("skill", "show"): "preview",
+    ("ssh-key", "ls"): "list", ("variable", "ls"): "list", ("variable", "remove"): "delete", ("workflow", "ls"): "list",
+}
+# gh 2.106.0's commands that `gh help` lists in no COMMANDS section, so the walk of shims/tests/test_gh_leak_terms.py
+# finds none of them, each that the check lets go with why, as GH_QUIET_COMMANDS gives it: the commands its source
+# hides (`Hidden: true`), the help topics it lists under HELP TOPICS, and the commands cobra adds, `help` and the
+# `__complete` and `__completeNoDesc` that the scripts of `gh completion` run. gh runs `send-telemetry` as a child of
+# itself, by its own path, past shims/gh (internal/telemetry SpawnSendTelemetry), and the official extension stubs `aw`,
+# `stack` and `webhook` (pkg/extensions/official.go), which offer to install an extension, are unknown commands until
+# they are sorted (dispatch://INFRA-4957, rulings on the tester's findings at 1c15219b, item 4): a call of one of those
+# four is refused. shims/tests/test_gh_leak_terms.py checks that the gh on PATH runs each command here.
+GH_HIDDEN_COMMANDS: dict[str, str] = {
+    "__complete": "read: prints the completions of a partial command line, which may read GitHub",
+    "__completeNoDesc": "read: prints the completions of a partial command line, which may read GitHub",
+    "accessibility": "local: prints a help topic",
+    "actions": "local: prints a help topic",
+    "attestation inspect": "local: prints what a Sigstore bundle on this machine holds",
+    "auth git-credential": "local: answers git's credential requests with the token stored on this machine",
+    "codespace select": "read: prints the name of a codespace the account chooses",
+    "credits": "read: shows the contributors of gh",
+    "environment": "local: prints a help topic",
+    "exit-codes": "local: prints a help topic",
+    "formatting": "local: prints a help topic",
+    "help": "local: prints the help of a command or a help topic",
+    "mintty": "local: prints a help topic",
+    "reference": "local: prints a help topic",
+    "repo credits": "read: shows the contributors of a repository",
+    "telemetry": "local: prints a help topic",
+    "version": "local: prints gh's version",
+}
+# The refusal of a call of a command that none of GH_TEXT_COMMANDS, GH_QUIET_COMMANDS, GH_REFUSED_COMMANDS and
+# GH_HIDDEN_COMMANDS names, that is no gh alias and no installed extension (gh_unknown).
+GH_UNKNOWN_REFUSAL = ("no table of the check names this command of gh, and it is no gh alias and no installed "
+                      "extension, so the check does not know what the call sends and refuses it")
 # The options whose value names a file whose text gh sends, `-` naming standard input. `--attach` names one too, before
 # a `#` (gh_split_file_arg), and gh_texts reads it so.
 GH_FILE_OPTIONS = frozenset(("--body-file", "--notes-file", "--from-file", "--recover", "--input"))
@@ -3823,10 +3869,10 @@ def gh_expand_alias(expansion: str, arguments: Sequence[str]) -> list[str] | Non
 
 
 def gh_next_command(arguments: Sequence[str]) -> tuple[str, list[str]] | None:
-    """cobra's reading of a command word in ARGUMENTS: the first word that is neither an option nor an option's value
-    (`gh -R o/r pr comment 1` and `gh pr -R o/r comment 1` are both `gh pr comment`), and the other words, which go on
-    to the command. As cobra's stripFlags does, an option written apart from any value, but --help and --version, is
-    taken to have its value in the next word."""
+    """cobra's reading of a command word in ARGUMENTS: the first word that is neither an option, an option's value nor
+    empty (`gh -R o/r pr comment 1` and `gh pr -R o/r comment 1` are both `gh pr comment`, and so is `gh pr '' comment
+    1`), and the other words, which go on to the command. As cobra's stripFlags does, an option written apart from any
+    value, but --help and --version, is taken to have its value in the next word, and an empty word is skipped."""
     index = 0
     while index < len(arguments):
         word = arguments[index]
@@ -3835,7 +3881,7 @@ def gh_next_command(arguments: Sequence[str]) -> tuple[str, list[str]] | None:
         if (word.startswith("-") and "=" not in word and word not in ("--help", "--version")
                 and (word.startswith("--") or len(word) == 2)):
             index += 2
-        elif word.startswith("-"):
+        elif not word or word.startswith("-"):
             index += 1
         else:
             return word, [*arguments[:index], *arguments[index + 1:]]
@@ -3844,9 +3890,9 @@ def gh_next_command(arguments: Sequence[str]) -> tuple[str, list[str]] | None:
 
 class GhUnjudgedError(Exception):
     """A gh call the check cannot judge, refused with TEXT_EXIT before gh runs (gh_check): one that may run an alias the
-    check cannot read (gh_alias_command), or a call of a command that sends text the check does not read
-    (GH_REFUSED_COMMANDS, gh_refuse). ARGS are the alias or command the call names and why it is refused, for an alias
-    with what to fix."""
+    check cannot read (gh_alias_command), a call of a command that sends text the check does not read
+    (GH_REFUSED_COMMANDS, gh_command), or a call of a command no table names (gh_unknown). ARGS are the alias or command
+    the call names and why it is refused, for an alias with what to fix."""
 
 
 def gh_unsplit(name: str, line: int, path: Path, error: ValueError, filled: bool) -> str:
@@ -3867,56 +3913,59 @@ def gh_unsplit(name: str, line: int, path: Path, error: ValueError, filled: bool
             "cannot judge a call through it: fix that line")
 
 
+def gh_commands() -> frozenset[str]:
+    """Each command the tables name (GH_TEXT_COMMANDS, `api` for ("api", ""); GH_QUIET_COMMANDS; GH_REFUSED_COMMANDS;
+    GH_HIDDEN_COMMANDS), by its words as gh names them, read from the tables at each call."""
+    return frozenset((*(" ".join(word for word in key if word) for key in GH_TEXT_COMMANDS), *GH_QUIET_COMMANDS,
+                      *GH_REFUSED_COMMANDS, *GH_HIDDEN_COMMANDS))
+
+
 def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
                depth: int = 0) -> tuple[str, str, list[str]] | None:
-    """(group, subcommand, the arguments the subcommand reads) of a gh call that can send text, after a gh alias; None
-    for any other call. GhUnjudgedError for a call the check cannot judge: one that may run an alias it cannot read
-    (gh_alias_command), and a call of a command GH_REFUSED_COMMANDS lists, whatever its target (gh_refuse)."""
+    """(group, subcommand, the arguments the subcommand reads) of a call of a GH_TEXT_COMMANDS command, after a gh
+    alias; None for any other call the check lets go: of a GH_QUIET_COMMANDS or GH_HIDDEN_COMMANDS command, of a group
+    with no subcommand (`gh pr`, whose help gh prints; `gh codespace ports`, which lists ports), of no command, and of a
+    refused command that gh_refusal_lifted lets go. The command is read word by word as cobra finds it
+    (gh_next_command), each word through gh's aliases of it (GH_GROUP_ALIASES, GH_SUBCOMMAND_ALIASES), until the tables
+    name it; a word that leaves it under no entry of the tables is a gh alias of the user's, of the first word (`co`) or
+    under a command (`gh alias set 'pr say' 'pr comment'`), which gh runs as what it expands to, or else a command no
+    table names (gh_alias_command, gh_unknown). Until 2026-11-17 only an alias of the first word was read, so `gh pr
+    say 11 --body …` went out unchecked; until the rulings on the tester's findings at 1c15219b (dispatch://INFRA-4957)
+    a command no table named went out unchecked. GhUnjudgedError for a call the check cannot judge: one that may run an
+    alias it cannot read (gh_alias_command), a call of a command GH_REFUSED_COMMANDS lists, whatever its target, refused
+    as the call writes it (`gh issue -R o/r artifact new 4` is `issue artifact create`, refused as `issue artifact
+    new`), and a call of a command no table names (gh_unknown)."""
     found = gh_next_command(arguments)
     if found is None:
         return None
-    first, rest = found
-    if first not in GH_COMMANDS:
-        return gh_alias_command(first, rest, environment, depth)
-    group = GH_GROUP_ALIASES.get(first, first)
-    if group == "api":
-        return group, "", rest
-    gh_refuse(first, group, rest)
-    found = gh_next_command(rest)
-    if found is None:
-        return None
-    word, rest = found
-    sub = GH_SUBCOMMAND_ALIASES.get((group, word), word)
-    if (group, sub) in GH_TEXT_COMMANDS:
-        return group, sub, rest
-    # An alias under a command (`gh alias set 'pr say' 'pr comment'`), which gh runs as what it expands to. Until
-    # 2026-11-17 only an alias of the first word was read, so `gh pr say 11 --body …` went out unchecked.
-    return gh_alias_command(f"{first} {word}", rest, environment, depth)
-
-
-def gh_refuse(typed: str, command: str, rest: Sequence[str]) -> None:
-    """GhUnjudgedError for a call of a command GH_REFUSED_COMMANDS lists, but for one gh_refusal_lifted lets go. COMMAND
-    is the call's command as gh names it so far, TYPED the same words as the call writes them, and REST the words after
-    them, from which the next word of the command is read while an entry of the table lies under COMMAND: `gh issue -R
-    o/r artifact new 4` is `issue artifact create`, refused as `issue artifact new`."""
-    while command not in GH_REFUSED_COMMANDS:
-        if not any(name.startswith(f"{command} ") for name in GH_REFUSED_COMMANDS):
-            return
+    typed, rest = found
+    commands = gh_commands()
+    command = GH_GROUP_ALIASES.get(typed, typed)
+    while command not in commands:
+        if not any(name.startswith(f"{command} ") for name in commands):
+            return gh_alias_command(typed, rest, environment, depth)
         found = gh_next_command(rest)
         if found is None:
-            return
+            return None
         word, rest = found
         typed, command = f"{typed} {word}", f"{command} {GH_SUBCOMMAND_ALIASES.get((command, word), word)}"
-    if not gh_refusal_lifted(command, rest):
+    if command in GH_REFUSED_COMMANDS:
+        if gh_refusal_lifted(command, rest):
+            return None
         raise GhUnjudgedError(typed, GH_REFUSED_COMMANDS[command])
+    group, _, sub = command.partition(" ")
+    return (group, sub, rest) if (group, sub) in GH_TEXT_COMMANDS else None
 
 
 def gh_refusal_lifted(command: str, rest: Sequence[str]) -> bool:
-    """Whether a call of the refused COMMAND, REST the words after the command's own, sends nothing a public place
-    shows, read with the command's options (GH_REFUSED_OPTIONS): `skill publish` with --dry-run or --fix on (gh_flag),
-    and `ssh-key add` whose last --type is `authentication`, or that gives none, gh's default. Any other --type, as
-    `signing` or a value gh refuses, keeps the refusal."""
+    """Whether a call of the refused COMMAND, REST the words of the call but the command's own, sends nothing a public
+    place shows: one with gh's help flag on (gh_help), read with the command's options where GH_REFUSED_OPTIONS gives
+    them; `skill publish` with --dry-run or --fix on (gh_flag); and `ssh-key add` whose last --type is
+    `authentication`, or that gives none, gh's default. Any other --type, as `signing` or a value gh refuses, keeps the
+    refusal."""
     table = GH_REFUSED_OPTIONS.get(command)
+    if gh_help(rest, gh_options(table) if table else None):
+        return True
     if table is None:
         return False
     read = gh_walk(rest, gh_options(table))
@@ -3929,24 +3978,107 @@ def gh_refusal_lifted(command: str, rest: Sequence[str]) -> bool:
     return False
 
 
+def gh_help(arguments: Sequence[str], options: Mapping[str, bool] | None) -> bool:
+    """Whether gh prints the command's help for ARGUMENTS, the words of a call but the command's own, and sends nothing:
+    cobra's Command.execute does where the root's persistent `--help` is on, the last one given winning, and where pflag
+    meets `-h` while the command gives no option that letter (pflag's ErrHelp, whatever follows). Read as pflag reads
+    them with the command's OPTIONS (gh_options), a help flag counts only where pflag reads an option: never as the
+    value an option before it takes (`--title --help`, `-th`), and never after an option OPTIONS does not give, which
+    may take the next word as its value. With OPTIONS None, for a command the check has no options of, every option but
+    `--help` is read so, and a bare `-h` as gh's own. Measured 2026-11-27 with gh 2.106.0: `gh ssh-key add k -h`, `gh
+    ssh-key add k --help=false -h` and `gh ssh-key add -h=false k` print the help, and `gh ssh-key add k --title
+    --help`, `gh ssh-key add k -th` and `gh ssh-key add k --help=false` run the command."""
+    on = False
+    # Where the word stands: where pflag reads an option ("option"), as the value of the option before it ("value"), or
+    # either ("either"), after an option the check does not know takes no value.
+    place = "option"
+    for word in arguments:
+        if place == "value":
+            place = "option"
+            continue
+        if word == "--":
+            break
+        if not word.startswith("-") or word == "-":
+            place = "option"
+            continue
+        name, attached, value = word.partition("=")
+        if name == "--help":
+            if place == "option":
+                on = value.lower() in ("1", "t", "true") if attached else True
+            place = "option"
+            continue
+        if word.startswith("--"):
+            takes = None if attached or options is None else options.get(name)
+            after = "option" if attached or takes is False else "value" if takes else "either"
+        elif options is None:
+            if name == "-h" and place == "option":
+                return True
+            after = "option" if name == "-h" else "either"
+        else:
+            after, helped = gh_help_letters(word[1:], options)
+            if helped and place == "option":
+                return True
+        place = after if place == "option" or after == "option" else "either"
+    return on
+
+
+def gh_help_letters(letters: str, options: Mapping[str, bool]) -> tuple[str, bool]:
+    """pflag's reading of the cluster of short options LETTERS (`dt` of `-dt`) with OPTIONS (gh_options), for gh_help:
+    where the next word stands ("option", or "value" where the last letter takes it, or "either" after a letter OPTIONS
+    does not give, which may take it), and whether pflag meets `h` among letters OPTIONS does not give (ErrHelp). A
+    letter's value is the rest of the cluster, after a `=` too (`-t=x`), where there is one."""
+    while letters:
+        name, letters = f"-{letters[0]}", letters[1:]
+        takes = options.get(name)
+        if takes is None:
+            return ("option", True) if name == "-h" else ("either", False)
+        if (len(letters) > 1 and letters[0] == "=") or (takes and letters):
+            return "option", False
+        if takes:
+            return "value", False
+    return "option", False
+
+
+def gh_extension(name: str, environment: Mapping[str, str]) -> bool:
+    """Whether the extension NAME is installed for gh, which then runs it as the top-level command NAME: an entry
+    `gh-NAME` in the `extensions` directory of gh's data directory (gh 2.106.0, pkg/cmd/extension/manager.go
+    Manager.list), which is XDG_DATA_HOME/gh, else ~/.local/share/gh under HOME (go-gh's config.DataDir)."""
+    data = environment.get("XDG_DATA_HOME")
+    directory = Path(data) / "gh" if data else Path(environment.get("HOME", "")) / ".local" / "share" / "gh"
+    return bool(name) and "/" not in name and os.path.lexists(directory / "extensions" / f"gh-{name}")
+
+
+def gh_unknown(name: str, rest: Sequence[str], environment: Mapping[str, str]) -> None:
+    """None for a call of NAME, the words of a command no table names that is no gh alias, REST the call's other words,
+    where it runs nothing that sends a text the check would have to read: an extension installed on this machine
+    (gh_extension), which sends its text with its own client and so is local (dispatch://INFRA-4957, rulings on the
+    tester's findings at 1c15219b, item 4), and a call with gh's help flag on (gh_help, OPTIONS None). GhUnjudgedError
+    for any other: the check does not know what the command sends (GH_UNKNOWN_REFUSAL)."""
+    if " " not in name and gh_extension(name, environment):
+        return None
+    if gh_help(rest, None):
+        return None
+    raise GhUnjudgedError(name, GH_UNKNOWN_REFUSAL)
+
+
 def gh_alias_command(name: str, rest: Sequence[str], environment: Mapping[str, str],
                      depth: int) -> tuple[str, str, list[str]] | None:
-    """gh_command of what the gh alias NAME runs with REST; None for no such alias, for a shell alias (`!…`), which
-    runs a shell whose own gh calls come back through shims/gh, for one whose `$N` REST does not fill, which goes to
-    gh, which refuses it itself (`not enough arguments for alias`), and past three aliases in a row. GhUnjudgedError,
+    """gh_command of what the gh alias NAME runs with REST; gh_unknown for no such alias; None for a shell alias (`!…`),
+    which runs a shell whose own gh calls come back through shims/gh, for one whose `$N` REST does not fill, which goes
+    to gh, which refuses it itself (`not enough arguments for alias`), and past three aliases in a row. GhUnjudgedError,
     refusing the call, where gh_aliases refuses config.yml and NAME stands in it (gh_alias_named), and where shlex
     cannot split NAME's expansion with REST in place of its `$N` (gh_expand_alias, which tests the `$N` first): only
     then is the expansion as config.yml holds it split on its own, to choose the refusal's message (gh_unsplit). gh
     splits an alias with google/shlex, which splits text Python's shlex refuses, a `#` beginning a comment there."""
-    if depth >= 3:
-        return None
     aliases = gh_aliases(gh_config_directory(environment) / "config.yml")
     if aliases.refused:
         if gh_alias_named(name, aliases.text):
             raise GhUnjudgedError(name, aliases.refused)
-        return None
+        return gh_unknown(name, rest, environment)
     found = aliases.expansions.get(name)
-    if found is None or found[0].startswith("!"):
+    if found is None:
+        return gh_unknown(name, rest, environment)
+    if depth >= 3 or found[0].startswith("!"):
         return None
     try:
         expanded = gh_expand_alias(found[0], rest)
@@ -4140,16 +4272,174 @@ def gh_argument_texts(group: str, sub: str, number: int, value: str) -> list[GhT
         if value == "-":
             return [GhText(option, value, path=value)]
         texts: list[GhText] = []
-        for path in sorted(glob.glob(value)) or [value]:
+        for path in gh_glob_paths(value):
             texts += [GhText(option, path, path=path), GhText(f"{option} name", text=os.path.basename(path))]
         return texts
     if (group, sub) == ("gist", "edit") and number == 2:
         return [GhText(option, value, path=value)]
     if (group, sub) in (("release", "create"), ("release", "upload")) and number >= 2:
-        # An asset: gh sends its file name and the label after a `#`. Its content is a build output, not text.
-        path, _, label = value.partition("#")
-        return [GhText(f"{option} name", text=os.path.basename(path)), GhText(f"{option} label", text=label)]
+        # An asset, `<file>[#<label>]`, as gh 2.106.0 reads it (pkg/cmd/release/shared/upload.go AssetsFromArgs): a
+        # value that holds a `#` is the file before its first `#`, unless that is its first character, with the label
+        # after it; any other is a pattern gh expands into files (gh_glob_paths). gh uploads each file's bytes, with its
+        # base name and the label (uploadAsset), and a release of a public repository shows them to anyone. Until the
+        # rulings on the tester's findings at 1c15219b (dispatch://INFRA-4957, item 3) the bytes went out unread.
+        index = value.find("#")
+        assets = ([(value[:index], value[index + 1:]) if index > 0 else (value, "")] if index >= 0
+                  else [(path, "") for path in gh_glob_paths(value)])
+        texts = []
+        for path, label in assets:
+            texts += [GhText(option, path, path=path), GhText(f"{option} name", text=os.path.basename(path)),
+                      GhText(f"{option} label", text=label)]
+        return texts
     return [GhText(option, text=value, is_name=(group, sub, option) in GH_NAME_TEXTS)]
+
+
+class GhBadPattern(ValueError):
+    """A file pattern that Go's path/filepath reads as malformed (ErrBadPattern), for which gh refuses the call."""
+
+
+def gh_glob_chunk(pattern: str) -> tuple[bool, str, str]:
+    """Go's scanChunk (path/filepath/match.go): whether PATTERN starts with a `*`, the chunk after its `*`s up to the
+    next `*` outside a character class, and the rest."""
+    star = pattern.startswith("*")
+    pattern = pattern.lstrip("*")
+    in_class = False
+    index = 0
+    while index < len(pattern):
+        character = pattern[index]
+        if character == "\\" and index + 1 < len(pattern):
+            index += 1
+        elif character == "[":
+            in_class = True
+        elif character == "]":
+            in_class = False
+        elif character == "*" and not in_class:
+            return star, pattern[:index], pattern[index:]
+        index += 1
+    return star, pattern, ""
+
+
+def gh_glob_escape(chunk: str) -> tuple[str, str]:
+    """Go's getEsc: the character that starts CHUNK, the bound of a class's range, a `\\` escaping it, and the rest;
+    GhBadPattern where there is none, it is a byte that is no UTF-8 (surrogateescape's U+DC80 to U+DCFF), or nothing
+    follows it."""
+    if not chunk or chunk[0] in "-]":
+        raise GhBadPattern(chunk)
+    if chunk[0] == "\\":
+        chunk = chunk[1:]
+        if not chunk:
+            raise GhBadPattern(chunk)
+    character, chunk = chunk[0], chunk[1:]
+    if not chunk or "\udc80" <= character <= "\udcff":
+        raise GhBadPattern(chunk)
+    return character, chunk
+
+
+def gh_glob_chunk_match(chunk: str, name: str) -> str | None:
+    """Go's matchChunk: the rest of NAME where CHUNK matches its start, else None; GhBadPattern for a CHUNK Go reads as
+    malformed, which is read to its end, after a failed match too."""
+    failed = False
+    while chunk:
+        failed = failed or not name
+        character = chunk[0]
+        if character == "[":
+            found = ""
+            if not failed:
+                found, name = name[0], name[1:]
+            chunk = chunk[1:]
+            negated = chunk.startswith("^")
+            if negated:
+                chunk = chunk[1:]
+            matched = False
+            ranges = 0
+            while True:
+                if chunk.startswith("]") and ranges:
+                    chunk = chunk[1:]
+                    break
+                low, chunk = gh_glob_escape(chunk)
+                high = low
+                if chunk[0] == "-":
+                    high, chunk = gh_glob_escape(chunk[1:])
+                matched = matched or low <= found <= high
+                ranges += 1
+            failed = failed or matched == negated
+        elif character == "?":
+            if not failed:
+                failed, name = name[0] == "/", name[1:]
+            chunk = chunk[1:]
+        else:
+            if character == "\\":
+                chunk = chunk[1:]
+                if not chunk:
+                    raise GhBadPattern(chunk)
+            if not failed:
+                failed, name = chunk[0] != name[0], name[1:]
+            chunk = chunk[1:]
+    return None if failed else name
+
+
+def gh_glob_match(pattern: str, name: str) -> bool:
+    """Go's filepath.Match on Linux: whether NAME matches all of PATTERN, whose `*` and `?` match no `/`, `[^…]` being a
+    class's complement and `\\` escaping the next character; GhBadPattern for a PATTERN Go reads as malformed."""
+    while pattern:
+        star, chunk, pattern = gh_glob_chunk(pattern)
+        if star and not chunk:
+            return "/" not in name
+        rest = gh_glob_chunk_match(chunk, name)
+        if rest is not None and (not rest or pattern):
+            name = rest
+            continue
+        if not star:
+            return False
+        for index in range(len(name)):
+            if name[index] == "/":
+                return False
+            rest = gh_glob_chunk_match(chunk, name[index + 1:])
+            if rest is not None and (pattern or not rest):
+                name = rest
+                break
+        else:
+            return False
+    return not name
+
+
+def gh_glob(pattern: str) -> list[str]:
+    """Go's filepath.Glob on Linux: PATTERN itself where it holds none of `*?[\\` and names something (os.Lstat), else
+    each path that matches it (gh_glob_match), a directory's names in sorted order and joined to it as filepath.Join
+    joins them, so `*` matches a name that begins with `.` too; GhBadPattern for a PATTERN Go reads as malformed."""
+    gh_glob_match(pattern, "")
+    if not any(character in pattern for character in "*?[\\"):
+        return [pattern] if os.path.lexists(pattern) else []
+    index = pattern.rfind("/")
+    directory, file = pattern[:index + 1], pattern[index + 1:]
+    directory = "." if not directory else directory if directory == "/" else directory[:-1]
+    if not any(character in directory for character in "*?[\\"):
+        return gh_glob_directory(directory, file)
+    if directory == pattern:
+        raise GhBadPattern(pattern)
+    return [path for found in gh_glob(directory) for path in gh_glob_directory(found, file)]
+
+
+def gh_glob_directory(directory: str, pattern: str) -> list[str]:
+    """Go's glob: each name in DIRECTORY that PATTERN matches, in sorted order, joined to DIRECTORY; none where
+    DIRECTORY is no directory or cannot be read."""
+    try:
+        if not stat.S_ISDIR(os.stat(directory).st_mode):
+            return []
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return []
+    return [os.path.normpath(os.path.join(directory, name)) for name in names if gh_glob_match(pattern, name)]
+
+
+def gh_glob_paths(pattern: str) -> list[str]:
+    """The files gh 2.106.0 takes for the file argument PATTERN of `gist create`, `release create` and `release upload`
+    (pkg/cmdutil/args.go GlobPaths, gh_glob); PATTERN itself where that gives none or Go reads it as malformed, for
+    which gh refuses the call, and which the check then reads as a path, as it reads any file (gh_contents)."""
+    try:
+        return gh_glob(pattern) or [pattern]
+    except GhBadPattern:
+        return [pattern]
 
 
 def gh_split_file_arg(value: str) -> tuple[str, str]:
@@ -5860,12 +6150,12 @@ def gh_refusal(name: str, reached: Sequence[GhTarget], matcher: TermMatcher | No
 def gh_check(arguments: Sequence[str]) -> int:
     """`gh -- ARGV…`: refuse a gh call that sends a listed term to anything not confirmed private (exit 3), whose text
     cannot be checked because the list cannot be read (exit 2), that names a file nobody can read (exit 4), that may
-    run a gh alias the check cannot read (exit 4), or that is of a command that sends text a public place shows and the
-    check does not read, as `issue artifact create` (exit 4, GH_REFUSED_COMMANDS); exit GH_STDIN_EXIT to ask for
-    standard input. Any other call exits 0 untouched, and the text of a call that reaches only private or internal
-    repositories is not checked, nor are their visibilities, nor the facts of the plain case (gh_plain_case), read
-    before a term is found. Outside the plain case a call that holds a listed term is one target read as public, as a
-    raw GraphQL mutation is.
+    run a gh alias the check cannot read (exit 4), that is of a command that sends text a public place shows and the
+    check does not read, as `issue artifact create` (exit 4, GH_REFUSED_COMMANDS), or that is of a command no table
+    names (exit 4, gh_unknown); exit GH_STDIN_EXIT to ask for standard input. Any other call exits 0 untouched, and the
+    text of a call that reaches only private or internal repositories is not checked, nor are their visibilities, nor
+    the facts of the plain case (gh_plain_case), read before a term is found. Outside the plain case a call that holds a
+    listed term is one target read as public, as a raw GraphQL mutation is.
 
     A call through a gh alias is read as the command it expands to. Where the check cannot read gh's aliases exactly,
     or cannot split what an alias runs, a call that may run one is refused with exit 4 before gh runs, the refusal

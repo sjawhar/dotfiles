@@ -227,26 +227,139 @@ gh_shim_is_write() {
     esac
     return 1
 }
-# gh_shim_may_send_text ARGV…: true when scripts/leak-terms-check must read this call, and it then
-# decides: a write (gh_shim_is_write), a first word that is not one of gh 2.106.0's own commands,
-# which can be an option before the command or a gh alias of the user's that the check expands, or a
-# command under which gh's config.yml may hold an alias (gh_shim_has_nested_alias). It may be wider
-# than the check's own table, never narrower (shims/tests/test_gh_leak_terms.py); a read never
-# starts the check.
+# gh_shim_may_send_text ARGV…: true when scripts/leak-terms-check must read this call, and it then decides: a write
+# (gh_shim_is_write), a first word that is not one of gh 2.106.0's own commands, which can be an option before the
+# command, a gh alias of the user's that the check expands, an installed extension or a command no table of the check
+# names, a command under which gh's config.yml may hold an alias (gh_shim_has_nested_alias), and any call of one of
+# those commands that gh_shim_is_quiet does not name, a verb gh does not have included: the check refuses a command
+# that no table of it names. It may be wider than the check's own tables, never narrower
+# (shims/tests/test_gh_leak_terms.py); a call gh_shim_is_quiet names never starts the check.
 gh_shim_may_send_text() {
     gh_shim_is_write "$@" && return 0
-    case "${1:-}" in
-        '' | --help | --version) return 1 ;;
+    (($#)) || return 1
+    case "$1" in
+        --help | --version) return 1 ;;
         agent | agent-task | agent-tasks | agents | alias | api | at | attestation \
             | auth | browse | cache | codespace | completion | config | copilot | cs | discussion | event | ext \
             | extension | extensions | gist | gpg-key | help | issue | label | licenses | org | pr | preview \
             | project | release | repo | rs | ruleset | run | search | secret | skill | skills | ssh-key \
             | status | variable | version | workflow)
-            gh_shim_has_nested_alias "$1"
+            gh_shim_has_nested_alias "$1" && return 0
+            ! gh_shim_is_quiet "$@"
             return
             ;;
     esac
     return 0
+}
+# gh_shim_is_quiet ARGV…: true when the call names a group of gh's alone, whose help gh prints; `gh api`, whose writes
+# gh_shim_is_write tells apart; or one of the one- and two-word commands of gh 2.106.0 that scripts/leak-terms-check
+# lets go whatever the call gives (GH_QUIET_COMMANDS, GH_HIDDEN_COMMANDS), by its words or by gh's aliases of them.
+# Its command and verb are found as gh_shim_is_write finds them, an empty word skipped as cobra skips it. Any other
+# call goes to the check, which refuses a command no table of it names: until the rulings on the tester's findings at
+# 1c15219b (dispatch://INFRA-4957, item 2) every call that was no write passed here unread, and a command gh added went
+# to gh unchecked. shims/tests/test_gh_leak_terms.py checks that the check lets go each call this names.
+gh_shim_is_quiet() {
+    local a group="" verb="" skip=0
+    for a in "$@"; do
+        if ((skip)); then
+            skip=0
+            continue
+        fi
+        case "$a" in
+            --) break ;;
+            '' | --help | --version | -*=*) ;;
+            --* | -?) skip=1 ;;
+            -*) ;;
+            *)
+                if [[ -z "$group" ]]; then
+                    group="$a"
+                else
+                    verb="$a"
+                    break
+                fi
+                ;;
+        esac
+    done
+    case "$group" in
+        agent | agent-tasks | agents) group=agent-task ;;
+        at) group=attestation ;;
+        cs) group=codespace ;;
+        ext | extensions) group=extension ;;
+        rs) group=ruleset ;;
+        skills) group=skill ;;
+    esac
+    case "$group" in
+        api | browse | completion | copilot | help | licenses | status | version) return 0 ;;
+    esac
+    [[ -n "$verb" ]] || return 0
+    case "$group" in
+        agent-task) case "$verb" in list | view) return 0 ;; esac ;;
+        alias) case "$verb" in delete | import | list | ls | set) return 0 ;; esac ;;
+        attestation) case "$verb" in download | inspect | trusted-root | verify) return 0 ;; esac ;;
+        auth)
+            case "$verb" in
+                git-credential | login | logout | refresh | setup-git | status | switch | token) return 0 ;;
+            esac
+            ;;
+        cache) case "$verb" in delete | list | ls) return 0 ;; esac ;;
+        codespace)
+            case "$verb" in
+                code | cp | create | delete | edit | jupyter | list | logs | ls | rebuild | select | ssh | stop \
+                    | view) return 0 ;;
+            esac
+            ;;
+        config) case "$verb" in clear-cache | get | list | ls | set) return 0 ;; esac ;;
+        discussion) case "$verb" in list | ls | view) return 0 ;; esac ;;
+        event) case "$verb" in listen) return 0 ;; esac ;;
+        extension)
+            case "$verb" in
+                browse | create | exec | install | list | ls | remove | search | uninstall | upgrade) return 0 ;;
+            esac
+            ;;
+        gist) case "$verb" in clone | delete | list | ls | view) return 0 ;; esac ;;
+        gpg-key) case "$verb" in delete | list | ls) return 0 ;; esac ;;
+        issue)
+            case "$verb" in
+                delete | list | lock | ls | pin | status | transfer | unlock | unpin | view) return 0 ;;
+            esac
+            ;;
+        label) case "$verb" in delete | list | ls) return 0 ;; esac ;;
+        org) case "$verb" in list | ls) return 0 ;; esac ;;
+        pr)
+            case "$verb" in
+                checkout | checks | co | diff | list | lock | ls | ready | status | unlock | update-branch | view)
+                    return 0
+                    ;;
+            esac
+            ;;
+        preview) case "$verb" in prompter) return 0 ;; esac ;;
+        project)
+            case "$verb" in
+                close | delete | field-delete | field-list | item-add | item-archive | item-delete | item-list | link \
+                    | list | ls | mark-template | unlink | view) return 0 ;;
+            esac
+            ;;
+        release)
+            case "$verb" in
+                delete | delete-asset | download | list | ls | verify | verify-asset | view) return 0 ;;
+            esac
+            ;;
+        repo)
+            case "$verb" in
+                archive | clone | credits | delete | list | ls | read-dir | read-file | set-default | sync | unarchive \
+                    | view) return 0 ;;
+            esac
+            ;;
+        ruleset) case "$verb" in check | list | ls | view) return 0 ;; esac ;;
+        run) case "$verb" in cancel | delete | download | list | ls | rerun | view | watch) return 0 ;; esac ;;
+        search) case "$verb" in code | commits | issues | prs | repos) return 0 ;; esac ;;
+        secret) case "$verb" in delete | list | ls | remove | set) return 0 ;; esac ;;
+        skill) case "$verb" in add | install | list | ls | preview | search | show | update) return 0 ;; esac ;;
+        ssh-key) case "$verb" in delete | list | ls) return 0 ;; esac ;;
+        variable) case "$verb" in delete | get | list | ls | remove | set) return 0 ;; esac ;;
+        workflow) case "$verb" in disable | enable | list | ls | view) return 0 ;; esac ;;
+    esac
+    return 1
 }
 # gh_shim_has_nested_alias COMMAND: true when gh's config.yml (in gh's own config dir) may hold an
 # alias under COMMAND, such as `gh alias set 'pr say' 'pr comment'`, which gh runs as what it
@@ -331,10 +444,12 @@ gh_shim_stdin_to_gh() {
 # left to the checks. A read or write error, or more than 64 MiB, refuses the call.
 gh_shim_buffer_fds() {
     local max=$((64 * 1024 * 1024)) option fd_path stdin_path a name fd key value flags buffer w size
-    # The path is the whole argument, or follows a short option (`-F/dev/fd/63`), a long one's `=`, or a field's `=@`.
+    # The path is the whole argument, or follows a short option (`-F/dev/fd/63`), a long one's `=`, or a field's `=@`;
+    # after it, a `#` may begin the alt text of an --attach file or the label of a release asset (`--attach <(…)#alt`),
+    # which gh splits from the path it reads (gh 2.106.0's SplitFileArg and AssetsFromArgs).
     option='^(-[A-Za-z]+|--[A-Za-z][A-Za-z0-9-]*=|.*=@)?'
-    fd_path="$option"'(/dev/fd/|/proc/self/fd/)(0|[1-9][0-9]*)$'
-    stdin_path="$option"'/dev/stdin$'
+    fd_path="$option"'(/dev/fd/|/proc/self/fd/)(0|[1-9][0-9]*)(#.*)?$'
+    stdin_path="$option"'/dev/stdin(#.*)?$'
     for a in "$@"; do
         if [[ "$a" =~ $fd_path ]]; then
             name="${BASH_REMATCH[2]}${BASH_REMATCH[3]}" fd="${BASH_REMATCH[3]}"

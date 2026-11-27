@@ -23,6 +23,7 @@ import tempfile
 import unittest
 from collections.abc import Callable
 from pathlib import Path
+from unittest import mock
 
 from leak_terms_fixture import (ALLOWED_TEST_TOKENS, REGISTRY_TEST_TERMS, SCOPED_TEST_TERMS, TEST_TERMS,
                                 fixture_environment)
@@ -261,6 +262,22 @@ class GhLeakTerms(unittest.TestCase):
         self.assertIn(f"leak terms: gh {name}: refused before gh ran, so nothing was sent.", stderr)
         self.setUp_calls()
         result = self.run_gh(argv)
+        self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
+        self.assertEqual(self.gh_calls(), [])
+
+    def assert_unknown_refused(self, argv: list[str], name: str, env: dict[str, str]) -> None:
+        """The call ARGV, with ENV, of NAME, a command that no table of the check names and that config.yml holds no
+        alias of, is refused before gh runs as a command no table names (gh_unknown), and not for gh's config.yml: the
+        check exits 4 naming NAME, its refusal saying nothing of config.yml; and through shims/gh the call exits 2 and
+        gh never runs. gh's data directory, where an installed extension would stand, is an empty one of the test's."""
+        env = {**env, "XDG_DATA_HOME": str(self.tmp / "data")}
+        checked = self.check(argv, env)
+        stderr = checked.stderr.decode("utf-8", "replace")
+        self.assertEqual(checked.returncode, 4, stderr)
+        self.assertIn(f"leak terms: gh {name}: {self.UNKNOWN}\n", stderr)
+        self.assertNotIn("config.yml", stderr)
+        self.setUp_calls()
+        result = self.run_gh(argv, env=env)
         self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
         self.assertEqual(self.gh_calls(), [])
 
@@ -2179,9 +2196,10 @@ class GhLeakTerms(unittest.TestCase):
         # sends a listed term to a public repository, and `pi`, a clean comment to a private one. One such form gh
         # writes itself: the `? |` key of a name that ends with a line feed, as `gh alias set $'trail\n' 'pr view'`
         # wrote it after `co`, `pp` and `pi` (measured 2026-11-20 with gh 2.98.0; the key stays so through later
-        # writes). The others gh does not write. Beside each, a call that runs no alias is judged as any
-        # call: a clean `pr comment` to a public repository, `pr view 1`, and `zz 1`, a name that stands nowhere in
-        # config.yml, go out, and the same comment with a term is refused for the term.
+        # writes). The others gh does not write. Beside each, a call that runs no alias is judged as any call: a clean
+        # `pr comment` to a public repository and `pr view 1` go out, `zz 1`, a name that stands nowhere in config.yml
+        # and that no table of the check names, is refused as such a command and not for config.yml, and the same
+        # comment with a term is refused for the term.
         pp = f"pp: issue comment 1 -R {PUBLIC} --body {CANARY}"
         pi = f"pi: issue comment 1 -R {PRIVATE} --body clean"
         rows = (
@@ -2225,10 +2243,12 @@ class GhLeakTerms(unittest.TestCase):
             for argv in (["co", "1"], ["pp"], ["pi"]):
                 with self.subTest(row=row, call=" ".join(argv)):
                     self.assert_alias_refused(argv, env, f"leak terms: gh {argv[0]}: {shown}")
-            for argv in (["pr", "comment", "1", "-R", PUBLIC, "--body", "hello"], ["pr", "view", "1"], ["zz", "1"]):
+            for argv in (["pr", "comment", "1", "-R", PUBLIC, "--body", "hello"], ["pr", "view", "1"]):
                 with self.subTest(row=row, call=" ".join(argv), control="no alias"):
                     self.setUp_calls()
                     self.assert_sent(self.run_gh(argv, env=env), argv)
+            with self.subTest(row=row, call="zz 1", control="no alias"):
+                self.assert_unknown_refused(["zz", "1"], "zz", env)
             with self.subTest(row=row, call="pr comment", term=True):
                 self.setUp_calls()
                 self.assert_refused(self.run_gh(["pr", "comment", "1", "-R", PUBLIC, "--body", TEXT], env=env),
@@ -2262,8 +2282,9 @@ class GhLeakTerms(unittest.TestCase):
         # `gh alias set $'cr\r' …` wrote `    ? "cr\r"`, then `    : …`; gh ran `gh pr say`, `gh lead`, `gh trail`
         # and `gh cr` as those aliases. Such a key is a form the reader does not read (gh_aliases), and its name
         # stands in config.yml before a `:` with the escape before or after it (gh_alias_named), so each call through
-        # it is refused with exit 4, the refusal naming the line. Control: a flow mapping with only a key past 128
-        # bytes, which gh writes after `? ` too and the reader reads, sends `gh pr say` and `gh trail` to gh.
+        # it is refused with exit 4, the refusal naming the line. Control: with a flow mapping that holds only a key
+        # past 128 bytes, which gh writes after `? ` too and the reader reads, `gh pr say` and `gh trail` run no alias,
+        # and are refused as commands no table of the check names, not for config.yml.
         for number, (row, aliases, argv, line) in enumerate((
                 ('flow, `? "pr say\\n"`', f' {{? "pr say\\n" : issue comment 1 -R {PUBLIC}}}', ["pr", "say"], 7),
                 ('flow, `? "\\nlead"`', f' {{? "\\nlead" : issue comment 1 -R {PUBLIC}}}', ["lead"], 7),
@@ -2276,10 +2297,9 @@ class GhLeakTerms(unittest.TestCase):
                     f"leak terms: gh {' '.join(argv)}: {env['GH_CONFIG_DIR']}/config.yml holds an alias key that holds "
                     f"a line break on line {line}, a form the check does not read"))
         env = self.gh_config("break-key-control", None, gh_config_yml(f" {{? pr {'x' * 130} : pr comment}}"))
-        for argv in (["pr", "say", "--body", "x"], ["trail", "--body", "x"]):
+        for argv, name in ((["pr", "say", "--body", "x"], "pr say"), (["trail", "--body", "x"], "trail")):
             with self.subTest(control="a key past 128 bytes alone", call=argv[0]):
-                self.setUp_calls()
-                self.assert_sent(self.run_gh(argv, env=env), argv)
+                self.assert_unknown_refused(argv, name, env)
 
     def test_the_files_and_standard_input_of_a_call_through_an_alias_are_read(self) -> None:
         # A call through an alias has its files and standard input read as any call does (gh_contents): a
@@ -2383,7 +2403,8 @@ class GhLeakTerms(unittest.TestCase):
         # lists `pp`. `gh pp` is refused with a term and without one, and so it is with a paragraph separator, a next
         # line or a carriage return there, which gh reads as breaks too, though it writes those two as escapes; a clean
         # `pr comment` and `pr view 1`, which run no alias, go out. An alias name stands there only whole: `s`, which
-        # ends `aliases:`, and `tor`, which ends `editor:`, are no alias, so `gh s x` and `gh tor x` go out to gh too.
+        # ends `aliases:`, and `tor`, which ends `editor:`, are no alias, so `gh s x` and `gh tor x` are refused as
+        # commands no table of the check names, not for config.yml.
         # `pp` is refused too after a line that holds only a separator, and where a separator hides the aliases key
         # itself (`editor: vim<U+2028>aliases:`, under which `gh alias list` lists `pp`); and so is `sq`, a
         # single-quoted value holding a separator as gh writes it.
@@ -2398,11 +2419,13 @@ class GhLeakTerms(unittest.TestCase):
                     self.assert_alias_refused(["pp"], env, f"leak terms: gh pp: {env['GH_CONFIG_DIR']}/config.yml "
                                                            f"holds a {shown} on line 11, a line break other than a "
                                                            "line feed")
-            for argv in (["pr", "comment", "1", "-R", PUBLIC, "--body", "hello"], ["pr", "view", "1"], ["s", "x"],
-                         ["tor", "x"]):
+            for argv in (["pr", "comment", "1", "-R", PUBLIC, "--body", "hello"], ["pr", "view", "1"]):
                 with self.subTest(separator=shown, call=" ".join(argv[:2])):
                     self.setUp_calls()
                     self.assert_sent(self.run_gh(argv, env=env), argv)
+            for argv in (["s", "x"], ["tor", "x"]):
+                with self.subTest(separator=shown, call=" ".join(argv)):
+                    self.assert_unknown_refused(argv, argv[0], env)
         pp = f"pp: issue comment 1 -R {PUBLIC} --body {CANARY}"
         for number, (row, config, name, line) in enumerate((
                 ("after a line that holds only a line separator",
@@ -3256,6 +3279,107 @@ class GhLeakTerms(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, stderr)
                     self.assertEqual(len(self.gh_calls()), 1)
 
+    # --- a command no table names, and a release's assets (dispatch://INFRA-4957, items 2 to 4) -----------------------
+
+    UNKNOWN = ("no table of the check names this command of gh, and it is no gh alias and no installed extension, so "
+               "the check does not know what the call sends and refuses it")
+
+    def test_a_command_no_table_names_is_refused_and_its_help_goes_out(self) -> None:
+        # A command that none of the check's tables names, that is no gh alias and no installed extension, is refused
+        # before gh runs, the refusal naming it: a verb gh does not have under a group, under a group's alias and under
+        # a group of a group, a top-level name gh does not have, and the official extension stubs `aw`, `stack` and
+        # `webhook`, which stay unknown until a table sorts them. shims/gh hands each to the check, though none is a
+        # write. With `--help` or `-h`, which gh reads as its help flag, each goes to gh, which prints help and sends
+        # nothing. Controls: a `--help` that an option before it may take as its value does not count; quiet commands,
+        # by gh's aliases too, a group alone, `gh help`, `gh version` and git's credential helper go out. gh's data
+        # directory, where an installed extension would stand, is an empty one of the test's.
+        self.env["XDG_DATA_HOME"] = str(self.tmp / "data")
+        for name, argv in (("pr bogus", ["pr", "bogus", "1"]), ("pr bogus", ["pr", "-R", PRIVATE, "bogus"]),
+                           ("cs bogus", ["cs", "bogus"]), ("issue artifact bogus", ["issue", "artifact", "bogus", "4"]),
+                           ("no-such-command", ["no-such-command", "x"]), ("aw", ["aw"]), ("stack", ["stack", "push"]),
+                           ("webhook", ["webhook", "forward"])):
+            with self.subTest(call=" ".join(argv)):
+                self.assert_command_refused(argv, name, self.UNKNOWN)
+            for flag in ("--help", "-h"):
+                with self.subTest(call=" ".join(argv), help=flag):
+                    self.setUp_calls()
+                    self.assert_sent(self.run_gh([*argv, flag]), [*argv, flag])
+        with self.subTest(control="--help as the value of an option"):
+            self.assert_command_refused(["pr", "bogus", "--title", "--help"], "pr bogus", self.UNKNOWN)
+        for argv in (["release", "list", "-R", PUBLIC], ["release", "ls", "-R", PUBLIC], ["pr", "co", "1"],
+                     ["cs", "ls"], ["issue", "artifact", "ls", "4", "-R", PUBLIC], ["pr"], ["help", "pr", "comment"],
+                     ["version"], ["auth", "git-credential", "get"]):
+            with self.subTest(control=" ".join(argv)):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+
+    def test_an_installed_extension_goes_out_and_an_extension_stub_is_refused(self) -> None:
+        # gh runs an installed extension, `gh-NAME` in the `extensions` directory of its data directory, as the
+        # top-level command NAME, in place of gh's own stub of that name. An extension sends its text with its own
+        # client, so it is local (item 4): a call of it goes out. Control: with no such extension, `stack` is gh's
+        # official extension stub, a command no table names, and is refused. gh's data directory is ~/.local/share/gh
+        # under the test's HOME, and XDG_DATA_HOME/gh where that is set.
+        self.env.pop("XDG_DATA_HOME", None)
+        argv = ["stack", "push", "--title", TEXT.strip()]
+        self.assert_command_refused(argv, "stack", self.UNKNOWN)
+        (self.tmp / "home" / ".local" / "share" / "gh" / "extensions" / "gh-stack").mkdir(parents=True)
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+        # Under XDG_DATA_HOME the same call is refused until the extension stands there too.
+        env = {**self.env, "XDG_DATA_HOME": str(self.tmp / "data")}
+        self.setUp_calls()
+        self.assertEqual(self.run_gh(argv, env=env).returncode, 2)
+        self.assertEqual(self.gh_calls(), [])
+        (self.tmp / "data" / "gh" / "extensions" / "gh-stack").mkdir(parents=True)
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv, env=env), argv)
+
+    def test_a_term_in_a_release_asset_is_refused_for_a_public_repository(self) -> None:
+        # gh 2.106.0 uploads each asset file of `release upload` and `release create`, `<file>[#<label>]`
+        # (pkg/cmd/release/shared/upload.go AssetsFromArgs and uploadAsset): a value that holds a `#` is the file before
+        # its first `#`, with the label after it; any other is a pattern Go's filepath.Glob expands (pkg/cmdutil/args.go
+        # GlobPaths), whose `*` matches a name that begins with `.` and whose `[^…]` is a class's complement. A release
+        # of a public repository shows each asset to anyone, so the check reads its bytes as it reads an --attach file.
+        # Each asset holds the term, and each call to a public repository is refused, naming the file as gh takes it.
+        # Controls: the same calls with clean files go out, and so do the files with the term to a private repository.
+        (self.work / "dist").mkdir()
+
+        def calls(repo: str) -> list[tuple[str, list[str], str]]:
+            return [
+                ("upload FILE", ["release", "upload", "v1", "notes.txt", "-R", repo], "argument 2 notes.txt"),
+                ("upload 'FILE#label'", ["release", "upload", "v1", "-R", repo, "--clobber", "notes.txt#Release notes"],
+                 "argument 2 notes.txt"),
+                ("upload PATTERN, `*` before a `.`", ["release", "upload", "v1", "dist/*", "-R", repo],
+                 "argument 2 dist/.notes.txt"),
+                ("create TAG FILE", ["release", "create", "v1", "notes.txt", "-R", repo, "--notes", "x"],
+                 "argument 2 notes.txt"),
+                ("create TAG PATTERN, `[^…]`", ["release", "create", "v1", "-R", repo, "--notes", "x",
+                                                "dist/[^x]notes.txt"], "argument 2 dist/.notes.txt"),
+            ]
+
+        for text, repo, refused in ((TEXT, PUBLIC, True), (CLEAN, PUBLIC, False), (TEXT, PRIVATE, False)):
+            self.file("notes.txt", text)
+            self.file("dist/.notes.txt", text)
+            for name, argv, field in calls(repo):
+                with self.subTest(form=name, repo=repo, term=text == TEXT):
+                    self.setUp_calls()
+                    if refused:
+                        self.assert_refused(self.run_gh(argv), field, line=1)
+                    else:
+                        self.assert_sent(self.run_gh(argv), argv)
+        # An asset named by its descriptor and a label (`<(…)#label`), which the shim buffers as it buffers an --attach
+        # file named so: the term in it is refused, and the clean file goes out.
+        for text, refused in ((TEXT, True), (CLEAN, False)):
+            with self.subTest(form="upload <(…)#label", term=refused):
+                self.setUp_calls()
+                result = subprocess.run(
+                    ["bash", "-c", '"$GH" release upload v1 -R "$REPO" <(printf %s "$BODY")#notes'],
+                    env={**self.env, "GH": str(GH), "REPO": PUBLIC, "BODY": text}, cwd=self.work,
+                    stdin=subprocess.DEVNULL, capture_output=True, timeout=240, check=False)
+                stderr = result.stderr.decode("utf-8", "replace")
+                self.assertEqual(result.returncode, 2 if refused else 0, stderr)
+                self.assertEqual(len(self.gh_calls()), 0 if refused else 1)
+
     # --- what a refusal shows (dispatch://INFRA-4383, R2) -----------------------------------------------------------
 
     def test_a_refusal_shows_the_term_and_a_bounded_line(self) -> None:
@@ -3479,6 +3603,168 @@ class Tables(unittest.TestCase):
                     out = subprocess.run(["bash", "-c", script], env={**os.environ, "GH_CONFIG_DIR": config},
                                          capture_output=True, text=True, timeout=60).stdout
                     self.assertEqual(out.strip(), "yes")
+
+    def test_a_command_taken_out_of_every_table_is_refused_at_run_time(self) -> None:
+        # The check reads its tables as it runs (gh_command), so they are the list of what passes
+        # (dispatch://INFRA-4957, rulings on the tester's findings at 1c15219b, item 2, and its control): a command
+        # taken out of every table is refused as one no table names, a quiet one, a hidden one and one whose text the
+        # check reads alike, and with the tables as they are the same calls are judged as before.
+        module = self.scanner()
+        with tempfile.TemporaryDirectory() as home:
+            env = {"GH_CONFIG_DIR": home, "HOME": home}
+            for table, key, argv, judged in (
+                    (module.GH_QUIET_COMMANDS, "release list", ["release", "list", "-R", "o/pub"], None),
+                    (module.GH_HIDDEN_COMMANDS, "auth git-credential", ["auth", "git-credential", "get"], None),
+                    (module.GH_TEXT_COMMANDS, ("pr", "comment"), ["pr", "comment", "1", "--body", "x"],
+                     ("pr", "comment", ["1", "--body", "x"]))):
+                with self.subTest(command=" ".join(argv[:2])):
+                    self.assertEqual(module.gh_command(argv, env), judged)
+                    with mock.patch.dict(table):
+                        del table[key]
+                        with self.assertRaises(module.GhUnjudgedError) as raised:
+                            module.gh_command(argv, env)
+                    self.assertEqual(raised.exception.args, (" ".join(argv[:2]), module.GH_UNKNOWN_REFUSAL))
+                    self.assertEqual(module.gh_command(argv, env), judged)
+
+    def test_gh_s_aliases_are_the_installed_gh_s_own(self) -> None:
+        # gh_command reads a call's words through gh's aliases (GH_GROUP_ALIASES, GH_SUBCOMMAND_ALIASES) and refuses an
+        # alias it does not know as a command no table names, so the tables hold exactly the aliases of the gh on PATH.
+        # Each command's help lists its aliases in its ALIASES section, written out with each spelling of the words
+        # above it (`gh codespace ls, gh cs ls`), a hidden command's too (`gh a11y`). The walk is that of
+        # test_every_command_of_the_installed_gh_is_in_exactly_one_table, from `gh` and from each hidden command, with
+        # a config directory that holds no alias of the user's.
+        gh = self.real_gh()
+        if gh is None:
+            self.skipTest("no gh on PATH")
+        module = self.scanner()
+        entry = re.compile(r"^\s+([^\s:]+):\s")
+        groups: dict[str, str] = {}
+        subcommands: dict[tuple[str, str], str] = {}
+        pending: list[list[str]] = [[], *(name.split() for name in module.GH_HIDDEN_COMMANDS)]
+        walked = 0
+        with tempfile.TemporaryDirectory() as config:
+            while pending:
+                words = pending.pop()
+                walked += 1
+                text = subprocess.run([gh, "help", *words], capture_output=True, text=True, check=True, timeout=60,
+                                      env={**os.environ, "GH_CONFIG_DIR": config}).stdout
+                section, found = "", []
+                for help_line in text.splitlines():
+                    if help_line and not help_line.startswith(" "):
+                        section = help_line.strip()
+                    elif (section.endswith("COMMANDS") and section not in ("ALIAS COMMANDS", "EXTENSION COMMANDS")
+                          and (m := entry.match(help_line))):
+                        found.append(m[1])
+                    elif section == "ALIASES" and help_line.strip():
+                        for spelled in help_line.split(","):
+                            alias = spelled.split()[-1]
+                            if len(words) == 1:
+                                groups[alias] = words[0]
+                            else:
+                                subcommands[(" ".join(words[:-1]), alias)] = words[-1]
+                pending.extend([*words, sub] for sub in found)
+        self.assertGreater(walked, 200, "the walk read too few commands to compare the aliases")
+        self.assertEqual(groups, module.GH_GROUP_ALIASES)
+        self.assertEqual(subcommands, module.GH_SUBCOMMAND_ALIASES)
+
+    def test_each_hidden_command_is_one_the_installed_gh_runs(self) -> None:
+        # GH_HIDDEN_COMMANDS lets go gh's commands that `gh help` lists in no COMMANDS section, which the walk of
+        # test_every_command_of_the_installed_gh_is_in_exactly_one_table cannot find, so each must be a command of the
+        # gh on PATH: `gh <words> --help` exits 0, where gh refuses a top-level word it does not have (`unknown
+        # command`), and for two words prints a usage that begins with them, where for a verb it does not have it prints
+        # the group's own. Each is in no other table, and git's credential helper, gh's help and version, and the
+        # completion scripts' command are among them. Control: words gh does not have fail the same probe. The probe
+        # runs no extension stub, which installs its extension on `--help`.
+        gh = self.real_gh()
+        if gh is None:
+            self.skipTest("no gh on PATH")
+        module = self.scanner()
+        with tempfile.TemporaryDirectory() as config:
+            env = {key: value for key, value in os.environ.items() if key not in ("GH_TOKEN", "GITHUB_TOKEN")}
+            env["GH_CONFIG_DIR"] = config
+
+            def runs(words: list[str]) -> bool:
+                done = subprocess.run([gh, *words, "--help"], capture_output=True, text=True, timeout=60, env=env,
+                                      stdin=subprocess.DEVNULL, check=False)
+                if done.returncode != 0 or "unknown command" in done.stderr:
+                    return False
+                lines = done.stdout.splitlines()
+                usage = lines[lines.index("USAGE") + 1].split() if "USAGE" in lines[:-1] else []
+                return len(words) == 1 or usage[:len(words) + 1] == ["gh", *words]
+
+            for name in module.GH_HIDDEN_COMMANDS:
+                with self.subTest(command=name):
+                    self.assertTrue(runs(name.split()), name)
+            for words in (["no-such-command"], ["auth", "no-such-command"]):
+                with self.subTest(control=" ".join(words)):
+                    self.assertFalse(runs(words))
+        listed = ({" ".join(word for word in key if word) for key in module.GH_TEXT_COMMANDS}
+                  | set(module.GH_QUIET_COMMANDS) | set(module.GH_REFUSED_COMMANDS))
+        self.assertEqual(listed & set(module.GH_HIDDEN_COMMANDS), set())
+        self.assertLessEqual({"auth git-credential", "help", "version", "__complete", "__completeNoDesc"},
+                             set(module.GH_HIDDEN_COMMANDS))
+
+    def test_the_shim_lets_a_call_go_unread_only_where_the_check_lets_it_go(self) -> None:
+        # shims/gh starts the check for every call but those gh_shim_is_quiet names. Until the rulings on the tester's
+        # findings at 1c15219b (dispatch://INFRA-4957, item 2) it let every call that was no write go unread, so a
+        # command in none of the check's tables went to gh unchecked. A call the shim does not hand to the check must be
+        # one the check lets go (gh_check exits 0), for each command the tables name, by its words and by gh's aliases
+        # of them, and for each pair of a top-level word the shim knows and a word gh_shim_is_quiet holds, so a verb the
+        # shim lets go that the check does not know is found too. Controls: a verb gh does not have, under a group, a
+        # group's alias, a group of a group and after an empty word, a top-level name gh does not have, after an empty
+        # word too, and an official extension stub are handed to the check; the reads agents run most, git's credential
+        # helper, `gh help` and `gh version` are not.
+        module = self.scanner()
+        text = GH.read_text(encoding="utf-8")
+        functions = ""
+        for name in ("gh_shim_is_write", "gh_shim_may_send_text", "gh_shim_is_quiet", "gh_shim_has_nested_alias"):
+            start = text.index(f"{name}() {{")
+            functions += text[start:text.index("\n}\n", start) + 3]
+        calls: set[tuple[str, ...]] = set()
+        for name in module.gh_commands():
+            words = name.split()
+            spellings = [words, *([alias, *words[1:]] for alias, group in module.GH_GROUP_ALIASES.items()
+                                  if group == words[0])]
+            for (parent, alias), sub in module.GH_SUBCOMMAND_ALIASES.items():
+                if parent.split() == words[:-1] and sub == words[-1]:
+                    spellings += [[*spelled[:-1], alias] for spelled in spellings]
+            calls.update(tuple(spelled) for spelled in spellings)
+        listed = re.search(r"\n\s+(agent \|.*?)\)\n\s+gh_shim_has_nested_alias \"\$1\"",
+                           text[text.index("gh_shim_may_send_text() {"):], re.DOTALL)
+        self.assertIsNotNone(listed, "the top-level words of gh_shim_may_send_text were not found")
+        assert listed is not None
+        tops = [word for word in re.split(r"[\s|\\]+", listed[1]) if word]
+        start = text.index("gh_shim_is_quiet() {")
+        held = set(re.findall(r"[a-z][a-z0-9-]*", text[start:text.index("\n}\n", start)]))
+        self.assertIn("checks", held)
+        calls.update((top, word) for top in tops for word in held)
+        calls.update((top,) for top in tops)
+        unknown = [("pr", "bogus"), ("cs", "bogus"), ("issue", "artifact", "bogus"), ("pr", "", "bogus"),
+                   ("no-such-command",), ("", "no-such-command"), ("aw",)]
+        hot = [("pr", "view", "1"), ("pr", "checks", "1"), ("run", "view"), ("api", "repos/o/r"),
+               ("auth", "git-credential", "get"), ("help",), ("version",)]
+        ordered = [*sorted(calls), *unknown, *hot]
+        with tempfile.TemporaryDirectory() as config:
+            script = functions
+            for call in ordered:
+                quoted = " ".join(f"'{a}'" for a in call)
+                script += f"\ngh_shim_may_send_text {quoted} && echo yes || echo no"
+            answers = subprocess.run(["bash", "-c", script], env={**os.environ, "GH_CONFIG_DIR": config},
+                                     capture_output=True, text=True, timeout=120).stdout.split()
+            self.assertEqual(len(answers), len(ordered))
+            handed = dict(zip(ordered, (answer == "yes" for answer in answers)))
+            unread = sorted(call for call in {*calls, *hot} if not handed[call])
+            self.assertGreater(len(unread), 100, "the shim lets too few calls go unread to compare them with the check")
+            with mock.patch.dict(os.environ, {"GH_CONFIG_DIR": config, "HOME": config}):
+                for call in unread:
+                    with self.subTest(call=" ".join(call)):
+                        self.assertEqual(module.gh_check(list(call)), 0)
+        for call in unknown:
+            with self.subTest(control=" ".join(call)):
+                self.assertTrue(handed[call])
+        for call in hot:
+            with self.subTest(read=" ".join(call)):
+                self.assertFalse(handed[call])
 
 
 class Writes(unittest.TestCase):
