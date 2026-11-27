@@ -371,8 +371,9 @@ platforms.macos-arm64 = { asset_pattern = "ctx-aarch64-apple-darwin.tar.gz" }
 
 # CodeGraph CLI (colbymchenry/codegraph), which the omp `codegraph` tool runs from PATH
 # (@bopstack/pi-codegraph in omp/plugins/package.json; without the CLI every call answers "CodeGraph
-# CLI is unavailable on PATH"). Same version as Legion's worker image, which pins it in
-# cybermonklabs/legion packages/daemon/docker/codegraph/package.json. Each release archive holds the
+# CLI is unavailable on PATH"). Same version as the Legion worker image's pin in
+# cybermonklabs/legion#5755 (packages/daemon/docker/codegraph/package.json), the change that moves
+# that image from 1.5.0 to this version. Each release archive holds the
 # npm per-platform package (@colbymchenry/codegraph-<platform>): bin/codegraph is a sh wrapper that
 # execs the Node 24 bundled beside it, so it needs no system node. The npm `@colbymchenry/codegraph`
 # package is only a `#!/usr/bin/env node` launcher for that same bundle. A box finds it through
