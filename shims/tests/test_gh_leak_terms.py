@@ -3758,6 +3758,27 @@ class GhLeakTerms(unittest.TestCase):
             self.setUp_calls()
             self.assert_sent(self.run_gh(argv), argv)
 
+    def test_a_term_whose_words_a_long_run_of_spaces_parts_across_a_chunk_edge_is_refused(self) -> None:
+        # A term's words match when any run of in-line whitespace parts them (TERM_SEPARATOR), and GitHub renders a run
+        # of spaces in Markdown as one, so `Quillfeather` and `Lane 9` 10,000 spaces apart show as the term. Two chunks
+        # overlap by GH_CHUNK_SLACK and a little more (GhChunkScan), so such a match across a chunk's edge lies whole in
+        # neither chunk. A public gist of a Markdown file over one chunk, the match starting 6 characters before the
+        # first edge, must be refused as the same file of one chunk is (dispatch://INFRA-4957, rulings-md v66 item 2: "no
+        # term is missed at a chunk's edge"). Control: the same run in a file of one chunk is refused.
+        chunk = load_check().GH_CHUNK
+        first, second = TEST_TERMS[0].split(" ", 1)
+        written = first + " " * 10_000 + second
+        lines = ("x" * 99 + "\n") * (3 * chunk // 100)
+        argv = ["gist", "create", "--public", "notes.md"]
+        for name, text in (("across the first edge", lines[:chunk - 6] + written + lines[chunk - 6 + len(written):]),
+                           ("control: in a file of one chunk", "intro\n" + written + "\n")):
+            with self.subTest(name):
+                self.file("notes.md", text)
+                self.setUp_calls()
+                result = self.run_gh(argv)
+                self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
+                self.assertEqual(self.gh_calls(), [], "gh ran although the file holds a listed term")
+
     def test_the_own_name_of_the_public_repository_counts_for_nothing_in_every_chunk_of_an_asset(self) -> None:
         # Given the knives ygo-fork list and its public release repository theorem-labs/ygo, whose name holds a term of
         # that list: an asset of its release that names the repository, in the middle of the second of the check's
