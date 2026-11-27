@@ -232,8 +232,9 @@ gh_shim_is_write() {
 # command, a gh alias of the user's that the check expands, an installed extension, which the check reads as a command
 # like any other (gh-stack by its GH_STACK_COMMANDS, any other refused as unknown), or a command no table of the check
 # names, a command under which gh's config.yml may hold an alias (gh_shim_has_nested_alias), and any call of one of
-# those commands that gh_shim_is_quiet does not name, a verb gh does not have included: the check refuses a command
-# that no table of it names. It may be wider than the check's own tables, never narrower
+# those commands that gh_shim_is_quiet does not name, a verb gh does not have included, and `extension exec`, which
+# runs an installed extension the check reads as above (GH_EXEC_COMMANDS): the check refuses a command that no table of
+# it names. It may be wider than the check's own tables, never narrower
 # (shims/tests/test_gh_leak_terms.py); a call gh_shim_is_quiet names never starts the check, and it names no `gh stack`
 # call, so each one starts the check, which tells an installed gh-stack from gh's stub of it.
 gh_shim_may_send_text() {
@@ -315,7 +316,7 @@ gh_shim_is_quiet() {
         event) case "$verb" in listen) return 0 ;; esac ;;
         extension)
             case "$verb" in
-                browse | create | exec | install | list | ls | remove | search | uninstall | upgrade) return 0 ;;
+                browse | create | install | list | ls | remove | search | uninstall | upgrade) return 0 ;;
             esac
             ;;
         gist) case "$verb" in clone | delete | list | ls | view) return 0 ;; esac ;;

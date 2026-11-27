@@ -421,6 +421,48 @@ class GhLeakTerms(unittest.TestCase):
         argv = ["pc", "11", "-R", PRIVATE, "--body", TEXT]
         self.assert_sent(self.run_gh(argv), argv)
 
+    def test_a_chain_of_gh_aliases_is_followed_however_long_it_is(self) -> None:
+        # gh 2.106.0 runs what an alias expands to as a call of its own, with no limit (pkg/cmd/root/alias.go:53-77,
+        # `root.SetArgs(expandedArgs); return root.Execute()`): on 2026-11-27 its `gh a1`, config.yml holding `a4:
+        # version`, `a3: a4`, `a2: a3` and `a1: a2`, printed gh's version in 33 of 60 runs. So the check follows a chain
+        # of aliases however long it is: through four aliases to `pr comment` on a public repository a term is refused
+        # for --body, as through three. Until the review of 053ef618 (finding 2) a call past three aliases in a row
+        # went out unread. Controls: four aliases to a private repository, and four to `pr view`, a read, go out.
+        config = self.tmp / "config" / "gh"
+        config.mkdir()
+        (config / "config.yml").write_text(gh_config_yml(
+            f"\n    a1: a2\n    a2: a3\n    a3: a4\n    a4: pr comment 1 -R {PUBLIC} --body\n"
+            f"    b1: b2\n    b2: b3\n    b3: pr comment 1 -R {PUBLIC} --body\n"
+            f"    p1: p2\n    p2: p3\n    p3: p4\n    p4: pr comment 1 -R {PRIVATE} --body\n"
+            "    v1: v2\n    v2: v3\n    v3: v4\n    v4: pr view 1\n"), encoding="utf-8")
+        for argv in (["a1", TEXT], ["b1", TEXT]):
+            with self.subTest(call=argv[0]):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(argv), "--body")
+        for argv in (["p1", TEXT], ["v1"]):
+            with self.subTest(control=argv[0]):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+
+    def test_a_loop_of_gh_aliases_is_refused(self) -> None:
+        # A chain of aliases that comes back to an alias in it is a loop, which the check does not follow: a call
+        # through one is refused before gh runs, exit 4 from the check and 2 through shims/gh, the refusal naming the
+        # alias, its line and the aliases the call ran through. gh 2.106.0 registers an alias only where what it runs
+        # is a command it has registered already (pkg/cmd/root/root.go:213-240), so it registers no alias of a loop: on
+        # 2026-11-27 its `gh c1`, config.yml holding `c1: c2` and `c2: c1`, failed with `unknown command "c1"` in 40 of
+        # 40 runs. An alias that runs itself is a loop too.
+        config = self.tmp / "config" / "gh"
+        config.mkdir()
+        path = config / "config.yml"
+        path.write_text(gh_config_yml(f"\n    c1: c2\n    c2: c1 -R {PUBLIC}\n    s: s --body\n"), encoding="utf-8")
+        for argv, shown in (
+                (["c1", "--body", TEXT], f"gh c1: the call comes back to gh's alias c1, on line 8 of {path}, after "
+                                         "the aliases c1, c2: a loop of aliases"),
+                (["s", TEXT], f"gh s: the call comes back to gh's alias s, on line 10 of {path}, after the aliases s: "
+                              "a loop of aliases")):
+            with self.subTest(call=argv[0]):
+                self.assert_alias_refused(argv, self.env, shown)
+
     # --- a term listed for some repositories only ---------------------------------------------------------------
 
     def test_a_scoped_term_is_refused_only_for_a_public_repository_of_its_scope(self) -> None:
@@ -3647,6 +3689,111 @@ class GhLeakTerms(unittest.TestCase):
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv, env=self.stack_env(PRIVATE)), argv)
 
+    # --- `gh extension exec`, which runs an installed extension (the review of 053ef618, finding 1) -------------------
+
+    def test_extension_exec_of_gh_stack_is_read_as_gh_stack(self) -> None:
+        # `gh extension exec <name> [args]` runs the installed extension NAME with the call's other words, which gh does
+        # not read (gh 2.106.0, pkg/cmd/extension/command.go:543-566: DisableFlagParsing, then m.Dispatch(args, …)), so
+        # the check reads `gh extension exec stack …` as `gh stack …` (GH_EXEC_COMMANDS), by gh's aliases `ext` and
+        # `extensions` of `extension` too. Until the review of 053ef618 (finding 1) `extension exec` was quiet, and
+        # each of these went out unread. A term in the title of `feedback`, which goes to the public github/gh-stack, is
+        # refused, though GH_REPO names a private repository, and so is one in a branch `link` sends to a public
+        # repository. Controls: `view --json`, a quiet subcommand, and `link` of clean branches go out.
+        self.git("init", "-q")
+        env = self.stack_env(PRIVATE)
+        for spelled in (["extension", "exec"], ["ext", "exec"], ["extensions", "exec"]):
+            with self.subTest(call=" ".join(spelled), sub="feedback"):
+                self.setUp_calls()
+                result = self.run_gh([*spelled, "stack", "feedback", "See", CANARY.upper(), "please"], env=env)
+                self.assert_refused(result, "title", line=1)
+                self.assertIn("github/gh-stack", result.stderr.decode("utf-8", "replace"))
+            with self.subTest(control=" ".join(spelled), sub="view --json"):
+                self.setUp_calls()
+                argv = [*spelled, "stack", "view", "--json"]
+                self.assert_sent(self.run_gh(argv, env=env), argv)
+        term = CANARY.upper()
+        with self.subTest(sub="link"):
+            self.setUp_calls()
+            result = self.run_gh(["extension", "exec", "stack", "link", "feat-a", term], env=self.stack_env(PUBLIC))
+            self.assert_refused(result, "argument 2", term, line=1)
+        with self.subTest(control="link of clean branches"):
+            self.setUp_calls()
+            argv = ["extension", "exec", "stack", "link", "feat-a", "feat-b"]
+            self.assert_sent(self.run_gh(argv, env=self.stack_env(PUBLIC)), argv)
+
+    def test_extension_exec_of_gh_stack_submit_is_read_as_gh_stack_submit(self) -> None:
+        # `gh extension exec stack submit` is read as `gh stack submit` (GH_EXEC_COMMANDS, gh_stack_check). With --auto,
+        # to a public repository: of a clean stack it goes out; a term in the subject of a branch's one commit is
+        # refused, naming the commit; and with no stack file the check cannot read the titles and bodies, and refuses
+        # it. Without --auto, gh-stack may take them from its editor, and the call is refused as a text the check
+        # cannot read, naming --auto.
+        auto = ["extension", "exec", "stack", "submit", "--auto"]
+        self.stack_repo(("feat-a", ["Add the parser\n\nIt reads the file."]), ("feat-b", ["one", "two"]))
+        with self.subTest(stack="clean"):
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(auto, env=self.stack_env(PUBLIC)), auto)
+        self.stack_repo(("feat-a", ["Add the parser"]), ("feat-b", [f"Add {CANARY.upper()} support"]))
+        commit = self.git("rev-parse", "feat-b")[:12]
+        with self.subTest(stack="a term in a subject"):
+            self.setUp_calls()
+            self.assert_refused(self.run_gh(auto, env=self.stack_env(PUBLIC)), f"--auto commit {commit} (title)",
+                                line=1)
+        path = self.stack_repo(("feat-a", ["Add the parser"]))
+        common = self.git("rev-parse", "--path-format=absolute", "--git-common-dir")
+        for name, argv, reason in (
+                ("without --auto", auto[:-1], "cannot read the titles and bodies of the pull requests it creates: "
+                                              "without --auto"),
+                ("no stack file", auto, f"the stack file {common}/gh-stack does not exist")):
+            if name == "no stack file":
+                path.unlink()
+            with self.subTest(refused=name):
+                checked = self.check(argv, self.stack_env(PUBLIC))
+                stderr = checked.stderr.decode("utf-8", "replace")
+                self.assertEqual(checked.returncode, 4, stderr)
+                self.assertIn(reason, stderr)
+                self.setUp_calls()
+                result = self.run_gh(argv, env=self.stack_env(PUBLIC))
+                self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
+                self.assertEqual(self.gh_calls(), [])
+
+    def test_extension_exec_of_another_extension_is_refused_and_its_help_goes_out(self) -> None:
+        # Through `extension exec` gh runs any installed extension, one whose name a command of gh's own takes too: on
+        # 2026-11-27 gh 2.106.0's `gh extension exec label x --help` ran an installed gh-label with `x --help`, where
+        # `gh label` stays gh's own command (pkg/cmd/root/root.go:197-206). So `extension exec` of an installed
+        # extension other than gh-stack is refused as a command no table names, gh-label in place of `gh label` too, and
+        # with `--help` it goes to gh, as `gh foo --help` does. Control: `gh label list`, gh's own read, goes out, and
+        # the check lets it go.
+        self.env["XDG_DATA_HOME"] = str(self.tmp / "data")
+        for name in ("foo", "label"):
+            self.install_extension(name)
+        for name, argv in (("foo", ["ext", "exec", "foo", "x"]), ("label", ["extension", "exec", "label", "x"])):
+            with self.subTest(call=" ".join(argv)):
+                self.assert_command_refused(argv, name, self.UNKNOWN)
+            with self.subTest(call=" ".join(argv), help="--help"):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh([*argv, "--help"]), [*argv, "--help"])
+        argv = ["label", "list", "-R", PUBLIC]
+        with self.subTest(control=" ".join(argv)):
+            checked = self.check(argv, self.env)
+            self.assertEqual(checked.returncode, 0, checked.stderr.decode("utf-8", "replace"))
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(argv), argv)
+
+    def test_extension_exec_of_no_installed_extension_goes_to_gh_which_refuses_it(self) -> None:
+        # Where the call names no installed extension, gh 2.106.0 fails before it sends anything
+        # (pkg/cmd/extension/command.go:557-563, manager.go:94-114; measured 2026-11-27): `gh extension exec`
+        # (`requires at least 1 arg(s), only received 0`), `gh extension exec --help` (`extension "--help" not found`)
+        # and `gh extension exec no-such-ext` (`extension "no-such-ext" not found`). The check lets each go, by gh's
+        # aliases of `extension` too, and so does shims/gh. gh's data directory is an empty one of the test's.
+        self.env["XDG_DATA_HOME"] = str(self.tmp / "data")
+        for argv in (["extension", "exec", "no-such-ext"], ["extension", "exec", "--help"], ["extension", "exec"],
+                     ["ext", "exec", "no-such-ext", "x"], ["extensions", "exec", "-h"]):
+            with self.subTest(call=" ".join(argv)):
+                checked = self.check(argv, self.env)
+                self.assertEqual(checked.returncode, 0, checked.stderr.decode("utf-8", "replace"))
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+
     def test_a_term_in_a_release_asset_is_refused_for_a_public_repository(self) -> None:
         # gh 2.106.0 uploads each asset file of `release upload` and `release create`, `<file>[#<label>]`
         # (pkg/cmd/release/shared/upload.go AssetsFromArgs and uploadAsset): a value that holds a `#` is the file before
@@ -4170,12 +4317,13 @@ class Tables(unittest.TestCase):
     def test_every_command_of_the_installed_gh_is_in_exactly_one_table(self) -> None:
         # When gh 2.106.0 added `issue artifact`, which uploads files, nothing failed: no table listed every command.
         # Each leaf of the command tree of the gh on PATH, a command whose help lists no subcommand, is in exactly one
-        # of GH_TEXT_COMMANDS (`api` for ("api", "")), GH_QUIET_COMMANDS and GH_REFUSED_COMMANDS, and each entry of the
-        # three is such a leaf, so a gh that adds a command, or drops one, fails here. A command's subcommands are the
-        # lines of each help section whose title ends with `COMMANDS`, but `ALIAS COMMANDS` and `EXTENSION COMMANDS`,
-        # which list this machine's aliases and extensions. The help is `gh help <words>`, the text `gh <words> --help`
-        # prints (measured 2026-11-27 with gh 2.106.0, for `gh` and each of its 242 commands), but for `extension
-        # exec`, which reads `--help` as the name of an extension to run and fails (`extension "--help" not found`).
+        # of GH_TEXT_COMMANDS (`api` for ("api", "")), GH_QUIET_COMMANDS, GH_REFUSED_COMMANDS and GH_EXEC_COMMANDS, and
+        # each entry of the four is such a leaf, so a gh that adds a command, or drops one, fails here. A command's
+        # subcommands are the lines of each help section whose title ends with `COMMANDS`, but `ALIAS COMMANDS` and
+        # `EXTENSION COMMANDS`, which list this machine's aliases and extensions. The help is `gh help <words>`, the
+        # text `gh <words> --help` prints (measured 2026-11-27 with gh 2.106.0, for `gh` and each of its 242 commands),
+        # but for `extension exec`, which reads `--help` as the name of an extension to run and fails (`extension
+        # "--help" not found`).
         gh = self.real_gh()
         if gh is None:
             self.skipTest("no gh on PATH")
@@ -4201,7 +4349,7 @@ class Tables(unittest.TestCase):
             else:
                 self.fail(f"`gh help` lists no command, so no command could be classified:\n{text}")
         tables = ({" ".join(word for word in key if word) for key in module.GH_TEXT_COMMANDS},
-                  set(module.GH_QUIET_COMMANDS), set(module.GH_REFUSED_COMMANDS))
+                  set(module.GH_QUIET_COMMANDS), set(module.GH_REFUSED_COMMANDS), set(module.GH_EXEC_COMMANDS))
         listed = set().union(*tables)
         problems = [f"{what}: {', '.join(names)}" for what, names in (
             ("unclassified", sorted(leaves - listed)),
@@ -4239,7 +4387,8 @@ class Tables(unittest.TestCase):
                 self.assertEqual(set(re.findall(r"`\{([a-z]+)\}`", found[1])), filled, found[0])
 
     def test_the_shim_hands_every_text_command_to_the_check(self) -> None:
-        # Each command whose text the check reads, each command it refuses (GH_REFUSED_COMMANDS), and each gh-stack
+        # Each command whose text the check reads, each command it refuses (GH_REFUSED_COMMANDS), each command that runs
+        # another the call names (GH_EXEC_COMMANDS), by gh's aliases of its words too (`ext exec`), and each gh-stack
         # subcommand it reads (GH_STACK_COMMANDS, `text`) is a call shims/gh hands to the check.
         # gh's config directory holds no config.yml, so no alias the user's may hold makes it a call the shim hands over
         # for that.
@@ -4252,6 +4401,10 @@ class Tables(unittest.TestCase):
         calls = [[group, *([sub] if sub else ["-X", "POST", "repos/o/r/issues"])]
                  for group, sub in module.GH_TEXT_COMMANDS]
         calls.extend(name.split() for name in module.GH_REFUSED_COMMANDS)
+        for name in module.GH_EXEC_COMMANDS:
+            group, *words = name.split()
+            spellings = [group, *(alias for alias, named in module.GH_GROUP_ALIASES.items() if named == group)]
+            calls.extend([spelled, *words] for spelled in spellings)
         calls.extend(["stack", name] for name, (kind, _) in module.GH_STACK_COMMANDS.items() if kind != "quiet")
         with tempfile.TemporaryDirectory() as config:
             for argv in calls:
@@ -4375,7 +4528,7 @@ class Tables(unittest.TestCase):
                 with self.subTest(control=" ".join(words)):
                     self.assertFalse(runs(words))
         listed = ({" ".join(word for word in key if word) for key in module.GH_TEXT_COMMANDS}
-                  | set(module.GH_QUIET_COMMANDS) | set(module.GH_REFUSED_COMMANDS))
+                  | set(module.GH_QUIET_COMMANDS) | set(module.GH_REFUSED_COMMANDS) | set(module.GH_EXEC_COMMANDS))
         self.assertEqual(listed & set(module.GH_HIDDEN_COMMANDS), set())
         self.assertLessEqual({"auth git-credential", "help", "version", "__complete", "__completeNoDesc"},
                              set(module.GH_HIDDEN_COMMANDS))

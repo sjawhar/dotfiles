@@ -2920,8 +2920,8 @@ GH_STDIN = "DOTFILES_LEAK_TERMS_GH_STDIN"
 # 2.106.0, the version mise.toml pins: (the options that take a value, the options that take none), a short and a long
 # spelling joined by `/`. shims/tests/test_gh_leak_terms.py compares the tables with the gh on PATH, so an upgrade that
 # adds an option fails that test until the table has it. `gh api` is ("api", ""). Every other command `gh help` lists is
-# in GH_QUIET_COMMANDS or GH_REFUSED_COMMANDS, each other command of gh the check lets go is in GH_HIDDEN_COMMANDS, and
-# a call of a command none of them names is refused (gh_command).
+# in GH_QUIET_COMMANDS, GH_REFUSED_COMMANDS or GH_EXEC_COMMANDS, each other command of gh the check lets go is in
+# GH_HIDDEN_COMMANDS, and a call of a command none of them names is refused (gh_command).
 GH_TEXT_COMMANDS: dict[tuple[str, str], tuple[str, str]] = {
     ("pr", "create"): (
         "-a/--assignee --attach -B/--base -b/--body -F/--body-file -H/--head -l/--label -m/--milestone -p/--project "
@@ -3096,14 +3096,14 @@ GH_TEXT_COMMANDS: dict[tuple[str, str], tuple[str, str]] = {
 # alias, auth, an extension, a completion, a checkout); `no text` deletes, closes, archives or changes a state, and
 # sends no text; `private` writes where only the account, or the repository's admins or collaborators, see; `closed
 # list` sends only a value from a closed list. shims/tests/test_gh_leak_terms.py walks the command tree of the gh on
-# PATH, and fails for a command in none of GH_TEXT_COMMANDS, this table and GH_REFUSED_COMMANDS, or in more than one,
-# and for an entry that gh does not list. When gh 2.106.0 added `issue artifact`, which uploads files, nothing failed:
-# no table listed every command, and neither shims/gh nor the check knew it. The check reads this table as it runs: a
-# call of a command in it goes to gh unread, and a call of a command no table names is refused (gh_command), so a
-# command gh adds is refused until a table sorts it. Until the rulings on the tester's findings at 1c15219b
-# (dispatch://INFRA-4957) nothing read this table at run time, and on a machine whose gh was not the pin a command in
-# none of the tables went to gh unchecked. shims/gh lets the one- and two-word commands here go without starting the
-# check (gh_shim_is_quiet).
+# PATH, and fails for a command in none of GH_TEXT_COMMANDS, this table, GH_REFUSED_COMMANDS and GH_EXEC_COMMANDS, or in
+# more than one, and for an entry that gh does not list. When gh 2.106.0 added `issue artifact`, which uploads files,
+# nothing failed: no table listed every command, and neither shims/gh nor the check knew it. The check reads this table
+# as it runs: a call of a command in it goes to gh unread, and a call of a command no table names is refused
+# (gh_command), so a command gh adds is refused until a table sorts it. Until the rulings on the tester's findings at
+# 1c15219b (dispatch://INFRA-4957) nothing read this table at run time, and on a machine whose gh was not the pin a
+# command in none of the tables went to gh unchecked. shims/gh lets the one- and two-word commands here go without
+# starting the check (gh_shim_is_quiet).
 GH_QUIET_COMMANDS: dict[str, str] = {
     "auth login": "local: signs in to a GitHub host and stores its token on this machine",
     "auth logout": "local: revokes the account's gh token and removes it from this machine",
@@ -3243,7 +3243,6 @@ GH_QUIET_COMMANDS: dict[str, str] = {
     "event subscription view": "read: shows an event subscription",
     "extension browse": "local: browses, installs and removes extensions on this machine",
     "extension create": "local: makes the files of a new extension on this machine",
-    "extension exec": "local: runs an extension installed on this machine",
     "extension install": "local: installs an extension on this machine",
     "extension list": "local: lists the extensions installed on this machine",
     "extension remove": "local: removes an extension from this machine",
@@ -3324,6 +3323,22 @@ GH_REFUSED_OPTIONS: dict[str, tuple[str, str]] = {
     "skill publish": ("--tag", "--dry-run --fix --help"),
     "ssh-key add": ("-t/--title --type", "--help"),
 }
+# The gh 2.106.0 command that runs another command the call names, which the check reads as a call of that command.
+# `extension exec <name> [args]` runs the installed extension NAME with the call's other words, which gh does not read
+# (pkg/cmd/extension/command.go:543-566: `Args: cobra.MinimumNArgs(1)`, `DisableFlagParsing: true`, then
+# `m.Dispatch(args, …)`), whatever command of gh's own has that name ("You can use this command when the short name
+# conflicts with a core gh command"): measured 2026-11-27 with gh 2.106.0, `gh extension exec label x --help` ran an
+# installed gh-label with `x --help`. Where the call names no installed extension, gh fails before it sends anything
+# (pkg/cmd/extension/manager.go:94-114): `gh extension exec` (`requires at least 1 arg(s), only received 0`), `gh
+# extension exec --help` (`extension "--help" not found`), `gh extension exec -- label` (`extension "--" not found`).
+# gh_command reads the call as one of that extension (gh_extension_command), gh-stack's by GH_STACK_COMMANDS and any
+# other refused as a command no table names. Until the review of 053ef618 (finding 1) it was in GH_QUIET_COMMANDS, and
+# `gh extension exec stack feedback …` sent its title unread. shims/tests/test_gh_leak_terms.py counts it with
+# GH_TEXT_COMMANDS, GH_QUIET_COMMANDS and GH_REFUSED_COMMANDS, each command `gh help` lists being in exactly one of the
+# four; it compares no options of it with gh's, since `gh extension exec --help` prints no help.
+GH_EXEC_COMMANDS: dict[str, str] = {
+    "extension exec": "runs the installed extension its first argument names, with the other arguments",
+}
 # gh 2.106.0's aliases of its commands, as the ALIASES section of `gh <command> --help` lists them: of a top-level
 # command (`gh cs` is `gh codespace`), and of a subcommand by the words of the command above it (`gh pr co` is `gh pr
 # checkout`). gh_command reads a call's words through them, so a call by an alias is judged as the command it names; an
@@ -3377,8 +3392,8 @@ GH_HIDDEN_COMMANDS: dict[str, str] = {
     "version": "local: prints gh's version",
 }
 # The refusal of a call of a command that none of GH_TEXT_COMMANDS, GH_QUIET_COMMANDS, GH_REFUSED_COMMANDS,
-# GH_HIDDEN_COMMANDS and GH_STACK_COMMANDS names, an installed extension other than gh-stack included, and that is no gh
-# alias (gh_unknown).
+# GH_EXEC_COMMANDS, GH_HIDDEN_COMMANDS and GH_STACK_COMMANDS names, an installed extension other than gh-stack
+# included, and that is no gh alias (gh_unknown).
 GH_UNKNOWN_REFUSAL = ("no table of the check names this command of gh, and it is no gh alias, so the check does not "
                       "know what the call sends and refuses it")
 # gh-stack, `gh stack`, GitHub's official extension for stacked pull requests (github/gh-stack, gh 2.106.0's
@@ -4026,30 +4041,33 @@ def gh_unsplit(name: str, line: int, path: Path, error: ValueError, filled: bool
 
 def gh_commands() -> frozenset[str]:
     """Each command the tables name (GH_TEXT_COMMANDS, `api` for ("api", ""); GH_QUIET_COMMANDS; GH_REFUSED_COMMANDS;
-    GH_HIDDEN_COMMANDS), by its words as gh names them, read from the tables at each call."""
+    GH_EXEC_COMMANDS; GH_HIDDEN_COMMANDS), by its words as gh names them, read from the tables at each call."""
     return frozenset((*(" ".join(word for word in key if word) for key in GH_TEXT_COMMANDS), *GH_QUIET_COMMANDS,
-                      *GH_REFUSED_COMMANDS, *GH_HIDDEN_COMMANDS))
+                      *GH_REFUSED_COMMANDS, *GH_EXEC_COMMANDS, *GH_HIDDEN_COMMANDS))
 
 
 def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
-               depth: int = 0) -> tuple[str, str, list[str]] | None:
+               seen: frozenset[str] = frozenset()) -> tuple[str, str, list[str]] | None:
     """(group, subcommand, the arguments the subcommand reads) of a call of a GH_TEXT_COMMANDS command, after a gh
     alias, or ("stack", subcommand, its arguments) of a gh-stack call gh_stack_check reads (gh_extension_command); None
     for any other call the check lets go: of a GH_QUIET_COMMANDS or GH_HIDDEN_COMMANDS command, of a group with no
     subcommand (`gh pr`, whose help gh prints; `gh codespace ports`, which lists ports), of no command, of a refused
-    command that gh_refusal_lifted lets go, and of a quiet gh-stack command. The command is read word by word as cobra
+    command that gh_refusal_lifted lets go, of a quiet gh-stack command, and of `extension exec` whose first argument
+    names no installed extension, which gh refuses before it sends anything (GH_EXEC_COMMANDS). SEEN holds the gh
+    aliases the call ran through to reach ARGUMENTS (gh_alias_command). The command is read word by word as cobra
     finds it (gh_next_command), each word through gh's aliases of it (GH_GROUP_ALIASES, GH_SUBCOMMAND_ALIASES), until
     the tables name it; a first word that leaves it under no entry of the tables is an installed extension, which gh
     runs in place of an alias of that name (gh_extension, gh_extension_command), else, as a word under a command, a gh
     alias of the user's, of the first word (`co`) or under a command (`gh alias set 'pr say' 'pr comment'`), which gh
     runs as what it expands to, or else a command no table names (gh_alias_command, gh_unknown). A name that is both a
-    command of gh's and an installed extension is read as gh's command, as gh runs it (gh_extension_command). Until
-    2026-11-17 only an alias of the first word was read, so `gh pr say 11 --body …` went out unchecked; until the
-    rulings on the tester's findings at 1c15219b (dispatch://INFRA-4957) a command no table named went out unchecked,
-    and until rulings-md v66 an installed extension did. GhUnjudgedError for a call the check cannot judge: one that
-    may run an alias it cannot read (gh_alias_command), a call of a command GH_REFUSED_COMMANDS lists, whatever its
-    target, refused as the call writes it (`gh issue -R o/r artifact new 4` is `issue artifact create`, refused as
-    `issue artifact new`), and a call of a command no table names (gh_unknown)."""
+    command of gh's and an installed extension is read as gh's command, as gh runs it (gh_extension_command), but after
+    `extension exec`, which runs the extension (GH_EXEC_COMMANDS). Until 2026-11-17 only an alias of the first word was
+    read, so `gh pr say 11 --body …` went out unchecked; until the rulings on the tester's findings at 1c15219b
+    (dispatch://INFRA-4957) a command no table named went out unchecked, until rulings-md v66 an installed extension
+    did, and until the review of 053ef618 (finding 1) one run by `extension exec` did. GhUnjudgedError for a call the
+    check cannot judge: one that may run an alias it cannot read (gh_alias_command), a call of a command
+    GH_REFUSED_COMMANDS lists, whatever its target, refused as the call writes it (`gh issue -R o/r artifact new 4` is
+    `issue artifact create`, refused as `issue artifact new`), and a call of a command no table names (gh_unknown)."""
     found = gh_next_command(arguments)
     if found is None:
         return None
@@ -4060,12 +4078,14 @@ def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
         if not any(name.startswith(f"{command} ") for name in commands):
             if " " not in typed and gh_extension(typed, environment):
                 return gh_extension_command(typed, rest)
-            return gh_alias_command(typed, rest, environment, depth)
+            return gh_alias_command(typed, rest, environment, seen)
         found = gh_next_command(rest)
         if found is None:
             return None
         word, rest = found
         typed, command = f"{typed} {word}", f"{command} {GH_SUBCOMMAND_ALIASES.get((command, word), word)}"
+    if command in GH_EXEC_COMMANDS:
+        return gh_extension_command(rest[0], rest[1:]) if rest and gh_extension(rest[0], environment) else None
     if command in GH_REFUSED_COMMANDS:
         if gh_refusal_lifted(command, rest):
             return None
@@ -4174,27 +4194,30 @@ def gh_help_letters(letters: str, options: Mapping[str, bool], long: Mapping[str
 
 
 def gh_extension(name: str, environment: Mapping[str, str]) -> bool:
-    """Whether the extension NAME is installed for gh, which then runs it as the top-level command NAME: an entry
-    `gh-NAME` in the `extensions` directory of gh's data directory (gh 2.106.0, pkg/cmd/extension/manager.go
-    Manager.list), which is XDG_DATA_HOME/gh, else ~/.local/share/gh under HOME (go-gh's config.DataDir)."""
+    """Whether the extension NAME is installed for gh, which then runs it as the top-level command NAME and through
+    `extension exec NAME` (GH_EXEC_COMMANDS): an entry `gh-NAME` in the `extensions` directory of gh's data directory
+    (gh 2.106.0, pkg/cmd/extension/manager.go Manager.list), which is XDG_DATA_HOME/gh, else ~/.local/share/gh under
+    HOME (go-gh's config.DataDir)."""
     data = environment.get("XDG_DATA_HOME")
     directory = Path(data) / "gh" if data else Path(environment.get("HOME", "")) / ".local" / "share" / "gh"
     return bool(name) and "/" not in name and os.path.lexists(directory / "extensions" / f"gh-{name}")
 
 
 def gh_extension_command(name: str, rest: Sequence[str]) -> tuple[str, str, list[str]] | None:
-    """gh_command of a call of the installed extension NAME (gh_extension), REST the call's other words, which gh runs
-    in place of an alias or a stub of that name, never in place of a command of its own: gh 2.106.0 registers no
-    extension whose name its own commands take (pkg/cmd/root/root.go:197-206, cmd.Find), refuses to install one
-    (pkg/cmd/extension/command.go:694-701), takes an alias only where no command, an extension included, has its name
-    (pkg/cmd/alias/shared/validations.go:15-29), and registers a stub only where no extension has (root.go:243-252).
-    gh-stack's call is read by GH_STACK_COMMANDS, its subcommand found as cobra finds it (gh_next_command, with no
-    flags) through its aliases (GH_STACK_ALIASES): ("stack", the subcommand, the words it reads) for a `text` one whose
-    help flag is off (gh_help); None for a `quiet` one, for one whose help flag is on, which prints its help and sends
-    nothing (cobra v1.10.2, the version gh-stack's go.mod pins, command.go:925-936: execute returns flag.ErrHelp before
-    it runs the command; gh-stack's help function only prints, cmd/root.go:96-106), and for a call that names none,
-    which prints gh-stack's help or its version. Any other extension, and a subcommand of gh-stack no entry names, is a
-    command no table names (gh_unknown)."""
+    """gh_command of a call of the installed extension NAME (gh_extension), REST the call's other words. gh runs it as
+    the top-level command NAME in place of an alias or a stub of that name, never in place of a command of its own: gh
+    2.106.0 registers no extension whose name its own commands take (pkg/cmd/root/root.go:197-206, cmd.Find), refuses
+    to install one (pkg/cmd/extension/command.go:694-701), takes an alias only where no command, an extension included,
+    has its name (pkg/cmd/alias/shared/validations.go:15-29), and registers a stub only where no extension has
+    (root.go:243-252). Through `extension exec NAME` gh runs it whatever command of its own has that name, an installed
+    gh-label in place of `gh label` (GH_EXEC_COMMANDS), and that call is read here the same. gh-stack's call is read by
+    GH_STACK_COMMANDS, its subcommand found as cobra finds it (gh_next_command, with no flags) through its aliases
+    (GH_STACK_ALIASES): ("stack", the subcommand, the words it reads) for a `text` one whose help flag is off (gh_help);
+    None for a `quiet` one, for one whose help flag is on, which prints its help and sends nothing (cobra v1.10.2, the
+    version gh-stack's go.mod pins, command.go:925-936: execute returns flag.ErrHelp before it runs the command;
+    gh-stack's help function only prints, cmd/root.go:96-106), and for a call that names none, which prints gh-stack's
+    help or its version. Any other extension, and a subcommand of gh-stack no entry names, is a command no table names
+    (gh_unknown)."""
     if name != "stack":
         return gh_unknown(name, rest)
     found = gh_next_command(rest, ())
@@ -4224,11 +4247,20 @@ def gh_unknown(name: str, rest: Sequence[str]) -> None:
 
 
 def gh_alias_command(name: str, rest: Sequence[str], environment: Mapping[str, str],
-                     depth: int) -> tuple[str, str, list[str]] | None:
-    """gh_command of what the gh alias NAME runs with REST; gh_unknown for no such alias; None for a shell alias (`!…`),
-    which runs a shell whose own gh calls come back through shims/gh, for one whose `$N` REST does not fill, which goes
-    to gh, which refuses it itself (`not enough arguments for alias`), and past three aliases in a row. GhUnjudgedError,
-    refusing the call, where gh_aliases refuses config.yml and NAME stands in it (gh_alias_named), and where shlex
+                     seen: frozenset[str]) -> tuple[str, str, list[str]] | None:
+    """gh_command of what the gh alias NAME runs with REST, SEEN the aliases the call ran through to reach NAME;
+    gh_unknown for no such alias; None for a shell alias (`!…`), which runs a shell whose own gh calls come back through
+    shims/gh, and for one whose `$N` REST does not fill, which goes to gh, which refuses it itself (`not enough
+    arguments for alias`). An alias that runs another is followed however many run in a row: gh 2.106.0 runs what an
+    alias expands to as a call of its own, with no limit (pkg/cmd/root/alias.go:53-77, `root.SetArgs(expandedArgs);
+    return root.Execute()`), and on 2026-11-27 its `gh a1`, config.yml holding `a4: version`, `a3: a4`, `a2: a3` and
+    `a1: a2`, printed gh's version in 33 of 60 runs. gh registers an alias only where what it runs is a command it has
+    registered already (pkg/cmd/root/root.go:213-240, pkg/cmd/alias/shared/validations.go:36-51), in the order of a Go
+    map, which Go does not fix (internal/config/config.go:815-826), so a chain runs in some runs only. Until the review
+    of 053ef618 (finding 2) a call past three aliases in a row went out unread. GhUnjudgedError, refusing the call,
+    where gh_aliases refuses config.yml and NAME stands in it (gh_alias_named); where the call comes back to NAME (NAME
+    in SEEN), a loop of aliases, which gh 2.106.0 does not register (on 2026-11-27 `gh c1`, config.yml holding `c1: c2`
+    and `c2: c1`, failed with `unknown command "c1"` in 40 of 40 runs) and the check does not follow; and where shlex
     cannot split NAME's expansion with REST in place of its `$N` (gh_expand_alias, which tests the `$N` first): only
     then is the expansion as config.yml holds it split on its own, to choose the refusal's message (gh_unsplit). gh
     splits an alias with google/shlex, which splits text Python's shlex refuses, a `#` beginning a comment there."""
@@ -4240,7 +4272,11 @@ def gh_alias_command(name: str, rest: Sequence[str], environment: Mapping[str, s
     found = aliases.expansions.get(name)
     if found is None:
         return gh_unknown(name, rest)
-    if depth >= 3 or found[0].startswith("!"):
+    if name in seen:
+        raise GhUnjudgedError(name, f"the call comes back to gh's alias {name}, on line {found[1]} of {aliases.path}, "
+                                    f"after the aliases {', '.join(sorted(seen))}: a loop of aliases, which the check "
+                                    "cannot follow, so it cannot judge the call: fix the loop")
+    if found[0].startswith("!"):
         return None
     try:
         expanded = gh_expand_alias(found[0], rest)
@@ -4250,7 +4286,7 @@ def gh_alias_command(name: str, rest: Sequence[str], environment: Mapping[str, s
         except ValueError as own:
             raise GhUnjudgedError(name, gh_unsplit(name, found[1], aliases.path, own, filled=False)) from None
         raise GhUnjudgedError(name, gh_unsplit(name, found[1], aliases.path, error, filled=True)) from None
-    return gh_command(expanded, environment, depth + 1) if expanded else None
+    return gh_command(expanded, environment, seen | {name}) if expanded else None
 
 
 def gh_walk(arguments: Sequence[str], options: Mapping[str, bool]) -> list[tuple[str | None, str | None]]:
