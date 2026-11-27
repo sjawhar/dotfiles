@@ -7,7 +7,7 @@
       "dependencies": {
         "@bopstack/pi-codegraph": "^0.1.1",
         "@sjawhar/opencode-knives": "github:sjawhar/knives#v6.1.11",
-        "@sjawhar/pi-envoy": "21.12.2",
+        "@sjawhar/pi-envoy": "21.12.7",
         "@sjawhar/pi-legion": "23.12.2",
         "ctx-memory": "github:sjawhar/ctx-memory#v0.2.9",
         "gws-accounts": "github:sjawhar/gws-accounts#v0.1.10",
@@ -154,7 +154,7 @@
 
     "@sjawhar/opencode-knives": ["@sjawhar/opencode-knives@github:sjawhar/knives#dd3cf4a", {}, "sjawhar-knives-dd3cf4a", "sha512-s5d2ZdQBOpXHdtnflVcGq4Ax8oRR34Yhwv3orY2iFPIoyEBiIfFKkmDd7tcq8tYGADcK0p2kpZp5Fi5fWAs/pA=="],
 
-    "@sjawhar/pi-envoy": ["@sjawhar/pi-envoy@21.12.2", "", {}, "sha512-uiALbXLZ8sNwVxBv/CW7dFFcIAJyboPbR4MDDB5yGH6DysoFYT/wLQtYaxTuWih9eGqPKxKoAkfR6IenDEjXJg=="],
+    "@sjawhar/pi-envoy": ["@sjawhar/pi-envoy@21.12.7", "", {}, "sha512-SXJHpF25EQAzheqOj1bSajGCymeeh683w5NlwavnkwSI+MWYghKrJFZ/axHiRhfD5c9xXJDx7xqMfSKM4NDV2A=="],
 
     "@sjawhar/pi-legion": ["@sjawhar/pi-legion@23.12.2", "", {}, "sha512-sLnN5aZKN1PRVAwjOxx3eV3hNEV/YBtbU2IO372SnH8A7NIPf+PiTbVsJpO1LZop+JOVjOLQ5+vsroWCDhNWXA=="],
 
