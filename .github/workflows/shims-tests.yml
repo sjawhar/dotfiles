@@ -53,6 +53,26 @@ jobs:
           [[ -L "$shim" && "$(basename "$(realpath "$shim")")" == mise ]] ||
             { echo "mise made no python3 shim at $shim" >&2; exit 1; }
           echo "dir=${shim%/*}" >> "$GITHUB_OUTPUT"
+      # A clone of github/gh-stack holding GH_STACK_COMMIT, the commit scripts/leak-terms-check pins its gh-stack tables
+      # to: test_gh_leak_terms.py's test_the_gh_stack_table_names_each_subcommand_of_gh_stack compares the tables with
+      # gh-stack's source at that commit, in the clone DOTFILES_GH_STACK_SOURCE names, and skips without it, as a runner
+      # has no vendor/gh-stack and no installed gh-stack. The step reads the commit from the script, so the two cannot
+      # differ. github/gh-stack is public: the fetch takes no token.
+      - name: gh-stack's source at GH_STACK_COMMIT
+        run: |
+          set -euo pipefail
+          mapfile -t pins < <(grep -E '^GH_STACK_COMMIT\b' scripts/leak-terms-check)
+          pin='^GH_STACK_COMMIT = "([0-9a-f]{40})"$'
+          [[ ${#pins[@]} -eq 1 && ${pins[0]} =~ $pin ]] || {
+            echo "scripts/leak-terms-check must set GH_STACK_COMMIT once, to 40 lowercase hex digits: ${pins[*]:-unset}" >&2
+            exit 1
+          }
+          commit=${BASH_REMATCH[1]}
+          clone="$RUNNER_TEMP/gh-stack"
+          git init -q "$clone"
+          git -C "$clone" fetch -q --depth 1 https://github.com/github/gh-stack.git "$commit"
+          git -C "$clone" cat-file -e "$commit^{commit}"
+          echo "DOTFILES_GH_STACK_SOURCE=$clone" >> "$GITHUB_ENV"
       - uses: ./.github/actions/pytest-guarded
         with:
           tests: shims/tests
