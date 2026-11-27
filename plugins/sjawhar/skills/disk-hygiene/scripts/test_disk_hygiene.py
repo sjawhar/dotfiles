@@ -35,6 +35,9 @@ Scenario map (verification table in the plan):
   22  borrowed via wt    -> test_s33_store_borrowed_through_a_worktrees_common_dir_is_refused
 """
 
+# unittest runs setUp, not __init__, before each test, and setUp sets every instance attribute.
+# pyright: reportUninitializedInstanceVariable=false
+
 from __future__ import annotations
 
 import fcntl
@@ -1377,6 +1380,78 @@ class InstrumentTest(unittest.TestCase):
         finally:
             proc.kill()
             proc.wait()
+
+
+class NonUtf8ProcessNameTest(unittest.TestCase):
+    """A process may name itself with any bytes: the kernel keeps them as given in
+    /proc/<pid>/comm and /proc/<pid>/stat, and `ss -p` prints them raw. One process whose name
+    held 0xff ended `writers` with a UnicodeDecodeError while the disk it was asked about was
+    full (2026-11-27). Each census keeps that process, with its counters, and shows the byte
+    as U+FFFD, as it already shows a command line's."""
+
+    CHILD: str = ("import socket, time\n"
+                  "with open('/proc/self/comm', 'wb') as f:\n"
+                  "    f.write(b'dh\\xffname')\n"
+                  "server = socket.create_server(('127.0.0.1', 0))\n"
+                  "client = socket.create_connection(server.getsockname())\n"
+                  "peer, _ = server.accept()\n"
+                  "log = open('out.bin', 'ab')\n"
+                  "print('ready', flush=True)\n"
+                  "end = time.time() + 60\n"
+                  "while time.time() < end:\n"
+                  "    log.write(b'x' * 4096); log.flush()\n"
+                  "    spin = time.time() + 0.01\n"
+                  "    while time.time() < spin:\n"
+                  "        pass\n")
+    SHOWN: str = "dh\ufffdname"
+    base: Path
+    proc: subprocess.Popen[bytes]
+
+    def setUp(self) -> None:
+        self.base = Path(tempfile.mkdtemp(prefix="dh-utf8-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.proc = subprocess.Popen([sys.executable, "-c", self.CHILD], cwd=self.base, stdout=subprocess.PIPE)
+        assert self.proc.stdout is not None
+        self.addCleanup(self.proc.stdout.close)
+        self.addCleanup(self.proc.wait)
+        self.addCleanup(self.proc.kill)
+        self.assertEqual(self.proc.stdout.readline(), b"ready\n")
+        self.assertIn(b"(dh\xffname)", Path(f"/proc/{self.proc.pid}/stat").read_bytes(),
+                      "the fixture's name must hold a byte that is not UTF-8")
+
+    def assert_row(self, out: str, *cells: str) -> None:
+        rows = [line for line in out.splitlines() if set(cells) <= set(line.split())]
+        self.assertTrue(rows, f"no row holds {cells}:\n{out}")
+
+    def test_writers_keeps_a_process_whose_name_is_not_utf8(self) -> None:
+        out = script("writers", "--seconds", "1", "--top", "100000")
+        self.assert_row(out.stdout, str(self.proc.pid), self.SHOWN, str(self.base))
+
+    def test_cpu_keeps_a_process_whose_name_is_not_utf8(self) -> None:
+        out = script("cpu", "--seconds", "1", "--top", "100000")
+        self.assert_row(out.stdout, self.SHOWN, str(self.proc.pid))
+
+    def test_fdwrites_names_a_process_whose_name_is_not_utf8(self) -> None:
+        out = script("fdwrites", "--seconds", "1", "--pid", str(self.proc.pid))
+        self.assert_row(out.stdout, str(self.proc.pid), self.SHOWN, str(self.base / "out.bin"))
+
+    def test_procs_under_names_a_process_whose_name_is_not_utf8(self) -> None:
+        self.assertIn((self.proc.pid, self.SHOWN), disk_hygiene.procs_under(str(self.base)))
+
+    def test_containers_survives_a_socket_owner_whose_name_is_not_utf8(self) -> None:
+        """The child holds an established TCP connection. A stub `docker` reports no containers
+        and a stub `sudo` runs the real `ss`, which lists this uid's own sockets without root."""
+        self.assertIn(b'"dh\xffname"', subprocess.run(["ss", "-tnpH", "state", "established"],
+                                                      capture_output=True, check=True).stdout,
+                      "`ss -p` must print the fixture's name raw for this test to mean anything")
+        stubs = self.base / "bin"
+        stubs.mkdir()
+        _ = (stubs / "docker").write_text('#!/bin/sh\ncase "$1" in\n  inspect) echo "[]" ;;\nesac\n')
+        _ = (stubs / "sudo").write_text('#!/bin/sh\nexec "$@"\n')
+        for stub in stubs.iterdir():
+            stub.chmod(0o755)
+        out = script("containers", env={**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}"})
+        self.assertEqual(json.loads(out.stdout), [])
 
 
 if __name__ == "__main__":
