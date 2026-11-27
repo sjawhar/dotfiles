@@ -1497,10 +1497,15 @@ class RegistryCopy:
 
     def workspaces(self, home: Path | None = None) -> str:
         """The oh-my-pi workspaces path the render writes for HOME: the big disk's directory, named
-        for the home, where there is one, else ~/.worktrees/oh-my-pi in full."""
+        for the home, where there is one and this user can make the workspaces under it (the
+        deepest of the directories that exists is writable), else ~/.worktrees/oh-my-pi in full."""
         home = home or self.home
         nvme = self.nvme_root / home.name
-        return f"{nvme}/omp-worktrees/branches" if nvme.is_dir() else f"{home}/.worktrees/oh-my-pi"
+        big = nvme / "omp-worktrees/branches"
+        for path in (big, big.parent, nvme):
+            if path.is_dir():
+                return str(big) if os.access(path, os.W_OK) else f"{home}/.worktrees/oh-my-pi"
+        return f"{home}/.worktrees/oh-my-pi"
 
     def render_script(self, home: Path | None = None) -> Path:
         """The render the case ran, in HOME's checkout: ~/.dotfiles/scripts/knives-registry-render.
@@ -1621,6 +1626,27 @@ class KnivesRegistry(RegistryCopy, Harness):
         written = (self.identity(self.copy), self.identity(self.render_record))
         self.assertEqual(self.run_follow(now=1_001_200.0), [])
         self.assertEqual((self.identity(self.copy), self.identity(self.render_record)), written)
+
+    @unittest.skipIf(os.geteuid() == 0, "root can write a directory whatever its mode")
+    def test_a_big_disk_directory_this_user_cannot_write_is_not_used(self) -> None:
+        # An agent box mounts the big disk's directory owned by root: a workspaces path there could
+        # not be made, and every `knives start` would fail. The render keeps ~/.worktrees/oh-my-pi
+        # until the directory can be written, then renders the big disk's path once.
+        self.nvme_root = Path(self.tmp.name) / "nvme"
+        os.environ["KNIVES_REGISTRY_NVME_ROOT"] = str(self.nvme_root)
+        locked = self.nvme_root / self.home.name
+        locked.mkdir(parents=True)
+        locked.chmod(0o555)
+        try:
+            self.first_render()
+            self.assert_copy_renders(REGISTRY_V1)
+            self.assertIn(f'workspaces = "{self.home}/.worktrees/oh-my-pi"\n', self.copy.read_text())
+        finally:
+            # The scratch tree is removed after the case, which a directory it cannot write stops.
+            locked.chmod(0o755)
+        self.assertEqual(self.run_follow(now=1_000_600.0), [])
+        self.assert_copy_renders(REGISTRY_V1)
+        self.assertIn(f'workspaces = "{locked}/omp-worktrees/branches"\n', self.copy.read_text())
 
     def test_a_pull_that_changes_only_the_render_script_renders_again(self) -> None:
         # The render depends on its own rule, scripts/knives-registry-render, as well: a pull that
