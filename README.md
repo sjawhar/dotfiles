@@ -53,6 +53,9 @@ when you are away from the laptop.
 | 12804 | RemoteForward | 127.0.0.1:12804 | PC/SC for YubiKey use |
 | 12805 | LocalForward | 127.0.0.1:12805 | Browser grant feed |
 | 12806 | RemoteForward | 127.0.0.1:12806 | Audio |
+| 8776 | LocalForward | 127.0.0.1:8776 | Personal Dispatch (default omp profile) |
+| 9030 | LocalForward | 127.0.0.1:9030 | Personal Envoy listener |
+| 4223 | LocalForward | 127.0.0.1:4223 | Personal Envoy NATS |
 
 ## Oryx
 
@@ -63,6 +66,15 @@ It needs no Tailscale; `oryx-edge-cutover` writes oryx's forward configuration.
 Run it as `agent`, the sudo user: it also enables and starts `bluetooth` and
 turns on lingering for `sami`, because the Galaxy A15 agent phone line pairs with
 oryx over Bluetooth and its bridge runs in `sami`'s user session.
+
+Oryx has no packaged 1Password CLI, so the installer first links
+`~/.config/mise/conf.d/op.toml` to `~/.dotfiles/oryx/mise-op.toml`, oryx's own
+mise pin of `op`, then runs `mise install op` while it holds
+`$MISE_DATA_DIR/.dotfiles-install.lock`. `bash ~/.dotfiles/oryx/install.sh op`
+runs only that step, with no `sudo`. The shared `mise.toml` pins no `op`, so the
+laptop keeps its packaged `/usr/bin/op`. To roll back, revert, then remove
+`~/.config/mise/conf.d/op.toml` on oryx; a revert alone leaves a dangling link
+that `mise` skips.
 
 `oryx-tunnel-enrol`, which `bash ~/.dotfiles/installers/forward.sh daemon` runs,
 writes the line in `oryx/oryx-tunnel.key-options` in front of the laptop's

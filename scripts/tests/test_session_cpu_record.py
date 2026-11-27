@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """Tests for scripts/session-cpu-record: its delta math, its attribution and its retention.
 
-Nothing here reads a real /proc or a real cgroup. The process table, the cgroup counters and
-the environments are fabricated, and the attribution test drives the REAL `session_claim` of
+Nothing here walks a real /proc or reads a real cgroup. The process table, the cgroup counters
+and the environments are fabricated, and the attribution test drives the REAL `session_claim` of
 scripts/load-swap-watch over that fabricated tree, so a change there that breaks this recorder
-fails here.
+fails here. One test reads the stat of a child it starts itself.
 """
 
 import datetime as dt
 import importlib.machinery
 import importlib.util
 import json
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from non_utf8_name import process_named  # noqa: E402 - found through the path above
 
 SCRIPT = Path(__file__).resolve().parents[1] / "session-cpu-record"
 LOADER = importlib.machinery.SourceFileLoader("session_cpu_record", str(SCRIPT))
@@ -178,8 +182,39 @@ class AttributionIsLoadSwapWatch(unittest.TestCase):
         self.assertEqual([row["session"] for row in rows], [ALPHA])
 
 
-class Retention(unittest.TestCase):
+class AgentWalk(unittest.TestCase):
+    """agent_processes over a stand-in /proc: the one walk that reads every process's name."""
+
     def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.proc = Path(self.tmp.name)
+
+    def process(self, entry: str, comm: bytes | None) -> None:
+        (self.proc / entry).mkdir()
+        if comm is not None:
+            (self.proc / entry / "comm").write_bytes(comm)
+
+    def test_a_name_that_is_not_utf8_is_read_and_passed_over(self) -> None:
+        """Any process may set any 15 bytes as its name (prctl PR_SET_NAME), UTF-8 or not."""
+        self.process("100", b"omp\n")
+        self.process("101", b"\xffbadname\n")
+        self.process("102", b"claude\n")
+        self.process("103", b"\xffomp\n")
+        self.process("104", None)  # gone between the listing and the read
+        self.process("self", b"python3\n")
+        self.assertEqual(TOOL.agent_processes(str(self.proc)), {100: "omp", 102: "claude"})
+
+    def test_the_stat_of_a_process_named_in_bytes_that_are_not_utf8_is_read(self) -> None:
+        """An agent's pid can be reused by such a process between the walk and the read of its stat."""
+        with process_named() as named:
+            fields = TOOL.proc_stat_fields(named.pid)
+        self.assertGreaterEqual(len(fields), 20)
+
+
+class Retention(FakeBox):
+    def setUp(self) -> None:
+        super().setUp()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.dir = Path(self.tmp.name)
@@ -212,14 +247,21 @@ class Retention(unittest.TestCase):
         self.assertTrue(odd.exists())
 
     def test_a_sample_run_writes_a_day_file_and_prunes(self) -> None:
+        """A whole sample over the fabricated box: it walks no real /proc and asks no real Envoy.
+
+        Over the real /proc it read every process on the host, so another test's process named in
+        non-UTF-8 bytes (test_oryx_tunnel_key_cleanup's) failed it whenever the two ran at once.
+        """
+        self.add_agent(100, ALPHA, "/alpha.scope", started=1000.0)
+        self.cgroup_cpu["/alpha.scope"] = 42.0
         stale = self.day(30)
         options = TOOL.argparse.Namespace(records=str(self.dir), keep_days=7, quiet=True)
         TOOL.sample(options)
         self.assertFalse(stale.exists())
         today = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
         written = json.loads((self.dir / f"{today}.jsonl").read_text().splitlines()[-1])
-        self.assertIn("sessions", written)
-        self.assertIn("counters", written)
+        self.assertEqual([row["session"] for row in written["sessions"]], [ALPHA])
+        self.assertIn("cg:/alpha.scope", written["counters"])
 
 
 class ReadingItBack(unittest.TestCase):

@@ -144,7 +144,7 @@ class UserLogin(unittest.TestCase):
             "TMPDIR": str(self.tmp), "GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1",
             "PUBLIC_LEAK_CHECK": "/bin/true",
             "DOTFILES_DIR": str(DOTFILES),
-            # The leak-term check reads every write's text (shims/AGENTS.md, "Leak-term list"): the list here, and
+            # The leak-term check reads every write's text (shims/gh): the list here, and
             # sops last on each PATH below.
             **fixture_environment(),
         }

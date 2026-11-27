@@ -52,6 +52,8 @@
 # (BOXES below) — and works in the first. The end of a box deletes everything in
 # it, its clones too, whatever they hold: a session pushes what it wants kept
 # before it ends (dispatch://INFRA-1720). omp flags pass straight through after `--`.
+# scripts/tmux-omp-ids and scripts/tmux-resurrect-omp resume a box session by running
+# `agentbox new` again with the arguments before `--` that the pane's launcher had.
 #
 # Every box leaves a RECORD of its own beside its image, <boxes>/../disks/<box>.info:
 # `box=`, `session=` (the owning omp session), `created=`, `command=` and its
@@ -104,13 +106,15 @@
 # within 15 min when nothing renews it. When the broker refuses renew as not live, the launcher
 # enrolls the key the box holds again (reenroll_if_not_live). A failed attempt keeps the key, and
 # the launcher tries again later.
+# So a revoked enrollment does not end a box's access: closing the box, or revoking the machine
+# login, does.
 # close_box ends the box's enrollments (unenroll_box). It revokes the box's own recorded
 # enrollment at once. An enroll call whose outcome is not known can have made an enrollment with
 # an id that the host does not have. A detached process gets that id from the broker and revokes
 # it. A session's enrollments go to a detached waiter, which ends them after a grace unless
 # another box of the session uses them. A box started while the host's helper holds no live
-# launcher credential gets no identity at all (no key, no enrollment.pending). Its agents use
-# secretsd, and `new` says so (broker_ready). The same holds for a box whose first enrollment
+# launcher credential gets no identity at all (no key, no enrollment.pending). Its agents have no
+# broker identity of their own, and `new` reports that (broker_ready). The same holds for a box whose first enrollment
 # fails: enroll_failed removes its key.
 set -euo pipefail
 
@@ -145,7 +149,7 @@ fi
 # (dispatch://INFRA-1192). WHAT IT COSTS: a local SSD is EMPTY after a machine stop, and a raid0
 # of them is gone if one member fails. Nothing durable may live here. A box's disk image holds
 # only the box's private $HOME, its /tmp and its clones, all three of which already die with the
-# box (agentbox/AGENTS.md), and the box cache holds only build caches; the box TREES and the clone
+# box (agentbox/README.md), and the box cache holds only build caches; the box TREES and the clone
 # templates stay on /mnt/nvme. Nothing is lost that a stop did not already take.
 # Only a real mount counts: a /mnt/scratch that is a plain directory of the root disk would put
 # every box image on a 484 GiB filesystem, under the 500 GiB admission floor, and no box would
@@ -186,6 +190,9 @@ NETWORK=agentbox
 # room to spare. `agentbox new --memory SIZE --cpus N` changes one box; AGENTBOX_MEMORY and
 # AGENTBOX_CPUS do too, but a session's environment reaches every box it later starts, so prefer
 # the flag.
+# Raise one box (`--cpus`), not this default: on 2026-11-11 the boxes' quotas added up to 600
+# cores on a 288-core host and the fleet was throttled in 6.6% of periods, while each of the two
+# boxes found throttled was running its own forgotten processes.
 # The per-box limit does not bound the sum: 44 boxes at 24 GiB may claim 1,056 GiB on a 251 GiB
 # host. So every box runs under one parent slice, user-<uid>-agentbox.slice, which systemd nests in
 # user-<uid>.slice by its name. Boxes and host sessions then share that slice's one ceiling
@@ -249,6 +256,8 @@ if [[ -n "$BOX_SCRATCH" ]]; then
 else
     BOX_DISKS="${AGENTBOX_DISKS:-$(dirname "$BOXES")/disks}"
 fi
+# scripts/disk-fill-watch (agentbox_storage_paths) resolves BOXES, BOX_DISKS and BOX_CACHE_ROOT
+# the same way, to measure them: change a default here and there together.
 # EVERY BOX LEAVES A RECORD OF ITS OWN, so a sweep over what a crash left behind can say whose
 # an image is without asking anybody. At 20:05Z on 2026-11-04 this host held 103 box images from
 # before the 18:06Z reboot, 416.2 GiB, each belonging to a session that was alive in a NEW box
@@ -441,7 +450,8 @@ if [[ -z "$OSSV_SSH" && -d "/mnt/nvme/$(id -un)/oss-verifier/ssh" ]]; then OSSV_
 COMPUTE_INVENTORY="${AGENTBOX_COMPUTE_INVENTORY:-}"
 if [[ -z "$COMPUTE_INVENTORY" && -d "/mnt/nvme/$(id -un)" ]]; then COMPUTE_INVENTORY="/mnt/nvme/$(id -un)/compute-inventory"; fi
 [[ "$DURABLE_DIR" == /* && -d "$DURABLE_DIR" ]] || DURABLE_DIR=""
-# The grading farm's three host paths (installers/grade-farm.sh), in every box whose host has
+# The retired grading farm's three host paths (grading-tools#1926 removed grade-farm/; no installer
+# writes them any more, devbox/sami-devbox.md), in every box whose host still has
 # them, each at its own path — never /mnt/nvme/<user> whole (Sami,
 # dispatch://INFRA-702/comment/11d4bf79-4369-4beb-8691-ec688cee53ab):
 #   farm-pkg     the package `farm` is: ~/.local/bin/farm, which every box has through the
@@ -449,8 +459,8 @@ if [[ -z "$COMPUTE_INVENTORY" && -d "/mnt/nvme/$(id -un)" ]]; then COMPUTE_INVEN
 #                directory `farm` is a dangling link and every call dies `No such file or
 #                directory`. That is what every box on sami-devbox had after the 18:05Z re-box
 #                on 2026-11-04, and it stopped the release builds. Bound READ-ONLY: the shim,
-#                its grading-tools clone and its venv are written by installers/grade-farm.sh
-#                on the host alone, and a run writes nothing in it.
+#                its grading-tools clone and its venv were written on the host alone, and a run
+#                writes nothing in it.
 #   grade-farm   the farm root (FARM_DIR: fleet, boxes, ssh_config, known_hosts, the no-start
 #                switch and the ssh control sockets each run opens). Read-write.
 #   boxid        the box identity's ssh key and its gcloud configuration, whose token cache
@@ -598,12 +608,75 @@ box_cache_mounts() {
         -v "$cache/cargo-git:$HOME/.cargo/git"
 }
 
-# remove_paths_command PATH…: the command line that removes each PATH, a read-only tree included,
-# for a line that says a removal failed.
+# A BOX'S ROOT LEAVES FILES THIS USER MAY NOT REMOVE: it writes, as root, into the host paths bound
+# into the box (its run-user, its home), and on sami-devbox at 2026-11-23 two boxes were left for good
+# that way: $RUN_BASE/agentbox-ea4e05d6f7bc by run-user/dconf (root's, mode 700) and
+# $BOXES/agentbox-9131d1634f66 by home/.cache, .config, .local and .ssh (root's). Every close and
+# every collector pass failed on them, and printed `chmod -R u+w …; rm -rf …`, which cannot remove a
+# file root owns (dispatch://INFRA-1720). What this user cannot remove goes in a short-lived
+# container that runs as root (root_rm_args), never through sudo.
+
+# root_rm_args DIR…: ROOT_RM_ARGS, the command that deletes everything under each DIR as root: a
+# container under runc (a sysbox container's root is not the host's root), with no network, of an
+# agentbox image already on this host (never pulled; each has find), with only the DIRs bound in.
+# --mount, not -v: it refuses a source that is missing, where -v makes it, root-owned. find stays on
+# each DIR's own filesystem and leaves each DIR itself, which this user removes after it: its parent
+# is this user's. Status 1 when this host has no agentbox image.
+root_rm_args() {
+    local img d i=0 mounts=() targets=()
+    img="$(docker image ls --filter dangling=false --format '{{.Repository}}:{{.Tag}}' agentbox 2>/dev/null | sed -n 1p)"
+    [[ "$img" == agentbox:* ]] || return 1
+    for d in "$@"; do
+        mounts+=(--mount "type=bind,source=$d,target=/x/$i")
+        targets+=("/x/$i")
+        i=$((i + 1))
+    done
+    ROOT_RM_ARGS=(docker run --rm --pull never --runtime runc --network none --user 0:0 --entrypoint find
+        "${mounts[@]}" "$img" "${targets[@]}" -xdev -mindepth 1 -delete)
+}
+
+# remove_tree BOX PATH: remove PATH, BOX's tree or file, whoever owns what is in it. Status 1 when
+# any of it is left. As this user first: what a plain `rm -rf` leaves of a tree (a Go module cache
+# is 0444 by design) is made writable, then removed. What is still there in a directory is another
+# user's, and goes in root_rm_args' container, only once docker says BOX has no container, since a
+# box that still runs uses it; then this user removes the rest. A link at PATH is never given to
+# docker, which would bind the link's target, and never followed.
+remove_tree() {
+    local box="$1" p="$2" names
+    rm -rf "$p" 2>/dev/null || true
+    [[ -e "$p" || -L "$p" ]] || return 0
+    [[ -L "$p" ]] && return 1
+    chmod -R u+w "$p" 2>/dev/null || true
+    rm -rf "$p" 2>/dev/null || true
+    [[ -e "$p" ]] || return 0
+    if [[ -d "$p" ]] \
+        && names="$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)" && [[ -z "$names" ]] \
+        && root_rm_args "$p"; then
+        "${ROOT_RM_ARGS[@]}" </dev/null >/dev/null 2>&1 || true
+        rm -rf "$p" 2>/dev/null || true
+    fi
+    [[ ! -e "$p" && ! -L "$p" ]]
+}
+
+# remove_paths_command PATH…: the command line that removes each PATH, whoever owns what is in it,
+# for a line that says a removal failed or was not made: the contents of each directory in
+# root_rm_args' container, then `rm -rf` of every PATH, which this user may remove once they are
+# empty. With no agentbox image on this host, `sudo rm -rf`.
 remove_paths_command() {
-    local q=() p
-    for p in "$@"; do q+=("$(printf '%q' "$p")"); done
-    echo "chmod -R u+w ${q[*]}; rm -rf ${q[*]}"
+    local q=() dirs=() p line=""
+    for p in "$@"; do
+        q+=("$(printf '%q' "$p")")
+        [[ -d "$p" && ! -L "$p" ]] && dirs+=("$p")
+    done
+    if (( ${#dirs[@]} )); then
+        if ! root_rm_args "${dirs[@]}"; then
+            echo "sudo rm -rf ${q[*]}"
+            return 0
+        fi
+        for p in "${ROOT_RM_ARGS[@]}"; do line+="${line:+ }$(printf '%q' "$p")"; done
+        line+="; "
+    fi
+    echo "${line}rm -rf ${q[*]}"
 }
 
 # Sami 2026-11-04: agent clutter must be cleaned up. A box's cache goes with its container,
@@ -611,31 +684,27 @@ remove_paths_command() {
 # that cannot go is a failed removal, said as one with the command that completes it, never as a
 # cache kept, and status 1 (dispatch://INFRA-1720).
 close_box_cache() {
-    local box="$1" cache="$BOX_CACHE_ROOT/$1" names remove
+    local box="$1" cache="$BOX_CACHE_ROOT/$1" names
     [[ -e "$cache" || -L "$cache" ]] || return 0
-    remove="$(remove_paths_command "$cache")"
     if ! names="$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)"; then
-        echo "agentbox: removing $box's cache $cache failed: docker could not say whether its container is gone; once it is, remove the cache with: $remove" >&2
+        echo "agentbox: removing $box's cache $cache failed: docker could not say whether its container is gone; once it is, remove the cache with: $(remove_paths_command "$cache")" >&2
         return 1
     fi
     if [[ -n "$names" ]]; then
-        echo "agentbox: removing $box's cache $cache failed: its container still exists; remove both with: docker rm -fv $box; $remove" >&2
+        echo "agentbox: removing $box's cache $cache failed: its container still exists; remove both with: docker rm -fv $box; $(remove_paths_command "$cache")" >&2
         return 1
     fi
     # A Go module cache is mode 0444 by design, and `rm -rf` cannot delete a read-only file in
     # a read-only directory: it fails per entry and the tree stays. Measured 2026-11-06: twelve
     # boxes that no longer exist had left 13,851 MiB behind here, and every exiting box's pane
-    # ends in a run of `rm: cannot remove '.../go-mod/...': Permission denied`. Make the tree
-    # writable first, then remove, then CHECK -- `rm -rf` reports failure per file but the
-    # caller never sees which, and a teardown that half-worked must not read as success
+    # ends in a run of `rm: cannot remove '.../go-mod/...': Permission denied`. remove_tree makes
+    # the tree writable first, then removes, then CHECKS -- `rm -rf` reports failure per file but
+    # the caller never sees which, and a teardown that half-worked must not read as success
     # (ORCH and TAIL, dispatch://INFRA-586). Its status is not this function's: under set -e a
     # failed rm ended the whole close, and every step after it did not run.
-    chmod -R u+w "${cache:?}" 2> /dev/null || true
-    rm -rf "${cache:?}" || true
-    if [[ -e "$cache" || -L "$cache" ]]; then
-        echo "agentbox: removing $box's cache $cache failed; remove what is left with: $remove" >&2
-        return 1
-    fi
+    remove_tree "$box" "${cache:?}" && return 0
+    echo "agentbox: removing $box's cache $cache failed; remove what is left with: $(remove_paths_command "$cache")" >&2
+    return 1
 }
 
 # The box's own filesystem at $BOXES/<box>: a sparse ext4 image loop-mounted there, so every
@@ -854,7 +923,7 @@ close_box_disk() {
 # Whether a new box can get a broker identity: the client installed and the helper holding a live
 # launcher credential (which also means the helper answers and an operator logged in). Until then
 # (a host before its one `agent-secrets-login`, a helper restarted since) a box starts without
-# one: no key, no enrollment.pending, so its agents use secretsd. Sets BROKER_UNREADY when it
+# one: no key, no enrollment.pending, so its agents have no broker identity of their own. Sets BROKER_UNREADY when it
 # answers no, with login-status's own answer.
 broker_ready() {
     local status
@@ -960,7 +1029,7 @@ copy_keyfile() {
 # How a box's enrollment ends when it does not end enrolled: the reason in enrollment.error, which
 # the box's `agentbox doctor --here` reports, and in ENROLL_ERROR, which the host's `agentbox
 # doctor` reports without reading the box-writable file. Then key.pem and the enrollment.pending
-# marker are removed, so the box has no broker identity and its agents use secretsd, as when the
+# marker are removed, so the box has no broker identity of its own, as when the
 # host could not enroll it.
 enroll_failed() {
     local keydir; keydir="$(box_keydir "$1")"
@@ -1921,26 +1990,26 @@ ensure_tcp_forwarder() {
         || die "forwarder $unit did not bind $NETWORK_GATEWAY:$port (journalctl --user -u $unit)"
 }
 
-# $4 = "optional": return 1 instead of ending the launch. A box cannot work without the session
-# bus; it can work without the host's tmux.
-ensure_unix_forwarder() {
-    local unit="$1" sock="$2" target="$3" optional="${4:-}"
-    # A unit already relaying somewhere else is stopped first, as the TCP one is: the host's
-    # tmux socket path follows TMUX_TMPDIR, and a stale unit would relay every box to a socket
-    # nothing listens on.
-    if systemctl --user is-active --quiet "$unit" \
-        && ! systemctl --user show -p ExecStart --value "$unit" 2>/dev/null | grep -qF "UNIX-CONNECT:$target"; then
-        systemctl --user stop "$unit" 2>/dev/null || true
+# The session bus goes through scripts/agentbox-bus-relay rather than socat. A box pid is a number
+# in the box's pid namespace, and the host's systemd reads it as a host pid: Chromium in a box asked
+# it to move "its own" pid into a scope, and the host moved one of its own processes (omp 723175, out
+# of its 109G ceiling, on 2026-11-20). The relay refuses the calls that hand systemd a pid and passes
+# everything else; its docstring has the cases. It replaces the socat unit agentbox-bus without
+# cutting that unit's connections: it takes the socket path over, and the old unit is stopped only
+# once its listener is all it holds, since Chromium aborts when its bus connection drops.
+ensure_bus_relay() {
+    local unit=agentbox-bus-relay legacy=agentbox-bus cg
+    mkdir -p "$(dirname "$BUS_SOCK")"
+    start_unit "$unit" /usr/bin/python3 "$DOTFILES_DIR/scripts/agentbox-bus-relay" "$BUS_SOCK" "/run/user/$UID_/bus" || true
+    # The socket alone proves nothing while the old unit's still exists, so the unit is the verdict.
+    wait_for systemctl --user is-active --quiet "$unit" && wait_for test -S "$BUS_SOCK" \
+        || die "relay $unit did not open $BUS_SOCK (journalctl --user -u $unit)"
+    if systemctl --user is-active --quiet "$legacy"; then
+        cg="$(systemctl --user show -p ControlGroup --value "$legacy" 2>/dev/null)"
+        if [[ -n "$cg" && "$(wc -l <"/sys/fs/cgroup$cg/cgroup.procs" 2>/dev/null)" == 1 ]]; then
+            systemctl --user stop "$legacy" 2>/dev/null || true
+        fi
     fi
-    mkdir -p "$(dirname "$sock")"
-    # The socket is the verdict, not the unit's start: a start that failed because the unit was
-    # already there leaves a working relay behind it (start_unit).
-    start_unit "$unit" socat "UNIX-LISTEN:$sock,fork,mode=600,unlink-early" "UNIX-CONNECT:$target" || true
-    if ! wait_for test -S "$sock"; then
-        [[ -n "$optional" ]] && return 1
-        die "forwarder $unit did not open $sock (journalctl --user -u $unit)"
-    fi
-    return 0
 }
 
 # The host's tmux server, for a lead that drives other sessions' panes (`tmux new-window`,
@@ -1960,7 +2029,7 @@ ensure_unix_forwarder() {
 # command as the host user, outside the box's cgroup and disk limit), respawn or kill any pane,
 # and `kill-server`, which would end every agent pane on the machine. It is given because the
 # relayed session bus already reaches the host's systemd user manager, so a box can already
-# `systemctl --user restart` the host's services (agentbox/AGENTS.md), and because a lead that
+# `systemctl --user restart` the host's services (agentbox/README.md), and because a lead that
 # cannot drive panes cannot be boxed at all - which would leave the coordination sessions, the
 # heaviest on the host, outside every limit this work exists to apply.
 #
@@ -2287,7 +2356,7 @@ ensure_forwarders() {
         ensure_tcp_forwarder agentbox-imds "$IMDS_PORT" 169.254.169.254:80
     fi
     ensure_tcp_forwarder agentbox-envoy "$ENVOY_PORT" "127.0.0.1:$ENVOY_PORT"
-    ensure_unix_forwarder agentbox-bus "$BUS_SOCK" "/run/user/$UID_/bus"
+    ensure_bus_relay
     ensure_tmux_forwarder "$box"
     ensure_forward_channels || return 1
     ensure_loopback_services
@@ -2367,6 +2436,8 @@ mount_args() {
     # 2026-11-01, lane box h-dgn-t1), and the cold trees in nvme-cold and src-cold, behind
     # symlinks at their old paths (2026-11-02). A --dir or an object store under it is not in
     # BOX_MOUNTS (box_dir_bound_why, box_dir_have), so nothing here binds it twice.
+    # A host launcher of `agentbox new … -- omp @<prompt>` also keeps the prompt and its error log
+    # there, and reads them after the box has gone; the session's work output goes on the box's disk.
     [[ -z "$DURABLE_DIR" ]] || a+=(-v "$DURABLE_DIR:$DURABLE_DIR")
     if [[ -n "$COMPUTE_INVENTORY" ]]; then
         mkdir -p "$COMPUTE_INVENTORY" || { echo "agentbox: cannot make $COMPUTE_INVENTORY, the compute ledger every box writes" >&2; return 1; }
@@ -2384,7 +2455,7 @@ mount_args() {
     # places a session writes without being told where. Without them both land in the
     # container's writable layer, which is docker's data root on the shared disk and has no
     # limit of any kind here: a home path outside the allow-list is silently writable
-    # (agentbox/AGENTS.md) and /tmp is where every tool puts its scratch. Docker nests binds by
+    # (agentbox/README.md) and /tmp is where every tool puts its scratch. Docker nests binds by
     # destination, so every allow-listed path below still mounts on top of this $HOME, and the
     # startup prunes exact host mountpoints before assigning private home directories. Both go
     # with the box, and a new box starts with neither of an earlier box's (dispatch://INFRA-1720).
@@ -2594,7 +2665,7 @@ session_env() {
     e+=(-e "PATH=$DOTFILES_DIR/shims:/opt/agentbox/docker-helpers:$DOTFILES_DIR/bin:$HOME/.dotfiles/bin:$DOTFILES_DIR/scripts:$HOME/.mise/shims:$HOME/.local/bin:$HOME/.pulumi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
     e+=(-e "JJ_CONFIG=$HOME/.config/jj/config.toml:$DOTFILES_DIR/.jjconfig.toml")
     # ~/.cache/ms-playwright is mounted rw from the host; without this, a box's `playwright
-    # install` deletes the browser builds of every checkout it cannot see (agentbox/AGENTS.md).
+    # install` deletes the browser builds of every checkout it cannot see.
     e+=(-e PLAYWRIGHT_SKIP_BROWSER_GC=1)
     # gcloud's file logging off, as scripts/agent-session sets it for a host session: a gcloud run
     # past shims/gcloud and ~/.gcloud's installation property copies a printed token into a log
@@ -2783,8 +2854,14 @@ detached() { setsid -w "$@"; }
 # Release every knives claim the session holds. Claims are keyed by the omp
 # session id (kind harness-session), so acting as that session releases them
 # without --force; knives forgets and removes the workspace itself and keeps
-# the commits. A claim's `repo` is its fork's lowercase upstream name
-# (`metr/hawk`), which `knives repos --json` reports as `upstream_name`
+# the branch's commits. For a claim on a release name, knives 6.0.0 and later
+# then sweep the release's earlier writes once jj has no workspace of the
+# claim: they abandon each that nothing keeps (a bookmark or tag, local or on
+# any remote, a workspace or visible descendant, or jj's default immutable
+# rule), hide each earlier write or superseded commit that this exposes, and
+# abandon none while the release holds conflicts; a failed sweep leaves the
+# exit status as it is. A claim's `repo` is its fork's lowercase upstream
+# name (`metr/hawk`), which `knives repos --json` reports as `upstream_name`
 # beside the checkout path.
 finish_knives_claims() {
     local sid="$1" state="$HOME/.config/knives/state.json" repo branch path
@@ -3151,26 +3228,24 @@ close_box() {
     close_box_dir "$box"
 }
 
-# close_box_run_dir BOX: $RUN_BASE/<box>, the box's runtime directory and enrollment files. One
-# that will not go is said with the command that removes it. Status 1 then.
+# close_box_run_dir BOX: $RUN_BASE/<box>, the box's runtime directory and enrollment files, whoever
+# owns what is in it (remove_tree: the box's root writes into its run-user). One that will not go is
+# said with the command that removes it. Status 1 then.
 close_box_run_dir() {
     local dir="${RUN_BASE:?}/$1"
-    rm -rf "$dir" || true
-    [[ -e "$dir" || -L "$dir" ]] || return 0
+    remove_tree "$1" "$dir" && return 0
     echo "agentbox: removing $1's runtime directory $dir failed; remove what is left with: $(remove_paths_command "$dir")" >&2
     return 1
 }
 
-# close_box_dir BOX: the box's filesystem and image (close_box_disk), then its directory. A
-# filesystem that will not unmount, or a tree that will not go (a read-only directory a session
-# made), is said with the command that completes the removal. Status 1 then.
+# close_box_dir BOX: the box's filesystem and image (close_box_disk), then its directory, whoever
+# owns what is in it (remove_tree). A filesystem that will not unmount, or a tree that will not go,
+# is said with the command that completes the removal. Status 1 then.
 close_box_dir() {
     local box="$1"
     close_box_disk "$box" || return 1
-    [[ -e "$BOXES/$box" ]] || return 0
-    rm -rf "${BOXES:?}/$box" 2>/dev/null || { chmod -R u+w "${BOXES:?}/$box" 2>/dev/null; rm -rf "${BOXES:?}/$box" 2>/dev/null; } || true
-    [[ ! -e "$BOXES/$box" ]] && return 0
-    echo "agentbox: removing $BOXES/$box failed; remove what is left with: chmod -R u+w '$BOXES/$box' && rm -rf '$BOXES/$box'" >&2
+    remove_tree "$box" "${BOXES:?}/$box" && return 0
+    echo "agentbox: removing $BOXES/$box failed; remove what is left with: $(remove_paths_command "$BOXES/$box")" >&2
     return 1
 }
 
@@ -3192,8 +3267,13 @@ close_box_dir() {
 #     without one (every box started before this change) counts as a launcher that is not running;
 #   - the newest of its files under those roots is more than an hour old: a box being made has no
 #     container for minutes while its clones are made, and one being closed has none while its
-#     launcher still works. With no file under the roots, its container ended more than an hour
-#     ago (`.State.FinishedAt`); an end time docker does not give keeps it;
+#     launcher still works. A file dated more than an hour AFTER the pass's clock is not counted:
+#     no clock of this host wrote that time, and it would keep the box for ever: on sami-devbox at
+#     2026-11-23 test files dated 2242 and 2096 kept agentbox-469ecd050ad1 (68 GiB, made 2026-11-05)
+#     and agentbox-c1c776d981f6 (119 GiB) young in every pass. The hour of slack keeps a file
+#     written while the walk runs, a little after the pass's clock, counted. With no
+#     file under the roots, its container ended more than an hour ago (`.State.FinishedAt`); an end
+#     time docker does not give keeps it;
 #   - no process has its working directory, a file it holds open or the program it runs under the
 #     box's directory or its $RUN_BASE/<box>, except the box's own tmux relay unit, which outlives
 #     a launcher that died.
@@ -3443,7 +3523,7 @@ collect_not_removed() {
 # collect_box BOX: delete BOX in every place it left, or say why it was not removed and the command
 # that removes it. Status 1 when it stays.
 collect_box() {
-    local box="$1" names state pid out rc young paths=() failed=0 left=() line owner unread shut hidden=() opened=""
+    local box="$1" names state pid out rc young paths=() failed=0 left=() line owner unread shut hidden=() opened="" now
     local denied="find: '(.+)': Permission denied$"
     if ! names="$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)"; then
         collect_not_removed "$box" "unknown" "docker could not be asked whether it has a container"
@@ -3480,7 +3560,11 @@ collect_box() {
         # line is never taken for one.
         while :; do
             rc=0
-            out="$(LC_ALL=C find "${paths[@]}" -mmin "-$COLLECT_AGE_MIN" -printf 'young\t%p\n' -quit 2>&1)" || rc=$?
+            # Young: dated within the hour before the pass's clock or the hour after it (above).
+            # `-mmin -60` alone matched a file dated in any future year.
+            now="$(date -u +%s)"
+            out="$(LC_ALL=C find "${paths[@]}" -newermt "@$((now - COLLECT_AGE_MIN * 60))" \
+                ! -newermt "@$((now + COLLECT_AGE_MIN * 60))" -printf 'young\t%p\n' -quit 2>&1)" || rc=$?
             young="$(sed -n 's/^young\t//p' <<<"$out" | head -n 1)"
             if [[ -n "$young" ]]; then
                 collect_not_removed "$box" "$names" "$young is younger than $COLLECT_AGE_MIN minutes"
@@ -4129,7 +4213,7 @@ cmd_new() {
     box="agentbox-$(tr -d '-' </proc/sys/kernel/random/uuid | cut -c1-12)"
     echo "agentbox: box $box" >&2
     if (( ! use_broker )); then
-        echo "agentbox: $box starts without a secrets-broker identity, so its agents use secretsd: $BROKER_UNREADY" >&2
+        echo "agentbox: $box starts without a secrets-broker identity of its own: $BROKER_UNREADY" >&2
     fi
     tag="$(image_tag)"
     build_image "$tag"
@@ -4637,7 +4721,7 @@ move_check_floor() {
 # /mnt/nvme/sami/worktrees/legion/stopped-tree - so the cwd alone would have given it a box whose
 # `git status` answers about ANOTHER checkout. A path a box is not given is not absent inside it:
 # a home path is silently writable into the box's own filesystem and lost with the box
-# (agentbox/AGENTS.md), which is the dangerous failure. So the spec is inferred from what the
+# (agentbox/README.md), which is the dangerous failure. So the spec is inferred from what the
 # session's own processes actually use, and `--plan` and the notice print every path with why it
 # was chosen, so a lane sees its box before it moves and adds what is missing with
 # `agentbox move --self --dir PATH`.
@@ -10872,15 +10956,15 @@ jq -e ".auths[\"https://index.docker.io/v1/\"] != null or .credHelpers[\"https:/
 [ -z "${AGENT_SECRETS_HELPER_SOCK:-}" ] && [ ! -S "/run/user/$(id -u)/agent-secrets/helper.sock" ] && ok "no helper socket in the box (a box is not a host session)" || fail "helper socket reachable from the box"
 # A box with no broker identity is a supported state, not a defect: one started before the key
 # dir existed, or while the host could not enroll boxes (no key, no enrollment.error). Its agents
-# use secretsd.
+# have no broker identity of their own.
 kd="${AGENT_SECRETS_KEY_DIR:-}"
 if [ -z "$kd" ]; then
-    echo "note box: no broker identity (no AGENT_SECRETS_KEY_DIR: the box predates it); its agents use secretsd"
+    echo "note box: no broker identity (no AGENT_SECRETS_KEY_DIR: the box predates it)"
 elif [ -z "${AGENT_SECRETS_URL:-}" ] || [ "$kd" != "/run/user/$(id -u)/agent-secrets" ]; then
     fail "agent-secrets env: URL=${AGENT_SECRETS_URL:-unset} KEY_DIR=$kd"
 elif [ ! -e "$kd/key.pem" ] && [ ! -e "$kd/enrollment.error" ]; then
     ok "agent-secrets env (url, key dir)"
-    echo "note box: no broker identity (the host could not enroll boxes when this box started); its agents use secretsd"
+    echo "note box: no broker identity (the host could not enroll boxes when this box started)"
 else
     ok "agent-secrets env (url, key dir)"
     [ "$(stat -c %a "$kd/key.pem" 2>/dev/null)" = 600 ] && [ "$(stat -c %U "$kd/key.pem" 2>/dev/null)" = ubuntu ] && ok "box key 0600 ubuntu" || fail "box key: $(ls -l "$kd" 2>&1 | tr "\n" " ")"
@@ -10977,13 +11061,13 @@ cmd_doctor() {
     ensure_forwarders && ok "host: forwarders (imds, envoy, bus)"
     local host_forward; host_forward="$(timeout 20 forward doctor 2>&1 | grep -cE 'accepted|reachable|accepts' || true)"
     # The broker, host side. A host whose helper holds no live launcher credential gives boxes and
-    # host sessions no broker identity, and their agents use secretsd: a supported state, so a
+    # host sessions no broker identity of their own: a supported state, so a
     # note. Both helper checks run as a child of the user manager: doctor itself may be running
     # inside an agent session, which would make its own pid a session member.
     local helper_out
     if command -v agent-secrets >/dev/null 2>&1; then ok "host: agent-secrets on PATH"; else fail "host: agent-secrets not installed (mise install agent-secrets)"; fi
     if [[ ! -e "$HOME/.config/systemd/user/agent-secrets-helper.service" ]]; then
-        echo "note host: agent-secrets-helper is not installed here (bash installers/agent-secrets.sh); boxes and host sessions use secretsd"
+        echo "note host: agent-secrets-helper is not installed here (bash installers/agent-secrets.sh); boxes and host sessions get no broker identity from it"
     elif ! systemctl --user is-active --quiet agent-secrets-helper.service || [[ ! -S "/run/user/$UID_/agent-secrets/helper.sock" ]]; then
         fail "host: agent-secrets-helper not active (systemctl --user status agent-secrets-helper)"
     else
@@ -10995,7 +11079,7 @@ cmd_doctor() {
             helper_out="$(fresh_process agent-secrets register --exec --wait 30 -- agent-secrets whoami 2>&1 || true)"
             if jq -e '.kind == "session"' <<<"$helper_out" >/dev/null 2>&1; then ok "host: helper enrolls and signs for a fresh session (kind $(jq -r .kind <<<"$helper_out"), operator $(jq -r .operator <<<"$helper_out"))"; else fail "host: helper session: $(head -1 <<<"$helper_out")"; fi
         else
-            echo "note host: $BROKER_UNREADY; boxes and host sessions start without a broker identity and use secretsd"
+            echo "note host: $BROKER_UNREADY; boxes and host sessions start without a broker identity of their own"
         fi
     fi
     build_image "$tag"

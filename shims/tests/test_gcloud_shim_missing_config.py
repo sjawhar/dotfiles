@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The gcloud shim reads a configuration's file quietly when the file is not there.
 
-An agent's call under an empty CLOUDSDK_CONFIG (scripts/gcloud-reader and scripts/gcloud-broker
-each run gcloud in a fresh one) has no configurations/config_default. The shim's readers of a
+An agent's call under an empty CLOUDSDK_CONFIG (scripts/gcloud-reader runs gcloud in a fresh
+one) has no configurations/config_default. The shim's readers of a
 configuration's `account` and `impersonate_service_account` treat a missing file as no value, and
 used to print bash's "No such file or directory" for it: the `2> /dev/null` came after the `<` of
 the loop, so the shell reported the failed redirect before stderr went to /dev/null.

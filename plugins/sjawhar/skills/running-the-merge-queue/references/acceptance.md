@@ -5,6 +5,8 @@ Read for any change to what executes: infrastructure, task data, agent or harnes
 ## Evidence rules
 
 - The proof is `opening-a-pr`'s step 4 (its `proof.md`): the owner runs it on a production-like surface, with the markers `RAN`, `BLOCKED`, `WAIVED-BY-SAMI`. The queue adds:
+- The owner also owns the later production check. It comes after the proof, never in its place. CI, unit tests, an internal helper or testing after merge do not replace the proof.
+- A build, unit suite, import or low-level probe is groundwork, not the scenario. A green pipeline does not prove that it scheduled the changed path.
 - Each required scenario row records the behavior or contract, the consuming component with its revision or config, the environment, the entry point and exact command, run ID, outcome, duration and evidence link. A row that claims two commits have the same tree names both SHAs and the tree hash.
 - An unrun scenario is a `BLOCKED` row, never a missing row, and it stops readiness.
 - Return infrastructure, tooling and skill gaps to the owner to fix before merge. Never run their acceptance or invent a waiver.
@@ -18,7 +20,7 @@ Read for any change to what executes: infrastructure, task data, agent or harnes
 - Registry-selected package: the entries supported launchers request, resolving and executing in the intended runner. It can change future launches with no redeploy, so migrate supported callers. An import, or "every launch tracks main", proves no availability. Keep an old alias only where a documented compatibility promise requires it.
 - Tightened acceptance assertions: a run on real data before merge. A safe theory does not prove valid real runs pass.
 - Advisory lane: which scenario ran and what it showed. Accept a valid observation from an advisory lane as evidence; it need not become a required check first.
-- Watcher offered as a merge condition: the attached run or resource identity, a jobs or state snapshot, and a later observation. A first log line proves only that the process exists, and an empty selection query can keep a watcher alive forever.
+- Watcher offered as a merge condition: the attached run or resource identity, a jobs or state snapshot, and a later observation (the watcher's output after at least one full poll interval or one watched event, showing that it read the watched run or resource). A first log line proves only that the process exists, and an empty selection query can keep a watcher alive forever.
 
 ## Independent oracle
 

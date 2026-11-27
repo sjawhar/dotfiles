@@ -1,6 +1,8 @@
 instructions: |
   Each advisor reviews only what its own roster entry names and stays silent on everything else.
 
+# Keep this list non-empty, even with every advisor disabled: with an empty roster omp runs its own
+# default advisor in every session (omp/config.yml sets advisor.enabled).
 advisors:
   - name: ForkGate
     enabled: false

@@ -131,7 +131,7 @@ class ForwardChannels(unittest.TestCase):
         result = subprocess.run(
             ["bash", "-c", '''source "$1"
              ensure_tcp_forwarder() { :; }
-             ensure_unix_forwarder() { :; }
+             ensure_bus_relay() { :; }
              ensure_tmux_forwarder() { :; }
              ensure_loopback_services() { echo "continued after failed discovery"; }
              if ensure_forwarders; then exit 0; else exit 1; fi''', "--", str(AGENTBOX)],

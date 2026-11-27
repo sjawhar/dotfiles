@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A gh call that arrives over SSH with no terminal is an agent's (shims/AGENTS.md, "Who is an agent"): `ssh
+"""A gh call that arrives over SSH with no terminal is an agent's (shims/tests/test_shim_agent_context.py): `ssh
 sami-devbox gh …` carries no session marker, so the SSH rule decides, and the call takes the agent route: the agent
 config directory, the App routing, the refusal of `gh auth` verbs and the public-text leak check. A person's own SSH
 session (SSH_TTY set, or a terminal), and a person who sets AGENT_SHIM_PERSON=1, reach gh as before. knives and gh are
@@ -52,7 +52,7 @@ class SshAgentContext(unittest.TestCase):
         self.work = self.tmp / "work"  # no repository here
         self.work.mkdir()
         self.base = {
-            # The leak-term check reads every write's text (shims/AGENTS.md, "Leak-term list").
+            # The leak-term check reads every write's text (shims/gh).
             **leak_check_environment(os.pathsep.join([str(SHIMS), str(self.bin), "/usr/bin", "/bin"])),
             "HOME": str(self.tmp / "home"),
             "USER": "no-such-user-gh-ssh-test",

@@ -5,6 +5,9 @@ description: Envoy fleet deployment via Docker over Tailscale SSH
 # machine silently defaults to the local ~/.pulumi backend and uses stale state.
 backend:
   url: s3://trajectory-labs-pulumi?region=us-west-2
+# The envoy-infra pin moves only as README.md, "The envoy-infra plugin", says: check the release's
+# archive first, and delete the entry below before `pulumi package add`, which otherwise keeps its
+# version whatever version it is given and exits 0 having regenerated the old SDK.
 packages:
   envoy-infra:
     source: envoy-infra

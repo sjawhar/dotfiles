@@ -7,7 +7,11 @@ compares them byte for byte; the second drives the function itself over every ca
 session of each case named — its controlling terminal and its stdin — so the matrix is proved once
 for every copy, `shims/gh-app-token`'s Python one included, and each shim's own test file carries
 only its own end-to-end case. `shims/secrets` makes the same test inline, tested in
-`test_secrets_shim.py`.
+`test_secrets_shim.py`. A new session marker goes into every copy, the lists of `shims/gh-app-token`
+and `shims/secrets`, the list `shims/tmux` carries into a new pane, `MARKERS` below, and the marker
+lists other shim tests strip from their environment: a grep for a marker already in the list finds
+them all. This file checks each marker in `MARKERS` against the copies and `shims/gh-app-token`
+only.
 
 A command that arrives over SSH in a session with no controlling terminal is an agent's: on
 2026-11-07 an agent's `ssh sami-devbox az account show` ran as Sami@Theorem.dev, because the shim

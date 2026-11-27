@@ -57,7 +57,7 @@ class Base(unittest.TestCase):
         self.env = {
             **{k: v for k, v in os.environ.items()
                if not k.startswith(("GIT_CONFIG_", "PUBLIC_LEAK_CHECK"))},
-            # The shim takes no gh above its own PATH entry (shims/AGENTS.md, "Adding to a shim"), so this checkout's
+            # The shim takes no gh above its own PATH entry (real_gh in shims/gh), so this checkout's
             # shims/, which a run inside the checkout has on PATH, is left out: the shim runs from outside PATH and
             # takes the fake gh first.
             "PATH": os.pathsep.join([str(self.bin), *(entry for entry in os.environ["PATH"].split(os.pathsep)
@@ -95,6 +95,13 @@ class Gate(Base):
         result = self.run_gate("pr", "comment", "9", "-R", "o/r", "--body", "hello", check_path=str(self.stub))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.stub_log.read_text().strip(), "gh-guard pr comment 9 -R o/r --body hello")
+
+    def test_gate_hands_a_one_word_call_after_a_double_dash(self):
+        # `<check> gh-guard WORD` is a call of two arguments whose first is a mode word: the shape
+        # of a pre-push hook's call, which leak-check-v33 and later refuse. One word goes after `--`.
+        result = self.run_gate("status", check_path=str(self.stub))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.stub_log.read_text().strip(), "gh-guard -- status")
 
     def test_gate_refuses_when_the_check_refuses(self):
         result = self.run_gate("pr", "comment", "9", "-R", "o/r", "--body", "x", rc="3", check_path=str(self.stub))

@@ -1,3 +1,5 @@
+# Dormant: nothing in this repository reads this file. [devpod] is the old devcontainer flow, and
+# [devbox] a cloud-init that provisions a bare VM; devbox/ sets up the dev box now.
 [devpod]
 image = "sjawhar/devpod"
 memory = "64Gi"

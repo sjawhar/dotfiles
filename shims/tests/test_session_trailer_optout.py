@@ -104,6 +104,18 @@ class GitTest(Base):
         self.run_ok("git", "worktree", "add", "-q", "-b", "side", str(self.tmp / "wt"), cwd=repo, env=self.plain)
         self.assertIn(TRAILER, self.commit(self.tmp / "wt"))
 
+    def test_a_clone_of_a_temporary_origin_leaves_it_off_until_a_github_remote_is_added(self):
+        # A test fixture's clone of its own bare origin.git (dispatch://INFRA-4003): every remote is a
+        # local path under a temporary root, so the clone is a throwaway repository too (scripts/throwaway-repository.sh).
+        seed = self.repo()
+        self.run_ok("git", "commit", "-q", "--allow-empty", "-m", "base", cwd=seed, env=self.plain)
+        self.run_ok("git", "clone", "-q", "--bare", str(seed), str(self.tmp / "origin.git"), cwd=self.tmp, env=self.plain)
+        self.run_ok("git", "clone", "-q", str(self.tmp / "origin.git"), str(self.tmp / "clone"), cwd=self.tmp, env=self.plain)
+        clone = self.tmp / "clone"
+        self.assertEqual(self.commit(clone).strip(), "work")
+        self.run_ok("git", "remote", "add", "upstream", PUBLIC, cwd=clone, env=self.plain)
+        self.assertIn(TRAILER, self.commit(clone))
+
     def test_a_symlinked_tmpdir_still_counts(self):
         # The root is under self.kept, so only $TMPDIR, reached through a symlink, can match it.
         root = self.kept / "session-tmp"
@@ -167,7 +179,7 @@ class GitTest(Base):
         self.assertEqual(ask(repo)[0], 1)
         self.assertRegex(ask(repo)[1], rf"^off: no remote, and the git common directory {common} is under the temporary root .+\n$")
         self.run_ok("git", "remote", "add", "origin", PUBLIC, cwd=repo, env=self.plain)
-        self.assertEqual(ask(repo), (0, "on: omp.sessionTrailer is unset and the repository has a remote\n"))
+        self.assertEqual(ask(repo), (0, "on: omp.sessionTrailer is unset and the repository has a remote that is not a local path under a temporary root\n"))
         self.run_ok("git", "config", "omp.sessionTrailer", "false", cwd=repo, env=self.plain)
         self.assertEqual(ask(repo), (1, "off: omp.sessionTrailer is false\n"))
         self.run_ok("git", "config", "omp.sessionTrailer", "true", cwd=repo, env=self.plain)

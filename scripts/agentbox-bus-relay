@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""agentbox-bus-relay LISTEN_SOCKET UPSTREAM_SOCKET
+
+The relay every agent box reaches the host's session bus through (scripts/agentbox,
+ensure_bus_relay). It copies each connection byte for byte, as the `socat UNIX-LISTEN:…,fork
+UNIX-CONNECT:…` it replaces did, with one change: a call that names processes by pid to the host's
+systemd is renamed before it leaves, so systemd answers it with UnknownMethod and moves nothing.
+
+Why: a pid in a box is a number in the box's pid namespace, and the host's systemd reads it as a
+host pid. Chromium, when it starts with a session bus, asks systemd to move "its own pid" into
+app-org.chromium.Chromium-<pid>.scope (components/dbus/xdg/systemd.cc), and from a box the host
+moved whichever host process had that number: omp 723175 on 2026-11-20 at 10:18:12Z, out of its
+109G scope into one with no MemoryMax, and socat 19953 on 2026-11-10. From inside a box,
+`busctl … StartTransientUnit x.scope … PIDs au 1 <n>` moved a host sleep with pid n that the box
+did not have (2026-11-21 23:23:14Z).
+
+Refused, and nothing else (a box may still use the host's systemd for everything that names no
+pid, such as `systemctl --user` or `systemd-run --user` of a service):
+  org.freedesktop.systemd1.Manager.StartTransientUnit of a unit whose name ends in .scope (a scope
+    is made of the pids its caller names), renamed to BoxPidsNotHostPids;
+  org.freedesktop.systemd1.Manager.AttachProcessesToUnit, renamed to BoxPidsAreNotHostPids.
+Each new name has the old one's length, so the message keeps its layout and only those bytes change.
+
+The client's half of the authentication and everything the bus sends back pass through untouched.
+A stream this relay cannot parse is relayed raw from that point, and the journal says so.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import signal
+import struct
+import sys
+
+SYSTEMD = "org.freedesktop.systemd1"
+MANAGER = "org.freedesktop.systemd1.Manager"
+RENAMES = {"StartTransientUnit": "BoxPidsNotHostPids", "AttachProcessesToUnit": "BoxPidsAreNotHostPids"}
+assert all(len(a) == len(b) for a, b in RENAMES.items())
+METHOD_CALL = 1
+FIELD_PATH, FIELD_INTERFACE, FIELD_MEMBER, FIELD_DESTINATION = 1, 2, 3, 6
+MAX_MESSAGE = 128 << 20  # the D-Bus specification's limit
+
+
+def log(text: str) -> None:
+    print(f"agentbox-bus-relay: {text}", file=sys.stderr, flush=True)
+
+
+def align(n: int, to: int) -> int:
+    return (n + to - 1) & ~(to - 1)
+
+
+class Unparseable(Exception):
+    pass
+
+
+def message_length(buf: bytes | bytearray) -> int | None:
+    """The whole message's length once its fixed header is in, else None."""
+    if len(buf) < 16:
+        return None
+    endian = {ord("l"): "<", ord("B"): ">"}.get(buf[0])
+    if endian is None:
+        raise Unparseable(f"endianness byte {buf[0]!r}")
+    body_len, _serial, fields_len = struct.unpack_from(endian + "III", buf, 4)
+    total = align(16 + fields_len, 8) + body_len
+    if total > MAX_MESSAGE:
+        raise Unparseable(f"message of {total} bytes")
+    return total
+
+
+def read_string(msg: bytes | bytearray, pos: int, endian: str, sig: str) -> tuple[int, int, int]:
+    """(start, end, next) of the string-like value at pos: s and o carry a u32 length, g a u8."""
+    if sig == "g":
+        n = msg[pos]
+        return pos + 1, pos + 1 + n, pos + 2 + n
+    pos = align(pos, 4)
+    (n,) = struct.unpack_from(endian + "I", msg, pos)
+    return pos + 4, pos + 4 + n, pos + 5 + n
+
+
+def refused(msg: bytearray) -> str | None:
+    """Rename a refused call in place and return what it was; None leaves the message as it is."""
+    if msg[1] != METHOD_CALL:
+        return None
+    endian = "<" if msg[0] == ord("l") else ">"
+    body_len, _serial, fields_len = struct.unpack_from(endian + "III", msg, 4)
+    end = 16 + fields_len
+    pos = 16
+    fields: dict[int, tuple[int, int]] = {}
+    while pos < end:
+        pos = align(pos, 8)
+        if pos >= end:
+            break
+        code, sig_len = msg[pos], msg[pos + 1]
+        sig = msg[pos + 2:pos + 2 + sig_len].decode("ascii")
+        pos += 3 + sig_len
+        if sig in ("s", "o", "g"):
+            start, stop, pos = read_string(msg, pos, endian, sig)
+            fields[code] = (start, stop)
+        elif sig == "u":
+            pos = align(pos, 4) + 4
+        else:
+            raise Unparseable(f"header field {code} of signature {sig!r}")
+
+    def text(code: int) -> str | None:
+        span = fields.get(code)
+        return msg[span[0]:span[1]].decode("utf-8", "replace") if span else None
+
+    member = text(FIELD_MEMBER)
+    if member not in RENAMES or text(FIELD_DESTINATION) != SYSTEMD or text(FIELD_INTERFACE) not in (MANAGER, None):
+        return None
+    what = member
+    if member == "StartTransientUnit":
+        body = align(end, 8)
+        if body_len < 4:
+            return None
+        start, stop, _ = read_string(msg, body, endian, "s")
+        unit = msg[start:stop].decode("utf-8", "replace")
+        if not unit.endswith(".scope"):
+            return None
+        what = f"StartTransientUnit {unit}"
+    start, stop = fields[FIELD_MEMBER]
+    msg[start:stop] = RENAMES[member].encode("ascii")
+    return what
+
+
+async def pipe_raw(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    while data := await reader.read(65536):
+        writer.write(data)
+        await writer.drain()
+
+
+async def client_to_bus(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, peer: str) -> None:
+    # Authentication: a NUL byte, then CRLF lines, until the client's BEGIN line; the bus answers on
+    # its own side. Each complete line is passed on as it comes.
+    buf = bytearray()
+    begun = False
+    while not begun:
+        data = await reader.read(65536)
+        if not data:
+            if buf:
+                writer.write(buf)
+                await writer.drain()
+            return
+        buf += data
+        while (nl := buf.find(b"\r\n")) != -1:
+            line = bytes(buf[:nl + 2])
+            del buf[:nl + 2]
+            writer.write(line)
+            if line.lstrip(b"\0") == b"BEGIN\r\n":
+                begun = True
+                break
+        await writer.drain()
+    # Messages.
+    while True:
+        try:
+            while (total := message_length(buf)) is not None and len(buf) >= total:
+                msg = bytearray(buf[:total])
+                del buf[:total]
+                if (what := refused(msg)) is not None:
+                    log(f"refused {what} from {peer}: a box pid names another process on the host")
+                writer.write(msg)
+        except (Unparseable, struct.error, IndexError, UnicodeDecodeError) as exc:
+            log(f"cannot parse the stream from {peer} ({exc}); relaying it raw from here")
+            writer.write(buf)
+            await writer.drain()
+            await pipe_raw(reader, writer)
+            return
+        await writer.drain()
+        data = await reader.read(65536)
+        if not data:
+            if buf:
+                writer.write(buf)
+            return
+        buf += data
+
+
+async def serve(upstream: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    peer = "a box"
+    try:
+        sock = writer.get_extra_info("socket")
+        pid, _uid, _gid = struct.unpack("iii", sock.getsockopt(1, 17, 12))  # SOL_SOCKET, SO_PEERCRED
+        peer = f"client pid {pid} (host view)"
+    except OSError:
+        pass
+    try:
+        up_reader, up_writer = await asyncio.open_unix_connection(upstream)
+    except OSError as exc:
+        log(f"cannot reach {upstream}: {exc}")
+        writer.close()
+        return
+    tasks = [asyncio.create_task(client_to_bus(reader, up_writer, peer)),
+             asyncio.create_task(pipe_raw(up_reader, writer))]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            task.cancel()
+        for w in (writer, up_writer):
+            w.close()
+
+
+async def main(listen: str, upstream: str) -> None:
+    try:
+        os.unlink(listen)
+    except FileNotFoundError:
+        pass
+    old = os.umask(0o177)
+    try:
+        server = await asyncio.start_unix_server(lambda r, w: serve(upstream, r, w), path=listen)
+    finally:
+        os.umask(old)
+    os.chmod(listen, 0o600)
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop.set)
+    log(f"relaying {listen} to {upstream}")
+    try:
+        async with server:
+            await stop.wait()
+    finally:
+        try:
+            os.unlink(listen)
+        except FileNotFoundError:
+            pass
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print((__doc__ or "").strip(), file=sys.stderr)
+        sys.exit(0 if sys.argv[1:] in (["-h"], ["--help"]) else 2)
+    asyncio.run(main(sys.argv[1], sys.argv[2]))

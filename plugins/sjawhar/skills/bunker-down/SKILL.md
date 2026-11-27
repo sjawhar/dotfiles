@@ -5,7 +5,7 @@ description: Use when hardening a publicly reachable EC2 instance used as a dail
 
 # Harden an EC2 devbox
 
-Apply each setting below even where the box's current config is looser, and tell the user each one you change.
+Apply each setting below where the box's current config is looser. Where the box already has a stricter value (a lower `MaxAuthTries`, a longer `bantime`), write that value in the command instead. Tell the user each setting you change.
 
 - Open each new access path and confirm it works before you close the old one, so the user is never locked out.
 - At each GATE, stop until the user confirms.
@@ -13,7 +13,9 @@ Apply each setting below even where the box's current config is looser, and tell
 
 ## 1. Assess
 
-Report each item as good or concerning: OS release and patch state, listening sockets, firewall (ufw, iptables, nftables), `sshd -T` and every file in `/etc/ssh/sshd_config.d/`, login-capable accounts, `/root/.ssh/authorized_keys`, fail2ban, unattended-upgrades, AppArmor, auditd, network sysctls, enabled services, published Docker ports, and from AWS the security groups, IMDS options and IAM instance profile. Record for later steps: `INSTANCE_ID` and `REGION` (instance metadata), `ACCOUNT_ID` (`aws sts get-caller-identity`), `OLD_SG_ID` (the instance's current security group).
+Report each item as good or concerning: OS release and patch state, listening sockets, firewall (ufw, iptables, nftables), `sshd -T` and every file in `/etc/ssh/sshd_config.d/`, login-capable accounts, `/root/.ssh/authorized_keys`, fail2ban, unattended-upgrades, AppArmor, auditd, network sysctls, enabled services, published Docker ports, and from AWS the security groups, IMDS options and IAM instance profile. An item is concerning when it allows more than Steps 2 to 7 set (for example password SSH login, IMDSv1, an inbound rule other than UDP 41641), when the internet can reach it (a published Docker port, a socket on a public address that a security group lets in), when it is off or behind (AppArmor or auditd not running, a package that `apt list --upgradable` lists), or when it is an account other than the user's and root with a login shell. Otherwise it is good.
+
+Record for later steps: `INSTANCE_ID` (instance metadata or `aws ec2 describe-instances`), `REGION` (instance metadata), `ACCOUNT_ID` (`aws sts get-caller-identity`), `VPC_ID` (`aws ec2 describe-instances`), `OLD_SG_ID` (the instance's current security group), and after Step 3 `TAILSCALE_IP` (`tailscale ip -4`).
 
 ## 2. SSM escape hatch
 
@@ -51,12 +53,12 @@ GATE: the user can still SSH to the Tailscale IP.
 
 ## 5. SSH and fail2ban
 
-Ask the user whether they use SFTP (VS Code Remote, scp, rsync over SSH).
+Ask the user whether they use SFTP (VS Code Remote, scp, rsync over SSH). Name the drop-in `00-hardening.conf`: sshd keeps the first value it reads, so a file sorted before it would win.
 
 ```bash
 SFTP_LINE="Subsystem sftp /bin/false"         # no SFTP
 # SFTP_LINE="Subsystem sftp internal-sftp"    # the user needs SFTP
-sudo tee /etc/ssh/sshd_config.d/99-hardening.conf << EOF
+sudo tee /etc/ssh/sshd_config.d/00-hardening.conf << EOF
 PermitRootLogin no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
@@ -105,40 +107,17 @@ GATE: SSH over Tailscale still works. Then `aws ec2 delete-security-group --grou
 
 ## 7. OS hardening
 
-```bash
-{ printf '%s = 0\n' net.ipv4.conf.{all,default}.{accept_redirects,accept_source_route,send_redirects} \
-    net.ipv6.conf.{all,default}.accept_redirects
-  echo 'net.ipv4.conf.all.log_martians = 1'; } | sudo tee /etc/sysctl.d/99-hardening.conf
-sudo sysctl --system
-aws ec2 modify-instance-metadata-options --instance-id $INSTANCE_ID \
-  --http-tokens required --http-put-response-hop-limit 1   # IMDSv2 only, no hop to a container
-# Edit this list to what Step 1 found running:
-for svc in ModemManager.service open-iscsi.service multipathd.service open-vm-tools.service; do
-    systemctl list-unit-files "$svc" &>/dev/null && sudo systemctl disable --now "$svc"
-done
-sudo apt-get install -y unattended-upgrades
-cat /etc/apt/apt.conf.d/20auto-upgrades  # both values should be "1"
-```
-
-If nothing on the machine uses IPv6 (ask the user), also add `net.ipv6.conf.all.disable_ipv6 = 1`. Add to the user's bashrc, so an idle shell outside tmux closes and a pending reboot shows:
-
-```bash
-[ -z "${TMUX:-}" ] && TMOUT=900
-if [ -f /var/run/reboot-required ]; then
-    printf '\033[1;33m*** System restart required ***\033[0m\n'
-    [ -f /var/run/reboot-required.pkgs ] && sed 's/^/    /' /var/run/reboot-required.pkgs
-fi
-```
+Read `references/os-hardening.md` now and run it: it writes the network sysctls, sets IMDSv2 only, disables unused services, installs unattended-upgrades, and has the IPv6 question and the bashrc lines.
 
 ## 8. Security review
 
-Give the `cybersecurity-expert` agent this brief, or do the review yourself if it is not available, and fix every HIGH finding before Step 9:
+Give the `cybersecurity-expert` agent (the `task` tool) this brief, or do the review yourself if it is not available, and fix every HIGH finding before Step 9:
 
-> Review the security posture of this EC2 instance, a personal development machine reached over Tailscale with SSM as an escape hatch: open ports, listening services, SSH config, firewall rules, IAM role scope, IMDS options, kernel params, permissions on ~/.ssh, /etc/shadow and sudoers, AppArmor, and the Docker daemon config if installed. Label each finding HIGH, MEDIUM or LOW, HIGH first.
+> Review the security posture of this EC2 instance, a personal development machine reached over Tailscale with SSM as an escape hatch: open ports, listening services, SSH config, firewall rules, IAM role scope, IMDS options, kernel params, permissions on ~/.ssh, /etc/shadow and sudoers, AppArmor, and the Docker daemon config if installed. Report anything else concerning. Label each finding HIGH, MEDIUM or LOW, HIGH first.
 
 ## 9. Final verification
 
-Check each change end to end and give the user a summary table: UFW status, the effective `sshd -T` values, the fail2ban sshd jail, Tailscale status, kernel params, IMDS options, listening ports, and the new security group's ingress rules.
+Check each change end to end: read the live state with the command named below, not the file you wrote, and have the user confirm from their laptop that a new SSH session to the Tailscale IP works, that `ssh` to the public IP times out, and that `aws ssm start-session` works. Give the user a summary table: UFW status (`sudo ufw status verbose`), the effective `sudo sshd -T` values, the fail2ban sshd jail (`sudo fail2ban-client status sshd`), `tailscale status`, kernel params (`sysctl <key>` for each key in `/etc/sysctl.d/99-hardening.conf`), IMDS options (`aws ec2 describe-instances --instance-ids $INSTANCE_ID --query 'Reservations[0].Instances[0].MetadataOptions'`), listening ports (`sudo ss -tulpn`), and the new security group's ingress rules (`aws ec2 describe-security-groups --group-ids $SG_ID`).
 
 ## Common issues
 

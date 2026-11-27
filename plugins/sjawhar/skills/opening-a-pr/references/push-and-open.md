@@ -3,7 +3,7 @@
 ## One line of work, one PR
 
 - Look for this session's PR first: `git branch -vv`, `gh pr view`, `gh pr list --author @me`. Fold same-line work in with a push, then `gh pr edit`. No sibling one-off PRs.
-- Use `gh-stack` only for dependent work that lands as one reviewed unit. Keep an unmerged base small, merge it fast, and split off what does not need it.
+- Use `gh-stack` only for dependent work that lands as one reviewed unit. Keep an unmerged base to what the PRs above it need, hand it to `landing-a-pr` as soon as its own proof and review pass, without waiting for the PRs above it, and split off what does not need it.
 - Size the PR before review: split where each piece can be verified alone. Ship the pieces in dependency order and rebase the rest onto each merged one. A slice no caller reaches yet may merge alone, if you ran the production path and it still behaves as before.
 - Fix correctness findings before merge. Push once per review round.
 - With no PR yet:

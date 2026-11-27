@@ -342,7 +342,7 @@ oryx_foreign_listener() {
         port="${local_address##*:}"
         address="${local_address%:*}"
         address="${address%%%*}"
-        case "$port" in 12801|12802|12805) ;; *) continue ;; esac
+        case "$port" in 12801|12802|12805|8776|9030|4223) ;; *) continue ;; esac
         # A wildcard listener on the port blocks ssh's 127.0.0.1 bind as surely as a loopback one.
         case "$address" in
             127.0.0.1|0.0.0.0|'*'|'[::]'|'[::ffff:127.0.0.1]'|'[::ffff:0.0.0.0]')

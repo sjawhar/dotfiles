@@ -6,7 +6,7 @@
 #
 # Resolution: the first bq past this shim's own PATH entry (below), else the SDK's documented
 # install location under the home gcloud itself uses, then under the uid's passwd home, which a
-# moved HOME (a test's temporary one) does not move (shims/AGENTS.md, "A moved HOME"). It never
+# moved HOME (a test's temporary one) does not move (shims/tests/test_shim_moved_home.py). It never
 # execs itself.
 #
 # bq shares gcloud's config directory and its per-call log files, which gcloud never prunes

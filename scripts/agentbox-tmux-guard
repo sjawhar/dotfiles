@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 """One agent box's end of the host tmux relay: it runs the box's tmux commands as the user, and
 refuses the ones that would end another session.
 

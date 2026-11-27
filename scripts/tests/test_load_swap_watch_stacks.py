@@ -174,7 +174,7 @@ class ReportSection(unittest.TestCase):
 class CaptureShape(unittest.TestCase):
     """The walk, the dmesg cut, the episode gate and the message line."""
 
-    def proc_tree(self, directory: Path, tasks: list[tuple[int, str, str]]) -> Path:
+    def proc_tree(self, directory: Path, tasks: list[tuple[int, str | bytes, str]]) -> Path:
         proc = directory / "proc"
         proc.mkdir()
         (proc / "uptime").write_text("100000.00 50000.00\n")
@@ -183,10 +183,12 @@ class CaptureShape(unittest.TestCase):
             base.mkdir()
             fields = ["0"] * 40
             fields[11], fields[12] = "300", "200"  # utime, stime: 5 s of CPU at 100 Hz
-            (base / "stat").write_text(f"{pid} ({comm}) {state} " + " ".join(fields) + "\n")
+            name = comm if isinstance(comm, bytes) else comm.encode()
+            (base / "stat").write_bytes(b"%d (%s) %s " % (pid, name, state.encode()) + " ".join(fields).encode() + b"\n")
             (base / "wchan").write_text("wait_for_completion")
-            # se.exec_start is in ms since boot: blocked for 1,000 s of the 100,000 s uptime.
-            (base / "sched").write_text("se.exec_start : 99000000.0\n")
+            # sched opens with the name, as stat holds it. se.exec_start is in ms since boot:
+            # blocked for 1,000 s of the 100,000 s uptime.
+            (base / "sched").write_bytes(b"%s (%d, #threads: 1)\nse.exec_start : 99000000.0\n" % (name, pid))
         return proc
 
     def test_d_state_walk_puts_the_umounts_first(self):
@@ -205,6 +207,24 @@ class CaptureShape(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             proc = self.proc_tree(Path(directory), [(100 + n, "python", "D") for n in range(12)])
             self.assertEqual(len(WATCH.d_state_tasks(proc, limit=5)), 5)
+
+    def test_d_state_walk_reads_a_name_that_is_not_utf8(self):
+        """Any process may name itself any bytes (prctl PR_SET_NAME); its stat and sched carry them."""
+        with tempfile.TemporaryDirectory() as directory:
+            proc = self.proc_tree(Path(directory), [(10, b"\xffbadname", "D"), (11, "umount", "D")])
+            tasks = WATCH.d_state_tasks(proc)
+        self.assertEqual([task["pid"] for task in tasks], [11, 10])
+        self.assertEqual(tasks[1]["comm"], "\ufffdbadname")
+        self.assertAlmostEqual(tasks[1]["blocked"], 1000.0, places=3)
+
+    def test_switch_worker_walk_goes_past_a_name_that_is_not_utf8(self):
+        stacks = WATCH.read_kernel_stacks
+        setattr(WATCH, "read_kernel_stacks", lambda pids, timeout=30.0: ({}, ""))  # no sudo here
+        self.addCleanup(setattr, WATCH, "read_kernel_stacks", stacks)
+        with tempfile.TemporaryDirectory() as directory:
+            proc = self.proc_tree(Path(directory), [(10, b"\xffbadname", "R"), (13, "kworker/1:0+inode_switch_wbs", "R")])
+            workers, _ = WATCH.switch_kworkers(proc)
+        self.assertEqual([worker["pid"] for worker in workers], [13])
 
     def test_dmesg_is_cut_into_one_block_per_blocked_task(self):
         lines = [

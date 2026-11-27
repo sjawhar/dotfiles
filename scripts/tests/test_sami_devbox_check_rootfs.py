@@ -4,7 +4,7 @@
 The boot disk holds the OS only (dispatch://INFRA-993, "Shape and disks"). The line FAILs when /
 uses over 40 GiB, when a directory on the root filesystem outside the OS's own (/usr, /var/lib/apt,
 /var/cache/apt, /boot, /snap, /var/lib/snapd, /opt, /var/log) holds over 1 GiB of its own, naming
-the deepest such directory, and when /var/log holds over 2 GiB. The function is run from the real
+the deepest such directory, and when /var/log holds over 4 GiB. The function is run from the real
 script, with `sudo`, `df` and `du` on PATH that print what each case gives.
 """
 
@@ -80,10 +80,17 @@ class HostRootfsTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("FAIL root disk: / uses", out)
 
-    def test_var_log_over_2_gib_fails(self) -> None:
-        rc, out = self.run_case(9 * GIB, dict(self.CLEAN, **{"/var/log": 3 * GIB, "/var": 3 * GIB, "/": 9 * GIB}))
+    def test_var_log_over_4_gib_fails(self) -> None:
+        rc, out = self.run_case(11 * GIB, dict(self.CLEAN, **{"/var/log": 5 * GIB, "/var": 5 * GIB, "/": 11 * GIB}))
         self.assertNotEqual(rc, 0, out)
-        self.assertIn("FAIL root disk: /var/log holds 3.0G", out)
+        self.assertIn("FAIL root disk: /var/log holds 5.0G, over 4G", out)
+
+    def test_a_full_journal_and_rsyslogs_bounded_copy_pass(self) -> None:
+        """journald's 2 GiB cap and rsyslog's copy of the same records (devbox/logrotate-rsyslog, under about 1 GiB):
+        3 GiB, which failed the old limit of journald's cap alone."""
+        rc, out = self.run_case(10 * GIB, dict(self.CLEAN, **{"/var/log": 3 * GIB, "/var": 3 * GIB, "/": 10 * GIB}))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ok   root disk: /var/log holds 3.0G, at most 4G", out)
 
     def test_a_du_past_its_bound_fails(self) -> None:
         rc, out = self.run_case(7 * GIB, {}, rc=124)

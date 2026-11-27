@@ -116,7 +116,7 @@ class ShimFixture(unittest.TestCase):
         write_stub(installs / "2.0.0" / "bin", "knives", KNIVES.format(label="PINNED"))
         # DOTFILES_DIR names a checkout with no mise.toml: under this HOME, which holds no mise
         # configuration until a case writes one, the shim would otherwise read the pin of the
-        # checkout it is in (shims/AGENTS.md, "A moved HOME") and run this machine's knives.
+        # checkout it is in (shims/tests/test_shim_moved_home.py) and run this machine's knives.
         self.env = {
             "HOME": str(self.root),
             "DOTFILES_DIR": str(self.root),

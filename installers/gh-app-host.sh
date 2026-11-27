@@ -10,8 +10,8 @@
 # the routes file here would not help: git reads ~/.config/git/config before ~/.gitconfig, whose
 # `helper =` clears it. So this names the profile in the machine's own git config,
 # gh-app.host-profile, and shims/gh answers the helper call through `gh-app-token <profile>`. A
-# host process has no broker session; gh-app-token registers one under the machine login
-# (`secret-run --register`).
+# host process has no broker session; the agent-secrets client that gh-app-token runs then acts
+# as the person signed in on this machine, or as the machine.
 #
 # Route GitHub remotes through the App's HTTPS helper even when their configured URL uses SSH.
 #

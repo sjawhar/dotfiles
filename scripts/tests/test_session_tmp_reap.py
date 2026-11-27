@@ -278,6 +278,9 @@ class TmpRootTest(unittest.TestCase):
         out = self.run_reaper(root="/mnt")
         self.assertNotIn("would remove", out)
         self.assertNotIn("/mnt/nvme/", out)
+        # The device gate, not the mount check after it, decides: /mnt/nvme reads as unowned, so the reaper never
+        # reads its OWNER. Without the gate the mount check still keeps it, and only this line fails.
+        self.assertNotIn("keep /mnt/nvme (", out)
         self.assertTrue(owner.exists())
 
     def test_a_mount_inside_an_entry_keeps_it_and_its_files(self):

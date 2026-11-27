@@ -19,8 +19,8 @@ python3 $S/enumerate-messages.py --from '<start>' --to '<end>' --legion legion.j
 python3 $S/extract-dispatch-human.py --since '<start>' --out dispatch-events.jsonl --text dispatch-events.md
 ```
 
-- Pick the window by his messages, not by active time: a window holding none returns tool trivia.
-- `enumerate-messages.py` reads the transcript store (`using-transcript-store`). Do not grep the sessions tree: a grep finds the phrase you guessed, not the message you missed. The store holds the hosts `tq sql "SELECT host, count() FROM sessions GROUP BY host"` lists, with Claude Code and Codex logs from some of them; read by hand the sessions of any other host, or name them as unread.
+- Pick the window by his messages, not by active time: set `--from` and `--to` around the day or week of his messages you mean to review, and keep the window only when the enumerator counts at least one message to read. A window of agent activity with none of his messages returns tool trivia.
+- `enumerate-messages.py` reads the transcript store (`using-transcript-store`). Do not grep the sessions tree: a grep finds the phrase you guessed, not the message you missed. The store holds the omp sessions of the hosts `tq sql "SELECT host, count() FROM sessions GROUP BY host"` lists, and Claude Code and Codex logs from some of them. Read by hand, or name in the report as unread, each session the store does not hold: one on another host, an OpenCode session, or a Claude Code log it did not copy.
 - `fetch-legion.py` prints how many Legion volumes no pod mounts. Put that count in the report as unread; do not create a pod to read them.
 - Print the enumerator's counts before any reading: messages to read, rows excluded per reason, and whether Legion was read.
 - Open five excluded rows per reason and judge each; put any real message of his back into `messages.jsonl`. `agent-sent` and `single-prompt` exclude a real message he writes once to a fresh session.
@@ -44,7 +44,7 @@ python3 $S/assign-readers.py records --max-records 12
 ## 4. Check what was read
 
 - A fresh agent that read no records runs `references/checker.md`, pasted whole: a reader that skipped a record also skips reporting it.
-- When `check-findings.py` flags more than about 20 items, split them across fresh checkers, each returning a fix or a rejection per item, and merge their answers into one `verdict.json`.
+- When `check-findings.py` flags more than 20 items, split them across fresh checkers, each returning a fix or a rejection per item, and merge their answers into one `verdict.json`.
 - Re-run only the batches the checker names, with fresh readers, at most three rounds. Do not re-check a record that passed.
 
 ## 5. Code the findings into types
@@ -60,24 +60,19 @@ python3 $S/count-types.py count records findings.jsonl types.jsonl --prior <last
 
 ## 6. Fix only what recurs
 
-1. Compare with last run first (`--prior`, rates per 100 records): held when this run's rate is lower, unchanged within one finding per 100, regressed when higher.
+1. Compare with last run first (`--prior`). For each type in `counts.json`, take its `per_100_records` less its `prior_per_100_records`: the type has held when that difference is below -1, is unchanged when it is from -1 to 1, and has regressed when it is above 1. A type whose `prior_per_100_records` is null is new. A type that the prior `counts.json` has and this run's lacks has a rate of 0 now: classify it the same way.
 2. Propose a fix only for a type `count` marks `recurs`: text costs every session that loads it.
 3. Take the first home that would have stopped every finding of the type: delete or rewrite the text that caused it; point to the right text from the skill or tool the agent opens there; a mechanical gate (a refusal, a lint, a default); a rule, with `~/.dotfiles/.claude/CLAUDE.md` last.
-4. Write a rule with its reason in one clause, and no incident, date or quote. Tighten existing text before you add a paragraph (`writing-agent-skills`).
-5. A fix that changes omp's own behavior ships behind a gate in `~/.dotfiles/omp/extensions/experiments/gates.json`; measure it as `skill-evals` says.
+4. Write a rule with no incident, date or quote, and give a reason only where the rule would look arbitrary, in one clause. Write "always" or "never" only for a rule with no exception. Tighten existing text before you add a paragraph (`writing-agent-skills`).
+5. A fix that changes omp's own behavior ships behind a per-session gate in `~/.dotfiles/omp/extensions/experiments/gates.json`; measure it as `skill://writing-agent-skills/references/testing.md`, "Measuring a harness change", says.
 
 ## 7. Report
 
-1. Order: the window's counts; each type with its count, its sessions, what it cost and two example records, costliest first; Sami's patterns, as observations for him to judge, not rules; the fixes proposed; what the run could not read.
+1. Order: the window's counts; each type with its count, its sessions, what it cost him and two example records, costliest first, where its cost is the findings he pushed back on (`pushed_back` in `counts.json`); Sami's patterns, as observations for him to judge, not rules; the fixes proposed; what the run could not read.
 2. Coverage: messages in the window, records read, findings kept, findings the checker rejected, records nobody read, and any agent that failed.
 3. Each finding's source: its record id and the `FILE:LINE` the record names.
-4. One line per workstream: what it tried to do, where its hours went (`tq time --by session`), and the shortest path that would have worked. Without these lines a failure list reads as generic.
+4. One line per workstream (the records that share an `issue` in `records/records.jsonl`, or a `repo` when they have none): what it tried to do, where its hours went (`tq time --by session`), and the shortest path that would have worked. Without these lines a failure list reads as generic.
 5. Read `references/experiments.md` when a gate in `gates.json` was `random` during the window (`git log -p` over it).
-6. Post the report as a Dispatch artifact on the run's issue, with the evidence files it cites, and keep a copy at `~/.dotfiles/.claude/session-analysis/YYYY-MM-DD.md`.
-7. In the message that carries it:
-   - Lead with the counts and the failure types: he reads the first screen.
-   - Bring at most 3 decisions, each as current state, evidence, options with trade-offs, and your recommendation, explained in the message, not by a section reference. Name what is queued behind them. No numbered menu of every open decision.
-   - Propose rules one at a time, each with why a cheaper home (a tool, a default, the skill loaded at that step) does not fit.
-   - Define every analysis term where you use it (reader names, type names, record ids), and give each count one concrete example.
-   - Short, plain sentences. Quote him only as evidence of a finding.
+6. Post the report with `dispatch artifact` (`skill://dispatch`) on the run's issue: the Dispatch issue that asked for this run, or one you file for it when none did. Attach the evidence files it cites, and keep a copy at `~/.dotfiles/.claude/session-analysis/YYYY-MM-DD.md`.
+7. Read `references/presenting.md` before you write the message that carries the report, and before any later message that asks him to decide.
 8. Groom memory last (read `references/memory-grooming.md` then), and `retain` three to five durable facts from the window.

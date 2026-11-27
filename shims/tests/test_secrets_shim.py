@@ -208,7 +208,8 @@ class SecretsShim(unittest.TestCase):
         ):
             self.log.unlink(missing_ok=True)
             stderr = self.assert_refused(*args)
-            self.assertIn('secret-run --reason "<what for>" ', stderr)
+            self.assertIn('    agent-secrets ', stderr)
+            self.assertIn(' --reason "<what for>" -- <command>\n', stderr)
             self.assertIn(
                 "dispatch://INFRA-223/ask/d2bfc2df-9399-42a9-90b8-35b9f5a46d66", stderr
             )
@@ -221,7 +222,8 @@ class SecretsShim(unittest.TestCase):
     def test_unregistered_session_gets_the_relaunch_line(self) -> None:
         stderr = self.assert_refused("HUMAN_KEY", "--", "env", IDENTITY_EXIT="1")
         self.assertIn("    omp --resume 01a1-agent-session\n", stderr)
-        self.assertIn('    secret-run --register --reason "<what for>" HUMAN_KEY -- <command>\n', stderr)
+        self.assertIn('    agent-secrets HUMAN_KEY --reason "<what for>" -- <command>\n', stderr)
+        self.assertNotIn("--register", stderr)
         stderr = self.run_shim(
             "get",
             "HUMAN_KEY",
@@ -236,7 +238,7 @@ class SecretsShim(unittest.TestCase):
             "GITHUB_ADMIN_PAT_THEOREM", "--", "gh", "api", "user"
         )
         self.assertIn(
-            'secret-run --reason "<what for>" GITHUB_ADMIN_PAT -- <command>', stderr
+            'agent-secrets GITHUB_ADMIN_PAT --reason "<what for>" -- <command>', stderr
         )
         self.assertIn(
             "The broker holds this same token under the name GITHUB_ADMIN_PAT",

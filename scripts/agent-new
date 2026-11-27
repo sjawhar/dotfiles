@@ -9,7 +9,7 @@
 # the issue; a file is attached to the first message as omp's @file; text is sent as it is.
 #
 # --box     run the session in an agent box: the pane runs `agentbox new --dir <dir> -- omp …`
-#           (agentbox/AGENTS.md). The default on a Google VM (scripts/on-google-vm), where every
+#           (scripts/agentbox's header). The default on a Google VM (scripts/on-google-vm), where every
 #           session runs in a box (sami-devbox, dispatch://INFRA-993); --host is the default
 #           elsewhere and runs `omp` on the host. A brief outside <dir>, ~/src and
 #           /mnt/durable/<user> gives the box its directory as one more --dir.

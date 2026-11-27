@@ -33,7 +33,7 @@ if [ -d "$private_skills" ]; then
 fi
 
 # A default cld session reads .claude/envoy.json and has no Dispatch or Envoy without one
-# (envoy/AGENTS.md): link it to the neutral file this machine's Dispatch and Envoy setup wrote.
+# (scripts/envoy's header has the lookup): link it to the neutral file this machine's Dispatch and Envoy setup wrote.
 envoy_json="${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json"
 if [ -f "$envoy_json" ]; then
     ensure_link "$envoy_json" "${DOTFILES_DIR}/.claude/envoy.json"

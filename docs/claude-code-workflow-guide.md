@@ -93,7 +93,7 @@ If you're uncertain about a specific piece, ask Claude to explain what it does, 
 
 ### How do I create custom skills?
 
-Use `/writing-skill` from superpowers. It's great because you can try out a skill, then open a new session and point Claude at that session: "use the writing skills skill to improve this skill." The skill improves itself iteratively.
+Use the [`writing-agent-skills`](../plugins/sjawhar/skills/writing-agent-skills/SKILL.md) skill from my dotfiles. It's great because you can try out a skill, then open a new session and point Claude at that session: "use the writing-agent-skills skill to improve this skill." The skill improves itself iteratively.
 
 ### How many agents can I run at once?
 

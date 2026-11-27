@@ -109,6 +109,9 @@ class AgentboxNoHostWrites(unittest.TestCase):
             "STUB_RUN_ARGS": str(self.run_args),
             "AGENTBOX_BOXES": str(self.root / "boxes"),
             "AGENTBOX_DISKS": str(self.root / "disks"),
+            # The box's exit row, in the fixture and not in this host's
+            # /mnt/durable/<user>/agentbox-exits.tsv.
+            "AGENTBOX_EXITS": str(self.root / "agentbox-exits.tsv"),
             "AGENTBOX_DISK": "0",
             # Each launch makes $RUN_BASE/<box> (its tmux, key and runtime dirs): the fixture's,
             # never the host's own /run/user/<uid>/agentbox, where each run of this file left 8.

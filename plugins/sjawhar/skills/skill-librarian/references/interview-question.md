@@ -9,8 +9,9 @@ the UTC timestamp of the last line in that range); ignore nothing before it and 
 after it.
 
 Did that session's work so far teach something important that a future agent on this project
-should know up front? Give only the one most valuable learning; if none is important, the answer is NONE. Count
-only these kinds:
+should know up front? A learning is important when a future agent would get something wrong
+without it. Give only the one most valuable learning; if none is important, the answer is NONE.
+Count only these kinds:
 - a design decision or principle for this system and its reason. Examples: what it must and
   must not do, what the source of truth is, which trade-off was chosen.
 - the user's taste or standard, shown by what they accepted, rejected or corrected, and why.

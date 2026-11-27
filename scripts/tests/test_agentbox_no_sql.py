@@ -95,6 +95,9 @@ class NoSqlInAgentbox(unittest.TestCase):
             "AGENTBOX_RUN_BASE": str(self.root / "run"),
             "AGENTBOX_BOXES": str(self.root / "boxes"),
             "AGENTBOX_DISKS": str(self.root / "disks"),
+            # The box's exit row, in the fixture and not in this host's
+            # /mnt/durable/<user>/agentbox-exits.tsv.
+            "AGENTBOX_EXITS": str(self.root / "agentbox-exits.tsv"),
             "AGENTBOX_DISK": "0",
             "AGENT_SECRETS_URL": "https://broker.example",
             "STUB_RUN_ARGS": str(self.run_args),

@@ -4,7 +4,7 @@
 
 - Some UI-only actions have no MCP tool or service but have a websocket command: `matter/interview_node` (device page "Re-interview"), `matter/ping_node`, `matter/node_diagnostics`, each taking `device_id`.
 - No `matter.*` service re-interviews, and the Matter Server's port 5580 is not on the LAN.
-- Pattern: `secrets HA_TOKEN -- bun <script>` (the SF instance's token is `HA_TOKEN_BUSH`). The script connects to `ws://<instance LAN address>:8123/api/websocket` (`homeassistant.local` on that LAN), sends `auth` with `access_token`, then `{id, type, ...}`.
+- Pattern: `secrets HA_TOKEN -- bun <script>` (for SF, `HA_TOKEN_BUSH`). From that instance's LAN, the script connects to `ws://<host>:8123/api/websocket` (Salt Lake: `homeassistant.local`; SF: `10.0.0.254`), sends `auth` with `access_token`, then `{id, type, ...}`.
 - `ha_get_integration(include_diagnostics=True, device_id=…)` returns the attribute cache as of the last interview, not live values. Re-interview first for current values.
 
 ## Endpoint layout change after a firmware update

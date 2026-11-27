@@ -1,6 +1,9 @@
 /**
  * jj-snapshot — permanent time-travel safety net.
  *
+ * This hook is the one jj snapshotter: add no other, in an extension or a hook, since a second
+ * one would run outside the flock below (installers/omp.sh prunes an old extension copy of it).
+ *
  * After every mutating tool call (edit/write/bash/eval/ast_edit/lsp), force a
  * jj working-copy snapshot so the operation log records the state after each
  * agent action. Recovery is file-level and op-store-safe:

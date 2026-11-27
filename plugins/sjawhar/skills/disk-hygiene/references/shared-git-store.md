@@ -30,8 +30,8 @@ Read this before you forget a jj workspace, remove a git worktree, repair a work
 Orphans (a checkout whose entry is gone or reused) are common here. Age is a first sort only: an orphan older than every live worktree is still not proof.
 
 - An orphan whose entry name was reused by another worktree: remove it with `rm -rf`, never `git worktree remove`. `git worktree remove <orphan path>` refuses with `is not a working tree`, which is not a clean bill of health; `git worktree remove <bare NAME>` exits 0 and deletes the live worktree that now holds that name, directory included.
-- To tell: read `<orphan>/.git` for its admin directory, then that directory's `gitdir` file. If it does not name the orphan's path, the entry belongs to another tree now.
-- Inside such an orphan, `git status`, `git log` and `git diff` answer about the other tree. Compare files instead: `diff -rq <orphan> <live> -x .git -x __pycache__ -x .venv -x node_modules`. An empty result means the orphan holds nothing the live tree lacks. With no live counterpart, archive before removing.
+- Before you remove anything that looks abandoned, read `<orphan>/.git` for its admin directory, then that directory's `gitdir` file. If it does not name the orphan's path, the entry belongs to another tree now.
+- Inside such an orphan, `git status`, `git log` and `git diff` answer about the other tree. Compare files instead: `diff -rq <orphan> <live> -x .git -x __pycache__ -x .venv -x node_modules`. An empty result means the orphan holds nothing the live tree lacks. With no live counterpart, `tar` the whole orphan into a file next to the ledger, and check that `tar -tf <file>` lists its files, before you remove it.
 - An orphan whose entry is gone: read its tree into a throwaway index, which touches nothing shared.
 
   ```bash

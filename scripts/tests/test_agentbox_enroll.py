@@ -409,6 +409,16 @@ class EnrollFixture(unittest.TestCase):
             # covers that one).
             "AGENTBOX_BOXES": str(self.root / "boxes"),
             "AGENTBOX_DISK": "0",
+            # Every other place the script writes a box to is the temp directory's too. Without
+            # these, each run on sami-devbox wrote four box records with their `.exit` markers to
+            # /mnt/scratch/<user>/agentbox/disks and four rows to the host's
+            # /mnt/durable/<user>/agentbox-exits.tsv, 95 of them by 2026-11-23 naming this suite's
+            # session id, which the collector and the production check then read as boxes
+            # (dispatch://INFRA-1720).
+            "AGENTBOX_DISKS": str(self.root / "disks"),
+            "AGENTBOX_RECORDS": str(self.root / "disks"),
+            "AGENTBOX_EXITS": str(self.root / "agentbox-exits.tsv"),
+            "AGENTBOX_CACHE_ROOT": str(self.root / "box-cache"),
             "STUB_CALLS": str(self.calls),
             "STUB_KEYDIR": str(self.keydir),
             "STUB_KEYDIR_REL": keydir_in_box_dir(),
@@ -2318,6 +2328,22 @@ class CmdNew(EnrollFixture):
         self.assertEqual(list(keydir.iterdir()), [])
         self.assertEqual(self.calls_matching("enroll "), [])
         self.assertEqual([c for c in self.calls_matching("docker ") if " keygen " in c], [])
+
+    def test_the_suite_writes_no_box_outside_its_temp_dir(self) -> None:
+        """Each place the script writes a box to is this fixture's temp dir, and a launch's exit row
+        lands in the fixture's tally. Before dispatch://INFRA-1720's fix each run of this file on
+        sami-devbox wrote four box records to /mnt/scratch/<user>/agentbox/disks and four rows to
+        the host's /mnt/durable/<user>/agentbox-exits.tsv."""
+        roots = self.bash(
+            'printf "%s\\n" "$BOXES" "$BOX_DISKS" "$BOX_RECORDS" "$BOX_EXITS" "$BOX_CACHE_ROOT" "$RUN_BASE" "$COLLECT_LOG_DIR"'
+        )
+        self.assertEqual(roots.returncode, 0, roots.stderr)
+        paths = roots.stdout.splitlines()
+        self.assertEqual(len(paths), 7, roots.stdout)
+        for path in paths:
+            self.assertTrue(Path(path).is_relative_to(self.root), f"{path} is outside {self.root}")
+        box = self.new_box().relative_to(self.run_base).parts[0]
+        self.assertIn(f"\t{box}\t", (self.root / "agentbox-exits.tsv").read_text())
 
     def renew_refused_while_it_runs(self, cmd: str, **stubs: str) -> tuple[str, Path, list[str]]:
         """cmd_new for a box whose first renew is refused as not live (the broker ended its

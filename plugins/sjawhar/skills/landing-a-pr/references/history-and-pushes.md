@@ -5,7 +5,7 @@ Read before you resolve a conflict, integrate a base, change a stack, or push af
 ## When to integrate the base
 
 - Integrate for a real conflict, a required dependency, or a decision by the person who owns the work (or the stack's owner); not only to be up to date.
-- On a published or reviewed head, merge forward: a rewrite deletes the commit its verdict names. Do not rebase, amend, describe over or squash into a commit the remote or a reviewer holds. Unpublished work follows `using-jj`.
+- On a published or reviewed head, merge forward: a rewrite deletes the commit its verdict names. Do not rebase, amend, describe over or squash into a commit the remote or a reviewer holds. Unpublished work follows `using-jj`, with its ownership and descendant checks; that never permits rewriting another session's stack or bypassing immutability.
 - When another session rewrites the parent PR, ask it for one parent sha it will not change before your next push, and build only on that sha.
 - After a parent squash-merges, its old commits are not ancestors of the squash commit, though their content is there. Diagnose duplicate content before you pick a fix; do not replay or discard another session's commits on an ancestry guess.
 
@@ -20,16 +20,18 @@ Read before you resolve a conflict, integrate a base, change a stack, or push af
 7. Push only that bookmark, and run `jj new` in the same `&&` chain. Check that `jj log -r '<name>@origin'` names the intended commit.
 8. Request a verdict at the new sha over the real delta and all open findings. Ancestry permits a delta review; it does not certify behavior.
 
+Chain dependent mutations with `&&`. Run the check that decides whether you may push in its own tool call, and read its output before the push; do not gate a push on a paged pipeline's status.
+
 ## Verdicts and comparisons
 
 - A verdict names a commit, not a bookmark. Check ancestry with `jj log -r '<verdict-sha> & ::<new-head>'`, and carry the verdict only as "Review gates tied to a head" in `review-and-readiness.md` says.
-- Name the base and tip at both ends of a comparison, make both fetchable by other readers, and list the commits, not only a count.
-- A two-commit diff and a merge-base diff answer different questions. For the PR's contribution, diff from the intended merge base, merge-resolution content included.
-- Where a new base can change behavior, run one matrix on old base, old head, new base and new head, in one environment and window, and compare the patch effects. A base change can explain an absolute difference, never a changed patch effect.
+- Name the base and tip at both ends of a comparison, make both fetchable by other readers, and list the commits, not only a count. Mark as unverified any old-to-new commit mapping that rests on local state other readers cannot fetch.
+- A two-commit diff and a merge-base diff answer different questions. To see what changed between two commits, read the files at both. For the PR's contribution, diff from the intended merge base, merge-resolution content included.
+- Where a new base can change behavior, run one matrix on old base, old head, new base and new head, in one environment and window, and compare the patch effects. State what the matrix cannot see. A base change can explain an absolute difference, never a changed patch effect.
 
 ## One wave per round
 
-- Before you request a head-bound review, read the state of the PR ahead of this one in the merge queue. If a base integration will soon be required, include it in the next push. Do not wait on unrelated predecessors or a moving main.
-- While a reviewer judges a held head, a plain jj read can snapshot the working copy and so rewrite a held commit you edited. Stage on an unpushed child or a scratch tree.
-- A blocking defect after READY: run `gh pr view <N> --json state` right before you post HOLD (your request to stop the merge). If it merged, fix it as a new change.
+- Before you request a head-bound review, read the state of the PR ahead of this one in the merge queue. If that PR, once merged, will conflict with this one or carry a change this one needs to build or pass, include that base integration in the next push. Do not wait on unrelated predecessors or a moving main.
+- While a reviewer judges a held head, a plain jj read can snapshot the working copy and so rewrite a held commit you edited. Stage on an unpushed child or a scratch tree, and combine that work with a blocking fix only on purpose.
+- A blocking defect after the readiness report: run `gh pr view <N> --json state` right before you post HOLD (your request to stop the merge). If it merged, fix it as a new change.
 - Disclose an accidental rewrite or unrequested base merge; do not hide it with a force push. Recover forward with `using-jj`. In a shared store do not run `jj undo`, `jj op restore`, or a rewrite over a revset that matches commits you did not make.

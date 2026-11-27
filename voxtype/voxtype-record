@@ -3,7 +3,8 @@
 # Audio files are saved to $XDG_DATA_HOME/voxtype/recordings/ as 16kHz mono WAV,
 # compatible with `voxtype transcribe <file>` for re-transcription. A second,
 # full-band copy (48 kHz, 24-bit) of the same take goes to recordings48k/ under
-# the same name, for voice work that needs the frequencies a 16 kHz file drops.
+# the same name, for voice work that needs the frequencies a 16 kHz file drops,
+# with a <timestamp>.source file beside it naming the PipeWire source captured.
 #
 # On stop, spawns a background check that notifies if transcription failed.
 # Checks for empty recordings after stop and warns if no audio was captured.
@@ -89,6 +90,7 @@ case "${1:-}" in
             pw-record --rate=48000 --channels=1 --format=s24 \
                 "$RECORDINGS48_DIR/$timestamp.wav" &
             echo $! >> "$PID_FILE"
+            pactl get-default-source > "$RECORDINGS48_DIR/$timestamp.source" 2>/dev/null || true
             echo "$recording_file" > "$WAV_FILE"
         else
             # About to stop — kill pw-record (before voxtype toggle so file is finalized)

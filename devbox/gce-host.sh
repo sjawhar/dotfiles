@@ -10,8 +10,10 @@
 #      and /theorem-xfs bound from the state disk, the local-SSD RAID with its swap at
 #      /mnt/scratch, and /tmp and /var/tmp bound from it at the next boot; the drop-in that keeps
 #      the user manager and Docker from starting before it (devbox/gce-disks-ready.conf); and
-#      journald's cap on the boot disk (devbox/journald-cap.conf); the open-file limit of
-#      tailscaled's and sshd's sessions (devbox/nofile.conf);
+#      journald's cap on the boot disk (devbox/journald-cap.conf), and rsyslog's rotation there,
+#      with logrotate run hourly (devbox/logrotate-rsyslog, devbox/logrotate-hourly.conf); root's perf
+#      build-id cache on the state disk (devbox/perfconfig); the open-file limit of tailscaled's and
+#      sshd's sessions (devbox/nofile.conf); the per-user pipe buffer soft limit (devbox/sysctl-pipes.conf);
 #   3. Docker (installers/docker.sh, for the user): docker-ce and docker-ce-cli pinned at one
 #      version, dockerd's live-restore on, and conntrack's TCP TIME_WAIT at 15 s
 #      (devbox/sysctl-conntrack.conf); then Sysbox (installers/sysbox.sh), which registers itself
@@ -166,6 +168,21 @@ if ! cmp -s "$DEVBOX_DIR/journald-cap.conf" "$journald_conf"; then
 fi
 journalctl --disk-usage
 
+# rsyslog's text copy of the journal on the boot disk: rotated daily, and once a file is over
+# 200 MiB at logrotate's hourly run, 20 rotations kept (the files say why). The rotation file
+# replaces the rsyslog package's own; a changed timer drop-in restarts the timer.
+install -m 644 "$DEVBOX_DIR/logrotate-rsyslog" /etc/logrotate.d/rsyslog
+logrotate_timer=/etc/systemd/system/logrotate.timer.d/50-hourly.conf
+if ! cmp -s "$DEVBOX_DIR/logrotate-hourly.conf" "$logrotate_timer"; then
+    install -D -m 644 "$DEVBOX_DIR/logrotate-hourly.conf" "$logrotate_timer"
+    systemctl daemon-reload
+    systemctl restart logrotate.timer
+fi
+
+# root's perf build-id cache on the state disk, not in /root/.debug on the boot disk (the file says why).
+install -d -m 755 /mnt/nvme/root-perf-buildid
+install -m 644 "$DEVBOX_DIR/perfconfig" /root/.perfconfig
+
 # The open-file limit of the sessions that Tailscale SSH and sshd start (the file says why).
 # Never restarted here: a tailscaled restart drops every Tailscale SSH connection and blips the
 # tailnet, so its drop-in takes effect at its next start (devbox/sami-devbox.md, "Next planned
@@ -179,6 +196,12 @@ for unit in tailscaled ssh; do
     echo "gce-host.sh: installed $nofile_conf"
 done
 systemctl show tailscaled.service ssh.service -p Id -p LimitNOFILESoft
+
+# The per-user pipe buffer soft limit: 262144 pages, not the kernel's 16384 (the file says why).
+# installers/lib.sh's ensure_sysctl_conf writes and applies it only when the file or the kernel
+# differs; systemd-sysctl applies it at each boot.
+ensure_sysctl_conf "$DEVBOX_DIR/sysctl-pipes.conf" /etc/sysctl.d/90-pipe-user-pages.conf \
+    fs.pipe-user-pages-soft
 
 # --- 3. Docker, then Sysbox -----------------------------------------------------------------------
 # docker-ce and docker-ce-cli at exactly this version, with dockerd's live-restore on

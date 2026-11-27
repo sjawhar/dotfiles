@@ -1,6 +1,6 @@
 ---
 name: centaur-review
-description: "Use when Sami reviews someone else's pull request with you."
+description: "Use when Sami reviews someone else's pull request with you: he narrates his observations as he reads the diff, and the review goes to GitHub as inline review comments."
 args: "<pr_url_or_number>"
 ---
 
@@ -26,8 +26,9 @@ In a jj checkout, pass the repository explicitly (`gh -R <owner>/<repo> ...`). D
    gh pr view <pr> -R "$REPO" --comments
    ```
 
-3. If Sami has already reviewed this PR, summarize open requests, unanswered questions, unresolved threads, changes
-   since his review, and other reviewers' concerns.
+3. If Sami has already reviewed this PR, show him a summary of open requests, unanswered questions, unresolved
+   threads, changes since his review, and other reviewers' concerns before he starts reading. The summary reports
+   the state of the review on GitHub, not your analysis of the code.
 4. Start these agents in parallel with the `task` tool, and keep their results until §3:
    - `bug-finder`: correctness, security, concurrency and edge-case defects that change what the code does.
    - `code-simplifier`: complexity or abstraction a smaller change removes.
@@ -55,16 +56,18 @@ When Sami ends his narration:
    will it improve the code?
 3. Collect the four agent results from §1 step 4. Discard each that reports no finding.
 4. Show Sami his comments, the challenges and the four agents' findings. He decides what stays.
-5. Write each kept comment as a clear observation, then a concrete question or change where one fits. Open with it,
-   not praise or a hedge. No emojis.
+5. Write each kept comment as a clear observation, then the concrete thing it asks of the author: a question for a
+   QUESTION comment; for every other severity, the change, or a question when Sami named no change. Open with the
+   observation, not praise or a hedge. No emojis.
 
    ```markdown
-   **Suggestion:** Could we return early when `items` is empty? The caller can supply
-   an empty list, so indexing `items[0]` would raise here. Let me know if I missed an
-   invariant.
+   **Suggestion:** The caller can supply an empty list, so indexing `items[0]` would
+   raise here. Could we return early when `items` is empty?
    ```
 
-6. After the inline comments, write a concise summary that starts with `## Review Summary`.
+6. After the inline comments, write the review body (`$SUMMARY` in §4): `## Review Summary`, then two to five
+   sentences that give Sami's overall assessment and name the BLOCKING and IMPORTANT comments, if any. Do not
+   repeat every inline comment: each one already sits on its line.
 7. Post only after Sami explicitly approves: the review goes out under his name.
 
 ## 4. Post the review
@@ -74,7 +77,7 @@ sends every `-F` field after every `-f` field, so two comments get their fields 
 
 ```bash
 COMMENT1=$(cat <<'EOF'
-**Suggestion:** Could we handle the empty case here?
+**Suggestion:** `items` can be empty here. Could we return early?
 EOF
 )
 head=$(gh pr view <pr> -R "$REPO" --json headRefOid -q .headRefOid) &&

@@ -11,7 +11,7 @@ scripts/agent-secrets-login names the operator by the email they sign in to Disp
 login is refused (exit 2) before the operator file is written.
 
 Every consumer of agent-secrets/broker.env (agent-secrets-session, agent-secrets-login, .bashrc,
-scripts/agentbox; scripts/secret-run in test_secret_run.py) ends with the same AGENT_SECRETS_URL,
+scripts/agentbox) ends with the same AGENT_SECRETS_URL,
 by agent-secrets/broker-url.sh: broker.env's, or env.local's over it, exported with its record
 DOTFILES_AGENT_SECRETS_URL, when the caller has no URL or has the one a dotfiles load recorded (a
 stale default); a URL the caller chose itself stays.
@@ -264,7 +264,7 @@ class AgentSecretsSession(unittest.TestCase):
 
     def test_a_closed_stderr_still_launches_unregistered(self) -> None:
         """Both unregistered paths write one stderr line first; under set -e a closed stderr (2>&-)
-        must not stop the launch there. secret-run --register runs its command through here."""
+        must not stop the launch there."""
         self.install_helper_unit()
         for case in ("no state", "no client"):
             with self.subTest(case=case):

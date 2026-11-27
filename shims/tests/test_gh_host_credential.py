@@ -116,8 +116,8 @@ class HostCredential(unittest.TestCase):
         self.assertEqual(self.recorded()[0], "gh-app-token agent get")
 
     # INFRA-1538, and its review: a command over SSH with no terminal in its session is an
-    # agent's, and the host profile is no exception to that — `gh-app-token` registers the broker
-    # session itself (`secret-run --register`), the profile installers/gh-app-host.sh writes IS
+    # agent's, and the host profile is no exception to that — the agent-secrets client that
+    # `gh-app-token` runs acts as the signed-in person or the machine outside a session, the profile installers/gh-app-host.sh writes IS
     # `agent`, and the exception the first draft made lifted such a call out of every other agent
     # safeguard too. So `ssh sami-devbox git clone …` now answers through the agent route, and
     # only a person's own session (SSH_TTY set) keeps the host route. The profile name tells the

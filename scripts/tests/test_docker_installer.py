@@ -781,6 +781,21 @@ class ConntrackTimeWait(InstallerCase):
         self.assertFalse(m.time_wait.exists())
         self.assertEqual(m.calls_of("sudo sysctl"), [f"sudo sysctl -q -p {m.conntrack_conf}"])
 
+    def test_a_file_without_the_setting_fails_before_writing(self) -> None:
+        """devbox/sysctl-conntrack.conf sets another key but not TIME_WAIT's: nothing is written or set."""
+        m = self.machine()
+        established = m.time_wait.with_name("nf_conntrack_tcp_timeout_established")
+        _ = established.write_text("432000\n", encoding="utf-8")
+        _ = m.conntrack_source.write_text("net.netfilter.nf_conntrack_tcp_timeout_established = 15\n", encoding="utf-8")
+
+        result = m.install(DOCKER_CONNTRACK_TIME_WAIT="1")
+
+        self.assert_failed(result)
+        self.assertIn("does not set net.netfilter.nf_conntrack_tcp_timeout_time_wait", result.stderr)
+        self.assertFalse(m.conntrack_conf.exists())
+        self.assertEqual(established.read_text(encoding="utf-8"), "432000\n")
+        self.assertEqual(m.calls_of("sysctl "), [])
+
     def test_the_rollback_value_is_applied_from_the_file(self) -> None:
         """The header's rollback: 120 in the file; the next run writes it and the kernel takes it."""
         m = self.machine()

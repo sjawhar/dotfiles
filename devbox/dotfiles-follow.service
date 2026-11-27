@@ -8,11 +8,13 @@ Nice=5
 IOSchedulingClass=idle
 # A user unit's PATH holds neither the dotfiles nor mise's shims: `mise install` and the pin lines
 # of devbox/sami-devbox-check need mise (bin/), knives (shims/) and the tools mise installs.
-# MISE_TRUSTED_CONFIG_PATHS as .bashrc sets it, so mise loads the checkout's mise.toml.
+# Trust comes from the global mise config (mise.toml's trusted_config_paths, which
+# this unit's mise reads at ~/.config/mise/config.toml), not an env var here: that
+# config is the one source of truth since dispatch://INFRA-5432 set paranoid = true.
+# It trusts ~/.dotfiles, so `mise install` loads this checkout's mise.toml.
 # No MISE_CACHE_DIR: dotfiles-follow gives its tools commands the one the checkout's .bashrc sets.
 Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
 Environment=MISE_DATA_DIR=%h/.mise
-Environment=MISE_TRUSTED_CONFIG_PATHS=%h/.dotfiles
 # dotfiles-follow takes this limit as its --run-limit (default 1170, keep the two equal) and keeps a
 # monotonic deadline from its start: 1170 s less 12 s for the state write
 # (scripts/dotfiles-follow.md step 8). Its hook sweep pass never runs past that deadline: a

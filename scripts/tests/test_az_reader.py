@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """scripts/az-reader: one Azure read as the Azure identity legion-reader, through the broker.
 
-az-reader asks secret-run for METADATA_READ (an access token of metadata-reader@theorem-agent-infra)
-with --register and --ttl 1h, mints that account's identity token for api://AzureADTokenExchange
+az-reader asks the agent-secrets client for METADATA_READ (an access token of
+metadata-reader@theorem-agent-infra) with --ttl 1h, mints that account's identity token for api://AzureADTokenExchange
 with iamcredentials' generateIdToken (the header on curl's stdin), signs in with `az login
 --service-principal --federated-token @FILE` in a throwaway AZURE_CONFIG_DIR, and runs the one az
 command there. Neither token reaches an argument list, and the directory is gone after exit.
@@ -29,11 +29,16 @@ READER = "metadata-reader@theorem-agent-infra.iam.gserviceaccount.com"
 CLIENT = "472b284a-6160-4195-8951-8362117f6c6b"
 TENANT = "aaa6ad34-51af-41e7-891f-f16f5c53c396"
 
-SECRET_RUN = r"""#!/bin/bash
-printf '%s\n' "$@" >> "$LOG/secret-run.argv"
-[[ -z "${SECRET_RUN_EXIT:-}" ]] || exit "$SECRET_RUN_EXIT"
-key=""
-while (( $# )) && [[ "$1" != -- ]]; do key="$1"; shift; done
+# The fake agent-secrets client logs each argument on its own line and the broker URL it was given,
+# then, unless AGENT_SECRETS_EXIT is set, exports the requested name (the first argument: the client
+# takes the names before its flags) as the bare token and runs the command after `--`, as the
+# client does.
+AGENT_SECRETS = r"""#!/bin/bash
+printf '%s\n' "$@" >> "$LOG/agent-secrets.argv"
+printf '%s\n' "${AGENT_SECRETS_URL:-}" > "$LOG/agent-secrets.url"
+[[ -z "${AGENT_SECRETS_EXIT:-}" ]] || exit "$AGENT_SECRETS_EXIT"
+key=$1
+while (( $# )) && [[ "$1" != -- ]]; do shift; done
 shift
 export "$key=$FAKE_ACCESS"
 exec "$@"
@@ -96,7 +101,7 @@ class Fixture:
         self.bin, self.log, self.tmpdir = root / "bin", root / "log", root / "tmp"
         for d in (self.bin, self.log, self.tmpdir):
             d.mkdir()
-        for name, body in (("secret-run", SECRET_RUN), ("gh", GH), ("curl", CURL), ("az", AZ)):
+        for name, body in (("agent-secrets", AGENT_SECRETS), ("gh", GH), ("curl", CURL), ("az", AZ)):
             path = self.bin / name
             path.write_text(body)
             path.chmod(path.stat().st_mode | stat.S_IEXEC)
@@ -114,6 +119,7 @@ class Fixture:
             "FAKE_ACCESS": ACCESS,
             "FAKE_IDTOKEN": IDTOKEN,
             "FAKE_CLIENT": CLIENT,
+            "DOTFILES_DIR": str(DOTFILES),
         }
         if reason is not None:
             env["AZ_READER_REASON"] = reason
@@ -134,22 +140,35 @@ class Fixture:
 def ttl_problems(script: Path) -> list[str]:
     with Fixture(script) as f:
         result = f.run("vm", "list", "-g", "SAMI")
-        argv = f.lines("secret-run.argv")
+        argv = f.lines("agent-secrets.argv")
         problems = []
         if result.returncode != 0:
             problems.append(f"exit {result.returncode}: {result.stderr}")
         if "--ttl\n1h\n" not in "".join(a + "\n" for a in argv):
-            problems.append(f"secret-run got no --ttl 1h: {argv}")
-        if "--register" not in argv:
-            problems.append(f"secret-run got no --register: {argv}")
-        if "--" not in argv or argv[argv.index("--") - 1] != "METADATA_READ":
-            problems.append(f"secret-run did not ask for METADATA_READ alone: {argv}")
+            problems.append(f"agent-secrets got no --ttl 1h: {argv}")
+        if "--reason\nINFRA-4748: the VMs of resource group SAMI\n" not in "".join(a + "\n" for a in argv):
+            problems.append(f"agent-secrets got no --reason from AZ_READER_REASON: {argv}")
+        names = argv[: next((i for i, a in enumerate(argv) if a.startswith("-")), len(argv))]
+        if names != ["METADATA_READ"]:
+            problems.append(f"agent-secrets did not ask for METADATA_READ alone: {argv}")
         return problems
 
 
 class AzReaderTest(unittest.TestCase):
-    def test_asks_for_metadata_read_with_an_hour_and_register(self) -> None:
+    def test_asks_for_metadata_read_with_an_hour_and_the_reason(self) -> None:
         self.assertEqual(ttl_problems(SCRIPT), [])
+
+    def test_the_client_gets_broker_env_s_url_when_the_caller_has_none(self) -> None:
+        """omp's eval kernel and a unit pass no AGENT_SECRETS_URL on, and the client refuses without one."""
+        committed = (DOTFILES / "agent-secrets" / "broker.env").read_text().split("AGENT_SECRETS_URL=", 1)[1].split()[0]
+        with Fixture(SCRIPT) as f:
+            result = f.run("vm", "list")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(f.lines("agent-secrets.url"), [committed])
+        with Fixture(SCRIPT) as f:
+            result = f.run("vm", "list", env_extra={"AGENT_SECRETS_URL": "https://broker.example.test"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(f.lines("agent-secrets.url"), ["https://broker.example.test"])
 
     def test_a_copy_without_the_ttl_fails_the_ttl_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -190,7 +209,7 @@ class AzReaderTest(unittest.TestCase):
     def test_no_token_reaches_an_argument_list(self) -> None:
         with Fixture(SCRIPT) as f:
             f.run("vm", "list", "-g", "SAMI")
-            argv = "\n".join(f.lines("secret-run.argv") + f.values("curl.log", "argv") + f.values("az.log", "argv"))
+            argv = "\n".join(f.lines("agent-secrets.argv") + f.values("curl.log", "argv") + f.values("az.log", "argv"))
             self.assertNotIn(ACCESS, argv)
             self.assertNotIn(IDTOKEN, argv)
 
@@ -235,7 +254,7 @@ class AzReaderTest(unittest.TestCase):
 
     def test_a_refused_release_stops_before_any_call(self) -> None:
         with Fixture(SCRIPT) as f:
-            result = f.run("vm", "list", env_extra={"SECRET_RUN_EXIT": "77"})
+            result = f.run("vm", "list", env_extra={"AGENT_SECRETS_EXIT": "77"})
             self.assertEqual(result.returncode, 77)
             self.assertEqual(f.lines("curl.log"), [])
             self.assertEqual(f.lines("az.log"), [])
@@ -255,7 +274,7 @@ class AzReaderTest(unittest.TestCase):
             result = f.run("vm", "list", env_extra={"GH_EMPTY": "1"})
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn("legion-reader=", result.stderr)
-            self.assertEqual(f.lines("secret-run.argv"), [])
+            self.assertEqual(f.lines("agent-secrets.argv"), [])
             self.assertEqual(f.lines("az.log"), [])
 
     def test_usage_errors_exit_2_before_any_call(self) -> None:
@@ -263,7 +282,7 @@ class AzReaderTest(unittest.TestCase):
             self.assertEqual(f.run().returncode, 2)
             self.assertEqual(f.run("vm", "list", reason=None).returncode, 2)
             self.assertEqual(f.run("--help").returncode, 0)
-            self.assertEqual(f.lines("secret-run.argv"), [])
+            self.assertEqual(f.lines("agent-secrets.argv"), [])
             self.assertEqual(f.lines("gh.argv"), [])
 
 

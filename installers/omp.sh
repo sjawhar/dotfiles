@@ -1,5 +1,7 @@
 #!/bin/bash
 set -euo pipefail
+# shellcheck source=installers/lib.sh
+# shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # omp (oh-my-pi) - the binary is mise-managed ("github:sjawhar/oh-my-pi" fork
@@ -35,8 +37,16 @@ MODELS_OUT="${OMP_AGENT_DIR}/models.yml"
 # Converge the earlier layout: a link to a built copy inside the repo.
 [ -L "$MODELS_OUT" ] && rm "$MODELS_OUT"
 rm -f "${DOTFILES_DIR}/omp/models.generated.yml"
-DOTFILES_DIR="$DOTFILES_DIR" "${DOTFILES_DIR}/scripts/omp-models-build" "$MODELS_OUT"
-ensure_link "${DOTFILES_DIR}/omp/mcp.json"    "${OMP_AGENT_DIR}/mcp.json"
+env DOTFILES_DIR="$DOTFILES_DIR" "${DOTFILES_DIR}/scripts/omp-models-build" "$MODELS_OUT"
+# mcp.json is not linked: shims/omp builds each profile's own from omp/mcp.json at every launch,
+# without the servers omp/scopes.yml leaves out there. A machine set up earlier keeps its link
+# until the default profile's next launch replaces it with the built file.
+# SAMI-RULES.md holds Sami's rules, .claude/CLAUDE.md, for every omp session in every directory and
+# its task subagents: omp/config.yml names it in contextFiles.extra, a user-level file omp also gives
+# subagents (it gives them no file named AGENTS.md). omp read the rules through CLAUDE_CONFIG_DIR
+# until shims/omp stopped passing that on (the shim's scope step says why). The shim copies or
+# links it into each named profile.
+ensure_link "${DOTFILES_DIR}/.claude/CLAUDE.md" "${OMP_AGENT_DIR}/SAMI-RULES.md"
 ensure_link "${DOTFILES_DIR}/omp/lsp.json"    "${OMP_AGENT_DIR}/lsp.json"
 ensure_link "${DOTFILES_DIR}/omp/WATCHDOG.md" "${OMP_AGENT_DIR}/WATCHDOG.md"
 ensure_link "${DOTFILES_DIR}/omp/WATCHDOG.yml" "${OMP_AGENT_DIR}/WATCHDOG.yml"
@@ -44,19 +54,20 @@ ensure_link "${DOTFILES_DIR}/omp/agents"      "${OMP_AGENT_DIR}/agents"
 ensure_link "${DOTFILES_DIR}/omp/keybindings.yml" "${OMP_AGENT_DIR}/keybindings.yml"
 # omp loads <agent dir>/hooks/<pre|post>/*.ts; post/jj-snapshot.ts is the one jj snapshotter.
 ensure_link "${DOTFILES_DIR}/omp/hooks"       "${OMP_AGENT_DIR}/hooks"
-# Standing rules (omp/AGENTS.md, rules/): link every omp/rules/*.md. memory-graph.md is linked by
+# Standing rules: link every omp/rules/*.md. memory-graph.md is linked by
 # installers/ctx-memory.sh. scripts/dotfiles-follow after a pull, and dotfiles-sync's tools step
 # after a move, run this same script, so a rule added by commit goes live without a hand-run installer.
 "${DOTFILES_DIR}/scripts/omp-link-rules"
 
 # Extensions: dotfiles-owned sources are linked here; everything else is an OMP
 # plugin installed from GitHub or npm. The pins live in the committed omp/plugins/package.json and
-# bun.lock, and they change only by a commit (made in a clone, then pushed; every machine pulls).
+# bun.lock, and they change only by a commit: edit them in ~/.dotfiles in place, install, then
+# `jj commit` them by name and run scripts/dotfiles-publish (the root AGENTS.md); every machine pulls.
 # This installer installs exactly what they pin and writes no tracked file: `bun install
 # --frozen-lockfile` never rewrites bun.lock, and the marketplace step puts the committed
-# omp-plugins.lock.json back. On 2026-11-03 a hand upgrade that edited the pin in a following
-# machine's checkout (sami-devbox) stopped scripts/dotfiles-follow there.
-# jj snapshotting is omp/hooks/post/jj-snapshot.ts alone (see omp/AGENTS.md);
+# omp-plugins.lock.json back. On 2026-11-03 a hand upgrade that rewrote the pin in a following
+# machine's checkout (sami-devbox) and was never committed stopped scripts/dotfiles-follow there.
+# jj snapshotting is omp/hooks/post/jj-snapshot.ts alone (its header says so);
 # a stale extension copy is pruned so no second, awaited snapshotter loads.
 if [ -L "${OMP_AGENT_DIR}/extensions" ]; then rm "${OMP_AGENT_DIR}/extensions"; fi
 mkdir -p "${OMP_AGENT_DIR}/extensions"
@@ -77,6 +88,7 @@ ensure_link "${DOTFILES_DIR}/omp/extensions/refusal-cooldown.ts" "${OMP_AGENT_DI
 rm -f "${OMP_AGENT_DIR}/extensions/served-model-notice.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/running-script-guard.ts" "${OMP_AGENT_DIR}/extensions/running-script-guard.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/decision-review-gate.ts" "${OMP_AGENT_DIR}/extensions/decision-review-gate.ts"
+ensure_link "${DOTFILES_DIR}/omp/extensions/zlib-reader-guard.ts" "${OMP_AGENT_DIR}/extensions/zlib-reader-guard.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/path-guard.ts" "${OMP_AGENT_DIR}/extensions/path-guard.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/span-account.ts" "${OMP_AGENT_DIR}/extensions/span-account.ts"
 # The experiments extension: several session features, each behind its own gate (omp/extensions/experiments/index.ts).
@@ -225,9 +237,11 @@ install_marketplace_plugin theorem-labs/verification-skills dev-infra@agent-skil
 # theorem-labs/core-ops: the company's operations skills, for the documents a customer reads.
 install_marketplace_plugin theorem-labs/core-ops core-ops@core-ops
 # slack@claude-plugins-official brings the Slack skills (slack-messaging, slack-search, ...) written
-# for the tools of the slack server in omp/mcp.json. Claude Code installs it from .claude/settings.json,
-# but omp reads Claude's plugin registry only when enabledProviders lists claude-plugins, so omp holds
-# its own install.
+# for the tools of the slack server in omp/mcp.json. Claude Code installs it from .claude/settings.json.
+# omp reads Claude Code's plugin registry only where Claude's user root is opted in: enabledProviders
+# lists claude or claude-plugins, or CLAUDE_CONFIG_DIR is set. .bashrc sets that variable for Claude
+# Code, and with it omp loaded the registry's stale plugin copies as duplicate skills, so shims/omp
+# starts omp without it and omp holds its own install.
 install_marketplace_plugin anthropics/claude-plugins-official slack@claude-plugins-official
 
 # Skills: pools are declared once in skills-sources.json;
@@ -281,12 +295,12 @@ ensure_vendor https://github.com/pulumi/agent-skills.git pulumi-agent-skills 251
 # `gh skill install` places it in ~/.agents/skills (user scope), which OMP's
 # built-in "agents" discovery provider already reads natively (on by default) -
 # no skills-sources.json entry needed. This block only materializes/pins it:
-# pinned to the cli/cli v2.98.0 tag commit, matching mise.toml's
-# `gh = "2.98.0"` pin (a newer skill documents flags, e.g. `--attach`, that an
+# pinned to the cli/cli v2.106.0 tag commit, matching mise.toml's
+# `gh = "2.106.0"` pin (a newer skill documents flags, e.g. `--attach`, that an
 # older installed `gh` rejects) - re-pin here whenever mise.toml's gh version
 # moves. Non-fatal when `gh` is absent (agent boxes without it) or `gh skill`
 # is unavailable.
-GH_SKILL_PIN="a255baf71d13fe5947a4eb7ad521ffd412d64cee"
+GH_SKILL_PIN="529111a21612ff1e29dc45e567a157df24e0e243"
 GH_SKILL_FILE="${HOME}/.agents/skills/gh/SKILL.md"
 if command -v gh &>/dev/null; then
     gh_skill_present=0
@@ -307,6 +321,7 @@ fi
 # skills directory would publish ~100 skills). Linked only where agent-c is checked out.
 AGENT_C_GLOBAL_SKILLS="${HOME}/src/agent-c/.claude/skills"
 OMP_AGENT_C_FARM="${HOME}/.omp/skill-farms/agent-c"
+# shellcheck disable=SC2043 # a list of one today; another skill is one more word here
 for global_skill in maintaining-inspect; do
     if [ -d "${AGENT_C_GLOBAL_SKILLS}/${global_skill}" ]; then
         mkdir -p "${OMP_AGENT_C_FARM}"

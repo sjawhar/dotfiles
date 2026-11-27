@@ -9,12 +9,17 @@ that something left the tool: a message, a recorded time, or a named row nobody 
 from __future__ import annotations
 
 import re
+import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from chief_dashboard import dispatch_check as dc
 from chief_dashboard import redrive
 from test_dispatch_check import DEAD, LIVE, NOW, SAMI, FakeDispatch, ev, found, issue, no_prs, session
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "tests"))
+from non_utf8_name import process_named  # noqa: E402 - found through the path above
 
 ASKER = "01a1asker-000-0000-0000-00000000"[:8] + "-0000-0000-0000-000000000000"
 LEAD = "01a1lead-0000-0000-0000-000000000000"
@@ -371,3 +376,11 @@ def test_the_ledger_survives_a_broken_file(tmp_path):
 
 def test_utc_times_are_written_without_microseconds():
     assert redrive.iso(datetime(2026, 10, 29, 17, 10, 5, 123456, tzinfo=UTC)) == "2026-10-29T17:10:05Z"
+
+
+def test_the_omp_search_reads_past_a_process_named_in_bytes_that_are_not_utf8(monkeypatch):
+    """A pane's process may name itself any bytes (prctl PR_SET_NAME); the search under it reads that name and goes on.
+    The pane's children are given, since pgrep over a busy host can pass its own 5 s limit."""
+    with process_named() as named:
+        monkeypatch.setattr(redrive, "_children", lambda pid: [named.pid] if pid == 4242 else [])
+        assert redrive._omp_pid(4242) is None

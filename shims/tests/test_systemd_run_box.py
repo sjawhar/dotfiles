@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import select
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -39,6 +40,8 @@ CGROUP_FILES = {
     "memory.min": "0",
     "memory.low": "0",
     "memory.swap.max": "max",
+    "memory.oom.group": "0",
+    "memory.events": "oom_kill 0",
     "cpu.max": "max 100000",
     "cpu.weight": "100",
     "pids.max": "max",
@@ -285,11 +288,64 @@ class FakeTree(unittest.TestCase):
         self.assertEqual(self.scopes(), [])
 
     def test_a_unit_property_that_is_not_a_limit_is_named_and_the_run_goes_on(self) -> None:
-        run = self.run_shim("--user", "--scope", "-p", "OOMPolicy=continue",
+        run = self.run_shim("--user", "--scope", "-p", "KillMode=mixed",
                             "-p", "MemoryMax=1G", "--", "echo", "ran")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn("ran", run.stdout)
-        self.assertIn("OOMPolicy", run.stderr)
+        self.assertIn("KillMode", run.stderr)
+
+    def test_oom_policy_kill_or_stop_makes_the_cgroup_one_oom_group(self) -> None:
+        """systemd's OOMPolicy=kill takes the whole unit when the kernel OOM-kills a process of it; here the kernel
+        does that itself for a cgroup whose memory.oom.group is 1. continue, a scope's default, leaves it 0. Read from
+        inside the run, since the shim removes the directory when it ends."""
+        out = self.root / "GROUP"
+        for policy, want in (("kill", "1"), ("stop", "1"), ("continue", "0")):
+            with self.subTest(policy=policy):
+                run = self.run_shim("--user", "--scope", "-q", "--unit", "g", "-p", "MemoryMax=1G",
+                                    "-p", f"OOMPolicy={policy}", "--",
+                                    "bash", "-c", f'cat "{self.cgroup}/g.scope/memory.oom.group" >"{out}"')
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertEqual(out.read_text(encoding="utf-8"), want)
+                self.assertNotIn("OOMPolicy", run.stderr)
+        marker = self.root / "RAN"
+        run = self.run_shim("--user", "--scope", "-p", "OOMPolicy=sometimes", "--", "touch", str(marker))
+        self.assertEqual(run.returncode, 1)
+        self.assertIn("OOMPolicy=sometimes", run.stderr)
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.scopes(), [])
+
+    def test_a_status_passes_through_and_only_a_proven_oom_kill_ends_the_shim_by_sigkill(self) -> None:
+        """On the host the command is exec'd in its scope, so its caller sees the signal that ended it. Here the shim
+        ends by SIGKILL only when its command ended with 137 and its cgroup recorded an OOM kill, the one death it can
+        prove; every other status passes through as it is. A death by another signal N reads as 128 + N (a SIGTERM
+        death as 143, a SIGKILL with no OOM kill as 137), the same as a command that exits 128 + N."""
+        events = f"{self.cgroup}/r.scope/memory.events"
+        for name, script, status in (("oom-killed", f'printf "oom 1\\noom_kill 1\\n" >"{events}"; kill -KILL $$',
+                                      -signal.SIGKILL),
+                                     ("oom-recorded-exit-0", f'printf "oom 1\\noom_kill 1\\n" >"{events}"', 0),
+                                     ("kill-without-oom", "kill -KILL $$", 137),
+                                     ("term-death", "kill -TERM $$", 143),
+                                     ("exit-143", "exit 143", 143),
+                                     ("exit-137", "exit 137", 137),
+                                     ("exit-129", "exit 129", 129),
+                                     ("exit-3", "exit 3", 3)):
+            with self.subTest(command=name):
+                run = self.run_shim("--user", "--scope", "-q", "--unit", "r", "-p", "MemoryMax=1G", "--",
+                                    "bash", "-c", script)
+                self.assertEqual(run.returncode, status, run.stdout + run.stderr)
+                self.assertEqual(self.scopes(), [], f"{name}: the cgroup was left behind")
+                said = "shims/systemd-run: oom_kill=1 in " in run.stderr
+                self.assertEqual(said, name.startswith("oom-"), run.stderr)
+
+    def test_an_oom_kill_in_the_cgroup_is_said_under_quiet_too(self) -> None:
+        """The host records an OOM kill as the scope's Result=oom-kill; a box has no unit to carry it, so the shim
+        says it, read from the cgroup's memory.events before it removes the cgroup."""
+        run = self.run_shim("--user", "--scope", "-q", "--unit", "o", "-p", "MemoryMax=1G", "--",
+                            "bash", "-c", f'printf "oom 2\\noom_kill 2\\n" >"{self.cgroup}/o.scope/memory.events"')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("shims/systemd-run: oom_kill=2 in ", run.stderr)
+        quiet = self.run_shim("--user", "--scope", "-q", "-p", "MemoryMax=1G", "--", "true")
+        self.assertEqual(quiet.stderr, "", "a run with no OOM kill said something under --quiet")
 
     def test_an_option_this_box_cannot_honour_is_refused_rather_than_dropped(self) -> None:
         marker = self.root / "RAN"
@@ -519,10 +575,27 @@ class RealCgroup(unittest.TestCase):
         run = self.run_shim("--user", "--scope", "-q", "-p", "MemoryMax=64M", "-p", "MemorySwapMax=0",
                             "--", sys.executable, "-c",
                             "x=bytearray()\nfor _ in range(400): x += bytearray(1024*1024)\nprint('NOT KILLED')")
-        self.assertEqual(run.returncode, 137, run.stdout + run.stderr)
+        # Ended by the kernel's SIGKILL, which the shim then ends by too, as the exec'd command of a host scope does.
+        self.assertEqual(run.returncode, -signal.SIGKILL, run.stdout + run.stderr)
         self.assertNotIn("NOT KILLED", run.stdout)
+        self.assertIn("shims/systemd-run: oom_kill=", run.stderr)
         # The shim's own plumbing is not reported to the caller as the failure.
         self.assertNotIn("read -r _ <", run.stderr)
+
+    def test_an_oom_kill_takes_the_whole_command_under_oom_policy_kill(self) -> None:
+        """A child past the cap: with OOMPolicy=kill the kernel kills every process of the cgroup with it, so the
+        shell that would go on is gone too, as systemd's policy takes a host scope whole. With continue, a scope's
+        default, the child dies alone and the shell goes on."""
+        eater = "x=bytearray()\nfor _ in range(400): x += bytearray(1024*1024)\n"
+        for policy, status, went_on in (("kill", -signal.SIGKILL, False), ("continue", 0, True)):
+            with self.subTest(policy=policy):
+                run = self.run_shim("--user", "--scope", "-q", "-p", "MemoryMax=64M", "-p", "MemorySwapMax=0",
+                                    "-p", f"OOMPolicy={policy}", "--", "sh", "-c",
+                                    f'"{sys.executable}" -c "$1"; echo WENT ON', "sh", eater)
+                self.assertEqual(run.returncode, status, run.stdout + run.stderr)
+                self.assertEqual("WENT ON" in run.stdout, went_on, run.stdout + run.stderr)
+                self.assertIn("shims/systemd-run: oom_kill=", run.stderr)
+                self.assertEqual(self.scopes(), [], "the run's cgroup was left behind")
 
     def test_a_process_the_command_leaves_behind_keeps_its_cgroup_and_the_next_run_sweeps_it(self) -> None:
         """The kernel refuses to remove a cgroup that still holds a process, as it does a

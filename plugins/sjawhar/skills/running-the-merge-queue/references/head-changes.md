@@ -19,10 +19,12 @@ jj log --no-graph -r '<verdict-sha> & ::<current-head>' -T 'commit_id ++ "\n"'
 
 ## 2. Classify the history shape
 
-- When an old verdict carries to a new head is in `landing-a-pr`'s review-and-readiness reference ("Review gates tied to a head"): a forward merge of the reviewed head, or a comparison of the PR's own diffs (section 3); acceptance still runs at the new head. The queue adds:
-- Appended commits that the owner documents as a prose-only round keep the verdict and the thermonuclear pair when the diff between the two heads touches only comments and docs.
+- When an old verdict carries to a new head is in `landing-a-pr`'s review-and-readiness reference ("Review gates tied to a head"): a forward merge of the reviewed head, or a comparison of the PR's own diffs (section 3). The queue adds:
+- A forward merge of main with no conflict keeps the approval: it changes none of the PR's own lines, and a PR need not contain the latest main. A merge that resolved a conflict is an integration update.
+- Appended commits keep ancestry, but the delta is not proven harmless. A round the owner documents as prose-only keeps the verdict and the thermonuclear pair when the diff between the two heads touches only comments and docs; check that diff with section 3. A code change needs review at the resulting code head.
 - An integration update keeps prior review only if its conflicts were prose-only and the PR's own code contribution is unchanged.
-- An identical clean rebase keeps the old review through a confirmation naming the new head, with no new pair run.
+- After an amend or rebase the reviewed SHA is not an ancestor of the new head, and no comparison changes that: do not carry the old review forward as if commits were appended. An identical clean rebase keeps the old review only through an explicit confirmation that names the new head. That confirmation rests on section 3 and needs no new pair run. A changed contribution, or a conflict resolution that changes code, needs an independent re-review.
+- Every shape still needs current required CI and the changed-path acceptance at the intended head, unless a scoped `WAIVED-BY-SAMI` covers it. None of this licenses an unnecessary rebase.
 - A three-dot sibling comparison shows the contribution since the common base, not the amendment. A direct tree diff shows content differences, not that anyone reviewed the new tree.
 - Return unexplained differences to the owner or reviewer.
 

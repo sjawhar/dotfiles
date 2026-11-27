@@ -28,3 +28,8 @@ Host oryx
   LocalForward 127.0.0.1:12801 127.0.0.1:12801
   LocalForward 127.0.0.1:12802 127.0.0.1:12802
   LocalForward 127.0.0.1:12805 127.0.0.1:12805
+  # oryx's personal Dispatch, Envoy listener and Envoy NATS, for the laptop's default
+  # omp profile (~/.config/legion/envoy.json). Each binds loopback on oryx only.
+  LocalForward 127.0.0.1:8776 127.0.0.1:8776
+  LocalForward 127.0.0.1:9030 127.0.0.1:9030
+  LocalForward 127.0.0.1:4223 127.0.0.1:4223

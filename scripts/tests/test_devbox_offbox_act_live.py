@@ -312,7 +312,8 @@ def test_live_answers_inside_its_budget_on_this_host(box):
     omps = descriptors = 0
     for entry in Path("/proc").iterdir():
         try:
-            if not entry.name.isdigit() or (entry / "comm").read_text().strip() != "omp":
+            # Bytes: a comm is whatever a process set, and another test's is not UTF-8.
+            if not entry.name.isdigit() or (entry / "comm").read_bytes().strip() != b"omp":
                 continue
             descriptors += len(os.listdir(entry / "fd"))
             omps += 1

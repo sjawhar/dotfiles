@@ -24,23 +24,35 @@
 #   - refuses to resume an omp session that `agentbox move --to` moved off this machine (below);
 #   - names omp/config.probe.yml, which turns the subagent progress probe on, in an omp session's
 #     PI_CONFIG_FILES only when the omp it runs is a release that holds the probe's fix (below);
+#   - sets none of DISPATCH_URL, DISPATCH_TOKEN(_FILE), ENVOY_URL, ENVOY_NATS_URL, ENVOY_TOKEN(_FILE)
+#     and NATS_NKEY_SEED(_FILE): each overrides one field of every profile's envoy.json, and would
+#     turn Envoy on for a profile that has none (scripts/agentbox's session_env sets none either);
 #   - execs the first <agent> on PATH that is not a wrapper, through scripts/agent-secrets-session.
 #     A wrapper is a file whose real path is in a shims/ directory (shims/omp, another checkout's
 #     copy of it) or mise's own shims dir, which falls back to PATH when mise has no version for
 #     the directory; either would hand the call back to a launcher. When there is none (a move of
 #     the checkout brought a pin nothing installed yet), it runs `mise install` once in the
-#     checkout, holding $MISE_DATA_DIR/.dotfiles-install.lock as dotfiles-sync's tools step,
-#     dotfiles-follow, shims/knives, installers/mise.sh and installers/librarian-harness-host.sh
-#     do, so a launch during a mover's install waits for it. That `mise install` alone gets
-#     DOTFILES_INSTALL_LOCK_HELD=1, so a knives call under it that lacks its pin exits 127 at once
-#     instead of waiting on the lock, and the agent does not get the marker. Then, whatever the
-#     install's result, it asks `mise which <agent>` for the pinned binary and execs that when it
-#     is not a wrapper, and exits 127 only when it is missing. A failed install's last lines go to
-#     stderr, never stdout.
+#     checkout, holding $MISE_DATA_DIR/.dotfiles-install.lock as oryx/install.sh's op step,
+#     dotfiles-sync's tools step, dotfiles-follow, shims/knives, installers/mise.sh and
+#     installers/librarian-harness-host.sh do, so a launch during a mover's install waits for it.
+#     That `mise install` alone gets DOTFILES_INSTALL_LOCK_HELD=1, so a knives call under it that
+#     lacks its pin exits 127 at once instead of waiting on the lock, and the agent does not get the
+#     marker. Then, whatever the install's result, it asks `mise which <agent>` for the pinned
+#     binary and execs that when it is not a wrapper, and exits 127 only when it is missing. A
+#     failed install's last lines go to stderr, never stdout.
 set -euo pipefail
 
+# No session makes group- or other-writable files, whatever started the shell above it. A tmux
+# server started under the systemd user manager takes the manager's 0002 (pam_umask,
+# USERGROUPS_ENAB in login.defs), one started another way 0022, so the same command made
+# group-writable files in one session and not in the next: after the reset of 2026-11-25
+# (dispatch://INFRA-5874) every host session had 0002, and a test suite that refuses a
+# group-writable file failed on its own fixtures. A box's sessions run with docker's 0022.
+# This adds 022 to the caller's mask and keeps a stricter one (0077 stays 0077).
+umask "$(printf '%04o' $(( 8#$(umask) | 8#022 )))"
+
 # The dotfiles checkout this script is in, not the one under HOME: a caller may give the session a
-# HOME of its own (shims/AGENTS.md, "A moved HOME"), and shims/omp execs this script by its path.
+# HOME of its own (shims/tests/test_shim_moved_home.py), and shims/omp execs this script by its path.
 _agent_session_self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")"
 DOTFILES_DIR="${DOTFILES_DIR:-${_agent_session_self%/scripts/*}}"
 # Absolute once, before any cd. A prefix of $PWD, not a `cd` into it, so a directory that exists

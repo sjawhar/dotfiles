@@ -110,6 +110,9 @@ class AgentboxLimits(unittest.TestCase):
             "STUB_RUN_ARGS": str(self.run_args),
             "AGENTBOX_BOXES": str(self.boxes),
             "AGENTBOX_DISKS": str(self.disks),
+            # The box's exit row, in the fixture and not in this host's
+            # /mnt/durable/<user>/agentbox-exits.tsv.
+            "AGENTBOX_EXITS": str(self.root / "agentbox-exits.tsv"),
             "STUB_SUDO_ARGS": str(self.sudo_args),
             "STUB_MKFS_ARGS": str(self.mkfs_args),
         }

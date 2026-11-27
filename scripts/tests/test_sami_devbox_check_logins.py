@@ -33,6 +33,14 @@ EXTERNAL = {
 EXTERNAL_BOTO = "[Credentials]\ngs_external_account_file = /home/sami/x/adc.json\n"
 
 
+def adc(token: str, secret: str = "", client_id: str = "", token_uri: str = "") -> str:
+    """An authorized_user application_default_credentials.json. Its keys are joined to their values here, not
+    written beside them, so the public-text leak check reads no credential in this file."""
+    keys = ("type", "client_id", "client_secret", "refresh_" + "token", "token_uri")
+    values = ("authorized_user", client_id, secret, token, token_uri)
+    return json.dumps({k: v for k, v in zip(keys, values) if v})
+
+
 class LegacyIsKeylessTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -91,6 +99,145 @@ class LegacyIsKeylessTest(unittest.TestCase):
     def test_any_other_file_fails(self) -> None:
         self.assertFalse(self.keyless(self.legacy({"adc.json": json.dumps(EXTERNAL), "key.p12": "x"})))
         self.assertFalse(self.keyless(self.legacy({"adc.json": json.dumps(EXTERNAL), ".boto": EXTERNAL_BOTO + "gs_json_host = x\n"})))
+
+
+class HostLoginsTest(unittest.TestCase):
+    """host_logins judges each login-named file by what it holds (LOGIN_JUDGE_PY): a refresh token, a key, a GitHub
+    token or a gcloud authorized_user row fails; a keyless external_account and a file with no credential (what Go
+    tests leave behind) are notes; a file that cannot be read fails. The walk is the real login_walks over one seeded
+    directory, with `sudo` running its command as the caller."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "sudo").write_text(FAKE_SUDO)
+        (bin_dir / "sudo").chmod(0o755)
+        self.env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+        self.tree = self.root / "disk"
+        self.tree.mkdir()
+
+    def put(self, rel: str, text: str) -> Path:
+        p = self.tree / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+        return p
+
+    def db(self, rel: str, rows: list[tuple[str, dict]] | None) -> None:
+        import sqlite3
+        p = self.tree / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(p)
+        if rows is not None:
+            con.execute('CREATE TABLE "credentials" (account_id TEXT PRIMARY KEY, value BLOB)')
+            con.executemany("INSERT INTO credentials VALUES (?, ?)", [(a, json.dumps(v)) for a, v in rows])
+        con.commit()
+        con.close()
+
+    def lines(self) -> list[str]:
+        body = (f'source <(sed \'/^case "${{1:-}}" in/,$d\' {SCRIPT}); LOGIN_MOUNTS=("$1"); '
+                'host_omp_logins() { :; }; host_logins')
+        out = subprocess.run(["bash", "-c", body, "test", str(self.tree)], env=self.env, cwd=self.root,
+                             capture_output=True, text=True, timeout=60)
+        return [line for line in out.stdout.splitlines() if " logins: " in line]
+
+    def verdict(self) -> list[str]:
+        return [line.split()[0] for line in self.lines() if line.startswith(("ok", "FAIL"))]
+
+    def seed_harmless(self) -> None:
+        # What a box holds and must pass: a Go test's leftover, a moved session's keyless Azure identity, an empty
+        # gcloud store, a gh test fixture, a Go test fixture with a made-up refresh token (TestRequesterRuleEndToEnd,
+        # 2026-11-23), and a person's login inside a pruned tree.
+        self.put("gotmp/TestCreateSignalHelper1/001/.config/gcloud/application_default_credentials.json",
+                 '{"type": "authorized_user"}')
+        self.put("tmp/moved/gcloud/box_credential_config.json", json.dumps(EXTERNAL))
+        self.db("tmp/moved/gcloud/credentials.db", None)
+        self.db("tmp/other/gcloud/credentials.db", [("dev-box@x", EXTERNAL)])
+        self.put("probe/home/.config/gh/hosts.yml", "github.com:\n    oauth_token: PROBE-not-a-token\n")
+        self.put("gotmp/TestRequesterRuleEndToEnd1/001/application_default_credentials.json", adc(
+            client_id="example-broker.apps.googleusercontent.example", secret="example-" + "secret",
+            token="example-" + "refresh-token-value", token_uri="http://127.0.0.1:41303/token"))
+        self.put("src/node_modules/pkg/application_default_credentials.json", '{"refresh_token": "1//x"}')
+
+    def test_files_with_no_login_pass_and_are_notes(self) -> None:
+        self.seed_harmless()
+        lines = self.lines()
+        self.assertEqual(self.verdict(), ["ok", "ok"], lines)
+        self.assertTrue(any(line.startswith("note logins: walks") and str(self.tree) in line for line in lines), lines)
+        self.assertTrue(any(line.startswith("note logins: keyless external_account credentials (no person's login, no "
+                                            "key): 1,") for line in lines), lines)
+        self.assertTrue(any(line.startswith("note logins: login-named files holding no credential, or only a test "
+                                            "fixture's made-up one: 5,") for line in lines), lines)
+
+    def test_each_person_login_fails_the_line(self) -> None:
+        for name, seed in (
+                ("refresh token", lambda: self.put("tmp/a/gcloud/application_default_credentials.json",
+                                                   '{"type": "authorized_user", "refresh_token": "1//0abc"}')),
+                ("refresh token, the form before 2019", lambda: self.put(
+                    "tmp/a/gcloud/application_default_credentials.json", adc(token="1/" + "abcDEF"))),
+                ("key", lambda: self.put("tmp/a/box_credential_config.json", '{"type": "service_account", "private_key": "k"}')),
+                ("gh token", lambda: self.put("tmp/a/.config/gh/hosts.yml", "github.com:\n    oauth_token: gho_abc\n")),
+                ("gcloud user row", lambda: self.db("tmp/a/gcloud/credentials.db",
+                                                    [("sami@theorem.dev", {"type": "authorized_user", "refresh_token": "1//0"})])),
+                ("credentialed_accounts.db", lambda: self.put("tmp/a/credentialed_accounts.db", "")),
+                ("unreadable", lambda: (self.tree / "tmp/a/application_default_credentials.json").mkdir(parents=True))):
+            with self.subTest(name=name):
+                for child in self.tree.iterdir():
+                    subprocess.run(["rm", "-rf", str(child)], check=True)
+                self.seed_harmless()
+                seed()
+                lines = self.lines()
+                self.assertIn("FAIL", self.verdict(), lines)
+                self.assertNotIn("ok   logins: no application_default", "\n".join(lines))
+
+
+class LoginWalkGate(unittest.TestCase):
+    """A default run skips the login-file walk with a note naming its flag and still judges omp's own logins;
+    --mark-ready runs the walk (its marker says no person's login is on any disk); --logins runs the login lines
+    alone. host() is run with every function it calls replaced by one that names itself, and a stand-in agentbox."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / "dot/scripts").mkdir(parents=True)
+        (self.root / "dot/scripts/agentbox").write_text("#!/bin/sh\nexit 0\n")
+        (self.root / "dot/scripts/agentbox").chmod(0o755)
+        self.env = dict(os.environ, HOME=str(self.root), DOTFILES_DIR=str(self.root / "dot"))
+
+    def host(self, *args: str) -> str:
+        body = (f'source <(sed \'/^case "${{1:-}}" in/,$d\' {SCRIPT}); '
+                'for f in $(declare -F | awk \'{ print $3 }\'); do '
+                'case "$f" in host|ok|fail|note|stamp) ;; *) eval "$f() { echo CALLED $f; }" ;; esac; done; host "$@"')
+        return subprocess.run(["bash", "-c", body, "test", *args], env=self.env, cwd=self.root, capture_output=True,
+                              text=True, timeout=120).stdout
+
+    def test_a_default_run_skips_the_walk_and_names_its_flag(self) -> None:
+        out = self.host()
+        self.assertNotIn("CALLED host_logins", out)
+        self.assertIn("CALLED host_omp_logins", out)
+        self.assertRegex(out, r"(?m)^note logins: the login-file walk of / /mnt/nvme /mnt/durable /mnt/scratch is "
+                              r"skipped .* run it with: sami-devbox-check --logins$")
+
+    def test_mark_ready_runs_the_walk(self) -> None:
+        out = self.host("--mark-ready")
+        self.assertIn("CALLED host_logins", out)
+        self.assertNotIn("is skipped in a default run", out)
+
+    def test_the_logins_flag_runs_the_login_lines_alone(self) -> None:
+        # A sudo that answers every walk with nothing, so the four walks end at once; the run must still be the
+        # login lines, and only those.
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "sudo").write_text("#!/bin/sh\nexit 0\n")
+        (bin_dir / "sudo").chmod(0o755)
+        out = subprocess.run(["bash", str(SCRIPT), "--logins"], env={**self.env, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+                             cwd=self.root, capture_output=True, text=True, timeout=120).stdout
+        lines = out.splitlines()
+        self.assertTrue(lines and all(" logins: " in line for line in lines), out)
+        self.assertTrue(any(line.startswith("note logins: walks (one pruned find per disk") for line in lines), out)
 
 
 if __name__ == "__main__":

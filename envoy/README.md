@@ -46,7 +46,7 @@ its own, with legion's `packages/envoy/deploy/compose/single-node.compose.yml`
 legion's docs site, "Running Envoy on one machine", has the steps), so its
 sessions reach only each other and no GitHub/Slack events arrive. Its sessions
 find that NATS through `"natsUrls": ["nats://127.0.0.1:4222"]` in the `envoy`
-section of the machine's `envoy.json` (`AGENTS.md`, "Where the secrets are"),
+section of the machine's `envoy.json` (`scripts/envoy`'s header says which file a session reads),
 where every other machine names the NATS URL its stack's `envoy:natsUrl` does. Such a machine needs
 no `envoy/env.local`; delete one left from before.
 
@@ -132,6 +132,8 @@ AWS_PROFILE=default secrets PULUMI_CONFIG_PASSPHRASE -- pulumi up --stack laptop
 
 The state is in S3 (`Pulumi.yaml`'s `backend`): the devbox reads it with its
 instance role, and the laptop with Sami's AWS SSO login (`aws sso login --sso-session trajectorylabs`).
+
+oryx's `agent` account holds no Trajectory AWS profile or sign-in (HOME-216), so the `laptop` stack is not applied from oryx.
 
 ## Secrets
 

@@ -40,8 +40,8 @@ while (( i < $# )); do
     esac
 done
 
-# The agent test the identity shims share, byte for byte (shims/AGENTS.md, "Who is an agent";
-# shims/tests/test_shim_agent_context.py compares the copies). This shim needs it twice over:
+# The agent test the identity shims share, byte for byte (shims/tests/test_shim_agent_context.py
+# compares the copies). This shim needs it twice over:
 # for what it adds below, and for what it refuses.
 agent_context() {
     [[ -n "${OMP_SESSION_ID:-}${PI_SESSION_FILE:-}${PI_TOOL_BRIDGE_URL:-}${AGENTBOX_SESSION:-}${CLAUDECODE:-}${ENVOY_SESSION_ID:-}${AGENT_SHIM_AGENT:-}${LEGION_ROLE:-}${LEGION_TREE:-}${LEGION_CONTROLLER:-}${LEGION_DAEMON_URL:-}" ]] && return 0
@@ -303,7 +303,7 @@ fi
 # In an agent box the host's tmux server is reached through a guard, not through its own
 # protocol: scripts/agentbox-tmux-guard answers the box's relay socket, runs the command as the
 # user against the host server, and refuses `kill-server` and the kills aimed at panes the box
-# does not own (agentbox/AGENTS.md, dispatch://INFRA-1192). AGENTBOX_TMUX_GUARD_SOCK is that
+# does not own. AGENTBOX_TMUX_GUARD_SOCK is that
 # socket, set by `agentbox new` and by nothing else, so a host shell and a box started before
 # the change take none of this. A call that names another socket or a -L server is a box-local
 # tmux and goes to the real binary below.
@@ -400,7 +400,7 @@ handed_back() {
 }
 
 # mise_paths: mise as this machine runs it, whatever HOME and PATH the caller set
-# (shims/AGENTS.md, "A moved HOME"). A Legion test pane runs a shim with a
+# (shims/tests/test_shim_moved_home.py). A Legion test pane runs a shim with a
 # temporary HOME and the PATH <bin>:/usr/local/bin:/usr/bin:/bin, where every
 # path under HOME names nothing. Sets, once per process:
 #   _mise_bin     mise on PATH, else the dotfiles checkout's bin/mise, else the

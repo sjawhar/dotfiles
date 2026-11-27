@@ -1,7 +1,11 @@
-# Shared jj config. Shells (.bashrc) and agent boxes load it through JJ_CONFIG
-# after ~/.config/jj/config.toml, the per-machine file holding user.name and
-# user.email, so a value here wins over that file. jj run without JJ_CONFIG
-# reads this file through the ~/.jjconfig.toml symlink first, and that file wins.
+# Shared jj config. Shells (.bashrc), agent boxes and omp sessions
+# (omp/extensions/session-env.ts) load it through JJ_CONFIG after
+# ~/.config/jj/config.toml, the per-machine file holding user.name and
+# user.email, so a value here wins over that file, the identity scopes below
+# included. jj run with no JJ_CONFIG reads this file (the ~/.jjconfig.toml link)
+# first and the per-machine file after it, so the per-machine user.email wins
+# over every identity scope: such a jj commits with the per-machine identity in
+# every repository.
 
 [revset-aliases]
 'closest_bookmark(to)' = 'heads(::to & bookmarks())'
@@ -69,55 +73,42 @@ key = "~/.ssh/jj-signing.pub"
 [signing.backends.ssh]
 allowed-signers = "~/.dotfiles/jj-allowed-signers"
 
-# A repository's identity by rule. jj has no remote condition, so each rule
-# matches jj checkouts by repository path. Every workspace of a repository has
-# its main checkout's repository path, so one entry covers every workspace of
-# that checkout wherever it lives. jj compares the repository's real path: a
-# listed repository reached through a symlink still matches, but a listed path
-# that is a symlink to a repository elsewhere, or a workspace at a listed path
-# whose repository is elsewhere, does not, and needs `git-identity`. git's half
-# of each rule is a remote-URL include in .gitconfig, and the two must agree:
-# with behavior = "own", jj drops the signature of a commit whose author email
-# is not its user.email when it rewrites it, so a commit git made as cybermonk
-# would lose its signature the first time jj rewrote it as trajectorylabs. Where
-# two scopes match, the later one wins, as the later include does in .gitconfig.
-
-# theorem-labs repositories commit as sami@theorem.dev: every jj checkout under
-# ~/Code/personal/theorem is a theorem-labs repository. A theorem-labs jj
-# checkout outside this directory needs `git-identity th`.
+# A repository commits as the identity git resolves for it: .gitconfig's
+# remote-URL rules (every cybermonklabs repository as sami@thecybermonk.com,
+# every theorem-labs one as sami@theorem.dev) and a checkout's own git config
+# (~/src/oh-my-pi's noreply address) decide jj's identity too, in every
+# checkout and every workspace of it, wherever it lives. jj has no remote
+# condition, so shims/jj asks git about the backing git repository and passes
+# its user.email as DOTFILES_GIT_EMAIL, and each scope below turns one identity
+# scripts/git-identity knows into jj's user.name and user.email. The two tools
+# must agree: with behavior = "own", jj drops the signature of a commit whose
+# author email is not its user.email when it rewrites it, so a commit git made
+# as cybermonk would lose its signature the first time jj rewrote it as
+# trajectorylabs. These scopes are user config, so a repository's or a
+# workspace's own jj user.email (`git-identity`, `jj config set --repo`) wins
+# over them, and JJ_USER/JJ_EMAIL, the Legion daemon's GitHub App identity,
+# over both. A jj run without the shim, or under an address git-identity does
+# not know, keeps the per-machine user.email.
 [[--scope]]
---when.repositories = ["~/Code/personal/theorem"]
+--when.environments = ["DOTFILES_GIT_EMAIL=sami@trajectorylabs.net"]
 [--scope.user]
 name = "Sami Jawhar"
-email = "sami@theorem.dev"
+email = "sami@trajectorylabs.net"
 
-# cybermonklabs repositories are public and commit as sami@thecybermonk.com,
-# never as sami@theorem.dev, which the leak check refuses there.
-# This matches Legion's jj checkout at ~/src/legion and at ~/Code/legion; it
-# comes after theorem-labs, as its include does in .gitconfig. oh-my-pi's
-# checkout, also cybermonklabs, commits as noreply (below). Any other
-# cybermonklabs jj checkout needs `git-identity cm`. The Legion daemon's own
-# workspaces commit as their role's GitHub App through JJ_USER/JJ_EMAIL, which
-# outrank any config.
 [[--scope]]
---when.repositories = ["~/src/legion", "~/Code/legion"]
+--when.environments = ["DOTFILES_GIT_EMAIL=sami@thecybermonk.com"]
 [--scope.user]
 name = "Sami Jawhar"
 email = "sami@thecybermonk.com"
 
-# oh-my-pi commits as the GitHub noreply address in every workspace. Its origin
-# and upstream are public, so a commit made with the default address puts the
-# company name on GitHub, and knives' forbidden-term list for this fork refuses
-# that address at a release cut. As for Legion, jj matches the checkout by path:
-# every `knives start` workspace of ~/src/oh-my-pi, wherever it lives, has that
-# checkout's repository path, so this one entry covers them all. Until
-# 2026-11-21 the address was set per workspace (`git-identity nr`), and a new
-# knives workspace committed with the default one. git's half is the canonical
-# checkout's local config, which every git worktree of it shares and which wins
-# over .gitconfig's cybermonklabs include; a clone that lacks it needs
-# `git-identity nr`, or jj drops signatures as described above.
 [[--scope]]
---when.repositories = ["~/src/oh-my-pi"]
+--when.environments = ["DOTFILES_GIT_EMAIL=sami@theorem.dev"]
+[--scope.user]
+name = "Sami Jawhar"
+email = "sami@theorem.dev"
+
+[[--scope]]
+--when.environments = ["DOTFILES_GIT_EMAIL=sjawhar@users.noreply.github.com"]
 [--scope.user]
 name = "Sami Jawhar"
 email = "sjawhar@users.noreply.github.com"

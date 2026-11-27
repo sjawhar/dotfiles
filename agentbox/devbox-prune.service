@@ -9,8 +9,9 @@ Description=Prune the always-safe class on the shared devbox: host Docker volume
 # No -a anywhere: tagged images, named volumes and anything a container or build references
 # stay. The script logs bytes reclaimed per box and fails the unit, naming the box and the
 # command, if any step fails (agentbox/devbox-prune).
-# install.sh does not install this unit: a host links and enables it by hand
-# (agentbox/AGENTS.md).
+# install.sh does not install this unit: a host links it and devbox-prune.timer from
+# ~/.dotfiles/agentbox and enables the timer by hand, so renaming either file stops the prune on
+# that host.
 [Service]
 Type=oneshot
 ExecStart=%h/.dotfiles/agentbox/devbox-prune

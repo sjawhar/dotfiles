@@ -3,10 +3,71 @@
 # per network, on the hub machine only. Role-specific, so it runs only when invoked
 # explicitly on that machine; root install.sh does not call it. Re-running converges
 # every bridge config on the values below and keeps each bridge's tokens.
+# It also registers the chat relay of dojo's Compose file (registrations/envoy-relay.yaml);
+# its url is null, so Tuwunel sends it nothing, until envoy-relay.on exists in the state
+# folder. This call writes only that file and, when it changed, the marker that makes the
+# next full run restart Tuwunel; it runs neither mise nor systemctl:
+#   env -u XDG_DATA_HOME ~/.dotfiles/installers/chathub.sh relay-registration
+# Switch the relay on, or off; each switch restarts Tuwunel, and with it every bridge, once:
+#   touch ~/.local/share/chathub/envoy-relay.on && env -u XDG_DATA_HOME ~/.dotfiles/installers/chathub.sh
+#   rm -f ~/.local/share/chathub/envoy-relay.on && env -u XDG_DATA_HOME ~/.dotfiles/installers/chathub.sh
 set -euo pipefail
+# shellcheck source=installers/lib.sh
+# shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 MISE="${DOTFILES_DIR}/bin/mise"
 STATE="${XDG_DATA_HOME:-$HOME/.local/share}/chathub"
+RELAY_REG="$STATE/registrations/envoy-relay.yaml"
+RELAY_SWITCH="$STATE/envoy-relay.on"
+RELAY_URL="http://127.0.0.1:29342"
+RESTART_PENDING="$STATE/tuwunel-restart-pending"
+
+# The chat relay's registration. Its user namespace is Sami alone (anchored: Tuwunel matches
+# a namespace unanchored), so Tuwunel sends it each event of his rooms. Tokens are read back
+# as plain text, without mise, and a missing or unusable one is made new; both are checked
+# before anything is written, since Tuwunel stops loading registrations/ at a file it cannot
+# parse. The file is replaced only when its text changes. The marker that asks for a restart
+# is made before the file is replaced, so a run that stops partway never loses the restart.
+write_relay_registration() {
+    local as_token="" hs_token="" url=null tmp
+    local token_re='^[0-9a-f]{64}$'
+    install -d -m 0700 "$STATE" "$STATE/registrations"
+    if [ -f "$RELAY_REG" ]; then
+        as_token="$(sed -n 's/^as_token: \([0-9a-f]\{64\}\)$/\1/p' "$RELAY_REG")"
+        hs_token="$(sed -n 's/^hs_token: \([0-9a-f]\{64\}\)$/\1/p' "$RELAY_REG")"
+    fi
+    [[ $as_token =~ $token_re ]] || as_token="$(openssl rand -hex 32)"
+    [[ $hs_token =~ $token_re && $hs_token != "$as_token" ]] || hs_token="$(openssl rand -hex 32)"
+    if ! [[ $as_token =~ $token_re && $hs_token =~ $token_re && $as_token != "$hs_token" ]]; then
+        echo "ERROR: could not make two tokens for $RELAY_REG; nothing written." >&2
+        exit 1
+    fi
+    [ -f "$RELAY_SWITCH" ] && url="'$RELAY_URL'"
+    tmp="$(mktemp "$STATE/.envoy-relay.XXXXXX")" # mktemp makes it 0600
+    printf '%s\n' \
+        "id: envoy-relay" \
+        "url: $url" \
+        "as_token: $as_token" \
+        "hs_token: $hs_token" \
+        "sender_localpart: envoy-relay" \
+        "rate_limited: false" \
+        "namespaces:" \
+        "  users:" \
+        "    - regex: '^@sami:chathub\$'" \
+        "      exclusive: false" >"$tmp"
+    if cmp -s "$tmp" "$RELAY_REG"; then
+        rm -f "$tmp"
+        return
+    fi
+    touch "$RESTART_PENDING" || { rm -f "$tmp"; exit 1; }
+    mv -f "$tmp" "$RELAY_REG"
+}
+
+case "$#:${1:-}" in
+    0:) ;;
+    1:relay-registration) write_relay_registration; exit 0 ;;
+    *) echo "usage: $0 [relay-registration]" >&2; exit 2 ;;
+esac
 
 # instance  appservice-port  bot  config-layout
 # The instance name is the binary's suffix: chathub/mautrix@.service runs mautrix-%i.
@@ -32,14 +93,15 @@ YQ="$("$MISE" which yq)"
 install -d -m 0700 "$STATE"
 install -d -m 0700 "$STATE/registrations"
 
-new_registration=false
 changed=()
 
 # Double puppeting: one registration whose user namespace covers the hub, so every
 # bridge can act as @sami, joining new chat rooms for him and posting what he sends
-# from his phone as him. It has no url, so Tuwunel sends it no events.
+# from his phone as him. It has no url, so Tuwunel sends it no events. The restart marker is
+# made before the file, so a run that stops partway never loses the restart.
 dp_reg="$STATE/registrations/doublepuppet.yaml"
 if [ ! -f "$dp_reg" ]; then
+    touch "$RESTART_PENDING"
     (
         umask 077
         cat >"$dp_reg" <<EOF
@@ -55,9 +117,10 @@ namespaces:
       exclusive: false
 EOF
     )
-    new_registration=true
 fi
 dp_secret="as_token:$("$YQ" '.as_token' "$dp_reg")"
+
+write_relay_registration
 
 # Render one bridge's config from its own example, then pin every value the hub
 # depends on. Assignments, not a merge: a merge would keep the example's
@@ -124,9 +187,11 @@ render_bridge() {
         changed+=("$name")
     fi
 
+    # The restart marker comes before the registration, so a run that stops partway never
+    # loses the restart.
     if [ ! -f "$reg" ]; then
+        touch "$RESTART_PENDING"
         "$MISE" exec -- "mautrix-$name" -g -c "$cfg" -r "$reg" >/dev/null
-        new_registration=true
     fi
 }
 
@@ -144,10 +209,14 @@ systemctl --user daemon-reload 2>/dev/null \
     || echo "NOTE: could not reload the chat hub units (no user systemd session here?) — reload them on the hub machine."
 systemctl --user enable --now tuwunel 2>/dev/null \
     || echo "NOTE: could not enable tuwunel (no user systemd session here?) — enable it on the hub machine."
-# Tuwunel reads appservice_dir at startup, so a new bridge registration needs a restart.
-if [ "$new_registration" = true ]; then
-    systemctl --user restart tuwunel 2>/dev/null \
-        || echo "NOTE: could not restart tuwunel after a new registration — restart it on the hub machine."
+# Tuwunel reads appservice_dir only at startup, so a new or changed registration needs one
+# restart; the marker keeps that need across runs until a restart succeeds.
+if [ -f "$RESTART_PENDING" ]; then
+    if systemctl --user restart tuwunel 2>/dev/null; then
+        rm -f "$RESTART_PENDING"
+    else
+        echo "NOTE: could not restart tuwunel after a registration changed — run this installer again on the hub machine."
+    fi
 fi
 for bridge in "${BRIDGES[@]}"; do
     name="${bridge%% *}"

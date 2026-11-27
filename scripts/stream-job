@@ -2,7 +2,7 @@
 """Run each stream's own standing job, from a job file the stream owns.
 
 Why this exists: a stream's standing job runs a script in that stream's scratch directory, and
-no dotfiles unit may hold an absolute path (dotfiles AGENTS.md). So every lead who wanted a
+no dotfiles unit may hold a path of one machine or one user (dotfiles AGENTS.md). So every lead who wanted a
 job on a timer hand-wrote a unit into ~/.config/systemd/user, where nobody reviews it and a
 rebuild of the box loses it. This is one reviewed runner on one dotfiles timer, and a lead
 writes one small file instead of a unit.

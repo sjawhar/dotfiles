@@ -6,12 +6,12 @@
       "name": "omp-plugins",
       "dependencies": {
         "@bopstack/pi-codegraph": "^0.1.1",
-        "@sjawhar/opencode-knives": "github:sjawhar/knives#v5.1.0",
-        "@sjawhar/pi-envoy": "17.39.0",
-        "@sjawhar/pi-legion": "18.52.2",
+        "@sjawhar/opencode-knives": "github:sjawhar/knives#v6.1.11",
+        "@sjawhar/pi-envoy": "21.12.7",
+        "@sjawhar/pi-legion": "23.12.2",
         "ctx-memory": "github:sjawhar/ctx-memory#v0.2.9",
         "gws-accounts": "github:sjawhar/gws-accounts#v0.1.10",
-        "secretsd": "github:sjawhar/forward#v3.8.3",
+        "secretsd": "github:sjawhar/forward#v3.8.5",
         "superpowers": "github:obra/superpowers#v7.0.1",
       },
     },
@@ -152,11 +152,11 @@
 
     "@silvia-odwyer/photon-node": ["@silvia-odwyer/photon-node@0.3.4", "", {}, "sha512-bnly4BKB3KDTFxrUIcgCLbaeVVS8lrAkri1pEzskpmxu9MdfGQTy8b8EgcD83ywD3RPMsIulY8xJH5Awa+t9fA=="],
 
-    "@sjawhar/opencode-knives": ["@sjawhar/opencode-knives@github:sjawhar/knives#f6a1ef9", {}, "sjawhar-knives-f6a1ef9", "sha512-+JU3rz9wxL5ckI1lQFNAYFh1W/y+/IlkDkHS8wsXSpsGLkZ9tlrX5Zk2WfL/52UiSTS7tBnTpeBZvzb/eJf/RA=="],
+    "@sjawhar/opencode-knives": ["@sjawhar/opencode-knives@github:sjawhar/knives#dd3cf4a", {}, "sjawhar-knives-dd3cf4a", "sha512-s5d2ZdQBOpXHdtnflVcGq4Ax8oRR34Yhwv3orY2iFPIoyEBiIfFKkmDd7tcq8tYGADcK0p2kpZp5Fi5fWAs/pA=="],
 
-    "@sjawhar/pi-envoy": ["@sjawhar/pi-envoy@17.39.0", "", {}, "sha512-io2+AhQVZ8ln/EE9/NG4u5Fr8YhJxWiN4aZ1JMc0HxjHEIjfGUhCMQZWDMXfYnI9x39jOI4lNb9xdSwSzwCRjA=="],
+    "@sjawhar/pi-envoy": ["@sjawhar/pi-envoy@21.12.7", "", {}, "sha512-SXJHpF25EQAzheqOj1bSajGCymeeh683w5NlwavnkwSI+MWYghKrJFZ/axHiRhfD5c9xXJDx7xqMfSKM4NDV2A=="],
 
-    "@sjawhar/pi-legion": ["@sjawhar/pi-legion@18.52.2", "", {}, "sha512-r0WanRu4usjq60B6jvO2AEWHJIwB0KN5yY/Pit0c1n4bQR5DuUrKWAd2iuqNkdGfNZqqWO19pcOblmeSZnovEA=="],
+    "@sjawhar/pi-legion": ["@sjawhar/pi-legion@23.12.2", "", {}, "sha512-sLnN5aZKN1PRVAwjOxx3eV3hNEV/YBtbU2IO372SnH8A7NIPf+PiTbVsJpO1LZop+JOVjOLQ5+vsroWCDhNWXA=="],
 
     "@smithy/core": ["@smithy/core@3.33.2", "", { "dependencies": { "@smithy/types": "^4.17.2", "tslib": "^2.6.2" } }, "sha512-CUGXpnPkVdjUCbix+83sWLW9VFgQOm44MDOx/ihITJMAnOZKvL8YYIc7DR9pP/tZ8CIRvMiON/TucvygqbHO3w=="],
 
@@ -314,7 +314,7 @@
 
     "safe-buffer": ["safe-buffer@5.2.1", "", {}, "sha512-rp3So07KcdmmKbGvgaNxQSJr7bGVSVk5S9Eq1F+ppbRo70+YeaDxkw5Dd8NPN+GD6bjnYm2VuPuCXmpuYvmCXQ=="],
 
-    "secretsd": ["secretsd@github:sjawhar/forward#53280d0", { "dependencies": { "@opencode-ai/plugin": "^1.3.0" } }, "sjawhar-forward-53280d0", "sha512-LrdHvyhRfb+sJJ5bW8SwG2eWacx3bvWa6mPnYQZA4nWUCbrbmLDG/d2bm7zKaSAPfrSK53SIspMxodEJC7QGzw=="],
+    "secretsd": ["secretsd@github:sjawhar/forward#baf1ad0", { "dependencies": { "@opencode-ai/plugin": "^1.3.0" } }, "sjawhar-forward-baf1ad0", "sha512-PyhqXeGuJoWLzUx85IO0+UAELkGgV9HzOFofwxTikWUEU+KipcXuFUSYbphe+u/emb7pgeUokeKLBEb0EoEvEw=="],
 
     "semver": ["semver@7.8.0", "", { "bin": { "semver": "bin/semver.js" } }, "sha512-AcM7dV/5ul4EekoQ29Agm5vri8JNqRyj39o0qpX6vDF2GZrtutZl5RwgD1XnZjiTAfncsJhMI48QQH3sN87YNA=="],
 

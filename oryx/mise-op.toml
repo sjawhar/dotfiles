@@ -1,0 +1,15 @@
+# op is the 1Password CLI. Agents on oryx use it with a service account to read secrets.
+# Oryx has no packaged CLI at /usr/bin/op. Only oryx/install.sh's op step links this file to
+# ~/.config/mise/conf.d/op.toml, so the laptop with its packaged CLI never sees this pin.
+
+[tool_alias]
+# aqua downloads 1Password's binary from its release host without a plugin repository. Plain op
+# picks a vfox plugin cloned at unpinned HEAD.
+op = "aqua:1password/cli"
+
+[tools]
+# This pin was the newest stable release that was at least 14 days old when chosen. An exact pin
+# skips minimum_release_age, so check a new version's release date by hand before a bump.
+op = "2.41.1"
+
+# `mise use -g op@<version>` on oryx writes this file through the conf.d link.

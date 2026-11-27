@@ -157,7 +157,7 @@ class AgentboxLeakHook(unittest.TestCase):
         r = self.launch("dark")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(self.hooked(self.root / "boxes/b/dark"))
-        self.assertEqual(self.gh_calls(), ["api repos/x/dark --jq .visibility"])
+        self.assertEqual(self.gh_calls(), ["api --hostname github.com repos/x/dark --jq .visibility"])
 
     def test_a_new_template_of_a_private_repository_gets_none(self) -> None:
         self.repo("priv", "private")

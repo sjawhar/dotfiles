@@ -3,8 +3,9 @@
 [global]
 # Host-independent, so IDs (@sami:chathub) survive moving the hub to another machine.
 server_name = "chathub"
-# Loopback only: the bridges, inboundd and agents' matrix-mcp all run on the hub
-# machine, and the access token acts as Sami on every chat network (HOME-104).
+# Loopback only: the bridges, the chat relay of dojo's Compose file and agents'
+# matrix-mcp all run on the hub machine, and the access token acts as Sami on every
+# chat network (HOME-104).
 address = ["127.0.0.1"]
 port = 8008
 # One user, created by chathub/bootstrap-user; nobody registers.

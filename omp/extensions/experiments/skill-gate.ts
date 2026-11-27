@@ -63,7 +63,7 @@ const STRING_OPEN_JS = String.raw`["'\x60]`;
 const EVAL_SPACE = String.raw`\s"',`;
 /**
  * Words that run the command after them, any number of them in a row: sudo, env and `VAR=value` assignments, timeout,
- * nice, nohup, time, exec, command, a shell's `-c` (`bash -c`, `sh -lc`), `secrets … --` and `secret-run … --`, and the
+ * nice, nohup, time, exec, command, a shell's `-c` (`bash -c`, `sh -lc`), `secrets … --` and `agent-secrets … --`, and the
  * shell keywords that open a command (do, then, else, if, while, until, !). Each word sequence parses one way only
  * (env takes its flags and the assignments after it are wrappers of their own), so a failed match never backtracks
  * through the ways to split it.
@@ -82,7 +82,7 @@ const COMMAND_PREFIX = (() => {
 		"exec",
 		"command",
 		String.raw`(?:ba|z|da|k)?sh(?:${sep}-[a-z]+)*?${sep}-[a-z]*c`,
-		String.raw`secret(?:s|-run)(?:${sep}(?!--(?!${word}))${word}+)*?${sep}--`,
+		String.raw`(?:agent-)?secrets(?:${sep}(?!--(?!${word}))${word}+)*?${sep}--`,
 		"do",
 		"then",
 		"else",

@@ -6,7 +6,10 @@
 #   1. each key below is registered as a *signing* key (not just an auth key)
 #   2. each email below is a *verified* address on the account
 #
-# Add a new machine's key here after generating ~/.ssh/jj-signing on it.
+# A new machine: make its key with
+#   ssh-keygen -t ed25519 -N "" -C "jj-signing-$(hostname -s)" -f ~/.ssh/jj-signing
+# add its public key below with every identity as a principal, and register it at
+# https://github.com/settings/ssh/new as a Signing Key.
 sami@trajectorylabs.net,sami@thecybermonk.com,sami@theorem.dev,sjawhar@users.noreply.github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICA4IzBOyaJmzAm3kPsjH0cVQFjEysEMinjo3uvFh31U laptop
 sami@trajectorylabs.net,sami@thecybermonk.com,sami@theorem.dev,sjawhar@users.noreply.github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKiFZITI3UIN1TAOOR3tsQThfs7egEpIqEryqnIVQbz5 jj-signing-devbox
 sami@trajectorylabs.net,sami@thecybermonk.com,sami@theorem.dev,sjawhar@users.noreply.github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICff1ryx0+ULTCQDUsYR/8G/OdeYtmtpnIbyZ84Ssszo jj-signing-oryx

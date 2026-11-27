@@ -33,6 +33,8 @@ Exit 0: every path may leave. Exit 1: at least one may not; each refusal is prin
 `no-offbox: REFUSED <path>: <why>`, the why naming the marker file or the pattern it found.
 Exit 2: usage error, or a patterns file that exists and cannot be read. A mover refuses on any
 status but 0: the marker means refusal, never a prompt.
+Only scripts/backup-shared-state and `scripts/omp-teleport --host` call it: `agentbox move --to`
+and the devbox bulk copy (upload.sh, snapshot-copy.sh) copy a marked tree like any other.
 
 --excludes  print, one per line (NUL with -0), the paths whose exclusion lets the rest go: a
             marked directory, a path a pattern matches, an unreadable directory, or the given

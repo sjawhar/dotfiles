@@ -67,7 +67,7 @@ class TmuxGuard(unittest.TestCase):
         if no_pinned_install:
             # No tmux past PATH either: under this HOME mise has no configuration, and DOTFILES_DIR
             # names a checkout with no mise.toml, so the shim's pinned-install lookup
-            # (shims/AGENTS.md, "A moved HOME") has no pin to look up.
+            # (shims/tests/test_shim_moved_home.py) has no pin to look up.
             env["DOTFILES_DIR"] = self.temp_dir.name
         if tmux is not None:
             env["TMUX"] = tmux

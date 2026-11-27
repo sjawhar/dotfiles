@@ -15,10 +15,10 @@ Do not decide from `gh api repos/<owner>/<repo> -q .permissions`: it reports a u
 A GitHub admin action that work Sami already asked for needs (an App permission or installation, an admin merge, a repository or branch setting) is yours to do with his admin token from the credential broker; do not ask him to do it. `GITHUB_ADMIN_PAT` reaches theorem-labs repositories, `GITHUB_PERSONAL_ADMIN_PAT` sjawhar's own. The broker puts the token in the variable of its own name and gh reads only `GH_TOKEN` or `GITHUB_TOKEN`, so pass it in the command:
 
 ```sh
-secret-run --register --reason '<what and why>' GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh "$@"' gh <the call>
+agent-secrets GITHUB_ADMIN_PAT --reason '<what and why>' -- sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh "$@"' gh <the call>
 ```
 
-- Sami approves the broker's grant card once per session. `--register` gives a session with no broker identity one, with no restart.
+- Sami approves the broker's grant card once per session. The card is not an ask: request the token without asking him first. The broker refuses a request for this token that carries no `--reason`.
 - The token never skips a check that tests the work.
 
 ## Approvals
@@ -46,9 +46,9 @@ A guard that reads a diff cannot see the state: a repository can be clean on eve
 
 ## cybermonklabs/legion
 
-- Work here goes to Legion, whose reviewer phase is the review; a dev-box session opens no new PR here. Legion merges the work it produces.
+- Legion merges the work it produces.
 - GitHub needs one approving review from an identity other than the PR author's.
-- A PR a dev-box session already has open gets a full review at its head from a cross-family subagent its author dispatches. The approval comes from Legion's own reviewer: ask the INFRA Legion controller (Envoy `notifications.role.legion-infra-controller`) which running Legion reviewer reads the repository, and send that reviewer the PR and its head. Ask for no review issue, and send each new head you push.
+- A PR a dev-box session has open gets a full review at its head from a cross-family subagent its author dispatches. The approval comes from Legion's own reviewer: ask the INFRA Legion controller (Envoy `notifications.role.legion-infra-controller`) which running Legion reviewer reads the repository, and send that reviewer the PR and its head. Ask for no review issue, and send each new head you push.
 - Nothing on a dev box posts as the Legion review App.
 
 ## theorem-labs/*

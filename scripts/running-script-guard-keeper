@@ -65,7 +65,8 @@ def state_dir() -> pathlib.Path:
 def process_start(pid: int) -> float | None:
     """Wall-clock start of a live, non-zombie process, or None."""
     try:
-        stat = pathlib.Path(f"/proc/{pid}/stat").read_text()
+        # Any process may name itself any bytes, and stat carries the name.
+        stat = pathlib.Path(f"/proc/{pid}/stat").read_bytes().decode("utf8", "replace")
     except OSError:
         return None
     fields = stat[stat.rfind(")") + 2 :].split()

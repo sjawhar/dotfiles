@@ -116,7 +116,7 @@ def launcher_spec(pane_pid: int) -> str | None:
         next_frontier: list[int] = []
         for pid in frontier:
             try:
-                argv = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+                argv = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf8", "replace")
             except OSError:
                 argv = ""
             m = omp_sessions.LAUNCH_SPEC.search(argv)

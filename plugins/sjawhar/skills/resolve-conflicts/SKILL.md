@@ -16,23 +16,23 @@ The commands are git's. In a jj checkout, jj records conflicts in the commits an
    - Same lines changed on both sides: combine them, or take the better one.
    - Moved and changed differently on each side: resolve the path first, then the content.
    - Deleted on one side, changed on the other: decide whether the file must exist; if it must, keep the changes.
-   - Mutually exclusive designs: explain both sides and ask the user.
+   - Architectural disagreement or mutually exclusive designs: explain both sides and ask the user. A guess lands an architecture nobody chose.
 3. Resolve each file.
    - Remove every marker. In a merge, `<<<<<<<` to `=======` is your side and the rest is theirs; in a rebase the halves swap.
-   - Give each file a one-line reason ("took `MERGE_HEAD`: it has the cache fix"), so a reviewer need not redo step 1.
+   - Give each file a reason ("took `MERGE_HEAD`: it has the cache fix") in the pull request description, or in the commit message when there is no pull request, so a reviewer need not redo step 1.
 4. Check the merged tree, not only the conflicted files.
-   - Each path that `git diff --name-status $B <target-branch-tip>` marks `D` stays deleted, unless the change means to restore it and its description says so.
+   - Each path that `git diff --name-status $B <target-branch-tip>` marks `D` stays deleted, unless the change means to restore it and its description says so. `<target-branch-tip>` is the tip of the branch the change lands on, such as `origin/main`.
    - In files both sides changed, find hunks git merged without a conflict that your resolution dropped, docs included: taking one whole side discards the other's work.
    - Trace renamed or changed interfaces to consumers no compiler sees: string-keyed registries, import loaders, monkeypatch targets.
    - Run focused tests while you fix. Before you publish, run the affected packages' syntax, type, lint and test commands as CI runs them, with the same test layout.
-   - Before you name a failure's cause, run the same commands in the same environment on the base: the base's own failure is not yours.
+   - Before you name a failure's cause, run the same commands in the same environment on `<target-branch-tip>`, the base your result goes on: the base's own failure is not yours.
    - Fix every failure before you publish, the base's own included, or state the fix it needs and get the user's explicit approval to leave it out. "Pre-existing" is not a resolution.
-5. Done when no conflict is left, every check in step 4 passes, the result is pushed, and `git log <base>..HEAD` has no commit that only undoes or repeats another.
+5. Done when no conflict is left, every check in step 4 passes, the result is pushed, and `git log <target-branch-tip>..HEAD` has no commit that only undoes or repeats another.
 
 ## Stop and rethink before you
 
-- Rebase around a conflicting parent: that loses the parent's changes.
+- Rebase so that a parent commit that conflicts with yours is no longer under your commits (onto an older commit, or with that parent skipped): that loses the parent's changes.
 - Add a fix-up commit that reverses changes: fix the original resolution instead.
-- Run `git reset --hard` to try again: it leaves no record of what you tried, and a reset of pushed commits rewrites shared history.
-- Drop commits to clean up a resolution: first check nobody relies on them and `git branch -r --contains <sha>` is empty.
+- Run `git reset --hard` to try again: it leaves no record of what you tried, and a reset of pushed commits rewrites shared history. Make one deliberate fix instead.
+- Drop commits to clean up a resolution: first check that nobody wants or relies on them. `git branch -r --contains <sha>` must be empty, and a commit you did not make in this session needs the user's yes, asked with its `git log --oneline -1 <sha>` line.
 - Start a second fix after the first fell short: redo step 1.

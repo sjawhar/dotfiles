@@ -57,6 +57,7 @@ describe("which calls need a skill", () => {
 		["eval", { language: "py", code: "subprocess.run('gh pr create --fill', shell=True, check=True)" }, PR],
 		["eval", { language: "py", code: "subprocess.run(['gh', '-R', repo, 'pr', 'create', '--fill'], check=True)" }, PR],
 		["eval", { language: "py", code: "subprocess.run(['secrets', 'GH_TOKEN', '--', 'gh', 'pr', 'create', '--fill'])" }, PR],
+		["eval", { language: "py", code: "subprocess.run(['agent-secrets', 'GITHUB_ADMIN_PAT', '--reason', 'x', '--', 'gh', 'pr', 'create', '--fill'])" }, PR],
 		["eval", { language: "py", code: "subprocess.run(['bash', '-c', '''\nnice -n 19 gh pr create --fill\n'''])" }, PR],
 		["eval", { language: "py", code: "import subprocess\nsubprocess.run(['jj', 'git', 'push', '-b', 'main'], check=True)" }, PUSH],
 		["eval", { language: "py", code: "os.system('cd x && timeout 90 jj git push')" }, PUSH],
