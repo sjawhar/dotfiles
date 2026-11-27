@@ -3875,8 +3875,8 @@ class GhLeakTerms(unittest.TestCase):
         self.assertLess(peak, 4 * chunk, f"the scan took a peak of {peak >> 10} KiB for 4 MiB of spaces")
 
     def test_the_own_name_of_the_public_repository_counts_for_nothing_in_every_chunk_of_an_asset(self) -> None:
-        # Given the knives ygo-fork list and its public release repository theorem-labs/ygo, whose name holds a term of
-        # that list: an asset of its release that names the repository, in the middle of the second of the check's
+        # Given the knives ygo-fork list and the public YGO in its scope, whose name holds a term of that list: an
+        # asset of a release of YGO that names the repository, in the middle of the second of the check's
         # chunks and across the edge of the second and the third, sends nothing new there, and the call goes out
         # (gh_own_name, which reads the part of a chunk around the match, gh_name_window). Each name stands after 599
         # letters and a space, more than GH_CHUNK_CONTEXT, which the check reads before a match to find where an own
