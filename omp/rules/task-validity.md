@@ -18,3 +18,5 @@ A proof leak or copying cheat means improve the deduplication, which we should a
 On actual proof work, not tasks, copying is heavily encouraged: OSS Verify should always have the entire corpus available to the proof workers, so they minimize the novel from-scratch proof machinery they build. Copying is a cheat only inside a task an agent is graded on.
 
 Before you write "void", "withdrawn", "does not count", "regrade from zero", "reset the counter" or "recalibrate from scratch" after a kernel or grader bug, a leak or an exploit: fix the bug or patch the exploit, improve the deduplication for a leak, and re-judge the scores you have. Keep the calibration you gathered. A task is invalid only when the task itself is wrong.
+
+To take a run or a version out of the count, mark it in the run tracker, as `docs/run-tracker.md` of BET's task repository says. Mark a run (`bet runs mark`, `docs/run-tracker.md` of BET's task repository) only after the person who owns that work has said yes on the lane's Dispatch issue, and link that yes in the mark; a hold of launches, a stop and a deletion of a task need the same yes first.
