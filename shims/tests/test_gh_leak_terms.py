@@ -3790,7 +3790,7 @@ class GhLeakTerms(unittest.TestCase):
         # blank line, are in two paragraphs, and the gist goes out.
         chunk = load_check().GH_CHUNK
         first, second = TEST_TERMS[0].split(" ", 1)
-        lines = ("x" * 99 + "\n") * (3 * chunk // 100)
+        lines = self.chunk_edge(chunk, None)[0]
         argv = ["gist", "create", "--public", "notes.md"]
         at = chunk - 6
         line = lines[:at].count("\n") + 1
@@ -3818,18 +3818,19 @@ class GhLeakTerms(unittest.TestCase):
     def test_the_chunk_scan_reads_a_term_whose_words_long_soft_line_breaks_part_as_the_whole_view_does(self) -> None:
         # Between two words of a term a paragraph shows at most two runs of whitespace, one on each side of a soft line
         # break, and the check keeps each run to two contexts, so the chunks overlap by four contexts for each gap of a
-        # term (GhChunkScan, TermMatcher.gaps). With no GH_CHUNK_SLACK, so that this overlap is all there is, a scan of
-        # a view in chunks (gh_view_matches) reads `Quillfeather Lane 9`, each gap a soft line break with 10,000 spaces,
-        # tabs, no-break spaces and a CRLF around it, as a reading of the whole view does: once, at its line, with the
-        # excerpt of the whole text. The match starts 6 characters before the first and the second chunk's edges and on
-        # the last character the first chunk gives. So is a match after five lines of 3,000 tabs each, which keep their
-        # line feeds. Control: the words parted by a line of more spaces than a chunk holds, a blank line, are no match.
+        # term (GhChunkScan, TermMatcher.most_gaps). With no GH_CHUNK_SLACK, so that this overlap is all there is, a
+        # scan of a view in chunks (gh_view_matches) reads `Quillfeather Lane 9`, each gap a soft line break with 10,000
+        # spaces, tabs, no-break spaces and a CRLF around it, as a reading of the whole view does: once, at its line,
+        # with the excerpt of the whole text. The match starts 6 characters before the first and the second chunk's
+        # edges and on the last character the first chunk gives. So is a match after five lines of 3,000 tabs each,
+        # which keep their line feeds. Control: the words parted by a line of more spaces than a chunk holds, a blank
+        # line, are no match.
         module = load_check()
         chunk = module.GH_CHUNK
         first, middle, last = TEST_TERMS[0].split(" ")
         written = (first + " " * 10_000 + "\n" + "\t" * 10_000 + middle + "\u00a0" * 10_000 + "\r\n" + " " * 10_000
                    + last)
-        lines = ("x" * 99 + "\n") * (3 * chunk // 100)
+        lines = self.chunk_edge(chunk, None)[0]
         with mock.patch.object(module, "GH_CHUNK_SLACK", 0):
             reader = module.TermMatcher(TEST_TERMS)
             context = module.GhChunkScan(reader).context

@@ -523,12 +523,12 @@ class TermMatcher:
                  allowed: Sequence[tuple[str, Sequence[str]]] = (), repositories: Sequence[str] | None = None):
         patterns: list[tuple[re.Pattern[str], int, str]] = []
         seen: set[tuple[str, str]] = set()
-        gaps = 0
+        most_gaps = 0
         self.scopes = {scope.label: scope for scope, _ in scoped}
         for label, listed in (("", terms), *((scope.label, listed) for scope, listed in scoped)):
             for number, term in enumerate(listed, start=1):
                 pieces = re.split(TERM_SEPARATOR, term.casefold())
-                gaps = max(gaps, len(pieces) - 1)
+                most_gaps = max(most_gaps, len(pieces) - 1)
                 pattern = TERM_SEPARATOR.join(re.escape(piece) for piece in pieces)
                 if pattern and (label, pattern) not in seen:
                     patterns.append((re.compile(pattern), number, label))
@@ -537,12 +537,13 @@ class TermMatcher:
         self._allowed = [(pattern, allowed_token(token)) for pattern, tokens in allowed for token in tokens]
         self._repositories = tuple(repositories) if repositories else ()
         # The longest term, folded, and the longest allowed token, in characters: what a match of a term written with
-        # one character between its words spans, and what a token that holds it spans; and the most runs of whitespace
-        # that part a term's words, each of which a match may hold at any length (GhChunkScan).
+        # one character between its words spans, and what a token that holds it spans; and the most gaps of a term, the
+        # places where whitespace (TERM_SEPARATOR) parts its words, at each of which a match may hold whitespace of any
+        # length (GhChunkScan).
         self.longest_term = max((len(term.casefold()) for listed in (terms, *(listed for _, listed in scoped))
                                  for term in listed), default=0)
         self.longest_token = max((len(token) for _, tokens in allowed for token in tokens), default=0)
-        self.gaps = gaps
+        self.most_gaps = most_gaps
         named = [(scope, listed) for scope, listed in scoped if not scope.registry]
         self._names: TermMatcher = (self if len(named) == len(scoped)
                                     else TermMatcher(terms, named, allowed, repositories))
@@ -5704,23 +5705,28 @@ def gh_view_findings(piece: GhText, label: str, views: Iterator[tuple[str, Seque
 # at 50aef475 (dispatch://INFRA-4957, rulings-md v66) every file was read whole, and the views of its text took about
 # 100 bytes for each of its bytes: 421 MiB for 4 MiB of random bytes, and past 4.3 GiB for 64 MiB.
 GH_CHUNK = 1 << 18
-# The characters a match as written may hold past its term's own (TermMatcher.longest_term) and the whitespace between
-# its words: the terminal sequences inside it, and each run of in-line whitespace past the two of a gap that such a
-# sequence parts from them. GhChunkScan keeps each run of in-line whitespace to twice its context, so the whitespace of
-# a gap, at most two runs and the line feed between them (a soft line break), takes at most four contexts and the line
-# feed however long it is written, and two chunks overlap by twice the context, the longest term, four contexts for
-# each gap of the term with the most (TermMatcher.gaps) and this. A match whose terminal sequences and extra runs, each
-# run kept to twice the context, hold no more than this lies whole in one chunk, with the context on each side; a
-# longer one across a chunk's edge is not read. Until the tester's red test at 4ec5827e (dispatch://INFRA-4957,
-# rulings-md v68 item 2) each run was read as written and only this held it, so a term whose words 10,000 spaces part
-# was missed across an edge.
+# The characters a match as written may hold past what GhChunkScan's overlap gives its term and the whitespace between
+# its words (TermMatcher.longest_term, 4 CONTEXT for each gap): the terminal sequences inside it, and each run of
+# in-line whitespace past the two of a gap that such a sequence parts from them, each run kept to twice the context. A
+# match that holds more than this across a chunk's edge is not read.
 GH_CHUNK_SLACK = 4096
 # The characters a match needs on each side to be read as in the whole view: the EXCERPT_CONTEXT of its excerpt and the
 # line break past them, an allowed token that holds it (TermMatcher.longest_token too), and the own name gh_own_name may
-# find it in, with the search for where to begin reading it (gh_name_window). GhChunkScan keeps its context, this or
-# one past the longest allowed token, of each end of a long run of in-line whitespace, so none of these readings
-# reaches past what it keeps.
+# find it in, with the search for where to begin reading it (gh_name_window).
 GH_CHUNK_CONTEXT = 512
+
+
+@lru_cache(maxsize=None)
+def gh_long_run(context: int) -> re.Pattern[str]:
+    """A run of in-line whitespace longer than 2 CONTEXT, which GhChunkScan keeps as its two ends, found whole from its
+    first character, which no such whitespace precedes. sub reads left to right, so it reaches each long run at its
+    first character, and the look-behind changes no match: it makes each later character of a shorter run fail at
+    once, where without it each would count the rest of the run again (0.03 s against 1.6 s for 300 runs of 1,000
+    spaces, 2026-11-27). The pattern begins with that character, not with the look-behind, so a search skips straight
+    to whitespace (55 ms against 140 ms for 4 MiB of prose, 2026-11-27)."""
+    return re.compile(rf"[^\S\n](?<![^\S\n]{{2}})[^\S\n]{{{2 * context},}}")
+
+
 # The most characters a destination's own name, and what gh_own_name reads past it, span from a match inside it: a
 # GitHub owner of 39 characters, `/`, a name of 100, then `.git` and one character.
 GH_NAME_REACH = 150
@@ -5775,7 +5781,7 @@ def gh_file_views(piece: GhText, reader: TermMatcher) -> Iterator[tuple[str, lis
 class GhChunkScan:
     """READER's matches (TermMatcher.spans) in one view of a text, which comes in pieces (feed), read as GitHub
     renders it (paragraph_view) in chunks of GH_CHUNK characters, each overlapping the last by twice CONTEXT, the
-    longest term, 4 CONTEXT for each gap of the term with the most (TermMatcher.gaps) and GH_CHUNK_SLACK.
+    longest term, 4 CONTEXT for each gap of the term with the most (TermMatcher.most_gaps) and GH_CHUNK_SLACK.
 
     Each run of in-line whitespace (any whitespace but a line feed, all of which paragraph_view shows as a space, as
     GitHub shows a run of spaces as one) longer than 2 CONTEXT is kept as its first and last CONTEXT characters, as it
@@ -5804,11 +5810,8 @@ class GhChunkScan:
     def __init__(self, reader: TermMatcher) -> None:
         self.reader = reader
         self.context = max(GH_CHUNK_CONTEXT, reader.longest_token + 1)
-        self.overlap = 2 * self.context + reader.longest_term + 4 * self.context * reader.gaps + GH_CHUNK_SLACK
-        # A run of in-line whitespace longer than 2 CONTEXT, found whole from its first character, which no such
-        # whitespace precedes. It begins with that character, not with the look back, so a search skips to each such
-        # character as fast as it can: 55 ms for 4 MiB of prose, where a look back first took 140 ms (2026-11-27).
-        self.long_run = re.compile(rf"[^\S\n](?<![^\S\n]{{2}})[^\S\n]{{{2 * self.context},}}")
+        self.overlap = 2 * self.context + reader.longest_term + 4 * self.context * reader.most_gaps + GH_CHUNK_SLACK
+        self.long_run = gh_long_run(self.context)
         # The view from START on as kept, but RUN, the run of in-line whitespace that ends what came so far, kept, which
         # may go on in the next piece; the line feeds before START, and where the matches the next chunk gives begin.
         self.text = ""
@@ -5819,7 +5822,9 @@ class GhChunkScan:
         self.found: list[GhViewMatch] = []
 
     def feed(self, text: str) -> None:
-        text = self.long_run.sub(self.kept, self.run + text)
+        text = self.run + text
+        if len(text) > 2 * self.context:
+            text = self.long_run.sub(self.kept, text)
         # What follows the last character that is no whitespace, and the last line feed, is the run that waits.
         settled = max(len(text.rstrip()), text.rfind("\n") + 1)
         self.text += text[:settled]
