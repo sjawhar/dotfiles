@@ -29,6 +29,7 @@ import threading
 import tomllib
 import unittest
 from pathlib import Path
+from typing import cast
 
 DOTFILES = Path(__file__).resolve().parents[2]
 SCRIPT = DOTFILES / "scripts" / "agent-session"
@@ -45,8 +46,8 @@ def pinned_codegraph() -> tuple[str | None, str]:
     """The codegraph whose `--version` prints the version mise.toml pins for github:colbymchenry/codegraph,
     or None, and the reason to skip without it: the version wanted and what was found. The one candidate is
     `mise which codegraph`, else the codegraph on PATH outside any shims directory."""
-    config: dict[str, dict[str, dict[str, str]]] = tomllib.loads((DOTFILES / "mise.toml").read_text(encoding="utf-8"))
-    pinned = config["tools"]["github:colbymchenry/codegraph"]["version"]
+    pinned = cast(str, tomllib.loads(
+        (DOTFILES / "mise.toml").read_text(encoding="utf-8"))["tools"]["github:colbymchenry/codegraph"]["version"])
     wanted = f"the codegraph mise.toml pins is {pinned}"
     found = subprocess.run(["mise", "which", "codegraph"], cwd=DOTFILES, capture_output=True, text=True, check=False) \
         if shutil.which("mise") else None
