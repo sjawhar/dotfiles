@@ -3455,11 +3455,10 @@ class GhLeakTerms(unittest.TestCase):
         # is: in an argument, in a title only the spaces make (`quillfeather_lane-9`), in --base, and in
         # `.github/pull_request_template.md` of the checkout. Controls: clean branches and a clean template go out to a
         # public repository, and each term goes out to a private one.
-        subprocess.run(["git", "init", "-q", str(self.work)], check=True, timeout=60)
+        self.git("init", "-q")
         (self.work / ".github").mkdir()
         template = self.work / ".github" / "pull_request_template.md"
-        root = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=self.work, capture_output=True, text=True,
-                              check=True, timeout=60).stdout.strip()
+        root = self.git("rev-parse", "--show-toplevel")
         term = CANARY.upper()
         calls = (("argument", ["stack", "link", "feat-a", term], CLEAN, "argument 2", term),
                  ("title", ["stack", "link", "quillfeather_lane-9", "feat-b"], CLEAN, "argument 1 (title)",
@@ -3722,16 +3721,21 @@ class GhLeakTerms(unittest.TestCase):
         # a private repository, where it reads every match and lets the call go, must stay within the 160 MiB that the
         # 4 MiB asset of test_a_binary_release_asset_is_read_in_bounded_memory may take.
         self.file("many.txt", f"a {CANARY} b\n" * 5000 + "\\-\n")
-        probe = subprocess.run(
-            [sys.executable, "-c", "import resource, subprocess, sys\n"
-             "done = subprocess.run(sys.argv[1:], stdin=subprocess.DEVNULL, capture_output=True)\n"
-             "print(done.returncode, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)",
-             str(CHECK), "gh", "--", "release", "upload", "v1", "many.txt", "-R", PRIVATE],
-            env=self.env, cwd=self.work, capture_output=True, text=True, timeout=600, check=False)
-        returncode, peak = (int(word) for word in probe.stdout.split())
-        self.assertEqual(returncode, 0, probe.stderr)
+        returncode, peak, stderr = self.peak(["release", "upload", "v1", "many.txt", "-R", PRIVATE], self.env)
+        self.assertEqual(returncode, 0, stderr)
         self.assertIn(f"repos/{PRIVATE}", self.visibility_reads(), "the check found no match, so it read no target")
         self.assertLess(peak, 160 << 10, f"the check took a peak of {peak >> 10} MiB")
+
+    def chunk_edge(self, chunk: int, split: int | None) -> tuple[str, int]:
+        """Lines of 100 characters, three chunks of CHUNK characters (GH_CHUNK) of them, and for a SPLIT the canary in
+        upper case on a long line, 100 letters on each side, across the edge where the first chunk would end without
+        the overlap, split there after SPLIT of its characters: the text, and the term's line in it (0 for no SPLIT)."""
+        lines = ("x" * 99 + "\n") * (3 * chunk // 100)
+        if split is None:
+            return lines, 0
+        at, term = chunk - split, CANARY.upper()
+        return (lines[:at - 100] + "y" * 100 + term + "z" * 100 + lines[at + len(term) + 100:],
+                lines[:at - 100].count("\n") + 1)
 
     def test_a_term_across_a_chunk_edge_of_an_asset_is_refused_as_in_the_whole_file(self) -> None:
         # The check reads an asset in chunks of GH_CHUNK characters, each overlapping the last (GhChunkScan). A term
@@ -3741,18 +3745,16 @@ class GhLeakTerms(unittest.TestCase):
         # characters, three chunks of them. Control: the same asset without the term goes out.
         chunk = load_check().GH_CHUNK
         term = CANARY.upper()
-        lines = ("x" * 99 + "\n") * (3 * chunk // 100)
         argv = ["release", "upload", "v1", "asset.txt", "-R", PUBLIC]
         for split in (1, len(term) // 2, len(term) - 1):
-            at = chunk - split
             with self.subTest(split=split):
-                self.file("asset.txt", lines[:at - 100] + "y" * 100 + term + "z" * 100 + lines[at + len(term) + 100:])
+                text, line = self.chunk_edge(chunk, split)
+                self.file("asset.txt", text)
                 self.setUp_calls()
-                shown = self.assert_refused(self.run_gh(argv), "argument 2 asset.txt", term,
-                                            line=lines[:at - 100].count("\n") + 1)
+                shown = self.assert_refused(self.run_gh(argv), "argument 2 asset.txt", term, line=line)
                 self.assertEqual(shown, "…" + "y" * 80 + term + "z" * 80 + "…")
         with self.subTest(control="no term"):
-            self.file("asset.txt", lines)
+            self.file("asset.txt", self.chunk_edge(chunk, None)[0])
             self.setUp_calls()
             self.assert_sent(self.run_gh(argv), argv)
 
@@ -3847,6 +3849,49 @@ class GhLeakTerms(unittest.TestCase):
                     self.assertLess(peak * 1024, 40 * len(data), f"the check took a peak of {peak >> 10} MiB for "
                                                                  f"{len(data) >> 20} MiB of {name}")
 
+    def test_a_json_body_that_holds_more_than_its_size_says_is_read_only_to_the_limit(self) -> None:
+        # The check reads a JSON body, which json.loads parses, whole up to GH_WHOLE_LIMIT bytes, and a larger one is a
+        # text it cannot read (gh_contents). The size a file says it has does not bound what a read of it takes: a
+        # procfs file says 0 bytes, and a file may grow. With the limit at 64 bytes, `--input /proc/self/status`, which
+        # says it holds no more than that and holds more, is refused for a public repository as a file that holds more
+        # than the check reads. Control: with the limit past what it holds, it is read whole and goes out.
+        module = load_check()
+        status = "/proc/self/status"
+        held = len(Path(status).read_bytes())
+        self.assertLessEqual(os.stat(status).st_size, 64, f"{status} says it holds more than 64 bytes")
+        self.assertGreater(held, 64, f"{status} holds no more than 64 bytes")
+        argv = ["api", f"repos/{PUBLIC}/issues", "--input", status]
+        for limit, code in ((64, module.TEXT_EXIT), (4 * held, 0)):
+            with self.subTest(limit=limit):
+                stderr = io.StringIO()
+                with mock.patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stderr(stderr), \
+                        mock.patch.object(module, "GH_WHOLE_LIMIT", limit):
+                    self.assertEqual(module.gh_check(argv), code, stderr.getvalue())
+                self.assertEqual(f"cannot read --input {status}: it holds more than the " in stderr.getvalue(),
+                                 bool(code), stderr.getvalue())
+
+    def test_the_pass_that_asks_for_standard_input_reads_no_base_repository(self) -> None:
+        # The check asks shims/gh for its buffer of standard input (GH_STDIN_EXIT) before it reads where the call goes
+        # (gh_stdin_texts), so the pass that asks reads no base repository (gh_bases: git's remotes, and the visibility
+        # of each), even for an endpoint gh fills from the base repository, `gh api repos/{owner}/{repo}/issues --input
+        # -`. Control: the pass with the buffer, from a checkout of a public repository, reads them once, and the clean
+        # body goes out.
+        module = load_check()
+        self.git("init", "-q")
+        self.git("remote", "add", "origin", f"https://github.com/{PUBLIC}.git")
+        buffer = self.tmp / "stdin-buffer"
+        buffer.write_text(json.dumps({"title": "t", "body": CLEAN}), encoding="utf-8")
+        argv = ["api", "repos/{owner}/{repo}/issues", "--input", "-"]
+        for env, code, reads in ((self.env, module.GH_STDIN_EXIT, 0),
+                                 ({**self.env, "DOTFILES_LEAK_TERMS_GH_STDIN": str(buffer)}, 0, 1)):
+            with self.subTest(buffered=bool(reads)):
+                stderr = io.StringIO()
+                with mock.patch.dict(os.environ, env, clear=True), contextlib.chdir(self.work), \
+                        contextlib.redirect_stderr(stderr), \
+                        mock.patch.object(module, "gh_bases", wraps=module.gh_bases) as bases:
+                    self.assertEqual(module.gh_check(argv), code, stderr.getvalue())
+                self.assertEqual(bases.call_count, reads, "the times the check read the base repositories")
+
     def test_a_term_across_a_chunk_edge_of_a_text_is_refused_as_in_the_whole_text(self) -> None:
         # The check reads a file in chunks of GH_CHUNK characters, each overlapping the last (GhChunkScan), standard
         # input too, and each view of a text it holds whole in such chunks, a JSON body's values among them
@@ -3857,7 +3902,6 @@ class GhLeakTerms(unittest.TestCase):
         # `body` member of an --input JSON body. Control: the same texts without the term go out.
         chunk = load_check().GH_CHUNK
         term = CANARY.upper()
-        lines = ("x" * 99 + "\n") * (3 * chunk // 100)
         forms = (("--body-file FILE", ["pr", "comment", "1", "-R", PUBLIC, "--body-file", "body.md"],
                   "--body-file body.md", False, False),
                  ("--body-file -", ["pr", "comment", "1", "-R", PUBLIC, "--body-file", "-"],
@@ -3866,9 +3910,7 @@ class GhLeakTerms(unittest.TestCase):
                   True, False))
         for name, argv, field, as_json, stdin in forms:
             for split in (1, len(term) // 2, len(term) - 1, None):
-                at = chunk - (split or 0)
-                text = (lines[:at - 100] + "y" * 100 + term + "z" * 100 + lines[at + len(term) + 100:] if split
-                        else lines)
+                text, line = self.chunk_edge(chunk, split)
                 data = (json.dumps({"body": text}) if as_json else text).encode()
                 if not stdin:
                     (self.work / argv[-1]).write_bytes(data)
@@ -3878,7 +3920,7 @@ class GhLeakTerms(unittest.TestCase):
                     if split is None:
                         self.assert_sent(result, argv, data if stdin else b"")
                         continue
-                    shown = self.assert_refused(result, field, term, line=lines[:at - 100].count("\n") + 1)
+                    shown = self.assert_refused(result, field, term, line=line)
                     self.assertEqual(shown, "…" + "y" * 80 + term + "z" * 80 + "…")
 
     # --- what a refusal shows (dispatch://INFRA-4383, R2) -----------------------------------------------------------
@@ -4307,7 +4349,6 @@ class Tables(unittest.TestCase):
         # subcommand, an alias or an option fails here until the tables have it, as
         # test_every_command_of_the_installed_gh_is_in_exactly_one_table fails for gh. Skipped where neither can be read.
         module = self.scanner()
-        self.assertLessEqual(set(module.GH_STACK_OPTIONS), set(module.GH_STACK_COMMANDS))
         self.assertLessEqual(set(module.GH_STACK_ALIASES.values()), set(module.GH_STACK_COMMANDS))
         self.assertEqual({kind for kind, _ in module.GH_STACK_COMMANDS.values()}, {"text", "quiet"})
         self.assertEqual({name for name, (kind, _) in module.GH_STACK_COMMANDS.items() if kind != "quiet"},

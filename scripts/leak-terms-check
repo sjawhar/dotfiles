@@ -4087,6 +4087,11 @@ def gh_refusal_lifted(command: str, rest: Sequence[str]) -> bool:
     return False
 
 
+# The values of a bool option that pflag reads as on, in lower case: Go's strconv.ParseBool takes 1, t, T, true, True
+# and TRUE.
+GH_TRUE = ("1", "t", "true")
+
+
 def gh_help(arguments: Sequence[str], table: tuple[str, str] | None) -> bool:
     """Whether the command prints its help for ARGUMENTS, the words of a call but the command's own, and sends nothing:
     cobra's Command.execute does where the help flag is on, the last one given winning, and where pflag meets `-h`
@@ -4119,7 +4124,7 @@ def gh_help(arguments: Sequence[str], table: tuple[str, str] | None) -> bool:
             continue
         name, attached, value = word.partition("=")
         if name == "--help":
-            given = value.lower() in ("1", "t", "true") if attached else True
+            given = value.lower() in GH_TRUE if attached else True
             if place == "option" or not given:
                 on = given
             place = "option"
@@ -4155,7 +4160,7 @@ def gh_help_letters(letters: str, options: Mapping[str, bool], long: Mapping[str
             return ("option", True, given) if name == "-h" else ("either", False, given)
         attached = len(letters) > 1 and letters[0] == "="
         if long.get(name) == "--help":
-            given = letters[1:].lower() in ("1", "t", "true") if attached else True
+            given = letters[1:].lower() in GH_TRUE if attached else True
         if attached or (takes and letters):
             return "option", False, given
         if takes:
@@ -4192,10 +4197,9 @@ def gh_extension_command(name: str, rest: Sequence[str]) -> tuple[str, str, list
         return None
     word, arguments = found
     sub = GH_STACK_ALIASES.get(word, word)
-    kind = GH_STACK_COMMANDS[sub][0] if sub in GH_STACK_COMMANDS else ""
-    if not kind:
+    if sub not in GH_STACK_COMMANDS:
         return gh_unknown(f"stack {word}", arguments)
-    if kind == "quiet" or gh_help(arguments, GH_STACK_OPTIONS[sub]):
+    if GH_STACK_COMMANDS[sub][0] == "quiet" or gh_help(arguments, GH_STACK_OPTIONS[sub]):
         return None
     return "stack", sub, arguments
 
@@ -4691,7 +4695,7 @@ def gh_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
 def gh_flag(read: Sequence[tuple[str | None, str | None]], long: Mapping[str, str], name: str) -> bool:
     """Whether the bool option whose long spelling is NAME is on: the last one given wins, and one with no value is on."""
     values = [value for option, value in read if option and long.get(option, option) == name]
-    return bool(values) and (values[-1] or "true").lower() in ("1", "t", "true")
+    return bool(values) and (values[-1] or "true").lower() in GH_TRUE
 
 
 def gh_git(arguments: Sequence[str]) -> str | None:
@@ -5151,25 +5155,34 @@ def gh_is_stdin(path: str) -> bool:
     return not stat.S_ISREG(standard.st_mode) and os.path.samestat(named, standard)
 
 
-def gh_contents(texts: Sequence[GhText], environment: Mapping[str, str]
-                ) -> tuple[list[tuple[GhText, str]], list[tuple[GhText, str]]] | None:
-    """Each of TEXTS, the texts of a call, with what gh sends for it, and each file that cannot be read with why; None
-    when one is standard input (`-`) and GH_STDIN in ENVIRONMENT does not name the shim's buffer of it, for which the
-    check exits GH_STDIN_EXIT. A file that is this call's standard input (gh_is_stdin) is read as `-`. A pipe, a socket
-    or a device other than /dev/null is not read: reading a pipe takes the text gh reads after the check (until
-    2026-11-17 a `--body-file <(…)` went out empty, and a `gh pr edit --body-file /dev/stdin` emptied the body), and a
-    device may never end. Such a file cannot be read, so its text is refused for a target not confirmed private. A file
-    whose text a reader takes whole (GhText.whole), a JSON body or a field json.loads, a GraphQL document's grammar or
-    gh_made_public reads, none of which reads in pieces, is read whole, up to GH_WHOLE_LIMIT bytes, which bounds what
-    the check holds of it, and a larger one cannot be read; gh_findings then reads each value of it in chunks
-    (gh_view_matches). Any other file, and standard input from the shim's buffer, that holds any byte is left to
-    gh_findings, with "" for its text and the file to read (GhText.chunked), which reads it in chunks (gh_file_views),
-    so the check holds none of it whole (dispatch://INFRA-4957, rulings-md v66 item 2)."""
-    texts = [replace(piece, path="-") if piece.path not in (None, "-") and gh_is_stdin(piece.path) else piece
-             for piece in texts]
-    pointer = environment.get(GH_STDIN, "")
-    if not pointer and any(piece.path == "-" for piece in texts):
+def gh_stdin_texts(texts: Sequence[GhText], environment: Mapping[str, str]) -> list[GhText] | None:
+    """TEXTS, the texts of a call, with each file that is this call's standard input (gh_is_stdin) read as `-`, as
+    gh_contents takes them; None when one is standard input (`-`) and GH_STDIN in ENVIRONMENT does not name the shim's
+    buffer of it, for which the check exits GH_STDIN_EXIT and reads no base repository first (gh_bases)."""
+    read = [replace(piece, path="-") if piece.path not in (None, "-") and gh_is_stdin(piece.path) else piece
+            for piece in texts]
+    if not environment.get(GH_STDIN, "") and any(piece.path == "-" for piece in read):
         return None
+    return read
+
+
+def gh_contents(texts: Sequence[GhText], environment: Mapping[str, str]
+                ) -> tuple[list[tuple[GhText, str]], list[tuple[GhText, str]]]:
+    """Each of TEXTS, the texts of a call as gh_stdin_texts gives them, with what gh sends for it, and each file that
+    cannot be read with why; standard input (`-`) is the shim's buffer of it, which GH_STDIN in ENVIRONMENT names. A
+    pipe, a socket or a device other than /dev/null is not read: reading a pipe takes the text gh reads after the check
+    (until 2026-11-17 a `--body-file <(…)` went out empty, and a `gh pr edit --body-file /dev/stdin` emptied the body),
+    and a device may never end. Such a file cannot be read, so its text is refused for a target not confirmed private.
+    A file whose text a reader takes whole (GhText.whole), a JSON body or a field json.loads, a GraphQL document's
+    grammar or gh_made_public reads, none of which reads in pieces, is read whole, up to GH_WHOLE_LIMIT bytes, which
+    bounds what the check holds of it, and a larger one cannot be read, whatever size the file says it has (a procfs
+    file says 0, and a file may grow); gh_findings then reads each value of it in chunks (gh_view_matches). Any other
+    file, and standard input from the shim's buffer, that holds any byte is left to gh_findings, with "" for its text
+    and the file to read (GhText.chunked), which reads it in chunks (gh_file_views), so the check holds none of it
+    whole (dispatch://INFRA-4957, rulings-md v66 item 2)."""
+    pointer = environment.get(GH_STDIN, "")
+    oversized = (f"it holds more than the {GH_WHOLE_LIMIT >> 20} MiB the check reads of a JSON body or a field it "
+                 "parses whole")
     contents: list[tuple[GhText, str]] = []
     unreadable: list[tuple[GhText, str]] = []
     for piece in texts:
@@ -5178,6 +5191,7 @@ def gh_contents(texts: Sequence[GhText], environment: Mapping[str, str]
             continue
         stdin = piece.path == "-"
         path = pointer if stdin else piece.path
+        whole = piece.whole()
         try:
             mode = os.stat(path).st_mode
             if (not stdin and (stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode))
@@ -5187,18 +5201,21 @@ def gh_contents(texts: Sequence[GhText], environment: Mapping[str, str]
                                               "text from gh: pass the text in a file, or on standard input as -"))
                 continue
             with open(path, "rb") as handle:
-                if piece.whole() and os.fstat(handle.fileno()).st_size > GH_WHOLE_LIMIT:
-                    unreadable.append((piece, f"it holds more than the {GH_WHOLE_LIMIT >> 20} MiB the check reads of "
-                                              "a JSON body or a field it parses whole"))
+                # The size the file says it has spares reading a larger one; the read, one byte past the limit, finds
+                # one that holds more than it says.
+                if whole and os.fstat(handle.fileno()).st_size > GH_WHOLE_LIMIT:
+                    unreadable.append((piece, oversized))
                     continue
-                data = handle.read() if piece.whole() else handle.read(1)
+                data = handle.read(GH_WHOLE_LIMIT + 1 if whole else 1)
         except OSError as error:
             if stdin:
                 unreadable.append((piece, "standard input could not be read"))
             elif not piece.optional:
                 unreadable.append((piece, error.strerror or type(error).__name__))
             continue
-        if piece.whole() or not data:
+        if whole and len(data) > GH_WHOLE_LIMIT:
+            unreadable.append((piece, oversized))
+        elif whole or not data:
             contents.append((piece, data.decode("utf-8", errors="surrogateescape")))
         else:
             contents.append((replace(piece, chunked=path), ""))
@@ -5684,8 +5701,9 @@ def gh_view_findings(piece: GhText, label: str, views: Iterator[tuple[str, Seque
 # 100 bytes for each of its bytes: 421 MiB for 4 MiB of random bytes, and past 4.3 GiB for 64 MiB.
 GH_CHUNK = 1 << 18
 # The characters a match as written may hold past its term's own (TermMatcher.longest_term): more whitespace between its
-# words than one character, and terminal sequences inside it. Two chunks overlap by the longest term and this, so a
-# match up to that long lies whole in one of them; a longer one across a chunk's edge is not read.
+# words than one character, and terminal sequences inside it. Two chunks overlap by twice the context a match needs
+# (GH_CHUNK_CONTEXT), the longest term and this (GhChunkScan), so a match no longer than the longest term and this lies
+# whole in one of them, with that context on each side; a longer one across a chunk's edge is not read.
 GH_CHUNK_SLACK = 4096
 # The characters a match needs on each side to be read as in the whole view: the EXCERPT_CONTEXT of its excerpt and the
 # line break past them, an allowed token that holds it (TermMatcher.longest_token too), and the own name gh_own_name may
@@ -5701,7 +5719,7 @@ GH_NAME_BREAK = re.compile(r"(?s:.*)[^A-Za-z0-9._/-]")
 
 class GhFileError(Exception):
     """A file gh_contents could read that gh_file_views could not read again: ARGS are its GhText and why, an entry of
-    the texts that cannot be read (gh_check)."""
+    the texts that cannot be read (gh_terms)."""
 
 
 def gh_file_texts(piece: GhText) -> Iterator[str]:
@@ -5743,7 +5761,7 @@ def gh_file_views(piece: GhText, reader: TermMatcher) -> Iterator[tuple[str, lis
 
 
 class GhChunkScan:
-    """READER's matches (TermMatcher.spans) in one view of a file's text, which comes in pieces (feed), read as GitHub
+    """READER's matches (TermMatcher.spans) in one view of a text, which comes in pieces (feed), read as GitHub
     renders it (paragraph_view) in chunks of GH_CHUNK characters, each overlapping the last by twice CONTEXT, the
     longest term and GH_CHUNK_SLACK. A chunk gives the matches that start from CONTEXT past its start to CONTEXT past
     the next chunk's start, the first from the view's start and the last to its end, so no match is given twice, and
@@ -6460,19 +6478,23 @@ def gh_reach(call: GhCall, bases: Callable[[], Sequence[GhBase]]) -> list[GhTarg
                 add(f"{found[1]}/{found[2]}, filled in from {base.source}", address.host,
                     f"https://{address.host}/{found[1]}/{found[2]}", GhTie(base=base.source))
     elif not repositories:
-        repositories += [GhRepository(base.shown, base.host, base.url, base.repository, GhTie(base=base.source))
-                         for base in bases()]
+        repositories += gh_base_repositories(bases())
     # `issue develop --branch-repo R` makes the branch in R, one more target and never the call's repository: the
     # issue is in the call's repository (-R, else the issue's URL, else the base repository), which is always a target.
     for value in values.get("--branch-repo", []):
         if value:
             add(value, *gh_repository_address(value), GhTie(option=("--branch-repo", value)))
     reached += gh_targets(repositories, call.made_public)
-    return reached or [GhTarget(GH_NO_REPOSITORY, "", True)]
+    return reached or [GH_NO_REPOSITORY]
 
 
 # The one target of a call that reaches no repository the check finds, read as public.
-GH_NO_REPOSITORY = "no GitHub repository found for the call, read as public"
+GH_NO_REPOSITORY = GhTarget("no GitHub repository found for the call, read as public", "", True)
+
+
+def gh_base_repositories(bases: Sequence[GhBase]) -> list[GhRepository]:
+    """A repository for each of BASES, the base repositories gh may take (gh_bases), tied to its base (GhTie.base)."""
+    return [GhRepository(base.shown, base.host, base.url, base.repository, GhTie(base=base.source)) for base in bases]
 
 
 def gh_targets(repositories: Sequence[GhRepository], made_public: bool = False) -> list[GhTarget]:
@@ -6497,20 +6519,25 @@ def gh_targets(repositories: Sequence[GhRepository], made_public: bool = False) 
     return reached
 
 
-def gh_terms(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText], bool]
-             ) -> tuple[TermMatcher | None, str | None, list[GhMatch]]:
+def gh_terms(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText], bool],
+             unreadable: list[tuple[GhText, str]]) -> tuple[TermMatcher | None, str | None, list[GhMatch]]:
     """The term list's matcher, the problem that kept the list from being read (None when it was read), and a GhMatch
     for each listed term in CONTENTS (gh_findings, GRAPHQL saying which text is a GraphQL document or carries one).
     The list is decrypted only when a text is not empty, a file left to be read in chunks holding bytes
     (GhText.chunked), with every scoped list, the knives registry's included: which ones apply depends on where the
-    text goes, which is read only once a term is found. GhFileError where such a file cannot be read again."""
+    text goes, which is read only once a term is found. Where such a file cannot be read again (GhFileError), as when
+    it is gone, it is added to UNREADABLE, the caller's texts that cannot be read, with no matcher and no match."""
     if not any(text or piece.chunked for piece, text in contents):
         return None, None, []
     try:
         matcher = load_terms(repositories=EVERY_REPOSITORY)
     except ListError as error:
         return None, c_escape(str(error)), []
-    return matcher, None, gh_findings(contents, graphql, matcher)
+    try:
+        return matcher, None, gh_findings(contents, graphql, matcher)
+    except GhFileError as error:
+        unreadable.append(error.args)
+        return None, None, []
 
 
 def gh_refusal(name: str, reached: Sequence[GhTarget], matcher: TermMatcher | None, findings: Sequence[GhMatch],
@@ -6576,6 +6603,8 @@ GH_STACK_SUBMIT_EDITOR = ("without --auto gh-stack takes them from its editor wh
                           "(cmd/submit.go:230), which the check cannot tell: run gh stack submit --auto, whose titles "
                           "and bodies the check reads from the stack's commits, or push the branches and run gh stack "
                           "link, whose text the check reads")
+# What a refusal of `gh stack submit` names where the check cannot read the titles and bodies it builds.
+GH_STACK_SUBMIT_TEXTS = GhText("the titles and bodies of the pull requests it creates")
 
 
 class GhStackFileError(Exception):
@@ -6626,7 +6655,7 @@ def gh_stack_current() -> tuple[str, list[str]]:
         raise GhStackFileError("git names no common Git directory here, which holds the stack file")
     common = printed.removesuffix("\n")
     try:
-        entries = sorted(os.listdir(os.path.join(common, "worktrees")))
+        entries = os.listdir(os.path.join(common, "worktrees"))
     except FileNotFoundError:
         entries = []
     except OSError as error:
@@ -6699,6 +6728,15 @@ def gh_stack_one_commit(base: str, head: str) -> tuple[str, str, str] | None:
     return commits[0][0].rpartition("\n")[2], subject, body.strip(GO_SPACE)
 
 
+def gh_stack_branch_texts(option: str, detail: str, branch: str) -> list[GhText]:
+    """The texts gh-stack sends for BRANCH, the head of a pull request it creates, given as OPTION and DETAIL (GhText):
+    the branch, a name, and where gh-stack's humanize changes it, the branch with each `-` and `_` a space
+    (GH_STACK_TITLE), a title it may give the pull request, read as a text."""
+    title = branch.translate(GH_STACK_TITLE)
+    return [GhText(option, detail, text=branch, is_name=True),
+            *([GhText(option, detail, part="title", text=title)] if title != branch else [])]
+
+
 def gh_stack_submit_texts(trunk: str, branches: Sequence[str]) -> list[GhText]:
     """Every text `gh stack submit --auto` may send in the pull requests it creates for the stack of TRUNK and BRANCHES
     (gh_stack_current; cmd/submit.go:503-578), for each branch, whether or not it has one already, which only GitHub
@@ -6714,9 +6752,7 @@ def gh_stack_submit_texts(trunk: str, branches: Sequence[str]) -> list[GhText]:
               GhText("--auto", "footer", text=GH_STACK_FOOTER)]
     seen: set[str] = set()
     for index, branch in enumerate(branches):
-        pieces.append(GhText("--auto", f"branch {branch}", text=branch, is_name=True))
-        if branch.translate(GH_STACK_TITLE) != branch:
-            pieces.append(GhText("--auto", f"branch {branch}", part="title", text=branch.translate(GH_STACK_TITLE)))
+        pieces += gh_stack_branch_texts("--auto", f"branch {branch}", branch)
         for base in (trunk, *branches[:index]):
             one = gh_stack_one_commit(base, branch)
             if one is None or one[0] in seen:
@@ -6754,33 +6790,26 @@ def gh_stack_check(sub: str, arguments: Sequence[str], environment: Mapping[str,
     unreadable: list[tuple[GhText, str]] = []
     if sub == "feedback":
         pieces += [GhText("title", text=" ".join(words))] if words else []
-    elif sub == "link":
-        for number, word in enumerate(words, 1):
-            pieces.append(GhText(f"argument {number}", text=word, is_name=True))
-            if word.translate(GH_STACK_TITLE) != word:
-                pieces.append(GhText(f"argument {number}", part="title", text=word.translate(GH_STACK_TITLE)))
-        pieces += [GhText("--base", text=value, is_name=True) for option, value in read
-                   if option and long.get(option, option) == "--base" and value is not None]
-        pieces += [GhText("pull request template", path, path=path) for path in gh_pr_templates()]
-    elif sub == "submit" and gh_flag(read, long, "--auto"):
-        try:
-            pieces += gh_stack_submit_texts(*gh_stack_current())
-        except GhStackFileError as error:
-            unreadable.append((GhText("the titles and bodies of the pull requests it creates"), str(error)))
+    elif sub == "link" or (sub == "submit" and gh_flag(read, long, "--auto")):
+        if sub == "link":
+            for number, word in enumerate(words, 1):
+                pieces += gh_stack_branch_texts(f"argument {number}", "", word)
+            pieces += [GhText("--base", text=value, is_name=True) for option, value in read
+                       if option and long.get(option, option) == "--base" and value is not None]
+        else:
+            try:
+                pieces += gh_stack_submit_texts(*gh_stack_current())
+            except GhStackFileError as error:
+                unreadable.append((GH_STACK_SUBMIT_TEXTS, str(error)))
         pieces += [GhText("pull request template", path, path=path) for path in gh_pr_templates()]
     else:
-        unreadable.append((GhText("the titles and bodies of the pull requests it creates"), GH_STACK_SUBMIT_EDITOR))
-    texts = gh_contents(pieces, environment)
+        unreadable.append((GH_STACK_SUBMIT_TEXTS, GH_STACK_SUBMIT_EDITOR))
+    texts = gh_stdin_texts(pieces, environment)
     if texts is None:
         return GH_STDIN_EXIT
-    contents, unread = texts
+    contents, unread = gh_contents(texts, environment)
     unreadable += unread
-    try:
-        matcher, list_problem, findings = gh_terms(contents, lambda piece: False)
-    except GhFileError as error:
-        # A file that could be read once and not again (gh_file_texts) is a text that cannot be read.
-        matcher, list_problem, findings = None, None, []
-        unreadable.append(error.args)
+    matcher, list_problem, findings = gh_terms(contents, lambda piece: False, unreadable)
     if not findings and list_problem is None and not unreadable:
         return 0
     if sub == "feedback":
@@ -6788,8 +6817,7 @@ def gh_stack_check(sub: str, arguments: Sequence[str], environment: Mapping[str,
     elif (condition := gh_plain_case(environment)) is not None:
         reached = [GhTarget(f"wherever gh-stack sends it, read as public, since {condition}", "", True)]
     else:
-        reached = gh_targets([GhRepository(base.shown, base.host, base.url, base.repository, GhTie(base=base.source))
-                              for base in gh_bases(environment, True)]) or [GhTarget(GH_NO_REPOSITORY, "", True)]
+        reached = gh_targets(gh_base_repositories(gh_bases(environment, True))) or [GH_NO_REPOSITORY]
     return gh_refusal(f"gh stack {sub}", reached, matcher, findings, unreadable, list_problem)
 
 
@@ -6844,6 +6872,11 @@ def gh_check(arguments: Sequence[str]) -> int:
             # fillPlaceholders), so a call with such a value passes, whatever else it holds. One whose endpoint alone
             # holds the branch is read as GraphQL instead, failing closed (gh_api_endpoint).
             return 0
+    # A call that reads standard input asks shims/gh for its buffer of it before the check reads where the call goes,
+    # so that pass reads no base repository (gh_stdin_texts).
+    texts = gh_stdin_texts(pieces, environment)
+    if texts is None:
+        return GH_STDIN_EXIT
     # Each repository gh may take as the base repository (gh_bases), read at most once, and only for a reading that
     # takes one: an endpoint that holds a base placeholder (gh_api_endpoint), a text gh fills that holds one
     # (gh_filled), the repository a `repo edit` that names none makes public (gh_published_names), and, once a term is
@@ -6863,11 +6896,8 @@ def gh_check(arguments: Sequence[str]) -> int:
     if gh_is_upload(group, sub, address):
         # A release asset's body is its bytes: never read as JSON (gh_is_upload), and so read in chunks, as any file
         # whose text no reader takes whole (gh_contents).
-        pieces = [replace(piece, json_body=False) for piece in pieces]
-    texts = gh_contents(pieces, environment)
-    if texts is None:
-        return GH_STDIN_EXIT
-    contents, unreadable = texts
+        texts = [replace(piece, json_body=False) for piece in texts]
+    contents, unreadable = gh_contents(texts, environment)
     if group == "api":
         # What gh sends once it has filled the placeholders of the endpoint and of its -F values (gh_filled).
         contents = gh_filled(contents, bases, branch)
@@ -6895,12 +6925,7 @@ def gh_check(arguments: Sequence[str]) -> int:
         """Whether PIECE is a GraphQL call's document (its `query` field) or carries one (its JSON body's `.query`)."""
         return graphql_call and (piece.json_body or piece.key == "query")
 
-    try:
-        matcher, list_problem, findings = gh_terms(contents, graphql)
-    except GhFileError as error:
-        # A file that could be read once and not again (gh_file_texts) is a text that cannot be read.
-        matcher, list_problem, findings = None, None, []
-        unreadable.append(error.args)
+    matcher, list_problem, findings = gh_terms(contents, graphql, unreadable)
     if not findings and list_problem is None and not unreadable:
         return 0
     if graphql_call:
