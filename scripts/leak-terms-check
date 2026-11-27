@@ -2901,7 +2901,7 @@ def scan_push(text: str, remote: str, url: str) -> list[Finding]:
 # bytes when the check passes.
 GH_STDIN_EXIT = 7
 GH_STDIN = "DOTFILES_LEAK_TERMS_GH_STDIN"
-# Every gh command that sends text, with its options as `gh <command> <subcommand> --help` lists them at gh 2.98.0, the
+# Every gh command that sends text, with its options as `gh <command> <subcommand> --help` lists them at gh 2.106.0, the
 # version mise.toml pins: (the options that take a value, the options that take none), a short and a long spelling
 # joined by `/`. shims/tests/test_gh_leak_terms.py compares the tables with the gh on PATH, so an upgrade that adds an
 # option fails that test until the table has it. `gh api` is ("api", ""). `issue transfer` is not here: GitHub moves
@@ -2911,18 +2911,18 @@ GH_STDIN = "DOTFILES_LEAK_TERMS_GH_STDIN"
 # to a public repository moves text that was public already.
 GH_TEXT_COMMANDS: dict[tuple[str, str], tuple[str, str]] = {
     ("pr", "create"): (
-        "-a/--assignee -B/--base -b/--body -F/--body-file -H/--head -l/--label -m/--milestone -p/--project "
+        "-a/--assignee --attach -B/--base -b/--body -F/--body-file -H/--head -l/--label -m/--milestone -p/--project "
         "--recover -r/--reviewer -T/--template -t/--title -R/--repo",
         "-d/--draft --dry-run -e/--editor -f/--fill --fill-first --fill-verbose --no-maintainer-edit -w/--web "
         "--help",
     ),
     ("pr", "edit"): (
-        "--add-assignee --add-label --add-project --add-reviewer -B/--base -b/--body -F/--body-file "
+        "--add-assignee --add-label --add-project --add-reviewer --attach -B/--base -b/--body -F/--body-file "
         "-m/--milestone --remove-assignee --remove-label --remove-project --remove-reviewer -t/--title -R/--repo",
         "--remove-milestone --help",
     ),
     ("pr", "comment"): (
-        "-b/--body -F/--body-file -R/--repo",
+        "--attach -b/--body -F/--body-file -R/--repo",
         "--create-if-none --delete-last --edit-last -e/--editor -w/--web --yes --help",
     ),
     ("pr", "review"): (
@@ -2946,18 +2946,18 @@ GH_TEXT_COMMANDS: dict[tuple[str, str], tuple[str, str]] = {
         "-d/--draft --help",
     ),
     ("issue", "create"): (
-        "-a/--assignee --blocked-by --blocking -b/--body -F/--body-file -l/--label -m/--milestone --parent "
+        "-a/--assignee --attach --blocked-by --blocking -b/--body -F/--body-file -l/--label -m/--milestone --parent "
         "-p/--project --recover -T/--template -t/--title --type -R/--repo",
         "-e/--editor -w/--web --help",
     ),
     ("issue", "edit"): (
-        "--add-assignee --add-blocked-by --add-blocking --add-label --add-project --add-sub-issue -b/--body "
+        "--add-assignee --add-blocked-by --add-blocking --add-label --add-project --add-sub-issue --attach -b/--body "
         "-F/--body-file -m/--milestone --parent --remove-assignee --remove-blocked-by --remove-blocking "
         "--remove-label --remove-project --remove-sub-issue -t/--title --type -R/--repo",
         "--remove-milestone --remove-parent --remove-type --help",
     ),
     ("issue", "comment"): (
-        "-b/--body -F/--body-file -R/--repo",
+        "--attach -b/--body -F/--body-file -R/--repo",
         "--create-if-none --delete-last --edit-last -e/--editor -w/--web --yes --help",
     ),
     ("issue", "close"): (
@@ -2969,7 +2969,7 @@ GH_TEXT_COMMANDS: dict[tuple[str, str], tuple[str, str]] = {
         "--help",
     ),
     ("issue", "develop"): (
-        "-b/--base --branch-repo -n/--name -R/--repo",
+        "-b/--base --branch-repo -n/--name --worktree -R/--repo",
         "-c/--checkout -l/--list --help",
     ),
     ("release", "create"): (
@@ -3086,17 +3086,27 @@ GH_SUBCOMMAND_ALIASES = {
 }
 GH_COMMANDS = frozenset((
     "agent", "agent-task", "agent-tasks", "agents", "alias", "api", "at", "attestation", "auth", "browse", "cache",
-    "codespace", "completion", "config", "copilot", "cs", "discussion", "ext", "extension", "extensions", "gist",
-    "gpg-key", "help", "issue", "label", "licenses", "org", "pr", "preview", "project", "release", "repo", "rs",
-    "ruleset", "run", "search", "secret", "skill", "skills", "ssh-key", "status", "variable", "version", "workflow",
+    "codespace", "completion", "config", "copilot", "cs", "discussion", "event", "ext", "extension", "extensions",
+    "gist", "gpg-key", "help", "issue", "label", "licenses", "org", "pr", "preview", "project", "release", "repo",
+    "rs", "ruleset", "run", "search", "secret", "skill", "skills", "ssh-key", "status", "variable", "version",
+    "workflow",
 ))
-# The options whose value names a file whose text gh sends, `-` naming standard input.
+# The subcommands of gh 2.106.0's preview `issue artifact` that send text: `create` (its alias `new`) and `edit` upload
+# Markdown and HTML documents, links and files (`[<file>[#<name>] | <url>]...`, --attach, --body, --body-file), which
+# the check does not read, so gh_command refuses each such call before gh runs, whatever its target (GhUnjudgedError).
+# `delete`, `download`, `list` and `view` send no text.
+GH_ARTIFACT_WRITES = frozenset(("create", "new", "edit"))
+GH_ARTIFACT_REFUSAL = ("gh 2.106.0's preview `issue artifact` uploads documents and files the check does not read, so "
+                       "the check refuses the call")
+# The options whose value names a file whose text gh sends, `-` naming standard input. `--attach` names one too, before
+# a `#` (gh_split_file_arg), and gh_texts reads it so.
 GH_FILE_OPTIONS = frozenset(("--body-file", "--notes-file", "--from-file", "--recover", "--input"))
-# Options whose value gh keeps to itself: a jq filter, a Go template or a format for its own output, a cache time.
+# Options whose value gh keeps to itself: a jq filter, a Go template or a format for its own output, a cache time, and
+# the local path `issue develop --worktree` checks the branch out into.
 GH_LOCAL_OPTIONS = frozenset((("api", "--jq"), ("api", "--template"), ("api", "--cache"), ("project", "--jq"),
-                              ("project", "--template"), ("project", "--format")))
+                              ("project", "--template"), ("project", "--format"), ("issue", "--worktree")))
 # The texts that name a ref (a branch or a tag) or an identity (a login, an e-mail), by (group, subcommand, option's
-# long name or `argument N`), as `gh <command> --help` at gh 2.98.0 describes them: the `<branch>` and `<tag>`
+# long name or `argument N`), as `gh <command> --help` at gh 2.106.0 describes them: the `<branch>` and `<tag>`
 # arguments of the usages, the branch, tag and target options, the assignees, reviewers and merge author, and the owner
 # logins, organization and team (`--owner`, "Login of the owner"; `repo fork --org`; `repo create --team`). Each is
 # read as a name (GhText.is_name, TermMatcher.names). A `gh api` field or endpoint is read as text, whatever it names.
@@ -3118,14 +3128,14 @@ GH_NAME_TEXTS = frozenset((
     ("project", "item-create", "--owner"), ("project", "item-edit", "--owner"), ("project", "copy", "--source-owner"),
     ("project", "copy", "--target-owner"), ("repo", "fork", "--org"), ("repo", "create", "--team"),
 ))
-# The commands whose first argument is the repository the call goes to, as the usage of gh 2.98.0 names it
+# The commands whose first argument is the repository the call goes to, as the usage of gh 2.106.0 names it
 # (`gh repo edit [<repository>]`, `gh repo fork [<repository>]`), by OWNER/REPO or by its URL; read so by
 # gh_argument_repository for gh_reach. Not `repo create [<name>]`, whose name a public create
 # publishes, nor `repo rename [<new-name>]`; and `repo edit --visibility public` publishes the name of the repository
 # it edits, which gh_check then reads (gh_made_public). shims/tests/test_gh_leak_terms.py compares it with the usage
 # the gh on PATH prints.
 GH_REPOSITORY_ARGUMENT = frozenset((("repo", "edit"), ("repo", "fork")))
-# The commands whose arguments the usage of gh 2.98.0 names by URL (`<url>`, `<urls>`, `<discussion-url>`,
+# The commands whose arguments the usage of gh 2.106.0 names by URL (`<url>`, `<urls>`, `<discussion-url>`,
 # `<comment-url>`, as in `gh pr comment [<number> | <url> | <branch>]` and `gh issue edit {<numbers> | <urls>}`): an
 # http or https URL argument of one names the repository the call goes to (gh_argument_repository). A URL in an
 # argument of any other command is text, such as the description `agent-task create` sends. A gist's URL names a gist,
@@ -3135,7 +3145,7 @@ GH_URL_ARGUMENT = frozenset((
     ("pr", "revert"), ("issue", "edit"), ("issue", "comment"), ("issue", "close"), ("issue", "reopen"),
     ("issue", "develop"), ("discussion", "edit"), ("discussion", "comment"), ("gist", "edit"), ("gist", "rename"),
 ))
-# The placeholders gh 2.98.0 fills in a `gh api` endpoint and in each -F value but a file's (`@path`), each with where
+# The placeholders gh 2.106.0 fills in a `gh api` endpoint and in each -F value but a file's (`@path`), each with where
 # gh takes its value from: `base`, the base repository (`{owner}` its owner, `{repo}` its name: the base placeholders),
 # GH_REPO's when that is set, else this directory's (gh_bases); `branch`, the current branch (gh_current_branch), which
 # no base repository gives. The list is gh's own, from `gh api --help`: "Placeholder values `{owner}`, `{repo}`, and
@@ -3621,9 +3631,11 @@ def gh_next_command(arguments: Sequence[str]) -> tuple[str, list[str]] | None:
     return None
 
 
-class GhAliasError(Exception):
-    """A gh call that may run an alias the check cannot read, refused with TEXT_EXIT (gh_check): ARGS are the alias the
-    call names and why, with what to fix."""
+class GhUnjudgedError(Exception):
+    """A gh call the check cannot judge, refused with TEXT_EXIT before gh runs (gh_check): one that may run an alias the
+    check cannot read (gh_alias_command), or an `issue artifact` call that sends documents and files the check does not
+    read (GH_ARTIFACT_WRITES). ARGS are the alias or command the call names and why it is refused, for an alias with
+    what to fix."""
 
 
 def gh_unsplit(name: str, line: int, path: Path, error: ValueError, filled: bool) -> str:
@@ -3647,7 +3659,8 @@ def gh_unsplit(name: str, line: int, path: Path, error: ValueError, filled: bool
 def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
                depth: int = 0) -> tuple[str, str, list[str]] | None:
     """(group, subcommand, the arguments the subcommand reads) of a gh call that can send text, after a gh alias; None
-    for any other call. GhAliasError for a call that may run an alias the check cannot read (gh_alias_command)."""
+    for any other call. GhUnjudgedError for a call the check cannot judge: one that may run an alias it cannot read
+    (gh_alias_command), and `issue artifact create`, `new` and `edit` (GH_ARTIFACT_WRITES), whatever their target."""
     found = gh_next_command(arguments)
     if found is None:
         return None
@@ -3664,6 +3677,10 @@ def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
     sub = GH_SUBCOMMAND_ALIASES.get((group, word), word)
     if (group, sub) in GH_TEXT_COMMANDS:
         return group, sub, rest
+    if (group, sub) == ("issue", "artifact"):
+        found = gh_next_command(rest)
+        if found is not None and found[0] in GH_ARTIFACT_WRITES:
+            raise GhUnjudgedError(f"{first} {word} {found[0]}", GH_ARTIFACT_REFUSAL)
     # An alias under a command (`gh alias set 'pr say' 'pr comment'`), which gh runs as what it expands to. Until
     # 2026-11-17 only an alias of the first word was read, so `gh pr say 11 --body …` went out unchecked.
     return gh_alias_command(f"{first} {word}", rest, environment, depth)
@@ -3673,7 +3690,7 @@ def gh_alias_command(name: str, rest: Sequence[str], environment: Mapping[str, s
                      depth: int) -> tuple[str, str, list[str]] | None:
     """gh_command of what the gh alias NAME runs with REST; None for no such alias, for a shell alias (`!…`), which
     runs a shell whose own gh calls come back through shims/gh, for one whose `$N` REST does not fill, which goes to
-    gh, which refuses it itself (`not enough arguments for alias`), and past three aliases in a row. GhAliasError,
+    gh, which refuses it itself (`not enough arguments for alias`), and past three aliases in a row. GhUnjudgedError,
     refusing the call, where gh_aliases refuses config.yml and NAME stands in it (gh_alias_named), and where shlex
     cannot split NAME's expansion with REST in place of its `$N` (gh_expand_alias, which tests the `$N` first): only
     then is the expansion as config.yml holds it split on its own, to choose the refusal's message (gh_unsplit). gh
@@ -3683,7 +3700,7 @@ def gh_alias_command(name: str, rest: Sequence[str], environment: Mapping[str, s
     aliases = gh_aliases(gh_config_directory(environment) / "config.yml")
     if aliases.refused:
         if gh_alias_named(name, aliases.text):
-            raise GhAliasError(name, aliases.refused)
+            raise GhUnjudgedError(name, aliases.refused)
         return None
     found = aliases.expansions.get(name)
     if found is None or found[0].startswith("!"):
@@ -3694,8 +3711,8 @@ def gh_alias_command(name: str, rest: Sequence[str], environment: Mapping[str, s
         try:
             shlex.split(found[0])
         except ValueError as own:
-            raise GhAliasError(name, gh_unsplit(name, found[1], aliases.path, own, filled=False)) from None
-        raise GhAliasError(name, gh_unsplit(name, found[1], aliases.path, error, filled=True)) from None
+            raise GhUnjudgedError(name, gh_unsplit(name, found[1], aliases.path, own, filled=False)) from None
+        raise GhUnjudgedError(name, gh_unsplit(name, found[1], aliases.path, error, filled=True)) from None
     return gh_command(expanded, environment, depth + 1) if expanded else None
 
 
@@ -3892,12 +3909,50 @@ def gh_argument_texts(group: str, sub: str, number: int, value: str) -> list[GhT
     return [GhText(option, text=value, is_name=(group, sub, option) in GH_NAME_TEXTS)]
 
 
+def gh_split_file_arg(value: str) -> tuple[str, str]:
+    """(the path of the file, the text after it) of a `--attach` VALUE, `<file>[#<alt text>]`, split as gh 2.106.0
+    splits it (internal/attachments/flags.go SplitFileArg), a `#` being legal in a file's name: VALUE whole, with no
+    text, when it names something that exists (os.Stat, which follows a link, from gh's working directory, which is the
+    check's); else, at each `#` after the first character from the last to the first, the part before it, with the text
+    after it, for the first such part that exists; else the two sides of the last `#` after the first character; else
+    VALUE whole, with no text. gh refuses a path that is "" or `-` itself."""
+
+    def exists(path: str) -> bool:
+        try:
+            os.stat(path)
+        except (OSError, ValueError):
+            return False
+        return True
+
+    if exists(value):
+        return value, ""
+    index = value.rfind("#")
+    while index > 0:
+        if exists(value[:index]):
+            return value[:index], value[index + 1:]
+        index = value.rfind("#", 0, index)
+    index = value.rfind("#")
+    return (value[:index], value[index + 1:]) if index > 0 else (value, "")
+
+
+def gh_attach_alt(path: str) -> str:
+    """The alt text gh 2.106.0 writes into the body for an image `--attach PATH` given none
+    (internal/attachments/userasset.go newImageAsset): the base name of PATH without its extension, each `.` in it a
+    space, which the value does not hold as written. A video's stands as its base name, which the value holds; the
+    check reads this text for a video too, one text more and never one less."""
+    base = os.path.basename(path.rstrip("/"))
+    dot = base.rfind(".")
+    return (base[:dot] if dot >= 0 else base).replace(".", " ")
+
+
 def gh_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]) -> list[GhText]:
     """Every text the call sends: each argument and option value, each whole, but those gh keeps to itself
     (GH_LOCAL_OPTIONS), and for a file gh reads, what the file holds; a field's key and its value are two texts, as
     GitHub stores them. The repository the call goes to (`-R`, a URL, an endpoint) is text too: a term inside the own
     name of a public destination counts for nothing there (gh_own_name). A `repo create --source DIR` given no name
-    names the new repository after DIR (gh_source_name), which is read as `--source name`."""
+    names the new repository after DIR (gh_source_name), which is read as `--source name`. A `--attach` value is text,
+    its file is read at the path gh takes (gh_split_file_arg), and the alt text gh makes from the file's name when the
+    value gives none (gh_attach_alt) is read as `--attach PATH (alt text)`."""
     long = gh_long_names(GH_TEXT_COMMANDS[(group, sub)])
     texts: list[GhText] = []
     number = 0
@@ -3917,6 +3972,14 @@ def gh_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
             texts.append(GhText(name, value, path=value, json_body=name == "--input"))
         elif (group, sub, name) == ("gist", "edit", "--add"):
             texts += [GhText(name, value, path=value), GhText(f"{name} name", text=os.path.basename(value))]
+        elif name == "--attach":
+            # gh uploads the file's bytes, and writes the alt text, else one made from the file's name, into the body.
+            path, alt = gh_split_file_arg(value)
+            texts.append(GhText(name, text=value))
+            if path not in ("", "-"):
+                texts.append(GhText(name, path, path=path))
+                if not alt:
+                    texts.append(GhText(name, path, part="alt text", text=gh_attach_alt(path)))
         elif (group, sub, name) == ("pr", "create", "--template"):
             # A template's name, which gh also reads as a file's path when there is such a file.
             texts += [GhText(name, text=value), GhText(name, value, path=value, optional=True)]
@@ -5531,19 +5594,20 @@ def gh_refusal(name: str, reached: Sequence[GhTarget], matcher: TermMatcher | No
 
 def gh_check(arguments: Sequence[str]) -> int:
     """`gh -- ARGV…`: refuse a gh call that sends a listed term to anything not confirmed private (exit 3), whose text
-    cannot be checked because the list cannot be read (exit 2), that names a file nobody can read (exit 4), or that
-    may run a gh alias the check cannot read (exit 4); exit GH_STDIN_EXIT to ask for standard input. Any other call
-    exits 0 untouched, and the text of a call that reaches only private or internal repositories is not checked, nor
-    are their visibilities, nor the facts of the plain case (gh_plain_case), read before a term is found. Outside the
-    plain case a call that holds a listed term is one target read as public, as a raw GraphQL mutation is.
+    cannot be checked because the list cannot be read (exit 2), that names a file nobody can read (exit 4), that may
+    run a gh alias the check cannot read (exit 4), or that is `issue artifact create`, `new` or `edit`, whose documents
+    and files the check does not read (exit 4, GH_ARTIFACT_WRITES); exit GH_STDIN_EXIT to ask for standard input. Any
+    other call exits 0 untouched, and the text of a call that reaches only private or internal repositories is not
+    checked, nor are their visibilities, nor the facts of the plain case (gh_plain_case), read before a term is found.
+    Outside the plain case a call that holds a listed term is one target read as public, as a raw GraphQL mutation is.
 
     A call through a gh alias is read as the command it expands to. Where the check cannot read gh's aliases exactly,
     or cannot split what an alias runs, a call that may run one is refused with exit 4 before gh runs, the refusal
-    naming why and what to fix (GhAliasError); gh_aliases states which calls and why."""
+    naming why and what to fix (GhUnjudgedError); gh_aliases states which calls and why."""
     environment = os.environ
     try:
         command = gh_command(arguments, environment)
-    except GhAliasError as error:
+    except GhUnjudgedError as error:
         name, problem = (c_escape(str(part)) for part in error.args)
         print(f"leak terms: gh {name}: {problem}", file=sys.stderr)
         print(f"leak terms: gh {name}: refused before gh ran, so nothing was sent.", file=sys.stderr)

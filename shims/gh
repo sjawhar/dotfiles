@@ -125,7 +125,8 @@ gh_shim_call_digest() {
 # new read command keeps working without an edit here. The command and its verb are found as cobra
 # finds them, past the options before each (`gh -R o/r pr comment 1` and `gh pr -R o/r comment 1`
 # are `gh pr comment`): an option written apart from any value, but --help and --version, takes the
-# next word as its value.
+# next word as its value. `issue artifact` (gh 2.106.0) counts whatever its own verb: the check refuses
+# its writes and lets its reads go (scripts/leak-terms-check, GH_ARTIFACT_WRITES).
 gh_shim_is_write() {
     local a method="" group="" verb="" skip=0 letters value kind pending="" body=0
     for a in "$@"; do
@@ -151,7 +152,7 @@ gh_shim_is_write() {
     done
     case "$group" in
         api)
-            # gh api's options as gh's flag parser (pflag) reads them (`gh api --help`, gh 2.98.0): the method is the
+            # gh api's options as gh's flag parser (pflag) reads them (`gh api --help`, gh 2.106.0): the method is the
             # last -X/--method given, and with none, a field (-f/-F) or an --input body makes gh POST. A value option
             # takes the rest of its word (`-XPOST`, `-X=POST`, `--method=POST`) or else the next word, also at the end
             # of a cluster after -i, gh api's one short flag that takes none (`-iXPOST`, `-if k=v`), and a word an
@@ -206,7 +207,7 @@ gh_shim_is_write() {
         issue | pr | discussion)
             case "$verb" in
                 create | new | comment | edit | close | reopen | merge | review | ready | delete | lock \
-                    | unlock | pin | unpin | transfer | develop | checkout | revert) return 0 ;;
+                    | unlock | pin | unpin | transfer | develop | checkout | revert | artifact) return 0 ;;
             esac
             ;;
         release | repo | label | secret | variable | gist | ruleset | project | codespace)
@@ -223,7 +224,7 @@ gh_shim_is_write() {
     return 1
 }
 # gh_shim_may_send_text ARGV…: true when scripts/leak-terms-check must read this call, and it then
-# decides: a write (gh_shim_is_write), a first word that is not one of gh 2.98.0's own commands,
+# decides: a write (gh_shim_is_write), a first word that is not one of gh 2.106.0's own commands,
 # which can be an option before the command or a gh alias of the user's that the check expands, or a
 # command under which gh's config.yml may hold an alias (gh_shim_has_nested_alias). It may be wider
 # than the check's own table, never narrower (shims/tests/test_gh_leak_terms.py); a read never
@@ -233,7 +234,7 @@ gh_shim_may_send_text() {
     case "${1:-}" in
         '' | --help | --version) return 1 ;;
         agent | agent-task | agent-tasks | agents | alias | api | at | attestation \
-            | auth | browse | cache | codespace | completion | config | copilot | cs | discussion | ext \
+            | auth | browse | cache | codespace | completion | config | copilot | cs | discussion | event | ext \
             | extension | extensions | gist | gpg-key | help | issue | label | licenses | org | pr | preview \
             | project | release | repo | rs | ruleset | run | search | secret | skill | skills | ssh-key \
             | status | variable | version | workflow)

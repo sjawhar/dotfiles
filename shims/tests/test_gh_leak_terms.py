@@ -3021,6 +3021,98 @@ class GhLeakTerms(unittest.TestCase):
         self.setUp_calls()
         self.assert_sent(self.run_gh(argv), argv)
 
+    # --- gh 2.106.0's --attach and `issue artifact` ---------------------------------------------------------------
+
+    def test_a_term_in_an_attach_file_is_refused_for_a_public_repository(self) -> None:
+        # gh 2.106.0's --attach `<file>[#<alt text>]` (pr create, edit and comment; issue create, edit and comment)
+        # uploads the file's bytes to GitHub (internal/attachments). gh takes the value whole as the file's path when it
+        # exists, else the longest part before a `#` that exists (SplitFileArg), so `a#b.png#the #1 shot` is the file
+        # `a#b.png`. Each file holds the term, and each call to a public repository is refused, naming the file as gh
+        # takes it. Controls: the same calls with clean files go out, and so do the files with the term to a private
+        # repository.
+        def calls(repo: str) -> list[tuple[str, list[str], str]]:
+            return [
+                ("--attach FILE", ["pr", "comment", "11", "-R", repo, "--body", "x", "--attach", "shot.png"],
+                 "--attach shot.png"),
+                ("--attach 'FILE#alt text'", ["issue", "create", "-R", repo, "-t", "t", "-b", "x", "--attach",
+                                              "shot.png#a screenshot"], "--attach shot.png"),
+                ("--attach=FILE, a # in its name", ["issue", "comment", "4", "-R", repo, "-b", "x",
+                                                    "--attach=a#b.png"], "--attach a#b.png"),
+                ("--attach 'FILE#alt text', a # in its name and its alt text",
+                 ["pr", "edit", "11", "-R", repo, "--attach", "a#b.png#the #1 shot"], "--attach a#b.png"),
+            ]
+
+        for text, repo, refused in ((TEXT, PUBLIC, True), (CLEAN, PUBLIC, False), (TEXT, PRIVATE, False)):
+            self.file("shot.png", text)
+            self.file("a#b.png", text)
+            for name, argv, field in calls(repo):
+                with self.subTest(form=name, repo=repo, term=text == TEXT):
+                    self.setUp_calls()
+                    if refused:
+                        self.assert_refused(self.run_gh(argv), field, line=1)
+                    else:
+                        self.assert_sent(self.run_gh(argv), argv)
+        # An attach file that cannot be read is refused for a public repository, as any file option's is; to a private
+        # one the call goes to gh, which refuses it itself.
+        argv = ["pr", "comment", "11", "-R", PUBLIC, "--body", "x", "--attach", "missing.png#alt"]
+        self.setUp_calls()
+        result = self.run_gh(argv)
+        stderr = result.stderr.decode("utf-8", "replace")
+        self.assertEqual(result.returncode, 2, stderr)
+        self.assertEqual(self.gh_calls(), [])
+        self.assertIn(f"leak terms: gh pr comment to {PUBLIC} (public): cannot read --attach missing.png: ", stderr)
+        argv = ["pr", "comment", "11", "-R", PRIVATE, "--body", "x", "--attach", "missing.png#alt"]
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+
+    def test_a_term_in_an_attach_alt_text_or_in_the_alt_text_gh_makes_is_refused(self) -> None:
+        # gh writes an --attach alt text into the body: the one after the `#`, else for an image its file's base name
+        # without its extension, each `.` a space (internal/attachments/userasset.go newImageAsset), so the file
+        # `Quillfeather.Lane.9.png` writes the term `Quillfeather Lane 9`, which the name as written does not hold.
+        self.file("shot.png", CLEAN)
+        term = TEST_TERMS[0]
+        named = self.file(f"{term.replace(' ', '.')}.png", CLEAN)
+        alt = ["pr", "comment", "11", "-R", PUBLIC, "--body", "x", "--attach", f"shot.png#{TEXT.strip()}"]
+        self.assert_refused(self.run_gh(alt), "--attach", line=1)
+        made = ["issue", "comment", "4", "-R", PUBLIC, "-b", "x", "--attach", named]
+        self.setUp_calls()
+        self.assert_refused(self.run_gh(made), f"--attach {named} (alt text)", term, line=1)
+        # Controls: the same calls to a private repository, and the named file with an alt text of its own to the
+        # public one, go out.
+        for argv in (["pr", "comment", "11", "-R", PRIVATE, "--body", "x", "--attach", f"shot.png#{TEXT.strip()}"],
+                     ["issue", "comment", "4", "-R", PRIVATE, "-b", "x", "--attach", named],
+                     ["issue", "comment", "4", "-R", PUBLIC, "-b", "x", "--attach", f"{named}#a screenshot"]):
+            with self.subTest(control=" ".join(argv)):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+
+    def test_gh_issue_artifact_create_and_edit_are_refused_and_its_reads_go_out(self) -> None:
+        # gh 2.106.0's preview `issue artifact create` (its alias `new`) and `edit` upload Markdown and HTML documents,
+        # links and files the check does not read: each call is refused before gh runs, the check exiting 4 whatever
+        # its target and its text, here a clean one to a private repository. Controls: its reads (`list`, `view`) go
+        # out, to a public repository too.
+        self.file("plan.md", CLEAN)
+        for verb, argv in (("create", ["issue", "artifact", "create", "4", "plan.md", "-R", PRIVATE]),
+                           ("new", ["issue", "-R", PRIVATE, "artifact", "new", "4", "--body", "x"]),
+                           ("edit", ["issue", "artifact", "edit", "4", "1", "-R", PRIVATE, "--name", "x"])):
+            with self.subTest(call=" ".join(argv)):
+                checked = self.check(argv, self.env)
+                stderr = checked.stderr.decode("utf-8", "replace")
+                self.assertEqual(checked.returncode, 4, stderr)
+                self.assertIn(f"leak terms: gh issue artifact {verb}: gh 2.106.0's preview `issue artifact` uploads "
+                              "documents and files the check does not read, so the check refuses the call\n", stderr)
+                self.assertIn(f"leak terms: gh issue artifact {verb}: refused before gh ran, so nothing was sent.",
+                              stderr)
+                self.setUp_calls()
+                result = self.run_gh(argv)
+                self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
+                self.assertEqual(self.gh_calls(), [])
+        for argv in (["issue", "artifact", "list", "4", "-R", PUBLIC], ["issue", "artifact", "view", "4", "1", "-R",
+                                                                       PUBLIC]):
+            with self.subTest(control=" ".join(argv)):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+
     # --- what a refusal shows (dispatch://INFRA-4383, R2) -----------------------------------------------------------
 
     def test_a_refusal_shows_the_term_and_a_bounded_line(self) -> None:
@@ -3114,7 +3206,10 @@ class Tables(unittest.TestCase):
         if gh is None:
             self.skipTest("no gh on PATH")
         module = self.scanner()
-        line = re.compile(r"^\s+(?:(-[A-Za-z0-9]), )?(--[A-Za-z0-9][A-Za-z0-9-]*)( \S+)?(?:\s{2,}|$)")
+        # An option that takes a value prints its type after it (`-b, --body string`); one that takes none prints
+        # nothing after it, or, from gh 2.106.0, `[=true|false]` (`-a, --approve[=true|false]`).
+        line = re.compile(r"^\s+(?:(-[A-Za-z0-9]), )?(--[A-Za-z0-9][A-Za-z0-9-]*)(?:\[=true\|false\]|( \S+))?"
+                          r"(?:\s{2,}|$)")
         commands = set(module.GH_TEXT_COMMANDS)
         self.assertLessEqual(module.GH_REPOSITORY_ARGUMENT, commands)
         self.assertLessEqual(module.GH_URL_ARGUMENT, commands)
@@ -3203,6 +3298,7 @@ class Writes(unittest.TestCase):
     def test_write_verbs_are_writes(self) -> None:
         for argv in (["issue", "comment"], ["issue", "create"], ["pr", "merge"], ["pr", "review"],
                      ["pr", "edit"], ["pr", "close"], ["release", "create"], ["workflow", "run"],
+                     ["issue", "artifact", "create"], ["issue", "-R", "o/r", "artifact", "edit"],
                      ["api", "-X", "POST", "repos/o/r/issues"],
                      ["api", "--method", "DELETE", "repos/o/r"],
                      ["api", "repos/o/r/issues", "-f", "title=x"]):
