@@ -27,7 +27,8 @@
 # helper, the secrets broker, Envoy, Dispatch, MLflow,
 # the model gateway with a dev-box@ token and Azure; and that no person's login file is on any
 # mounted disk. Both halves also clone-check private theorem-labs repositories over https
-# (github_check) and read the transcript store with `tq` (tq_check). The host half also runs
+# (github_check) and read the transcript store with `tq` (tq_check). The host half also asks the
+# store whether it holds this machine's own sessions (tq_own_sessions_check) and runs
 # agent-infra's guard.sh check (host_guard). The box half is run through
 # `agentbox new`, the same launcher a session goes through, so a check passes only with what a
 # real box gets: its mounts, its relays, its env.
@@ -564,10 +565,11 @@ azure_check() {
 # (https://transcript-store.$TAILNET, agent-infra transcript-store/), which names this machine by
 # its owner's login, sami@theorem.dev, as Sami's own node, with no password (dispatch://INFRA-913,
 # dispatch://INFRA-1099). A read-only count of the sessions table must give a positive number:
-# stdout's last line. tq writes on stderr a warning when a host it expects has not loaded lately;
-# that is the store's import (since sami-rocqperf's deletion on 2026-11-12, dispatch://INFRA-1236),
-# not this read, so it is a note. Read with the count, as it was until 2026-11-22, the warning
-# took the count's place and failed the line.
+# stdout's last line. tq writes on stderr a warning when a host it expects has not loaded lately.
+# It names hosts by their loads, mostly other machines' (machcsl-gcp-*, linux-speedrun), so here it
+# is a note; whether the store holds THIS machine's sessions is tq_own_sessions_check's line, which
+# FAILs. Read with the count, as it was until 2026-11-22, the warning took the count's place and
+# failed the line.
 tq_check() {
     local where="$1" out err
     err="$(mktemp)"
@@ -576,6 +578,59 @@ tq_check() {
     [[ "$out" =~ ^[0-9]+$ && "$out" -gt 0 ]] && ok "transcript store $where: tq sql count of sessions -> $out" \
         || fail "transcript store $where: tq sql 'SELECT count() FROM sessions': ${out:-nothing on stdout}; stderr: $(tail -1 "$err")"
     if grep -q 'warning' "$err"; then note "transcript store $where: $(grep -m1 'warning' "$err")"; fi
+    rm -f "$err"
+}
+
+# How far behind this machine's own session files the store may be: the push sends them every 10
+# minutes (agent-infra transcript-store-infra/push-logs.py, transcript-store-push.timer), the
+# box's import job starts every 10 minutes, and one of its runs may take its whole deadline, 8
+# hours (importers.go's devBoxTable). 8 h 20 min, the store's own bound for this machine.
+TRANSCRIPT_LAG_S=30000
+# How many of this machine's newest session files, of those older than that, the store must hold.
+TRANSCRIPT_PROBES=50
+
+# This machine's own sessions in the store. tq_check's count passes on a store that stopped taking
+# them, and tq's warning cannot see it either: the box's import job loads every few hours from the
+# omp_sessions database, so the host sami-devbox kept loading while the store held no session file
+# of this machine newer than 2026-11-12, and the line said so only as a note, for a fortnight
+# (dispatch://INFRA-5287). So this line names the object it judges: the TRANSCRIPT_PROBES newest
+# top-level session files under ~/.omp/agent/sessions (<dir>/<start>_<id>.jsonl, the boxes' among
+# them, since a box writes the host's tree) that started more than TRANSCRIPT_LAG_S ago must each be
+# a session of the store, by its id; a copy the store keeps as <id>@<host>:<hash> is the same
+# session. A store further behind than that FAILs, naming how many it lacks and the newest. A read
+# that finds no such file has compared nothing, so it FAILs too rather than pass.
+tq_own_sessions_check() {
+    local sessions="$HOME/.omp/agent/sessions" cutoff names ids list out err rc held missing newest
+    cutoff="$(date -u -d "@$(( $(date -u +%s) - TRANSCRIPT_LAG_S ))" +%Y-%m-%dT%H-%M-%S)"
+    # <start> is 2026-11-20T16-55-50-382Z, so its first 19 characters sort as the time they name. The
+    # shape is held whole, so every id that reaches the query is a UUID and nothing else.
+    names="$(find "$sessions" -mindepth 2 -maxdepth 2 -name '20*_*.jsonl' -printf '%f\n' 2>/dev/null \
+        | grep -E '^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{3}Z_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$' \
+        | awk -v c="$cutoff" 'substr($0, 1, 19) < c' | sort | tail -n "$TRANSCRIPT_PROBES")"
+    if [[ -z "$names" ]]; then
+        fail "transcript store: this machine's sessions: found no session file under $sessions that started before $cutoff, so nothing was compared with the store"
+        return
+    fi
+    ids="$(sed -E 's/^[^_]+_//; s/\.jsonl$//' <<<"$names")"
+    list="$(sed "s/.*/'&'/" <<<"$ids" | paste -sd, -)"
+    err="$(mktemp)"
+    out="$(PATH="$HOME/.local/bin:$PATH" timeout 60 tq sql \
+        "SELECT DISTINCT splitByChar('@', session_id)[1] AS id FROM sessions_latest WHERE id IN ($list)" 2>"$err")"
+    rc=$?
+    if (( rc != 0 )); then
+        fail "transcript store: this machine's sessions: tq sql exited $rc; stderr: $(grep -v 'warning' "$err" | tail -1)"
+        rm -f "$err"
+        return
+    fi
+    held="$(tail -n +2 <<<"$out")"
+    missing="$(grep -vxF -f <(printf '%s\n' "$held") <<<"$ids")"
+    if [[ -z "$missing" ]]; then
+        ok "transcript store: this machine's sessions: the store holds each of the $(wc -l <<<"$ids") newest session files that started here before $cutoff (newest: $(tail -1 <<<"$names"))"
+    else
+        newest="$(PATH="$HOME/.local/bin:$PATH" timeout 60 tq sql \
+            "SELECT max(started_at) FROM sessions_latest WHERE startsWith(path, '$sessions/')" 2>>"$err" | tail -1)"
+        fail "transcript store: this machine's sessions: the store lacks $(wc -l <<<"$missing") of the $(wc -l <<<"$ids") newest session files that started here before $cutoff (newest it lacks: $(grep -m1 -F "_$(tail -1 <<<"$missing").jsonl" <<<"$names")); the newest session it holds from $sessions started at ${newest:-an unknown time}"
+    fi
     rm -f "$err"
 }
 
@@ -1390,6 +1445,7 @@ host() {
     host_guard
     github_check "on the host"
     tq_check "on the host"
+    tq_own_sessions_check
     leak_check_host_check
     prepush_hook_host_check
     global_hooks_host_check
