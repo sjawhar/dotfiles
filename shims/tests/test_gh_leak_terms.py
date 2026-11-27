@@ -3216,6 +3216,46 @@ class GhLeakTerms(unittest.TestCase):
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv), argv)
 
+    def test_the_help_of_a_command_the_check_refuses_goes_out(self) -> None:
+        # `gh <command> --help`, or `-h`, prints the command's help and sends nothing, whatever else the call gives: a
+        # read, which goes to gh unchanged, for each command the check refuses (GH_REFUSED_COMMANDS) as for any other,
+        # and as `gh help <command>` does. Controls: the same calls without the help flag are refused.
+        self.file("plan.md", CLEAN)
+        calls = (["issue", "artifact", "create", "4", "plan.md", "-R", PRIVATE], ["issue", "artifact", "edit", "4", "1"],
+                 ["label", "clone", "o/src", "-R", PRIVATE], ["repo", "autolink", "create", "P-", "https://x/<num>"],
+                 ["skill", "publish", "--tag", "v1"], ["gpg-key", "add", "key.asc"],
+                 ["ssh-key", "add", "key.pub", "--type", "signing"])
+        for call in calls:
+            for flag in ("--help", "-h"):
+                argv = [*call, flag]
+                with self.subTest(call=" ".join(argv)):
+                    self.setUp_calls()
+                    self.assert_sent(self.run_gh(argv), argv)
+            with self.subTest(control=" ".join(call)):
+                self.setUp_calls()
+                self.assertEqual(self.run_gh(call).returncode, 2)
+                self.assertEqual(self.gh_calls(), [])
+
+    def test_a_pipe_attach_with_alt_text_reaches_gh_whole(self) -> None:
+        # `--attach <(…)#alt` names the descriptor gh reads, then its alt text (gh_split_file_arg). The shim buffers a
+        # descriptor named whole (`--attach <(…)`, gh_shim_buffer_fds), so the check reads it and gh gets every byte;
+        # with the `#alt` after it the same clean file must go out to a public repository too. Control: a term in it
+        # is refused.
+        for text, refused in ((CLEAN, False), (TEXT, True)):
+            with self.subTest(term=refused):
+                self.setUp_calls()
+                result = subprocess.run(
+                    ["bash", "-c", '"$GH" pr comment 11 -R "$REPO" --body x --attach <(printf %s "$BODY")#alt'],
+                    env={**self.env, "GH": str(GH), "REPO": PUBLIC, "BODY": text}, cwd=self.work,
+                    stdin=subprocess.DEVNULL, capture_output=True, timeout=240, check=False)
+                stderr = result.stderr.decode("utf-8", "replace")
+                if refused:
+                    self.assertEqual(result.returncode, 2, stderr)
+                    self.assertEqual(self.gh_calls(), [])
+                else:
+                    self.assertEqual(result.returncode, 0, stderr)
+                    self.assertEqual(len(self.gh_calls()), 1)
+
     # --- what a refusal shows (dispatch://INFRA-4383, R2) -----------------------------------------------------------
 
     def test_a_refusal_shows_the_term_and_a_bounded_line(self) -> None:
