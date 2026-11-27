@@ -4100,20 +4100,29 @@ GH_URL_HOST = "a host the check cannot read in a URL that is not GitHub's"
 
 
 def gh_config_condition(directory: Path) -> str | None:
-    """None when every host gh's config in DIRECTORY lists is github.com, as a simple reading reads it; else why not,
-    as a refusal names it. In hosts.yml each line at column 0 that is neither blank nor a comment is the key
-    `github.com`, plain or quoted, with its `:` (gh_yaml_key), and the first such line is at column 0; the lines
-    indented below a key are that host's. A hosts.yml that is absent, empty or holds only `{}`, which gh writes once
-    `gh auth logout` logged out of the last host (measured 2026-11-20 with gh 2.98.0, which then takes github.com),
-    lists none. config.yml holds no line break other than a line feed (gh_config_break): the check reads its lines at
-    its line feeds, and yaml.v3 begins a line at each break, so a key after such a break, a `hosts` key among them,
-    would be one the check does not see. Nor does it hold a `hosts` key at its root (gh_root_keys): gh takes the hosts
-    of that key before those of hosts.yml, and the check reads none of them, so such a key takes a call out of the
-    plain case; an alias named `hosts`, which `gh alias set hosts …` writes inside the aliases, is no such key. Any
-    layout this does not read is not plain: a host indented at the root, a flow mapping, a `---`, a file that cannot be
-    read. hosts.yml is split by str.splitlines, which splits at each break yaml.v3 reads and more. The agent config
-    directory of scripts/gh-agent-config, whose hosts.yml lists `github.com:` and whose config.yml is the user's, is
-    plain."""
+    """None when every host gh's config in DIRECTORY lists is github.com, and gives it no `api_host`, as a simple
+    reading reads it; else why not, as a refusal names it. In hosts.yml each line at column 0 that is neither blank nor
+    a comment is the key `github.com`, plain or quoted, with its `:` (gh_yaml_key) and nothing after it but blanks or a
+    comment, and the first such line is at column 0; the lines indented below a key are that host's, and each begins,
+    at its first character that is no blank, with a key gh_yaml_key reads, neither `api_host` nor the merge key `<<`.
+    gh 2.106.0 sends every REST and GraphQL call for a host to the host's `api_host` in place of its API host, which it
+    reads at `hosts.<host>.api_host` (internal/config/config.go APIHostForHost; go-gh v2.17.0 pkg/api/host.go apiHost),
+    so an `api_host`, plain or quoted, takes a call out of the plain case; so does one at any depth, under `users:` too,
+    where gh does not read it: a conservative reading. gh 2.106.0's `gh config get api_host --host github.com` read the
+    key plain, quoted, in a flow mapping and as an explicit key `? api_host`, and none under `users:` or behind `<<`
+    (measured 2026-11-27). A hosts.yml that is absent, empty or holds only `{}`, which gh writes once `gh auth logout`
+    logged out of the last host (measured 2026-11-20 with gh 2.98.0, which then takes github.com), lists none.
+    config.yml holds no line break other than a line feed (gh_config_break): the check reads its lines at its line
+    feeds, and yaml.v3 begins a line at each break, so a key after such a break, a `hosts` key among them, would be one
+    the check does not see. Nor does it hold a `hosts` key at its root (gh_root_keys): gh takes the hosts of that key
+    before those of hosts.yml, and the check reads none of them, so such a key takes a call out of the plain case; an
+    alias named `hosts`, which `gh alias set hosts …` writes inside the aliases, is no such key. Any layout this does
+    not read is not plain: a host indented at the root; a value on a host's line, such as a flow mapping, an anchor or
+    an alias; a merge key; an indented line that begins with no key gh_yaml_key reads, such as a flow mapping, an
+    explicit key `? …`, an anchor, an alias, a tag, a list item or a scalar's indented continuation; a `---`; a file
+    that cannot be read. hosts.yml is split by str.splitlines, which splits at each break yaml.v3 reads and more. The
+    hosts.yml gh writes is plain, and so is the agent config directory of scripts/gh-agent-config, whose hosts.yml lists
+    `github.com:` with `users`, `git_protocol`, `user` and `oauth_token` below it, and whose config.yml is the user's."""
     texts: dict[str, str] = {}
     for name in ("hosts.yml", "config.yml"):
         try:
@@ -4122,18 +4131,28 @@ def gh_config_condition(directory: Path) -> str | None:
             texts[name] = ""
         except (OSError, UnicodeDecodeError) as error:
             return f"gh's {name} cannot be read ({error})"
+    layout = "gh's hosts.yml is not in the layout the check reads"
     lines = [line for line in texts["hosts.yml"].removeprefix("\ufeff").splitlines()
              if line.strip() and not line.lstrip(" \t").startswith("#")]
+    host = "a host"
     for number, line in enumerate(lines):
         if re.fullmatch(r"[ \t]*\{\}[ \t]*(?:#.*)?", line):
             continue
         if line[0] in " \t" and number:
+            entry = gh_yaml_key(line, gh_blanks_end(line, 0))
+            if entry is not None and entry[0] == "api_host":
+                return f"gh's hosts.yml gives {host} an api_host, where gh 2.106.0 sends its API calls"
+            if entry is None or entry[0] == "<<":
+                return layout
             continue
         entry = gh_yaml_key(line, 0)
         if entry is None:
-            return "gh's hosts.yml is not in the layout the check reads"
+            return layout
         if entry[0] != "github.com":
             return f"gh's config lists {entry[0]}"
+        if not re.fullmatch(r"[ \t]*(?:#.*)?", line[entry[1]:]):
+            return layout
+        host = entry[0]
     config = gh_config_text(texts["config.yml"])
     broken = gh_config_break(config)
     if broken is not None:
@@ -4147,7 +4166,10 @@ def gh_plain_case(environment: Mapping[str, str]) -> str | None:
     """None when a call is in the plain case, where gh sends it to github.com unless the call itself names another
     host; else the condition that takes it out, as a refusal names it. The plain case holds when all three hold:
 
-    1. Every host gh's config lists is github.com (gh_config_condition).
+    1. Every host gh's config lists is github.com, and the config gives it no `api_host`, to which gh 2.106.0 sends
+       every REST and GraphQL call for that host (gh_config_condition; internal/config/config.go APIHostForHost and
+       go-gh v2.17.0 pkg/api/host.go). An `api_host` at any depth of hosts.yml, and a host line or an indented line in
+       a layout the check does not read, take the call out of the plain case.
     2. GH_HOST is unset, or names github.com as gh_host reads a host, as it reads --hostname: in any letter case, and
        `api.github.com` too, which go-gh's auth.NormalizeHostname makes github.com.
     3. Every remote of this directory that gh keeps (gh_remotes: by the repository of its fetch URL, else of its push

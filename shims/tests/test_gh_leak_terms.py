@@ -1876,12 +1876,17 @@ class GhLeakTerms(unittest.TestCase):
         # is on github.com. Outside it a call that holds a listed term is one target read as public, so even a write to
         # a private repository is refused, and the refusal names the condition; the same call with no term goes out.
         # Each row breaks one condition: hosts.yml lists ghe.example.com; config.yml has a `hosts` key; hosts.yml is
-        # in a layout the check does not read (YAML flow form); GH_HOST is ghe.example.com; a remote is on
-        # ghe.example.com, or on www.ghe.example.com (the reviewer's, review round 10); a remote fetches from
-        # ghe.example.com and pushes to github.com.
+        # in a layout the check does not read (YAML flow form); hosts.yml gives github.com an `api_host`, to which gh
+        # 2.106.0 sends every API call for github.com (internal/config/config.go APIHostForHost), its key plain or
+        # quoted, or nested under `users:`, which gh does not read and the check refuses too; hosts.yml gives it one in
+        # a layout the check does not read: a flow mapping on the host's line, a merge key `<<`, an explicit key
+        # `? api_host`; GH_HOST is ghe.example.com; a remote is on ghe.example.com, or on www.ghe.example.com (the
+        # reviewer's, review round 10); a remote fetches from ghe.example.com and pushes to github.com.
         private, ghe, www = (f"https://github.com/{PRIVATE}.git", "https://ghe.example.com/o/r.git",
                              "https://www.ghe.example.com/o/r.git")
         hosts_key = GH_VERSION + "hosts:\n" + "".join("    " + line for line in HOSTS_GHE.splitlines(keepends=True))
+        layout = "gh's hosts.yml is not in the layout the check reads"
+        api_host = "gh's hosts.yml gives github.com an api_host, where gh 2.106.0 sends its API calls"
         # (row, the environment, the checkout's remotes, the origin's own push URL or "", the condition it names)
         rows = (
             ("hosts.yml lists ghe.example.com", self.gh_config("ghe", HOSTS_GHE), [("origin", private)], "",
@@ -1889,7 +1894,25 @@ class GhLeakTerms(unittest.TestCase):
             ("config.yml has a hosts key", self.gh_config("hosts-key", None, hosts_key), [("origin", private)], "",
              "gh's config.yml has a hosts key"),
             ("hosts.yml in YAML flow form", self.gh_config("flow", '{"ghe.example.com": {"user": "x"}}\n'),
-             [("origin", private)], "", "gh's hosts.yml is not in the layout the check reads"),
+             [("origin", private)], "", layout),
+            ("hosts.yml gives github.com an api_host", self.gh_config(
+                "api-host", "github.com:\n    api_host: gateway.example.net\n" + GH_HOST_ENTRY), [("origin", private)],
+             "", api_host),
+            ("an api_host, quoted", self.gh_config(
+                "api-host-quoted", 'github.com:\n    "api_host": gateway.example.net\n' + GH_HOST_ENTRY),
+             [("origin", private)], "", api_host),
+            ("an api_host in a flow mapping on the host's line",
+             self.gh_config("api-host-flow", "github.com: {api_host: gateway.example.net}\n"), [("origin", private)],
+             "", layout),
+            ("an api_host behind a merge key", self.gh_config(
+                "api-host-merge", "github.com:\n    <<: {api_host: gateway.example.net}\n" + GH_HOST_ENTRY),
+             [("origin", private)], "", layout),
+            ("an api_host under users", self.gh_config("api-host-users", HOSTS_GITHUB.replace(
+                "        x:\n", "        x:\n            api_host: gateway.example.net\n")), [("origin", private)], "",
+             api_host),
+            ("an api_host as an explicit key", self.gh_config(
+                "api-host-explicit", "github.com:\n    ? api_host\n    : gateway.example.net\n" + GH_HOST_ENTRY),
+             [("origin", private)], "", layout),
             ("GH_HOST is ghe.example.com", {**self.env, "GH_HOST": "ghe.example.com"}, [("origin", private)], "",
              "GH_HOST is ghe.example.com"),
             ("a remote on ghe.example.com", self.env, [("origin", private), ("upstream", ghe)], "",
@@ -1996,11 +2019,12 @@ class GhLeakTerms(unittest.TestCase):
         # Each machine here is in the plain case, so a write with a listed term to a private repository goes out, and
         # the same write to a public one is refused for it: hosts.yml absent; holding only `{}`, which gh 2.98.0 writes
         # once `gh auth logout` logged out of the last host, and then takes github.com (measured by the tester,
-        # dispatch://INFRA-3365, review round 10); listing github.com, its key plain as scripts/gh-agent-config writes
-        # it, or quoted; GH_HOST github.com in another letter case, or api.github.com, which gh reads as github.com as
-        # it reads `--hostname api.github.com` (review round 11); config.yml holding an alias named `hosts`, which `gh
-        # alias set hosts 'auth status'` writes inside the aliases, in block and in flow form, and which is no `hosts`
-        # key at the root (review round 11); and a directory in no git repository.
+        # dispatch://INFRA-3365, review round 10); listing github.com, its key plain or quoted, with the entry gh
+        # writes, or in the layout scripts/gh-agent-config writes, which adds `git_protocol: https`: each indented key
+        # one the check reads, none an `api_host`; GH_HOST github.com in another letter case, or api.github.com, which
+        # gh reads as github.com as it reads `--hostname api.github.com` (review round 11); config.yml holding an alias
+        # named `hosts`, which `gh alias set hosts 'auth status'` writes inside the aliases, in block and in flow form,
+        # and which is no `hosts` key at the root (review round 11); and a directory in no git repository.
         self.checkout(("origin", f"https://github.com/{PRIVATE}.git"))
 
         def no_repository() -> dict[str, str]:
@@ -2012,6 +2036,8 @@ class GhLeakTerms(unittest.TestCase):
                 ("hosts.yml holds {}", lambda: self.gh_config("logged-out", "# gh auth logout\n{}\n")),
                 ("hosts.yml lists github.com", lambda: self.gh_config("github", HOSTS_GITHUB)),
                 ("hosts.yml lists github.com, quoted", lambda: self.gh_config("quoted", '"github.com":\n' + GH_HOST_ENTRY)),
+                ("hosts.yml in scripts/gh-agent-config's layout", lambda: self.gh_config(
+                    "agent-layout", HOSTS_GITHUB.replace("    user: x\n", "    git_protocol: https\n    user: x\n"))),
                 ("GH_HOST is GitHub.COM", lambda: {**self.env, "GH_HOST": "GitHub.COM"}),
                 ("GH_HOST is api.github.com", lambda: {**self.env, "GH_HOST": "api.github.com"}),
                 ("an alias named hosts", lambda: self.gh_config("hosts-alias", HOSTS_GITHUB,
