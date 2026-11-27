@@ -97,7 +97,7 @@ metadata_account_check() {
 # `theorem-session list` shows only the caller's own agents). An answer that is an error says
 # nothing about a grant, so it fails the line.
 identity_limits_check() {
-    local where="$1" tok out got
+    local where="$1" tok out got session
     if tok="$(gcloud auth print-access-token 2>&1)"; then
         if out="$(printf 'header = "Authorization: Bearer %s"\n' "$tok" | curl -fsS -m 20 -K - -X POST \
             -H 'Content-Type: application/json' -d '{"permissions":["iam.serviceAccounts.getAccessToken"]}' \
@@ -116,12 +116,15 @@ identity_limits_check() {
     got="$(kubectl --context "$KUBE_CONTEXT" -n envoy auth can-i create pods/exec 2>&1)"
     refused "$got" && ok "no envoy exec $where: kubectl -n envoy auth can-i create pods/exec: no" \
         || fail "no envoy exec $where: kubectl -n envoy auth can-i create pods/exec: $(tail -1 <<<"$got")"
-    if ! command -v theorem-session >/dev/null; then
-        fail "sessions $where: theorem-session is not on PATH (installers/theorem-session.sh installs it)"
-    elif out="$(timeout 120 theorem-session list --all 2>&1)"; then
-        ok "sessions $where: theorem-session list --all exits 0 ($(wc -l <<<"$out") lines)"
+    # Looked up as a login shell does: ~/.local/bin, where installers/theorem-session.sh puts it and
+    # which ~/.profile adds to a login shell's PATH, then the caller's PATH, which in an agent session
+    # on the host or a command sshd runs lacks ~/.local/bin.
+    if ! session="$(PATH="$HOME/.local/bin:$PATH" command -v theorem-session)"; then
+        fail "sessions $where: no theorem-session in $HOME/.local/bin or on PATH (installers/theorem-session.sh installs it)"
+    elif out="$(timeout 120 "$session" list --all 2>&1)"; then
+        ok "sessions $where: $session list --all exits 0 ($(wc -l <<<"$out") lines)"
     else
-        fail "sessions $where: theorem-session list --all: $(tail -1 <<<"$out")"
+        fail "sessions $where: $session list --all: $(tail -1 <<<"$out")"
     fi
 }
 

@@ -10,7 +10,8 @@ Secret read, no exec into an Envoy pod, and `theorem-session list --all` working
 
 Technique, as test_sami_devbox_check_logins.py: the real script sourced without its dispatch, each
 function run alone. gce_metadata_stub.py is the metadata server; `gcloud`, `curl`, `kubectl` and
-`theorem-session` are stubs on PATH where a case needs them.
+`theorem-session` are stubs on PATH where a case needs them; a case may also put `theorem-session` in the
+~/.local/bin of a throwaway HOME.
 """
 
 from __future__ import annotations
@@ -155,7 +156,15 @@ class IdentityLimits(CheckCase):
         super().setUp()
         for name, body in (("gcloud", GCLOUD), ("curl", CURL), ("kubectl", KUBECTL), ("theorem-session", SESSION)):
             write_stub(self.bin, name, body)
+        # A throwaway HOME: the sessions line looks in ~/.local/bin first, and must find only what a case puts there,
+        # never the real install.
+        self.local_bin.mkdir(parents=True)
+        self.env["HOME"] = str(self.root / "home")
         self.answers(tip={}, secrets="no", exec_="no", sessions=0)
+
+    @property
+    def local_bin(self) -> Path:
+        return self.root / "home" / ".local" / "bin"
 
     def answers(self, tip: Mapping[str, object], secrets: str, exec_: str, sessions: int) -> None:
         (self.root / "tip.json").write_text(json.dumps(tip), encoding="utf-8")
@@ -195,12 +204,33 @@ class IdentityLimits(CheckCase):
                 got = self.lines()
                 self.assertEqual((got["no envoy secrets"], got["no envoy exec"]), (want, want))
 
-    def test_no_theorem_session_on_path_fails_the_sessions_line_naming_its_installer(self) -> None:
+    def sessions_line(self) -> str:
+        [line] = [line for line in self.run_function('identity_limits_check "on the host"') if " sessions " in line]
+        return line
+
+    def test_no_theorem_session_in_local_bin_or_on_path_fails_the_sessions_line_naming_its_installer(self) -> None:
         (self.bin / "theorem-session").unlink()
         self.env["PATH"] = f"{self.bin}:/usr/bin:/bin"
-        [line] = [line for line in self.run_function('identity_limits_check "on the host"') if " sessions " in line]
+        line = self.sessions_line()
         self.assertTrue(line.startswith("FAIL "), line)
         self.assertIn("installers/theorem-session.sh installs it", line)
+
+    def test_theorem_session_in_local_bin_passes_when_path_lacks_it(self) -> None:
+        """installers/theorem-session.sh installs to ~/.local/bin, which a login shell's PATH holds (~/.profile) and an
+        agent session's or an ssh command's PATH lacks: the line finds it there, runs it and names it."""
+        write_stub(self.local_bin, "theorem-session", SESSION)
+        (self.bin / "theorem-session").unlink()
+        self.env["PATH"] = f"{self.bin}:/usr/bin:/bin"
+        line = self.sessions_line()
+        self.assertTrue(line.startswith("ok "), line)
+        self.assertIn(f"{self.local_bin}/theorem-session list --all exits 0", line)
+
+    def test_the_local_bin_copy_runs_before_one_on_path_as_in_a_login_shell(self) -> None:
+        write_stub(self.local_bin, "theorem-session", SESSION)
+        write_stub(self.bin, "theorem-session", "#!/bin/bash\nexit 2\n")
+        line = self.sessions_line()
+        self.assertTrue(line.startswith("ok "), line)
+        self.assertIn(f"{self.local_bin}/theorem-session list --all exits 0", line)
 
     def test_a_cut_short_iam_answer_is_no_pass_even_if_the_json_is_complete(self) -> None:
         write_stub(self.bin, "curl", '#!/bin/bash\ncat >/dev/null\nprintf "{}"\nexit 18\n')
