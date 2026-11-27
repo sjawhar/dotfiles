@@ -41,7 +41,8 @@ CLEAN = "Reviewed at abc123; nothing to add.\n"
 PUBLIC = "o/pub"
 PRIVATE = "o/priv"
 UNREAD = "o/unread"
-# The release repository of knives's ygo-fork entry, whose own name holds `theorem-labs`, a term of that entry's list.
+# A public repository named ygo, in the knives ygo-fork entry's scope (`*/ygo`), whose own name holds `theorem-labs`,
+# a term of that entry's list.
 YGO = "theorem-labs/ygo"
 YGO_LIST = "the knives ygo-fork list"
 # The one target of every raw GraphQL mutation (GH_GRAPHQL_TARGET): the check reads no mutation as going anywhere else.
@@ -432,8 +433,8 @@ class GhLeakTerms(unittest.TestCase):
     # --- a term inside the own name of a public destination sends nothing new (dispatch://INFRA-3365) -----------------
 
     def ygo_fork(self) -> dict[str, str]:
-        """The environment with a knives registry holding only the real ygo-fork entry: its forbidden list holds
-        `theorem-labs`, which the name of the entry's release repository, theorem-labs/ygo, holds too."""
+        """The environment with a knives registry holding only a made-up ygo-fork entry, whose public release
+        repository, theorem-labs/ygo, has a name that holds `theorem-labs`, a term of the entry's forbidden list."""
         knives = self.tmp / "knives"
         knives.mkdir()
         (knives / "repos.toml").write_text(
@@ -452,7 +453,7 @@ class GhLeakTerms(unittest.TestCase):
         ]
 
     def test_a_term_inside_the_name_of_the_public_repository_a_call_goes_to_counts_for_nothing(self) -> None:
-        # Given the knives ygo-fork list and its public release repository theorem-labs/ygo, whose name holds a term of
+        # Given the knives ygo-fork list and the public theorem-labs/ygo in its scope, whose name holds a term of
         # that list: the value of -R is text the call sends, read as every text is, and the term in it lies inside the
         # own name of a repository read as public, which sends nothing new, so the call goes out (gh_own_name).
         env = self.ygo_fork()
