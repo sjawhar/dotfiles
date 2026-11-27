@@ -120,30 +120,43 @@ _.path = ['{{ env.DOTFILES_DIR | default(value=env.HOME ~ "/.dotfiles") }}/shims
 # upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec
 # them for hub/worker spawns.
 #
-# v18.18.6-sami.20261126-110039 (commit 34021711, Cut14) carries two fixes of dispatch://HOME-311
-# that the pin before it, v18.18.6-sami.20261119-162325, lacked:
-# - one memory row with no text id or no text (SQLite's `.recover` wrote such a row into the
-#   theorem profile's Mnemopi database on 2026-10-30) no longer turns memory off at every start:
-#   the embedding rebuild skips it with a warning (fork member 941ae277, upstream
-#   can1357/oh-my-pi#20613);
-# - a /resume or /move to another directory while memory is already off moves the session there
-#   with a warning, instead of closing it (fork member e89d9e3d). A move from a directory where
-#   memory ran is still refused when memory cannot start in the destination.
-# 20261119 (b40fd3c3) is an ancestor of it, so it keeps the classifier-refusal fallback fix
+# v18.18.6-sami.20261126-222037 (commit 5a19b165, Cut15) carries one fix of dispatch://INFRA-5923
+# that the pin before it, v18.18.6-sami.20261126-110039 (Cut14, 34021711), lacked: fork member
+# fix/built-in-provider-discovery-and-restore (5c7bd962 and 328dc97a, landed as 635518b6).
+# - A built-in provider whose baseUrl is not its vendor's (omp/models.local.yml gives `anthropic`
+#   and `openai` the model gateway) runs its model discovery against that baseUrl, caches the result
+#   under a key of that endpoint, and keeps only that vendor's own model families. On this box's
+#   models.yml, Cut14's `omp models anthropic` listed 18 GPT and Gemini rows (anthropic/gpt-6.1-sol,
+#   anthropic/openai/gpt-6-astra, anthropic/gemini-4-neon, ...) and Cut15's lists Claude rows only
+#   (measured 2026-11-26 near 23:51Z). Both still list the gateway's 24 `anthropic/claude-*` group
+#   names as doubled `anthropic/anthropic/claude-*` selectors.
+# - A session whose saved selector names a provider that models.yml no longer declares resumes on
+#   that selector's own exact retry.fallbackChains key to the same model, or refuses and names
+#   --model and the key to add, instead of resuming on the default role's model. Such a key whose
+#   steps resolve no longer warns that it references an unknown model.
+# Cut14 is its first parent and every commit of Cut14 is carried, so it keeps both fixes of
+# dispatch://HOME-311 (a memory row with no text id or no text no longer turns memory off at every
+# start: the embedding rebuild skips it with a warning, fork member 941ae277, upstream
+# can1357/oh-my-pi#20613; a /resume or /move while memory is off moves the session with a warning,
+# fork member e89d9e3d) and, through 20261119 (b40fd3c3), the classifier-refusal fallback fix
 # (230bc2fa, dispatch://INFRA-4512), the 11-17 probe fix (dispatch://INFRA-4027), the 11-10
-# memory-leak fix (dispatch://INFRA-1876) and setup version 3. Its other cuts since then also bring
-# dispatch://INFRA-3530's session-memory change (Cut12), obash no longer waiting for ever on a
-# subshell that a fatal expansion error ends (Cut13, #301: Cut7 to Cut12 hung there on Linux), and
-# grep -o / rg --null-data anchor fixes (#295). Its release notes say not to set
-# `task.disabledAgents` yet; no config here sets it.
-# The linux-x64 asset (sha256 5a87f1737b1fd6c01884f907c69b95a4fc3705d8f9b783036faa2e8525b3e797) is
-# smoke-tested: `omp --version` gives omp/18.18.6 and `omp --smoke-test` gives `smoke-test: ok`. On
-# a private copy of the theorem database with the bad row, it logs one skip warning for rowid
-# 1374389534721 where 20261119 logs "backend startup failed" (measured 2026-11-26).
+# memory-leak fix (dispatch://INFRA-1876), setup version 3, dispatch://INFRA-3530's session-memory
+# change (Cut12), obash no longer waiting for ever on a subshell that a fatal expansion error ends
+# (Cut13, #301) and the grep -o / rg --null-data anchor fixes (#295). Its other members since Cut14
+# are obash fixes, Claude receiving no other model's thinking, a classifier refusal sent again to
+# the same model twice before the fallback chain, --session-id resuming or creating the session
+# with that id, and --resume preferring an exact id; the release notes list each.
+# The linux-x64 asset (sha256 cf15c8c6c9f3e03712455ede9c6390699f7884cf92f7ae3796e50e90d9ab6e08) is
+# smoke-tested: `omp --version` gives omp/18.18.6, as every 18.18.6 cut does, and `omp
+# --smoke-test` gives `smoke-test: ok` (measured 2026-11-26). On a private copy of the theorem
+# database with the bad row, Cut14 logged one skip warning for rowid 1374389534721 where 20261119
+# logged "backend startup failed" (measured 2026-11-26); Cut15's packages/mnemopi is identical to
+# Cut14's (`git diff 34021711 5a19b165 -- packages/mnemopi` is empty, where the same diff from
+# b40fd3c3 to 34021711 lists 11 files).
 # packages/mnemopi changed in the fork (the row fix, guarded model calls, a banks.ts refactor that
 # keeps the bank layout) with no schema change, so "npm:@oh-my-pi/pi-mnemopi" below stays 18.18.6.
 # That upstream CLI keeps the row bug until upstream ships #20613.
-# Release: https://github.com/cybermonklabs/oh-my-pi/releases/tag/v18.18.6-sami.20261126-110039
+# Release: https://github.com/cybermonklabs/oh-my-pi/releases/tag/v18.18.6-sami.20261126-222037
 #
 # There is NO macOS split here, and do not add one. The fork's CI builds and smoke-tests a
 # darwin-arm64 asset on a macos-15 runner, but no Mac of Sami's runs it. On 2026-11-10 this file
@@ -151,12 +164,15 @@ _.path = ['{{ env.DOTFILES_DIR | default(value=env.HOME ~ "/.dotfiles") }}/shims
 # plainly that he does not have a Mac and runs Linux (dispatch://INFRA-1876/ask/6ad5d62f). The hold
 # protected nobody and would have rotted into a permanently stale second pin.
 #
-# This release is an Actions build: run 45806183787 of "Build sami branch"
-# (https://github.com/cybermonklabs/oh-my-pi/actions/runs/45806183787) built and smoke-tested
-# linux-x64 on ubuntu-22.04 and darwin-arm64 on macos-15, and run 45809997588 published it. Its
-# linux-x64 archive has a build attestation: `gh attestation verify <archive> --owner cybermonklabs`
-# finds one, from sami-build.yml on release-candidate.
-"github:sjawhar/oh-my-pi" = "18.18.6-sami.20261126-110039"
+# This release is an Actions build: run 45903893773 of "Build sami branch" on release-candidate
+# (https://github.com/cybermonklabs/oh-my-pi/actions/runs/45903893773) built and smoke-tested
+# linux-x64 on ubuntu-22.04 and darwin-arm64 on macos-15, and run 45906529843 on sami published it
+# at 2026-11-26 22:44:44Z. Its linux-x64 archive has a build attestation: `gh attestation verify
+# <archive> --owner cybermonklabs` finds one SLSA provenance v1 attestation, from sami-build.yml on
+# release-candidate at 5a19b165 (run 45903893773), and answers 404 for a file with none. The
+# release-candidate "sami checks" run 45903894088 failed on pi-shell Bazel tests outside its
+# known-failure list, as Cut14's run 45806183844 failed.
+"github:sjawhar/oh-my-pi" = "18.18.6-sami.20261126-222037"
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
 # broker asset and gives it its own install dir alongside forward's.
