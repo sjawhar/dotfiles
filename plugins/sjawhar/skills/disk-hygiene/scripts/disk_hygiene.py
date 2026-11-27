@@ -154,7 +154,7 @@ def procs_under(path: str) -> list[tuple[int, str]]:
     hits: list[tuple[int, str]] = []
     for pid in refs_under(path, proc_path_refs()[0]):
         try:
-            hits.append((pid, Path(f"/proc/{pid}/comm").read_text().strip()))
+            hits.append((pid, Path(f"/proc/{pid}/comm").read_text(errors="replace").strip()))
         except OSError:
             hits.append((pid, "?"))
     return hits
@@ -1575,7 +1575,9 @@ def cmd_containers(_args: argparse.Namespace) -> None:
                 pass
     run_ids = _e2e_run_ids_in_env()
     drivers = [(pid, c[:120]) for pid, c in cmdlines if _INSPECT_DRIVER_RE.search(c) and "disk_hygiene" not in c]
-    _, ss_out = run(["sudo", "ss", "-tnpH", "state", "established"])
+    # ss prints each socket owner's name as raw bytes, and a process may name itself with any bytes.
+    ss_out = subprocess.run(["sudo", "ss", "-tnpH", "state", "established"], capture_output=True, text=True,
+                            errors="replace", timeout=600).stdout
     cwds = proc_cwds()
     stack_ws = _local_stack_workspaces()
     box_local = _docker_daemon_is_box_local()
@@ -1739,16 +1741,18 @@ def _proc_io(pid: str) -> dict[str, int] | None:
 
 
 def _proc_stat_fields(pid: str) -> list[str] | None:
-    """Fields of /proc/<pid>/stat after comm: state [0], utime [11], stime [12], starttime [19]."""
+    """Fields of /proc/<pid>/stat after comm: state [0], utime [11], stime [12], starttime [19].
+    A process may name itself with any bytes; decoding with replacement can alter only comm, dropped here."""
     try:
-        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return Path(f"/proc/{pid}/stat").read_text(errors="replace").rsplit(")", 1)[1].split()
     except (OSError, IndexError):
         return None
 
 
 def _proc_comm(pid: int | str) -> str:
+    """A byte of the name that is not UTF-8 shows as U+FFFD: the process stays in every census."""
     try:
-        return Path(f"/proc/{pid}/comm").read_text().strip()
+        return Path(f"/proc/{pid}/comm").read_text(errors="replace").strip()
     except OSError:
         return "?"
 
