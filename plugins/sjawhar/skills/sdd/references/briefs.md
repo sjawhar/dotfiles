@@ -2,12 +2,10 @@
 
 Each brief is Legion's role prompt parts, then a `# Task` section, joined with blank lines. Fetch the parts at dispatch time from `https://raw.githubusercontent.com/sjawhar/legion/main/packages/daemon/internal/prompts/roles/`, never from a local copy, which drifts from the prompts Legion reviews:
 
-| Role | Agent | Prompt parts |
-| --- | --- | --- |
-| Implement or debug | `deep` | `core/common.md`, `core/implementer.md`, `mechanics/interactive.md` |
-| Acceptance | `deep` | `core/common.md`, `core/tester.md`, `mechanics/interactive.md` |
-| Review | `reviewer` | `core/common.md`, `core/reviewer.md`, `mechanics/interactive.md` |
-| Research | `oracle` | `core/oracle.md`, `mechanics/interactive.md` |
+- implement or debug (`deep`): `core/common.md`, `core/implementer.md`, `mechanics/interactive.md`
+- acceptance (`deep`): `core/common.md`, `core/tester.md`, `mechanics/interactive.md`
+- review (`reviewer`): `core/common.md`, `core/reviewer.md`, `mechanics/interactive.md`
+- research (`oracle`): `core/oracle.md`, `mechanics/interactive.md`
 
 Do not fetch `core/planner.md`: you write the plan. Reject a non-200 response or an empty body:
 
@@ -21,16 +19,12 @@ fetch_part() {
 }
 ```
 
-- Keep fetched text verbatim.
-- A failed fetch blocks the dispatch, with no fallback.
-- Change the prompts only through review in Legion.
+- Keep fetched text verbatim. A failed fetch blocks the dispatch, with no fallback. Change the prompts only through review in Legion.
 - The task names the absolute workspace, the step brief, the acceptance criteria, the one branch or jj bookmark the worker may push, the absolute path of its report, and its skill-catalog entries.
 - Check commands in a brief are CI's exact recipe from the repo guide or workflow: a subset passes where CI fails.
 
 ## While the workers run
 
-- When a worker looks silent, follow `using-subagents`' `references/waiting.md` ("A lane that looks stalled").
-- When a worker looks silent, ask it one direct question: a re-dispatch sends the same brief.
-- When a `deep` worker's bash breaks, give it a shell tool from your kernel (`using-subagents`): a `deep` worker has no eval tool.
-- While a PR waits for merge or deploy, continue from its branch or a dependency's branch, unless you are revising it.
-- Post-merge production proof runs beside the next work, not instead of it.
+- When a worker looks silent, follow `using-subagents`' `references/waiting.md` ("A lane that looks stalled"). Ask it one direct question; a re-dispatch sends the same brief.
+- A `deep` worker has no eval tool: when its bash breaks, give it a shell tool from your kernel (`using-subagents`).
+- While a PR waits for merge or deploy, continue from its branch or a dependency's branch, unless you are revising it. Post-merge production proof runs beside the next work, not instead of it.
