@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from collections.abc import Callable
@@ -3380,6 +3381,28 @@ class GhLeakTerms(unittest.TestCase):
                 self.assertEqual(result.returncode, 2 if refused else 0, stderr)
                 self.assertEqual(len(self.gh_calls()), 0 if refused else 1)
 
+    def test_a_binary_release_asset_is_read_in_bounded_memory(self) -> None:
+        # A release asset is a build output, a tarball or a binary, and gh uploads up to 2 GiB of one; the check now
+        # reads its bytes (dispatch://INFRA-4957, item 3). Measured at c8d749df with the check alone on a clean asset of
+        # random bytes: 4 MiB took a peak of 421 MiB and 2.9 s, 16 MiB 1,554 MiB and 12 s, and 64 MiB passed 4.3 GiB
+        # before the pod's memory guard killed it; at 1c15219b, which read no asset bytes, 4 MiB took 72 MiB. An --attach
+        # image, which gh takes up to 10 MB, is read the same way. The check on a 4 MiB asset must stay within 40 times
+        # its size. Control: the same check on a 4 MiB asset that holds the term among the random bytes refuses it.
+        noise = os.urandom(4 << 20)
+        for name, data, code in (("clean.bin", noise, 0), ("term.bin", noise[:1 << 20] + TEXT.encode() + noise[1 << 20:], 3)):
+            with self.subTest(asset=name):
+                (self.work / name).write_bytes(data)
+                probe = subprocess.run(
+                    [sys.executable, "-c", "import resource, subprocess, sys\n"
+                     "done = subprocess.run(sys.argv[1:], stdin=subprocess.DEVNULL, capture_output=True)\n"
+                     "print(done.returncode, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)",
+                     str(CHECK), "gh", "--", "release", "upload", "v1", name, "-R", PUBLIC],
+                    env=self.env, cwd=self.work, capture_output=True, text=True, timeout=600, check=False)
+                returncode, peak = (int(word) for word in probe.stdout.split())
+                self.assertEqual(returncode, code, probe.stderr)
+                self.assertLess(peak * 1024, 40 * len(data), f"the check took a peak of {peak // 1024} MiB for a "
+                                                             f"{len(data) >> 20} MiB asset")
+
     # --- what a refusal shows (dispatch://INFRA-4383, R2) -----------------------------------------------------------
 
     def test_a_refusal_shows_the_term_and_a_bounded_line(self) -> None:
@@ -3625,6 +3648,25 @@ class Tables(unittest.TestCase):
                             module.gh_command(argv, env)
                     self.assertEqual(raised.exception.args, (" ".join(argv[:2]), module.GH_UNKNOWN_REFUSAL))
                     self.assertEqual(module.gh_command(argv, env), judged)
+
+    def test_a_bare_h_of_a_command_no_table_names_is_not_read_as_help(self) -> None:
+        # pflag reads `-h` as gh's help only where the command gives no option that letter; 12 commands of gh 2.106.0
+        # give one a value (`auth login` and six more `-h/--hostname`, `config get`, `list` and `set` `-h/--host`, `repo
+        # create` and `repo edit` `-h/--homepage`), and gh 2.106.0's `gh repo edit o/pub -h <url>` sends the homepage
+        # (measured behind a logging proxy: `CONNECT api.github.com:443`). For a command no table names the check knows
+        # no option, so its `-h` may be such an option, whose value is text gh sends: here `repo edit`, taken out of the
+        # tables as a command of a gh newer than the pin would be, with the canary in its homepage. Control: `--help`,
+        # which no command of gh gives a value, lets the same call go.
+        module = self.scanner()
+        with tempfile.TemporaryDirectory() as home:
+            env = {"GH_CONFIG_DIR": home, "HOME": home, "XDG_DATA_HOME": home}
+            argv = ["repo", "edit", "o/pub", "-h", f"https://example.com/{CANARY}"]
+            with mock.patch.dict(module.GH_TEXT_COMMANDS):
+                del module.GH_TEXT_COMMANDS[("repo", "edit")]
+                self.assertIsNone(module.gh_command([*argv[:3], "--help"], env))
+                with self.assertRaises(module.GhUnjudgedError) as raised:
+                    module.gh_command(argv, env)
+            self.assertEqual(raised.exception.args, ("repo edit", module.GH_UNKNOWN_REFUSAL))
 
     def test_gh_s_aliases_are_the_installed_gh_s_own(self) -> None:
         # gh_command reads a call's words through gh's aliases (GH_GROUP_ALIASES, GH_SUBCOMMAND_ALIASES) and refuses an
