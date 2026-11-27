@@ -127,14 +127,16 @@ Follow restores the managed marketplace lock before it calls the sync.
    as `installers/knives.sh` does, and records what the render depends on in
    `~/.config/knives/repos.toml.source-sha256`: the sha256 of the file it rendered, the oh-my-pi
    workspaces path it wrote (`/mnt/nvme/<home name>/omp-worktrees/branches` where the big local
-   disk's directory `/mnt/nvme/<home name>` exists, else `~/.worktrees/oh-my-pi`), and the sha256
-   of `scripts/knives-registry-render` itself, whose sed is the render's rule. It writes nothing
-   while the copy is a plain file and the record holds all three as this run has them. So a
-   merged change to the registry reaches the machine with no person's command, and
+   disk's directory `/mnt/nvme/<home name>` exists and the deepest existing directory of that path
+   is writable, else `~/.worktrees/oh-my-pi`; an agent box mounts that directory owned by root),
+   and the sha256 of `scripts/knives-registry-render` itself, whose sed is the render's rule. It
+   writes nothing while the copy is a plain file and the record holds all three as this run has
+   them. So a merged change to the registry reaches the machine with no person's command, and
    `scripts/leak-terms-check`, which reads the same copy, sees it too; a copy rendered while that
-   directory was absent is rendered again once it is there; and a merged change to the render
-   script renders again although `knives/repos.toml` did not change. A copy that a person edited
-   by hand is replaced when the file changes, as an install replaces it, and a symlink at the
+   directory was absent or not writable is rendered again once it can be used; and a merged
+   change to the render script renders again although `knives/repos.toml` did not change. A copy
+   that a person edited by hand is replaced when the file changes, as an install replaces it, and
+   a symlink at the
    copy's path is replaced by a plain file. A directory there is never replaced: the render
    fails. The first run of this version renders once, since no record of this form exists yet.
    A failed render is a condition and stops nothing: the tools step still runs. A `~/.dotfiles`

@@ -42,7 +42,15 @@ worktrees="$HOME/.worktrees/oh-my-pi"
 # The big disk's directory is named for the home it belongs to, not for the login name.
 # KNIVES_REGISTRY_NVME_ROOT replaces /mnt/nvme (the tests point it at a scratch tree).
 nvme="${KNIVES_REGISTRY_NVME_ROOT:-/mnt/nvme}/$(basename "$HOME")"
-[[ -d "$nvme" ]] && worktrees="$nvme/omp-worktrees/branches"
+# It counts only where this user can make the workspaces: an agent box mounts that directory
+# owned by root, and a workspaces path no one can create makes every `knives start` fail. So the
+# deepest of the three directories that exists must be writable.
+for dir in "$nvme/omp-worktrees/branches" "$nvme/omp-worktrees" "$nvme"; do
+    if [[ -d "$dir" ]]; then
+        [[ -w "$dir" ]] && worktrees="$nvme/omp-worktrees/branches"
+        break
+    fi
+done
 # The render's own rule is this script: its bytes are hashed too, so a changed script renders
 # again once.
 rule="$(sha256sum <"${BASH_SOURCE[0]}")"
