@@ -4,10 +4,12 @@ description: |
   Retired to GPT-6.1 Sol on 2026-11-03: per-token GPT-6 Astra cost about $19.8k/day
   (dispatch://INFRA-165), and Sami prefers Sol over Astra (dispatch://BET-545). Use `sol`
   instead. This name stays so old briefs still resolve; it serves GPT-6.1 Sol through the OSS
-  Verify gateway, falls back to GPT-6.1 Sol on the Codex subscription, never to per-token
+  Verify gateway, on its Flex tier first, falls back to GPT-6.1 Sol on the Codex subscription, never to per-token
   Astra and never to Anthropic: a refusal means no Sol route was reachable.
   Full tool access; finishes the task it is handed and reports with evidence.
 model:
+  - "model-gateway-openai/openai/gpt-6.1-sol-flex:xhigh"
+  - "model-gateway/openai/gpt-6.1-sol-flex:xhigh"
   - "model-gateway-openai/openai/gpt-6.1-sol:xhigh"
   - "model-gateway/openai/gpt-6.1-sol:xhigh"
 color: green

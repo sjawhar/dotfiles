@@ -3,10 +3,12 @@ name: gpt-api
 description: |
   Retired to GPT-6.1 Sol on 2026-11-03 (dispatch://INFRA-165: per-token OpenAI spend);
   use `sol` instead. This name stays so old briefs still resolve; it serves GPT-6.1 Sol
-  through Theorem's model gateway, falls back to GPT-6.1 Sol on the Codex subscription, and
+  through Theorem's model gateway, on its Flex tier first, falls back to GPT-6.1 Sol on the Codex subscription, and
   never to Anthropic. Full tool access; finishes the task it is handed and reports with
   evidence.
 model:
+  - "model-gateway-openai/openai/gpt-6.1-sol-flex:xhigh"
+  - "model-gateway/openai/gpt-6.1-sol-flex:xhigh"
   - "model-gateway-openai/openai/gpt-6.1-sol:xhigh"
   - "model-gateway/openai/gpt-6.1-sol:xhigh"
 color: yellow
