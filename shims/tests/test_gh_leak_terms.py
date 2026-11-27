@@ -250,6 +250,20 @@ class GhLeakTerms(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
         self.assertEqual(self.gh_calls(), [])
 
+    def assert_command_refused(self, argv: list[str], name: str, message: str) -> None:
+        """The call ARGV of a command the check refuses whatever it sends (GH_REFUSED_COMMANDS), NAME as the call writes
+        it, is refused before gh runs: the check exits 4, its refusal giving MESSAGE and saying nothing was sent; and
+        through shims/gh the call exits 2 and gh never runs."""
+        checked = self.check(argv, self.env)
+        stderr = checked.stderr.decode("utf-8", "replace")
+        self.assertEqual(checked.returncode, 4, stderr)
+        self.assertIn(f"leak terms: gh {name}: {message}\n", stderr)
+        self.assertIn(f"leak terms: gh {name}: refused before gh ran, so nothing was sent.", stderr)
+        self.setUp_calls()
+        result = self.run_gh(argv)
+        self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
+        self.assertEqual(self.gh_calls(), [])
+
     # --- every input form: refused for a public repository, sent unchanged to a private one ----------------------
 
     def forms(self, repo: str, text: str) -> list[tuple[str, list[str], bytes, str]]:
@@ -3047,7 +3061,7 @@ class GhLeakTerms(unittest.TestCase):
         self.setUp_calls()
         self.assert_sent(self.run_gh(argv), argv)
 
-    # --- gh 2.106.0's --attach and `issue artifact` ---------------------------------------------------------------
+    # --- gh 2.106.0's --attach, and the commands the check refuses whatever they send (GH_REFUSED_COMMANDS) --------
 
     def test_a_term_in_an_attach_file_is_refused_for_a_public_repository(self) -> None:
         # gh 2.106.0's --attach `<file>[#<alt text>]` (pr create, edit and comment; issue create, edit and comment)
@@ -3114,27 +3128,90 @@ class GhLeakTerms(unittest.TestCase):
 
     def test_gh_issue_artifact_create_and_edit_are_refused_and_its_reads_go_out(self) -> None:
         # gh 2.106.0's preview `issue artifact create` (its alias `new`) and `edit` upload Markdown and HTML documents,
-        # links and files the check does not read: each call is refused before gh runs, the check exiting 4 whatever
-        # its target and its text, here a clean one to a private repository. Controls: its reads (`list`, `view`) go
-        # out, to a public repository too.
+        # links and files the check does not read (GH_REFUSED_COMMANDS): each call is refused before gh runs, the check
+        # exiting 4 whatever its target and its text, here a clean one to a private repository. Controls: its reads
+        # (`list`, `view`) go out, to a public repository too.
         self.file("plan.md", CLEAN)
         for verb, argv in (("create", ["issue", "artifact", "create", "4", "plan.md", "-R", PRIVATE]),
                            ("new", ["issue", "-R", PRIVATE, "artifact", "new", "4", "--body", "x"]),
                            ("edit", ["issue", "artifact", "edit", "4", "1", "-R", PRIVATE, "--name", "x"])):
             with self.subTest(call=" ".join(argv)):
-                checked = self.check(argv, self.env)
-                stderr = checked.stderr.decode("utf-8", "replace")
-                self.assertEqual(checked.returncode, 4, stderr)
-                self.assertIn(f"leak terms: gh issue artifact {verb}: gh 2.106.0's preview `issue artifact` uploads "
-                              "documents and files the check does not read, so the check refuses the call\n", stderr)
-                self.assertIn(f"leak terms: gh issue artifact {verb}: refused before gh ran, so nothing was sent.",
-                              stderr)
-                self.setUp_calls()
-                result = self.run_gh(argv)
-                self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
-                self.assertEqual(self.gh_calls(), [])
+                self.assert_command_refused(argv, f"issue artifact {verb}", "gh 2.106.0's preview `issue artifact` "
+                                            "uploads documents and files the check does not read, so the check refuses "
+                                            "the call")
         for argv in (["issue", "artifact", "list", "4", "-R", PUBLIC], ["issue", "artifact", "view", "4", "1", "-R",
                                                                        PUBLIC]):
+            with self.subTest(control=" ".join(argv)):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+
+    def test_gh_skill_publish_is_refused_unless_dry_run_or_fix_is_on(self) -> None:
+        # gh 2.106.0's preview `skill publish` creates a GitHub release, with a tag and auto-generated notes, and adds
+        # the `agent-skills` topic to the repository, and the check reads none of them: each call is refused before gh
+        # runs, whatever its target, through gh's alias `skills` too, and with --dry-run or --fix given off. Controls:
+        # with --dry-run or --fix on, as gh reads a bool flag (bare or `=true`, the last one given winning), it only
+        # checks or fixes the skills on this machine, and goes out.
+        message = ("gh 2.106.0's preview `skill publish` creates a GitHub release, with a tag and auto-generated notes, "
+                   "and adds a topic to the repository, and the check reads none of them, so the check refuses the "
+                   "call; with --dry-run or --fix it only checks the skills on this machine")
+        for name, argv in (("skill publish", ["skill", "publish", "--tag", "v1"]),
+                           ("skills publish", ["skills", "publish", "--tag", "v1"]),
+                           ("skill publish", ["skill", "publish", "skills-dir", "--dry-run=false", "--tag", "v1"]),
+                           ("skill publish", ["skill", "publish", "--fix", "--fix=false"])):
+            with self.subTest(call=" ".join(argv)):
+                self.assert_command_refused(argv, name, message)
+        for argv in (["skill", "publish", "--dry-run"], ["skill", "publish", "--fix"],
+                     ["skill", "publish", "--tag", "v1", "--dry-run=true"],
+                     ["skills", "publish", "--dry-run=false", "--fix"]):
+            with self.subTest(control=" ".join(argv)):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+
+    def test_gh_label_clone_and_repo_autolink_create_are_refused_and_autolink_reads_go_out(self) -> None:
+        # `label clone` copies the label names and descriptions of the source repository onto the target, and the key
+        # prefix and the URL template of `repo autolink create` (its alias `new`) show in the rendered links of the
+        # repository's issues and pull requests. The check reads none of them, so each call is refused before gh runs,
+        # whatever its target, here a private one. Controls: the reads of `repo autolink` go out, to a public
+        # repository too.
+        label = ("`label clone` copies the label names and descriptions of the source repository onto the target, and "
+                 "the check does not read them, so the check refuses the call")
+        autolink = ("the key prefix and the URL template of `repo autolink create` show in the rendered links of the "
+                    "repository's issues and pull requests, and the check does not read them, so the check refuses "
+                    "the call")
+        for name, argv, message in (
+                ("label clone", ["label", "clone", "o/src", "-R", PRIVATE], label),
+                ("repo autolink create", ["repo", "autolink", "create", "PREFIX-", "https://x/<num>", "-R", PRIVATE],
+                 autolink),
+                ("repo autolink new", ["repo", "autolink", "new", "PREFIX-", "https://x/<num>", "-R", PRIVATE],
+                 autolink)):
+            with self.subTest(call=" ".join(argv)):
+                self.assert_command_refused(argv, name, message)
+        for argv in (["repo", "autolink", "list", "-R", PUBLIC], ["repo", "autolink", "view", "1", "-R", PUBLIC]):
+            with self.subTest(control=" ".join(argv)):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+
+    def test_gh_gpg_key_add_and_a_signing_ssh_key_add_are_refused_and_an_authentication_key_goes_out(self) -> None:
+        # GitHub lists for anyone a GPG key's armored text and emails (`GET /users/<login>/gpg_keys`), and the title of
+        # an SSH signing key (GH_REFUSED_COMMANDS), so `gpg-key add` and `ssh-key add --type signing` are refused
+        # before gh runs, the last --type given winning. Controls: the title of an authentication key, the default
+        # --type, only the account sees, so `ssh-key add` with no --type, or whose last --type is `authentication`,
+        # goes out.
+        self.file("key.asc", CLEAN)
+        self.file("key.pub", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI x\n")
+        gpg = ("`gpg-key add` sends a key's armored text, with its user IDs, which GitHub lists for anyone, and the check "
+               "does not read it, so the check refuses the call")
+        ssh = ("GitHub shows anyone the title of a signing key, which `ssh-key add --type signing` adds, and the check "
+               "does not read it, so the check refuses the call; an authentication key, the default --type, goes out")
+        for name, argv, message in (
+                ("gpg-key add", ["gpg-key", "add", "key.asc", "--title", "t"], gpg),
+                ("ssh-key add", ["ssh-key", "add", "key.pub", "--type", "signing"], ssh),
+                ("ssh-key add", ["ssh-key", "add", "key.pub", "--type=authentication", "-t", "t", "--type", "signing"],
+                 ssh)):
+            with self.subTest(call=" ".join(argv)):
+                self.assert_command_refused(argv, name, message)
+        for argv in (["ssh-key", "add", "key.pub", "--title", "t"],
+                     ["ssh-key", "add", "key.pub", "--type", "signing", "--type=authentication"]):
             with self.subTest(control=" ".join(argv)):
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv), argv)
@@ -3205,7 +3282,8 @@ class GhLeakTerms(unittest.TestCase):
 
 class Tables(unittest.TestCase):
     """The check reads gh's arguments as gh does, from a table of each command's options and of the commands whose first
-    argument is the repository the call goes to."""
+    argument is the repository the call goes to; and each command of gh is in one of its tables, so the check knows
+    it."""
 
     def scanner(self):
         import importlib.machinery
@@ -3239,7 +3317,12 @@ class Tables(unittest.TestCase):
         commands = set(module.GH_TEXT_COMMANDS)
         self.assertLessEqual(module.GH_REPOSITORY_ARGUMENT, commands)
         self.assertLessEqual(module.GH_URL_ARGUMENT, commands)
-        for (group, sub), table in module.GH_TEXT_COMMANDS.items():
+        # The options of a refused command, which the check reads to let some of its calls go (gh_refusal_lifted), are
+        # compared the same way.
+        self.assertLessEqual(set(module.GH_REFUSED_OPTIONS), set(module.GH_REFUSED_COMMANDS))
+        tables = [*module.GH_TEXT_COMMANDS.items(),
+                  *((tuple(name.split(" ", 1)), table) for name, table in module.GH_REFUSED_OPTIONS.items())]
+        for (group, sub), table in tables:
             with self.subTest(command=f"{group} {sub}"):
                 text = subprocess.run([gh, group, *([sub] if sub else []), "--help"], capture_output=True, text=True,
                                       check=True, timeout=60).stdout
@@ -3264,6 +3347,49 @@ class Tables(unittest.TestCase):
                 self.assertEqual((group, sub) in module.GH_REPOSITORY_ARGUMENT, first == "<repository>", usage)
                 urls = {"<url>", "<urls>", "<discussion-url>", "<comment-url>"}
                 self.assertEqual((group, sub) in module.GH_URL_ARGUMENT, bool(urls.intersection(arguments)), usage)
+
+    def test_every_command_of_the_installed_gh_is_in_exactly_one_table(self) -> None:
+        # When gh 2.106.0 added `issue artifact`, which uploads files, nothing failed: no table listed every command.
+        # Each leaf of the command tree of the gh on PATH, a command whose help lists no subcommand, is in exactly one
+        # of GH_TEXT_COMMANDS (`api` for ("api", "")), GH_QUIET_COMMANDS and GH_REFUSED_COMMANDS, and each entry of the
+        # three is such a leaf, so a gh that adds a command, or drops one, fails here. A command's subcommands are the
+        # lines of each help section whose title ends with `COMMANDS`, but `ALIAS COMMANDS` and `EXTENSION COMMANDS`,
+        # which list this machine's aliases and extensions. The help is `gh help <words>`, the text `gh <words> --help`
+        # prints (measured 2026-11-27 with gh 2.106.0, for `gh` and each of its 242 commands), but for `extension
+        # exec`, which reads `--help` as the name of an extension to run and fails (`extension "--help" not found`).
+        gh = self.real_gh()
+        if gh is None:
+            self.skipTest("no gh on PATH")
+        module = self.scanner()
+        entry = re.compile(r"^\s+([^\s:]+):\s")
+        leaves: set[str] = set()
+        pending: list[list[str]] = [[]]
+        while pending:
+            words = pending.pop()
+            text = subprocess.run([gh, "help", *words], capture_output=True, text=True, check=True,
+                                  timeout=60).stdout
+            section, subcommands = "", []
+            for help_line in text.splitlines():
+                if help_line and not help_line.startswith(" "):
+                    section = help_line.strip()
+                elif (section.endswith("COMMANDS") and section not in ("ALIAS COMMANDS", "EXTENSION COMMANDS")
+                      and (m := entry.match(help_line))):
+                    subcommands.append(m[1])
+            if subcommands:
+                pending.extend([*words, sub] for sub in subcommands)
+            elif words:
+                leaves.add(" ".join(words))
+            else:
+                self.fail(f"`gh help` lists no command, so no command could be classified:\n{text}")
+        tables = ({" ".join(word for word in key if word) for key in module.GH_TEXT_COMMANDS},
+                  set(module.GH_QUIET_COMMANDS), set(module.GH_REFUSED_COMMANDS))
+        listed = set().union(*tables)
+        problems = [f"{what}: {', '.join(names)}" for what, names in (
+            ("unclassified", sorted(leaves - listed)),
+            ("in more than one table", sorted(name for name in listed if sum(name in table for table in tables) > 1)),
+            ("stale", sorted(listed - leaves))) if names]
+        if problems:
+            self.fail("\n".join(problems))
 
     def test_each_name_text_is_an_option_or_argument_of_its_command(self) -> None:
         # GH_NAME_TEXTS names each text by the long spelling of a GH_TEXT_COMMANDS option, or `argument N`: a spelling
@@ -3294,17 +3420,25 @@ class Tables(unittest.TestCase):
                 self.assertEqual(set(re.findall(r"`\{([a-z]+)\}`", found[1])), filled, found[0])
 
     def test_the_shim_hands_every_text_command_to_the_check(self) -> None:
+        # Each command whose text the check reads, and each command it refuses (GH_REFUSED_COMMANDS), is a write to
+        # shims/gh. gh's config directory holds no config.yml, so no alias the user's may hold makes it a call the shim
+        # hands over for that.
         text = GH.read_text(encoding="utf-8")
         functions = ""
         for name in ("gh_shim_is_write", "gh_shim_may_send_text", "gh_shim_has_nested_alias"):
             start = text.index(f"{name}() {{")
             functions += text[start:text.index("\n}\n", start) + 3]
-        for group, sub in self.scanner().GH_TEXT_COMMANDS:
-            argv = [group, *([sub] if sub else ["-X", "POST", "repos/o/r/issues"])]
-            with self.subTest(command=" ".join(argv)):
-                script = functions + "\ngh_shim_may_send_text " + " ".join(f"'{a}'" for a in argv) + " && echo yes"
-                out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60).stdout
-                self.assertEqual(out.strip(), "yes")
+        module = self.scanner()
+        calls = [[group, *([sub] if sub else ["-X", "POST", "repos/o/r/issues"])]
+                 for group, sub in module.GH_TEXT_COMMANDS]
+        calls.extend(name.split() for name in module.GH_REFUSED_COMMANDS)
+        with tempfile.TemporaryDirectory() as config:
+            for argv in calls:
+                with self.subTest(command=" ".join(argv)):
+                    script = functions + "\ngh_shim_may_send_text " + " ".join(f"'{a}'" for a in argv) + " && echo yes"
+                    out = subprocess.run(["bash", "-c", script], env={**os.environ, "GH_CONFIG_DIR": config},
+                                         capture_output=True, text=True, timeout=60).stdout
+                    self.assertEqual(out.strip(), "yes")
 
 
 class Writes(unittest.TestCase):

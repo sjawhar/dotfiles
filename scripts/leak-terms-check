@@ -2901,14 +2901,11 @@ def scan_push(text: str, remote: str, url: str) -> list[Finding]:
 # bytes when the check passes.
 GH_STDIN_EXIT = 7
 GH_STDIN = "DOTFILES_LEAK_TERMS_GH_STDIN"
-# Every gh command that sends text, with its options as `gh <command> <subcommand> --help` lists them at gh 2.106.0, the
-# version mise.toml pins: (the options that take a value, the options that take none), a short and a long spelling
-# joined by `/`. shims/tests/test_gh_leak_terms.py compares the tables with the gh on PATH, so an upgrade that adds an
-# option fails that test until the table has it. `gh api` is ("api", ""). `issue transfer` is not here: GitHub moves
-# an issue only within one owner and never from a private to a public repository ("You can only transfer issues between
-# repositories owned by the same user or organization account. A private repository issue cannot be transferred to a
-# public repository", docs.github.com, "Transferring an issue to another repository", read 2026-11-19), so a transfer
-# to a public repository moves text that was public already.
+# Every gh command whose text the check reads, with its options as `gh <command> <subcommand> --help` lists them at gh
+# 2.106.0, the version mise.toml pins: (the options that take a value, the options that take none), a short and a long
+# spelling joined by `/`. shims/tests/test_gh_leak_terms.py compares the tables with the gh on PATH, so an upgrade that
+# adds an option fails that test until the table has it. `gh api` is ("api", ""). Every other command of gh is in
+# GH_QUIET_COMMANDS or GH_REFUSED_COMMANDS.
 GH_TEXT_COMMANDS: dict[tuple[str, str], tuple[str, str]] = {
     ("pr", "create"): (
         "-a/--assignee --attach -B/--base -b/--body -F/--body-file -H/--head -l/--label -m/--milestone -p/--project "
@@ -3077,12 +3074,232 @@ GH_TEXT_COMMANDS: dict[tuple[str, str], tuple[str, str]] = {
         "--allow-escape-sequences -i/--include --paginate --silent --slurp --verbose --help",
     ),
 }
-# gh's own aliases of those commands, and its top-level commands with theirs: a first word that is none of them can be
-# a gh alias of the user's (config.yml's `aliases`), which is read as the command it expands to.
-GH_GROUP_ALIASES = {"agent": "agent-task", "agent-tasks": "agent-task", "agents": "agent-task"}
+# Each other command of gh 2.106.0 that the check need not read, by its words as `gh <words> --help` names them, with
+# why: it sends GitHub no text, or only text that no reader of a public repository or a public page sees. Each reason
+# begins with its kind: `read` lists or shows, and sends no text; `local` touches only this machine (gh's config, an
+# alias, auth, an extension, a completion, a checkout); `no text` deletes, closes, archives or changes a state, and
+# sends no text; `private` writes where only the account, or the repository's admins or collaborators, see; `closed
+# list` sends only a value from a closed list. shims/tests/test_gh_leak_terms.py walks the command tree of the gh on
+# PATH, and fails for a command in none of GH_TEXT_COMMANDS, this table and GH_REFUSED_COMMANDS, or in more than one,
+# and for an entry that gh does not list. When gh 2.106.0 added `issue artifact`, which uploads files, nothing failed:
+# no table listed every command, and neither shims/gh nor the check knew it.
+GH_QUIET_COMMANDS: dict[str, str] = {
+    "auth login": "local: signs in to a GitHub host and stores its token on this machine",
+    "auth logout": "local: revokes the account's gh token and removes it from this machine",
+    "auth refresh": "local: changes the scopes of the token stored on this machine",
+    "auth setup-git": "local: makes gh the credential helper of this machine's git",
+    "auth status": "read: shows the accounts and the authentication state of each known host",
+    "auth switch": "local: changes the active account of a host on this machine",
+    "auth token": "local: prints the token stored on this machine",
+    "browse": "read: opens a repository, an issue, a pull request or a file in the web browser",
+    "codespace code": "local: opens a codespace in Visual Studio Code",
+    "codespace cp": "private: copies files between this machine and a codespace, which only its account sees",
+    "codespace create": "private: creates a codespace, with its display name, which only its account sees",
+    "codespace delete": "no text: deletes codespaces",
+    "codespace edit": "private: sets the display name or the machine of a codespace, which only its account sees",
+    "codespace jupyter": "local: opens a codespace in JupyterLab",
+    "codespace list": "read: lists codespaces",
+    "codespace logs": "read: shows the logs of a codespace",
+    "codespace ports forward": "local: forwards ports of a codespace to this machine",
+    "codespace ports visibility": "closed list: sets the visibility of a forwarded port to public, private or org",
+    "codespace rebuild": "no text: makes a codespace again from its dev container",
+    "codespace ssh": "private: opens SSH to a codespace, which only its account sees",
+    "codespace stop": "no text: stops a codespace",
+    "codespace view": "read: shows a codespace",
+    "discussion list": "read: lists the discussions of a repository",
+    "discussion view": "read: shows a discussion and its comments",
+    "gist clone": "local: clones a gist to this machine",
+    "gist delete": "no text: deletes a gist",
+    "gist list": "read: lists the account's gists",
+    "gist view": "read: shows a gist",
+    "issue list": "read: lists the issues of a repository",
+    "issue status": "read: shows the status of relevant issues",
+    "issue artifact delete": "no text: deletes artifacts of an issue",
+    "issue artifact download": "read: downloads artifacts of an issue to files",
+    "issue artifact list": "read: lists the artifacts of an issue",
+    "issue artifact view": "read: shows an artifact of an issue",
+    "issue delete": "no text: deletes an issue",
+    "issue lock": "closed list: locks the conversation of an issue, --reason one of off_topic, resolved, spam, "
+                  "too_heated",
+    "issue pin": "no text: pins an issue to its repository",
+    # GitHub moves an issue only within one owner and never from a private to a public repository ("You can only
+    # transfer issues between repositories owned by the same user or organization account. A private repository issue
+    # cannot be transferred to a public repository", docs.github.com, "Transferring an issue to another repository",
+    # read 2026-11-19), so a transfer to a public repository moves text that was public already.
+    "issue transfer": "no text: moves an issue within its owner, never from a private repository to a public one",
+    "issue unlock": "no text: unlocks the conversation of an issue",
+    "issue unpin": "no text: unpins an issue from its repository",
+    "issue view": "read: shows an issue",
+    "org list": "read: lists the account's organizations",
+    "pr list": "read: lists the pull requests of a repository",
+    "pr status": "read: shows the status of relevant pull requests",
+    "pr checkout": "local: checks a pull request out in this machine's git",
+    "pr checks": "read: shows the CI status of a pull request",
+    "pr diff": "read: shows the changes of a pull request",
+    "pr lock": "closed list: locks the conversation of a pull request, --reason one of off_topic, resolved, spam, "
+               "too_heated",
+    "pr ready": "no text: marks a pull request ready for review, or a draft with --undo",
+    "pr unlock": "no text: unlocks the conversation of a pull request",
+    "pr update-branch": "no text: updates the branch of a pull request from its base branch, by a merge or a rebase",
+    "pr view": "read: shows a pull request",
+    "project close": "no text: closes a project, or opens it again with --undo",
+    "project delete": "no text: deletes a project",
+    "project field-delete": "no text: deletes a field of a project",
+    "project field-list": "read: lists the fields of a project",
+    "project item-add": "no text: adds an issue or a pull request, by its URL, to a project",
+    "project item-archive": "no text: archives an item of a project",
+    "project item-delete": "no text: deletes an item of a project",
+    "project item-list": "read: lists the items of a project",
+    "project link": "no text: links a project to a repository or a team",
+    "project list": "read: lists the projects of an owner",
+    "project mark-template": "no text: marks a project as a template",
+    "project unlink": "no text: unlinks a project from a repository or a team",
+    "project view": "read: shows a project",
+    "release list": "read: lists the releases of a repository",
+    "release delete": "no text: deletes a release",
+    "release delete-asset": "no text: deletes an asset of a release",
+    "release download": "read: downloads the assets of a release",
+    "release verify": "read: verifies the attestation of a release",
+    "release verify-asset": "read: verifies that a file is an asset of a release",
+    "release view": "read: shows a release",
+    "repo list": "read: lists the repositories of an owner",
+    "repo archive": "no text: archives a repository",
+    "repo autolink delete": "no text: deletes an autolink reference",
+    "repo autolink list": "read: lists the autolink references of a repository",
+    "repo autolink view": "read: shows an autolink reference",
+    "repo clone": "local: clones a repository to this machine",
+    "repo delete": "no text: deletes a repository",
+    "repo deploy-key add": "private: adds a deploy key, with its title, which only the repository's admins see",
+    "repo deploy-key delete": "no text: deletes a deploy key",
+    "repo deploy-key list": "read: lists the deploy keys of a repository",
+    "repo gitignore list": "read: lists the gitignore templates",
+    "repo gitignore view": "read: shows a gitignore template",
+    "repo license list": "read: lists common licenses",
+    "repo license view": "read: shows a license",
+    "repo read-dir": "read: lists a directory of a repository",
+    "repo read-file": "read: shows a file of a repository",
+    "repo set-default": "local: sets the default repository of this machine's clone",
+    "repo sync": "no text: updates a branch, of this clone or of a repository, to the branch of its source repository",
+    "repo unarchive": "no text: unarchives a repository",
+    "repo view": "read: shows the description and the README of a repository",
+    "skill install": "local: installs skills from a repository on this machine",
+    "skill list": "local: lists the skills installed on this machine",
+    "skill preview": "read: shows a skill of a repository",
+    "skill search": "read: searches public repositories for skills",
+    "skill update": "local: updates the skills installed on this machine",
+    "cache delete": "no text: deletes Actions caches",
+    "cache list": "read: lists Actions caches",
+    "run cancel": "no text: cancels a workflow run",
+    "run delete": "no text: deletes a workflow run",
+    "run download": "read: downloads the artifacts of a workflow run",
+    "run list": "read: lists workflow runs",
+    "run rerun": "no text: runs a workflow run, or its jobs, again",
+    "run view": "read: shows a workflow run",
+    "run watch": "read: shows the progress of a workflow run until it completes",
+    "workflow disable": "no text: disables a workflow",
+    "workflow enable": "no text: enables a workflow",
+    "workflow list": "read: lists workflows",
+    "workflow view": "read: shows a workflow",
+    "agent-task list": "read: lists agent tasks",
+    "agent-task view": "read: shows an agent task session",
+    "alias delete": "local: deletes aliases from gh's config on this machine",
+    "alias import": "local: adds aliases to gh's config on this machine",
+    "alias list": "local: prints the aliases of gh's config on this machine",
+    "alias set": "local: adds an alias to gh's config on this machine",
+    "attestation download": "read: downloads the attestations of an artifact",
+    "attestation trusted-root": "read: prints a trusted root for offline verification",
+    "attestation verify": "read: verifies the attestations of an artifact",
+    "completion": "local: prints a shell completion script",
+    "config clear-cache": "local: clears gh's cache on this machine",
+    "config get": "local: prints a key of gh's config on this machine",
+    "config list": "local: prints gh's config on this machine",
+    "config set": "local: sets a key of gh's config on this machine",
+    "copilot": "local: runs the Copilot CLI on this machine, which gh downloads first when it is not installed",
+    "event listen": "read: prints the events of a pull request as they happen",
+    "event subscription create": "private: subscribes the account to the events of a resource",
+    "event subscription delete": "no text: deletes an event subscription",
+    "event subscription list": "read: lists event subscriptions",
+    "event subscription view": "read: shows an event subscription",
+    "extension browse": "local: browses, installs and removes extensions on this machine",
+    "extension create": "local: makes the files of a new extension on this machine",
+    "extension exec": "local: runs an extension installed on this machine",
+    "extension install": "local: installs an extension on this machine",
+    "extension list": "local: lists the extensions installed on this machine",
+    "extension remove": "local: removes an extension from this machine",
+    "extension search": "read: searches for extensions",
+    "extension upgrade": "local: upgrades the extensions installed on this machine",
+    "gpg-key delete": "no text: deletes a GPG key",
+    "gpg-key list": "read: lists the account's GPG keys",
+    "label delete": "no text: deletes a label",
+    "label list": "read: lists the labels of a repository",
+    "licenses": "local: prints the licenses of gh's third-party libraries",
+    "preview prompter": "local: runs a test of gh's prompts",
+    "ruleset check": "read: shows the rules that apply to a branch",
+    "ruleset list": "read: lists rulesets",
+    "ruleset view": "read: shows a ruleset",
+    "search code": "read: searches code",
+    "search commits": "read: searches commits",
+    "search issues": "read: searches issues",
+    "search prs": "read: searches pull requests",
+    "search repos": "read: searches repositories",
+    "secret delete": "no text: deletes a secret",
+    "secret list": "read: lists secrets",
+    "secret set": "private: sets a secret, its value encrypted on this machine, its name seen only by collaborators",
+    "ssh-key delete": "no text: deletes an SSH key",
+    "ssh-key list": "read: lists the account's SSH keys",
+    "status": "read: shows the account's issues, pull requests, review requests and mentions",
+    "variable delete": "no text: deletes an Actions variable",
+    "variable get": "read: shows an Actions variable",
+    "variable list": "read: lists Actions variables",
+    "variable set": "private: sets an Actions variable, which only collaborators can read",
+}
+# The gh 2.106.0 commands the check refuses before gh runs, whatever their target (gh_refuse, GhUnjudgedError), each
+# with the message of its refusal: each sends text that a public place shows, which the check does not read. `issue
+# artifact create` (its alias `new`) and `edit` upload Markdown and HTML documents, links and files (`[<file>[#<name>]
+# | <url>]...`, --attach, --body, --body-file). `label clone` copies the label names and descriptions of the source
+# repository onto the target. The key prefix and the URL template of `repo autolink create` (its alias `new`) show in
+# the rendered links of the repository's issues and pull requests. `skill publish` creates a GitHub release, with a tag
+# and auto-generated notes, and adds the `agent-skills` topic to the repository. GitHub shows anyone the title of a GPG
+# key and its armored text, which holds its user IDs ("Lists the GPG keys for a user. This information is accessible
+# by anyone", docs.github.com, "REST API endpoints for GPG keys", read 2026-11-27, its `name` and `raw_key`), and the
+# title of an SSH signing key: on 2026-11-27 an unauthenticated `GET users/sjawhar/ssh_signing_keys` gave each key's
+# `title`, and `GET users/sjawhar/keys`, the authentication keys, gave none. A call of a command GH_REFUSED_OPTIONS
+# names goes out where it sends none of that (gh_refusal_lifted).
+GH_ARTIFACT_REFUSAL = ("gh 2.106.0's preview `issue artifact` uploads documents and files the check does not read, so "
+                       "the check refuses the call")
+GH_REFUSED_COMMANDS: dict[str, str] = {
+    "gpg-key add": ("`gpg-key add` sends a key's armored text, with its user IDs, which GitHub lists for anyone, and "
+                    "the check does not read it, so the check refuses the call"),
+    "issue artifact create": GH_ARTIFACT_REFUSAL,
+    "issue artifact edit": GH_ARTIFACT_REFUSAL,
+    "label clone": ("`label clone` copies the label names and descriptions of the source repository onto the target, "
+                    "and the check does not read them, so the check refuses the call"),
+    "repo autolink create": ("the key prefix and the URL template of `repo autolink create` show in the rendered links "
+                             "of the repository's issues and pull requests, and the check does not read them, so the "
+                             "check refuses the call"),
+    "skill publish": ("gh 2.106.0's preview `skill publish` creates a GitHub release, with a tag and auto-generated "
+                      "notes, and adds a topic to the repository, and the check reads none of them, so the check "
+                      "refuses the call; with --dry-run or --fix it only checks the skills on this machine"),
+    "ssh-key add": ("GitHub shows anyone the title of a signing key, which `ssh-key add --type signing` adds, and the "
+                    "check does not read it, so the check refuses the call; an authentication key, the default "
+                    "--type, goes out"),
+}
+# The options, as GH_TEXT_COMMANDS gives them, of each refused command some of whose calls send nothing a public place
+# shows, which gh_refusal_lifted reads to let those calls go: `skill publish` with --dry-run or --fix on ("Validate
+# without publishing", "Auto-fix issues where possible without publishing", `gh skill publish --help`), and
+# `ssh-key add` of an authentication key, whose title only the account sees. shims/tests/test_gh_leak_terms.py
+# compares them with the gh on PATH.
+GH_REFUSED_OPTIONS: dict[str, tuple[str, str]] = {
+    "skill publish": ("--tag", "--dry-run --fix --help"),
+    "ssh-key add": ("-t/--title --type", "--help"),
+}
+# gh's own aliases of those commands, by the words of the command above each, and its top-level commands with theirs:
+# a first word that is none of them can be a gh alias of the user's (config.yml's `aliases`), which is read as the
+# command it expands to.
+GH_GROUP_ALIASES = {"agent": "agent-task", "agent-tasks": "agent-task", "agents": "agent-task", "skills": "skill"}
 GH_SUBCOMMAND_ALIASES = {
     ("gist", "new"): "create", ("issue", "new"): "create", ("pr", "new"): "create", ("release", "new"): "create",
-    ("repo", "new"): "create",
+    ("repo", "new"): "create", ("issue artifact", "new"): "create", ("repo autolink", "new"): "create",
 }
 GH_COMMANDS = frozenset((
     "agent", "agent-task", "agent-tasks", "agents", "alias", "api", "at", "attestation", "auth", "browse", "cache",
@@ -3091,13 +3308,6 @@ GH_COMMANDS = frozenset((
     "rs", "ruleset", "run", "search", "secret", "skill", "skills", "ssh-key", "status", "variable", "version",
     "workflow",
 ))
-# The subcommands of gh 2.106.0's preview `issue artifact` that send text: `create` (its alias `new`) and `edit` upload
-# Markdown and HTML documents, links and files (`[<file>[#<name>] | <url>]...`, --attach, --body, --body-file), which
-# the check does not read, so gh_command refuses each such call before gh runs, whatever its target (GhUnjudgedError).
-# `delete`, `download`, `list` and `view` send no text.
-GH_ARTIFACT_WRITES = frozenset(("create", "new", "edit"))
-GH_ARTIFACT_REFUSAL = ("gh 2.106.0's preview `issue artifact` uploads documents and files the check does not read, so "
-                       "the check refuses the call")
 # The options whose value names a file whose text gh sends, `-` naming standard input. `--attach` names one too, before
 # a `#` (gh_split_file_arg), and gh_texts reads it so.
 GH_FILE_OPTIONS = frozenset(("--body-file", "--notes-file", "--from-file", "--recover", "--input"))
@@ -3209,13 +3419,14 @@ class GhText:
 
 
 def gh_options(table: tuple[str, str]) -> dict[str, bool]:
-    """Every spelling of each option of a GH_TEXT_COMMANDS entry: True for one that takes a value."""
+    """Every spelling of each option of a GH_TEXT_COMMANDS or GH_REFUSED_OPTIONS entry: True for one that takes a
+    value."""
     return {name: takes for takes, names in ((True, table[0]), (False, table[1])) for item in names.split()
             for name in item.split("/")}
 
 
 def gh_long_names(table: tuple[str, str]) -> dict[str, str]:
-    """The long spelling of each spelling of each option of a GH_TEXT_COMMANDS entry."""
+    """The long spelling of each spelling of each option of a GH_TEXT_COMMANDS or GH_REFUSED_OPTIONS entry."""
     return {name: item.split("/")[-1] for item in f"{table[0]} {table[1]}".split() for name in item.split("/")}
 
 
@@ -3633,9 +3844,9 @@ def gh_next_command(arguments: Sequence[str]) -> tuple[str, list[str]] | None:
 
 class GhUnjudgedError(Exception):
     """A gh call the check cannot judge, refused with TEXT_EXIT before gh runs (gh_check): one that may run an alias the
-    check cannot read (gh_alias_command), or an `issue artifact` call that sends documents and files the check does not
-    read (GH_ARTIFACT_WRITES). ARGS are the alias or command the call names and why it is refused, for an alias with
-    what to fix."""
+    check cannot read (gh_alias_command), or a call of a command that sends text the check does not read
+    (GH_REFUSED_COMMANDS, gh_refuse). ARGS are the alias or command the call names and why it is refused, for an alias
+    with what to fix."""
 
 
 def gh_unsplit(name: str, line: int, path: Path, error: ValueError, filled: bool) -> str:
@@ -3660,7 +3871,7 @@ def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
                depth: int = 0) -> tuple[str, str, list[str]] | None:
     """(group, subcommand, the arguments the subcommand reads) of a gh call that can send text, after a gh alias; None
     for any other call. GhUnjudgedError for a call the check cannot judge: one that may run an alias it cannot read
-    (gh_alias_command), and `issue artifact create`, `new` and `edit` (GH_ARTIFACT_WRITES), whatever their target."""
+    (gh_alias_command), and a call of a command GH_REFUSED_COMMANDS lists, whatever its target (gh_refuse)."""
     found = gh_next_command(arguments)
     if found is None:
         return None
@@ -3670,6 +3881,7 @@ def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
     group = GH_GROUP_ALIASES.get(first, first)
     if group == "api":
         return group, "", rest
+    gh_refuse(first, group, rest)
     found = gh_next_command(rest)
     if found is None:
         return None
@@ -3677,13 +3889,44 @@ def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
     sub = GH_SUBCOMMAND_ALIASES.get((group, word), word)
     if (group, sub) in GH_TEXT_COMMANDS:
         return group, sub, rest
-    if (group, sub) == ("issue", "artifact"):
-        found = gh_next_command(rest)
-        if found is not None and found[0] in GH_ARTIFACT_WRITES:
-            raise GhUnjudgedError(f"{first} {word} {found[0]}", GH_ARTIFACT_REFUSAL)
     # An alias under a command (`gh alias set 'pr say' 'pr comment'`), which gh runs as what it expands to. Until
     # 2026-11-17 only an alias of the first word was read, so `gh pr say 11 --body …` went out unchecked.
     return gh_alias_command(f"{first} {word}", rest, environment, depth)
+
+
+def gh_refuse(typed: str, command: str, rest: Sequence[str]) -> None:
+    """GhUnjudgedError for a call of a command GH_REFUSED_COMMANDS lists, but for one gh_refusal_lifted lets go. COMMAND
+    is the call's command as gh names it so far, TYPED the same words as the call writes them, and REST the words after
+    them, from which the next word of the command is read while an entry of the table lies under COMMAND: `gh issue -R
+    o/r artifact new 4` is `issue artifact create`, refused as `issue artifact new`."""
+    while command not in GH_REFUSED_COMMANDS:
+        if not any(name.startswith(f"{command} ") for name in GH_REFUSED_COMMANDS):
+            return
+        found = gh_next_command(rest)
+        if found is None:
+            return
+        word, rest = found
+        typed, command = f"{typed} {word}", f"{command} {GH_SUBCOMMAND_ALIASES.get((command, word), word)}"
+    if not gh_refusal_lifted(command, rest):
+        raise GhUnjudgedError(typed, GH_REFUSED_COMMANDS[command])
+
+
+def gh_refusal_lifted(command: str, rest: Sequence[str]) -> bool:
+    """Whether a call of the refused COMMAND, REST the words after the command's own, sends nothing a public place
+    shows, read with the command's options (GH_REFUSED_OPTIONS): `skill publish` with --dry-run or --fix on (gh_flag),
+    and `ssh-key add` whose last --type is `authentication`, or that gives none, gh's default. Any other --type, as
+    `signing` or a value gh refuses, keeps the refusal."""
+    table = GH_REFUSED_OPTIONS.get(command)
+    if table is None:
+        return False
+    read = gh_walk(rest, gh_options(table))
+    long = gh_long_names(table)
+    if command == "skill publish":
+        return gh_flag(read, long, "--dry-run") or gh_flag(read, long, "--fix")
+    if command == "ssh-key add":
+        types = [value for option, value in read if option and long.get(option, option) == "--type"]
+        return not types or types[-1] == "authentication"
+    return False
 
 
 def gh_alias_command(name: str, rest: Sequence[str], environment: Mapping[str, str],
@@ -5617,11 +5860,12 @@ def gh_refusal(name: str, reached: Sequence[GhTarget], matcher: TermMatcher | No
 def gh_check(arguments: Sequence[str]) -> int:
     """`gh -- ARGV…`: refuse a gh call that sends a listed term to anything not confirmed private (exit 3), whose text
     cannot be checked because the list cannot be read (exit 2), that names a file nobody can read (exit 4), that may
-    run a gh alias the check cannot read (exit 4), or that is `issue artifact create`, `new` or `edit`, whose documents
-    and files the check does not read (exit 4, GH_ARTIFACT_WRITES); exit GH_STDIN_EXIT to ask for standard input. Any
-    other call exits 0 untouched, and the text of a call that reaches only private or internal repositories is not
-    checked, nor are their visibilities, nor the facts of the plain case (gh_plain_case), read before a term is found.
-    Outside the plain case a call that holds a listed term is one target read as public, as a raw GraphQL mutation is.
+    run a gh alias the check cannot read (exit 4), or that is of a command that sends text a public place shows and the
+    check does not read, as `issue artifact create` (exit 4, GH_REFUSED_COMMANDS); exit GH_STDIN_EXIT to ask for
+    standard input. Any other call exits 0 untouched, and the text of a call that reaches only private or internal
+    repositories is not checked, nor are their visibilities, nor the facts of the plain case (gh_plain_case), read
+    before a term is found. Outside the plain case a call that holds a listed term is one target read as public, as a
+    raw GraphQL mutation is.
 
     A call through a gh alias is read as the command it expands to. Where the check cannot read gh's aliases exactly,
     or cannot split what an alias runs, a call that may run one is refused with exit 4 before gh runs, the refusal
