@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tracemalloc
 import unittest
 from collections.abc import Callable
 from pathlib import Path
@@ -3778,6 +3779,98 @@ class GhLeakTerms(unittest.TestCase):
                 result = self.run_gh(argv)
                 self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
                 self.assertEqual(self.gh_calls(), [], "gh ran although the file holds a listed term")
+
+    def test_a_term_whose_words_a_run_longer_than_a_chunk_parts_across_an_edge_is_refused_at_its_line(self) -> None:
+        # The check keeps each long run of in-line whitespace as its two ends (GhChunkScan), so a match whose words a
+        # run of any length parts lies whole in one chunk. A public gist of a Markdown file that holds the term, its
+        # words parted across the first chunk's edge by more spaces, tabs or no-break spaces than a chunk holds, or by a
+        # soft line break with 10,000 spaces on each side, is refused: the refusal names the term's line and shows the
+        # match and its line as a reading of the whole file shows them, the first and last 80 characters of the match
+        # with the characters of its line on each side. Control: the same words parted by a line of 10,000 spaces, a
+        # blank line, are in two paragraphs, and the gist goes out.
+        chunk = load_check().GH_CHUNK
+        first, second = TEST_TERMS[0].split(" ", 1)
+        lines = ("x" * 99 + "\n") * (3 * chunk // 100)
+        argv = ["gist", "create", "--public", "notes.md"]
+        at = chunk - 6
+        line = lines[:at].count("\n") + 1
+        for name, gap, shown in (("spaces", " " * (chunk + 50_000), " "), ("tabs", "\t" * (chunk + 50_000), "\\t"),
+                                 ("no-break spaces", "\u00a0" * (chunk + 50_000), "\\u00a0"),
+                                 ("a soft line break", " " * 10_000 + "\n" + " " * 10_000, " ")):
+            written = first + gap + second
+            text = lines[:at] + written + lines[at + len(written):]
+            end = at + len(written)
+            before = text[text.rindex("\n", 0, at) + 1:at]
+            after = text[end:text.index("\n", end)]
+            matched = first + shown * (80 - len(first)) + "…" + shown * (80 - len(second)) + second
+            with self.subTest(name):
+                self.file("notes.md", text)
+                self.setUp_calls()
+                refused = self.assert_refused(self.run_gh(argv), "argument 1 notes.md", matched, line=line)
+                self.assertEqual(refused, ("…" + before[-80:] if len(before) > 80 else before) + matched
+                                 + (after[:80] + "…" if len(after) > 80 else after))
+        with self.subTest(control="a blank line"):
+            written = first + "\n" + " " * 10_000 + "\n" + second
+            self.file("notes.md", lines[:at] + written + lines[at + len(written):])
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(argv), argv)
+
+    def test_the_chunk_scan_reads_a_term_whose_words_long_soft_line_breaks_part_as_the_whole_view_does(self) -> None:
+        # Between two words of a term a paragraph shows at most two runs of whitespace, one on each side of a soft line
+        # break, and the check keeps each run to two contexts, so the chunks overlap by four contexts for each gap of a
+        # term (GhChunkScan, TermMatcher.gaps). With no GH_CHUNK_SLACK, so that this overlap is all there is, a scan of
+        # a view in chunks (gh_view_matches) reads `Quillfeather Lane 9`, each gap a soft line break with 10,000 spaces,
+        # tabs, no-break spaces and a CRLF around it, as a reading of the whole view does: once, at its line, with the
+        # excerpt of the whole text. The match starts 6 characters before the first and the second chunk's edges and on
+        # the last character the first chunk gives. So is a match after five lines of 3,000 tabs each, which keep their
+        # line feeds. Control: the words parted by a line of more spaces than a chunk holds, a blank line, are no match.
+        module = load_check()
+        chunk = module.GH_CHUNK
+        first, middle, last = TEST_TERMS[0].split(" ")
+        written = (first + " " * 10_000 + "\n" + "\t" * 10_000 + middle + "\u00a0" * 10_000 + "\r\n" + " " * 10_000
+                   + last)
+        lines = ("x" * 99 + "\n") * (3 * chunk // 100)
+        with mock.patch.object(module, "GH_CHUNK_SLACK", 0):
+            reader = module.TermMatcher(TEST_TERMS)
+            context = module.GhChunkScan(reader).context
+            cases = [(f"from {at}", lines[:at], written, lines[at + len(written):], True)
+                     for at in (chunk - 6, chunk + context - 1, 2 * chunk - 6)]
+            cases += [("after five lines of tabs", ("\t" * 3000 + "\n") * 5, first + " " * 3000 + middle + " " + last,
+                       "\n", True),
+                      ("control: a blank line", lines[:chunk - 6],
+                       first + "\n" + " " * (chunk + 50_000) + "\n" + middle + " " + last, lines[chunk:], False)]
+            for name, before, words, after, holds in cases:
+                text = before + words + after
+                start, end = len(before), len(before) + len(words)
+                with self.subTest(name):
+                    self.assertEqual([match[:3] for match in module.gh_view_matches(reader, text)],
+                                     [(text.count("\n", 0, start) + 1, *module.excerpt(text, start, end))] if holds
+                                     else [])
+
+    def test_the_chunk_scan_reads_a_long_run_of_megabytes_of_spaces_in_little_memory(self) -> None:
+        # The run of in-line whitespace that ends what came so far waits for the rest of it kept as its two ends
+        # (GhChunkScan), so a run of any length costs no more memory than a piece of it. Sixteen pieces of GH_CHUNK
+        # spaces, 4 MiB, fed one at a time between `Quillfeather` and `Lane 9`, give the match, at its line and cut to
+        # its first and last 80 characters, and the scan's peak memory (tracemalloc) stays below four pieces. A scan
+        # that held the whole run took more than the sixteen.
+        module = load_check()
+        chunk = module.GH_CHUNK
+        first, second = TEST_TERMS[0].split(" ", 1)
+        spaces = " " * chunk
+        scan = module.GhChunkScan(module.TermMatcher(TEST_TERMS))
+        tracemalloc.start()
+        try:
+            scan.feed("intro\n" + first)
+            for _ in range(16):
+                scan.feed(spaces)
+            scan.feed(second + "\nend\n")
+            found = scan.finish()
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        matched = first + " " * (80 - len(first)) + "…" + " " * (80 - len(second)) + second
+        self.assertEqual([match[:3] for match in found], [(2, matched, matched)])
+        self.assertLess(peak, 4 * chunk, f"the scan took a peak of {peak >> 10} KiB for 4 MiB of spaces")
 
     def test_the_own_name_of_the_public_repository_counts_for_nothing_in_every_chunk_of_an_asset(self) -> None:
         # Given the knives ygo-fork list and its public release repository theorem-labs/ygo, whose name holds a term of
