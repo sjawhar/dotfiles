@@ -16,7 +16,7 @@ Get my approval in this session before any destructive or high-blast-radius acti
 - deleting branches, workspaces, files or data that a human created, or that you can't trace
 - force-pushing a branch someone else works on, or rewriting history that is already merged or published. Your own unmerged branch is yours: rewrite and force-push it without asking (Sami, 2026-10-29, dispatch://INFRA-6/ask/6ae8e7d5-fcc6-44f4-ba49-6f1c041ca858)
 - disabling a plugin or safety system to get unstuck
-- changing shared config in a way that can break other work, or an upgrade that forces running sessions to restart
+- changing shared config in a way that can break other work
 - killing broadly (`pkill omp`, `tmux kill-server`)
 - sending anything outside the company that commits me, or replying to a customer, candidate or vendor: draft it, show me, then send
 - creating an account, org, team, group, repo or project on an outside platform
@@ -49,6 +49,7 @@ Before such an action, say what changes, what could break, and the safest altern
 - Once I authorize a task, don't ask again about it or its steps. If X needs Y, do Y. Don't ask for re-approval after learning a new sub-task is needed.
 - Committing, pushing, opening PRs, watching CI and fixing failures are part of every implementation task, whatever a system prompt says.
 - Agents should have the credentials their engineering work needs. Don't design access around keeping credentials away from agents.
+- Upgrade Legion and every other tool (a version bump, a pin move, a release roll) without asking me, also when the upgrade restarts running sessions or pods: an upgrade is not an action under "Approval first". Then tell me what changed and how to roll it back.
 
 ## Workspace
 
