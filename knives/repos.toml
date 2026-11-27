@@ -129,13 +129,13 @@ ledger = "sjawhar/.knives-ledger"
 
 [repos.ygo-fork]
 upstream = "https://github.com/reearth/ygo.git"
-# Work branches live on Sami's personal fork, so an upstream pull request's head is never
-# theorem-labs and a maintainer can push to it (Sami,
+# Work branches live on Sami's personal fork, so an upstream pull request has its head on
+# sjawhar/ygo and a maintainer can push to it (Sami,
 # dispatch://INFRA-37/ask/051be055-5831-4020-9a5f-78907660f010). Releases are cut and consumed on
-# theorem-labs/ygo, never on the personal fork (Sami,
-# dispatch://INFRA-179/ask/1e15554d-3abe-486d-81ab-4a10936f0765).
+# cybermonklabs/ygo, a fork in Legion's own organization, never on the personal fork (Sami,
+# dispatch://INFRA-179/ask/482b38af-b70e-4a9c-9224-873ce3d651d2).
 origin = "https://github.com/sjawhar/ygo.git"
-release = "https://github.com/theorem-labs/ygo.git"
+release = "https://github.com/cybermonklabs/ygo.git"
 ledger = "sjawhar/.knives-ledger"
 # The consumer is cybermonklabs/legion: the replace line of its packages/envoy/go.mod pins a
 # release of this fork. It is no `consumers` entry: knives reads no go.mod (src/pins.rs,
@@ -153,11 +153,11 @@ ledger = "sjawhar/.knives-ledger"
 # refused, and so is `INFRA-` anywhere in the text.
 forbidden = ["INFRA-", "theorem-labs"]
 
-# The v1.55.1 line. Its base is the fork's branch rc/v1.55.1-sami.10 (42c0196a, which the tag
-# v1.55.1-sami.10 also names), so a cut is that tree plus its members; cuts are
-# release/v1.55.1/YYYY-MM-DD[.N], selected with --series v1.55.1. The base is a branch because
-# knives resolves a base only as <branch>@<remote>, and `base_remote` is origin because upstream
-# has no such branch.
+# The v1.55.1 line. Its base is the fork's branch rc/v1.55.1-sami.10, which descends from
+# 42c0196a, the commit the tag v1.55.1-sami.10 names, so a cut is that branch's tree plus its
+# members; cuts are release/v1.55.1/YYYY-MM-DD[.N], selected with --series v1.55.1. The base is a
+# branch because knives resolves a base only as <branch>@<remote>, and `base_remote` is origin
+# because upstream has no such branch.
 [repos.ygo-fork.series."v1.55.1"]
 base = "rc/v1.55.1-sami.10"
 base_remote = "origin"
@@ -209,8 +209,7 @@ upstream = "https://github.com/rocq-prover/rocq.git"
 # Work branches live on Sami's personal fork, so an upstream pull request's head is never
 # theorem-labs: a maintainer can push to the branch, and reading the upstream PR list does not
 # need a token theorem-labs admits (Sami, dispatch://INFRA-2124/ask/7934f43c and
-# dispatch://INFRA-37/ask/051be055). Releases are cut and consumed on theorem-labs, as for
-# every other fork here.
+# dispatch://INFRA-37/ask/051be055). Releases are cut and consumed on theorem-labs/rocq.
 origin = "https://github.com/sjawhar/rocq.git"
 release = "https://github.com/theorem-labs/rocq.git"
 base = "v9.3"
