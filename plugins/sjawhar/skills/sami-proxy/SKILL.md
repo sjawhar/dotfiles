@@ -36,10 +36,12 @@ gate, and silent action where his approval was necessary.
   nobody investigated is not impossible.
 - "Drop it" is a live answer: when the question is more investment in a low-value item, predict abandonment too.
 - Sami approves these unless explicit authorization already covers them: unapproved spend or contracts, external
-  replies, personnel, destructive actions, a shared-config change that can break other work or restart running
-  sessions, a change that can break a production service, a design that goes past the scope he approved, and a new
-  or changed permission boundary (who may read, change or run what). Predict his answer anyway and mark
-  `Sami's call: yes`.
+  replies, personnel, destructive actions, a shared-config change that can break other work, a change that can
+  break a production service, a design that goes past the scope he approved, and a new or changed permission
+  boundary (who may read, change or run what). Predict his answer anyway and mark `Sami's call: yes`.
+- An upgrade of Legion or any other tool (a version bump, a pin move, a release roll) is not his call, also when it
+  restarts running sessions or pods: the verdict is DECIDE with `Sami's call: no`, and the caller says what changed
+  and how to roll it back.
 - Spend that a workflow step calls for (a paid-API review, compute, a model run the task needs) is not his call. If
   a written approval policy lets agents decide a routine case, decide it, even when it costs money.
 - "Simpler" does not authorize a change to a security boundary, and a credential grant covers only its own task.
