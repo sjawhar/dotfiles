@@ -26,6 +26,7 @@ import stat
 import subprocess
 import tempfile
 import threading
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -40,17 +41,34 @@ def executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
-def pinned_codegraph() -> str | None:
-    """The codegraph mise.toml pins, not a shim; None where it is not installed."""
+def pinned_codegraph() -> tuple[str | None, str]:
+    """The codegraph whose `--version` prints the version mise.toml pins for github:colbymchenry/codegraph,
+    or None, and the reason to skip without it: the version wanted and what was found. The one candidate is
+    `mise which codegraph`, else the codegraph on PATH outside any shims directory."""
+    config: dict[str, dict[str, dict[str, str]]] = tomllib.loads((DOTFILES / "mise.toml").read_text(encoding="utf-8"))
+    pinned = config["tools"]["github:colbymchenry/codegraph"]["version"]
+    wanted = f"the codegraph mise.toml pins is {pinned}"
     found = subprocess.run(["mise", "which", "codegraph"], cwd=DOTFILES, capture_output=True, text=True, check=False) \
         if shutil.which("mise") else None
     if found is not None and found.returncode == 0 and found.stdout.strip():
-        return found.stdout.strip()
-    path = os.pathsep.join(p for p in os.environ.get("PATH", "").split(os.pathsep) if "shims" not in p)
-    return shutil.which("codegraph", path=path)
+        candidate: str | None = found.stdout.strip()
+    else:
+        path = os.pathsep.join(p for p in os.environ.get("PATH", "").split(os.pathsep) if "shims" not in p)
+        candidate = shutil.which("codegraph", path=path)
+    if candidate is None:
+        return None, f"{wanted}; no codegraph found by mise which or on PATH"
+    try:
+        version = subprocess.run([candidate, "--version"], capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return None, f"{wanted}; {candidate} --version did not run: {error}"
+    printed = version.stdout.strip()
+    if version.returncode != 0 or not printed:
+        output = printed or version.stderr.strip() or "nothing"
+        return None, f"{wanted}; {candidate} --version exited {version.returncode} and printed {output}"
+    return (candidate if printed == pinned else None), f"{wanted}; {candidate} prints {printed}"
 
 
-CODEGRAPH = pinned_codegraph()
+CODEGRAPH, CODEGRAPH_SKIP = pinned_codegraph()
 
 
 class Listener:
@@ -122,7 +140,7 @@ class AgentSessionCodegraphTelemetry(unittest.TestCase):
         out = self.launch('printf "TELEMETRY=%s\\n" "${CODEGRAPH_TELEMETRY-<unset>}"', {"CODEGRAPH_TELEMETRY": "1"})
         self.assertIn("TELEMETRY=1", out.splitlines())
 
-    @unittest.skipUnless(CODEGRAPH, "the pinned codegraph is not installed")
+    @unittest.skipUnless(CODEGRAPH, CODEGRAPH_SKIP)
     def test_a_codegraph_index_in_a_session_sends_nothing_and_without_it_sends_its_event(self) -> None:
         assert CODEGRAPH is not None
         listener = Listener()
