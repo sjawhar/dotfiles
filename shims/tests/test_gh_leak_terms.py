@@ -3863,17 +3863,56 @@ class GhLeakTerms(unittest.TestCase):
                                                              f"{len(data) >> 20} MiB asset")
 
     def test_an_asset_that_holds_a_term_many_times_is_read_in_bounded_memory(self) -> None:
-        # Each match of a later view of a text (Markdown escapes undone) has the as-written view's matches of its term
-        # for twins (gh_findings). Until the review of dispatch://INFRA-4957 each held a tuple of its own, so a text
-        # that holds a term N times and one escape took memory as N squared: gh_findings over an asset of 75 KB that
-        # holds a term 5,000 times took 197 MiB so (tracemalloc). The check on such an asset, the canary 5,000 times, to
-        # a private repository, where it reads every match and lets the call go, must stay within the 160 MiB that the
-        # 4 MiB asset of test_a_binary_release_asset_is_read_in_bounded_memory may take.
-        self.file("many.txt", f"a {CANARY} b\n" * 5000 + "\\-\n")
-        returncode, peak, stderr = self.peak(["release", "upload", "v1", "many.txt", "-R", PRIVATE], self.env)
-        self.assertEqual(returncode, 0, stderr)
-        self.assertIn(f"repos/{PRIVATE}", self.visibility_reads(), "the check found no match, so it read no target")
-        self.assertLess(peak, 160 << 10, f"the check took a peak of {peak >> 10} MiB")
+        # The check judges each match as it finds it, and keeps only the ones a refusal shows: at most GH_MATCH_LIMIT
+        # of each term in each text (gh_refusal). Until the review of 053ef618 (dispatch://INFRA-4957) it kept every
+        # match with the part of the view around it, about 0.8 KB each. An asset of 5 MB that holds the canary 200,000
+        # times and one escape, so the check reads it again with the escapes undone (gh_file_views), took a peak of 420
+        # MiB at 0bb020f6, and must stay within the 160 MiB that the 4 MiB asset of
+        # test_a_binary_release_asset_is_read_in_bounded_memory may take: to a private repository, which the check
+        # reads to the first match and lets go; and to a public one, whose refusal shows GH_MATCH_LIMIT matches as
+        # written, none of their twins with the escapes undone, and how many more it does not show.
+        self.file("many.txt", f"a {CANARY} b\n" * 200_000 + "\\-\n")
+        for repo, code in ((PRIVATE, 0), (PUBLIC, 3)):
+            with self.subTest(repo=repo):
+                returncode, peak, stderr = self.peak(["release", "upload", "v1", "many.txt", "-R", repo], self.env)
+                self.assertEqual(returncode, code, stderr[-4096:])
+                self.assertIn(f"repos/{repo}", self.visibility_reads(), "the check found no match, so it read no target")
+                self.assertLess(peak, 160 << 10, f"the check took a peak of {peak >> 10} MiB")
+                if not code:
+                    continue
+                limit = load_check().GH_MATCH_LIMIT
+                finding = f'"{CANARY}" ({GLOBAL}), in: a {CANARY} b'
+                shown = re.findall(rf"^leak terms: gh release upload to [^\n]*: argument 2 many\.txt line \d+: "
+                                   rf"{re.escape(finding)}$", stderr, re.MULTILINE)
+                self.assertEqual(len(shown), limit, stderr[-4096:])
+                self.assertIn(f": {200_000 - limit} more matches of these terms, not shown: ", stderr)
+                self.assertNotIn("Markdown escapes undone", stderr)
+                self.assertEqual(len(stderr.splitlines()), limit + 2, stderr[-4096:])
+
+    def test_a_term_after_many_own_names_of_the_public_repository_is_refused_in_bounded_memory(self) -> None:
+        # A match inside the own name of the public repository a call goes to counts for nothing (gh_own_name), so it
+        # takes none of the GH_MATCH_LIMIT places of a refusal (gh_refusal). Given the knives ygo-fork list, an asset of
+        # a release of the public YGO that names the repository 200,000 times and then holds YGO's owner in a word it
+        # only begins, `<owner>-internal`, is refused for that last line alone, within 160 MiB: at 0bb020f6, which kept
+        # every match, it took 225 MiB, and a check that kept the first matches before it read own names filled those
+        # places with the repository's name and let the call go (exit 0, measured on a copy). Control: the same names
+        # without that line go out.
+        env = self.ygo_fork()
+        self.answer(YGO, "public")
+        owner = YGO.partition("/")[0]
+        names = f"{YGO}.git\n" * 200_000
+        argv = ["release", "upload", "v1", "asset.txt", "-R", YGO]
+        for text, code in ((names + f"see {owner}-internal\n", 3), (names, 0)):
+            with self.subTest(leak=bool(code)):
+                self.file("asset.txt", text)
+                returncode, peak, stderr = self.peak(argv, env)
+                self.assertEqual(returncode, code, stderr[-4096:])
+                self.assertLess(peak, 160 << 10, f"the check took a peak of {peak >> 10} MiB")
+                if code:
+                    self.assertEqual(re.findall(r"^leak terms: gh release upload to [^\n]*: (argument 2 asset\.txt line "
+                                                r"[^\n]*)$", stderr, re.MULTILINE),
+                                     [f'argument 2 asset.txt line 200001: "{owner}" ({YGO_LIST}), in: see '
+                                      f'{owner}-internal'], stderr[-4096:])
 
     def chunk_edge(self, chunk: int, split: int | None) -> tuple[str, int]:
         """Lines of 100 characters, three chunks of CHUNK characters (GH_CHUNK) of them, and for a SPLIT the canary in
@@ -4009,11 +4048,11 @@ class GhLeakTerms(unittest.TestCase):
         scan = module.GhChunkScan(module.TermMatcher(TEST_TERMS))
         tracemalloc.start()
         try:
-            scan.feed("intro\n" + first)
+            found = list(scan.feed("intro\n" + first))
             for _ in range(16):
-                scan.feed(spaces)
-            scan.feed(second + "\nend\n")
-            found = scan.finish()
+                found += scan.feed(spaces)
+            found += scan.feed(second + "\nend\n")
+            found += scan.finish()
             peak = tracemalloc.get_traced_memory()[1]
         finally:
             tracemalloc.stop()

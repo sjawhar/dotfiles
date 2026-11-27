@@ -5645,16 +5645,18 @@ class MarkdownUnescaper:
 @dataclass(frozen=True)
 class GhMatch:
     """A listed term gh_findings finds in a value of a gh call's text: FINDING, what a refusal shows; SPAN, the match in
-    VIEW, the view of the value it is in, where gh_check reads the destination's own name (gh_own_name), or for a file
+    VIEW, the view of the value it is in, where gh_refusal reads the destination's own name (gh_own_name), or for a file
     read in chunks the part of the view around the match where gh_own_name reads as in the whole view (gh_name_window);
-    TWINS, for a match of a later view, the as-written view's matches of its term, list and allowed tokens, as (match,
-    view); and PIECE, the text, which says where it goes (gh_goes_to)."""
+    PIECE, the text, which says where it goes (gh_goes_to); VALUE, the number of the value among the call's values,
+    which the matches of every view of one value share; and HOW, how its view reads the value, "" for as written, whose
+    matches of a term, list and allowed tokens are the twins of a later view's (gh_findings)."""
 
     finding: Finding
     span: Span
     view: str
-    twins: tuple[tuple[Span, str], ...]
     piece: GhText
+    value: int
+    how: str
 
 
 # A match of a view as gh_view_findings takes it: the line of the view it starts on, the match and its line as excerpt
@@ -5663,28 +5665,31 @@ GhViewMatch = tuple[int, str, str, Span, str]
 
 
 def gh_findings(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText], bool],
-                matcher: TermMatcher) -> list[GhMatch]:
+                matcher: TermMatcher) -> Iterator[GhMatch]:
     """A GhMatch for each listed term in each value of each text (gh_values, GRAPHQL saying which text is a GraphQL
     document or carries one), its Finding at the text's field or file, the value's path in it and the line in the
-    value.
+    value, given as each chunk of each view is read (GhChunkScan): the check holds no list of a call's matches, which
+    a text may hold by the hundred thousand (gh_refusal).
 
     A value is read as GitHub renders it, a paragraph at a time (paragraph_view): a line break inside a paragraph shows
     as a space, so a term of several words that a wrapped line (or a no-break space) splits is the term on the page.
     Until 2026-11-17 each line was read alone, and a body wrapped inside such a term went to a public repository. A
     value read both ways is read with its escapes decoded too, whatever the first view finds: a match counts only for a
-    target its list reaches, no allowed token of that target holds and whose own name does not hold it (gh_check), so
-    the first view's matches can all be dropped there while the second's count. Each of those views is read once more
-    with CommonMark's escapes undone (markdown_unescaped), where that changes it, since GitHub shows `INFRA\\-1` as
-    INFRA-1. The twins of a match of a later view are the matches of the first view that have its term, list and
-    allowed tokens: gh_check shows it only when no twin counts, since a twin that counts shows the same term. A text
-    that names a ref or an identity (GhText.is_name) is read as a name (TermMatcher.names). A file gh_contents left
-    unread (GhText.chunked) is read in chunks, to the same views (gh_file_views), and each view of any other text is
-    read in chunks too (gh_view_matches)."""
-    found: list[GhMatch] = []
+    target its list reaches, no allowed token of that target holds and whose own name does not hold it (gh_refusal),
+    so the first view's matches can all be dropped there while the second's count. Each of those views is read once
+    more with CommonMark's escapes undone (markdown_unescaped), where that changes it, since GitHub shows `INFRA\\-1` as
+    INFRA-1. The views of a value come one after the other, as written first, and the twins of a match of a later view
+    are the matches of the first view that have its term, list and allowed tokens: gh_refusal shows it only when no
+    twin counts, since a twin that counts shows the same term. A text that names a ref or an identity (GhText.is_name)
+    is read as a name (TermMatcher.names). A file gh_contents left unread (GhText.chunked) is read in chunks, to the
+    same views (gh_file_views), and each view of any other text is read in chunks too (gh_view_matches). GhFileError
+    where such a file cannot be read again."""
+    number = 0
     for piece, text in contents:
         reader = matcher.names() if piece.is_name else matcher
         if piece.chunked:
-            found += gh_view_findings(piece, piece.shown(), gh_file_views(piece, reader))
+            yield from gh_view_findings(piece, piece.shown(), number, gh_file_views(piece, reader))
+            number += 1
             continue
         for path, value, both in gh_values(piece, text, graphql(piece)):
             views = [("", value)]
@@ -5694,44 +5699,30 @@ def gh_findings(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhTex
                 rendered = markdown_unescaped(view)
                 if all(rendered != seen for _, seen in views):
                     views.append((", ".join(filter(None, (how, "Markdown escapes undone"))), rendered))
-            found += gh_view_findings(piece, piece.shown() + (f" {c_escape(path)}" if path else ""),
-                                      ((how, gh_view_matches(reader, view)) for how, view in views))
-    return found
+            matches = ((how, match) for how, view in views for match in gh_view_matches(reader, view))
+            yield from gh_view_findings(piece, piece.shown() + (f" {c_escape(path)}" if path else ""), number, matches)
+            number += 1
 
 
-def gh_view_matches(reader: TermMatcher, view: str) -> list[GhViewMatch]:
+def gh_view_matches(reader: TermMatcher, view: str) -> Iterator[GhViewMatch]:
     """The matches of READER in VIEW, a view of a value, read as GitHub renders it (paragraph_view), GH_CHUNK characters
-    at a time (GhChunkScan), as a file's view is (gh_file_views): a text the check holds whole, a JSON body of up to
-    GH_WHOLE_LIMIT bytes among them, costs no more memory than its own copies, where a reading of the whole view took
-    about 100 bytes for each of its characters (GH_CHUNK). A view of no more than GH_CHUNK characters and the overlap
-    is read in one chunk, as a whole view is."""
+    at a time (GhChunkScan), as a file's view is (gh_file_views), each given as its chunk is read: a text the check
+    holds whole, a JSON body of up to GH_WHOLE_LIMIT bytes among them, costs no more memory than its own copies, where
+    a reading of the whole view took about 100 bytes for each of its characters (GH_CHUNK). A view of no more than
+    GH_CHUNK characters and the overlap is read in one chunk, as a whole view is."""
     scan = GhChunkScan(reader)
     for start in range(0, len(view), GH_CHUNK):
-        scan.feed(view[start:start + GH_CHUNK])
-    return scan.finish()
+        yield from scan.feed(view[start:start + GH_CHUNK])
+    yield from scan.finish()
 
 
-def gh_view_findings(piece: GhText, label: str, views: Iterator[tuple[str, Sequence[GhViewMatch]]]) -> list[GhMatch]:
-    """A GhMatch for each match of each of VIEWS of a value of PIECE, (how the view reads the value, "" for as written,
-    which comes first; its matches), its Finding at LABEL, how and the line; a match of a later view with its twins
-    (gh_findings), one tuple for each term, list and allowed tokens, which every match of later views that has them
-    shares: the as-written view is read whole before them, and a tuple for each match held the N twins of a term that
-    a text holds N times N times over (gh_findings over an asset of 75 KB that holds a term 5,000 times and one escape
-    took 197 MiB so, and takes 9 MiB, measured with tracemalloc on 2026-11-27)."""
-    found: list[GhMatch] = []
-    written: dict[tuple[int, str, tuple[str, ...]], list[tuple[Span, str]]] = {}
-    twins: dict[tuple[int, str, tuple[str, ...]], tuple[tuple[Span, str], ...]] = {}
-    for how, matches in views:
-        for line, matched, shown, span, view in matches:
-            key = (span.term, span.scope, span.allowed_in)
-            if not how:
-                written.setdefault(key, []).append((span, view))
-            elif key not in twins:
-                twins[key] = tuple(written.get(key, ()))
-            place = f"{label}{f' ({how})' if how else ''} line {line}"
-            found.append(GhMatch(Finding(place, matched, shown, span.scope), span, view, twins[key] if how else (),
-                                 piece))
-    return found
+def gh_view_findings(piece: GhText, label: str, number: int, matches: Iterator[tuple[str, GhViewMatch]]
+                     ) -> Iterator[GhMatch]:
+    """A GhMatch for each of MATCHES, (how its view reads value NUMBER of PIECE, "" for as written, which comes first;
+    the match), its Finding at LABEL, how and the line, each as it comes."""
+    for how, (line, matched, shown, span, view) in matches:
+        place = f"{label}{f' ({how})' if how else ''} line {line}"
+        yield GhMatch(Finding(place, matched, shown, span.scope), span, view, piece, number, how)
 
 
 # A file a call sends may be a build output of any size: gh takes a release asset of up to 2 GiB. gh_file_views reads
@@ -5773,7 +5764,7 @@ GH_NAME_BREAK = re.compile(r"(?s:.*)[^A-Za-z0-9._/-]")
 
 class GhFileError(Exception):
     """A file gh_contents could read that gh_file_views could not read again: ARGS are its GhText and why, an entry of
-    the texts that cannot be read (gh_terms)."""
+    the texts that cannot be read (gh_refusal)."""
 
 
 def gh_file_texts(piece: GhText) -> Iterator[str]:
@@ -5790,28 +5781,29 @@ def gh_file_texts(piece: GhText) -> Iterator[str]:
     yield decoder.decode(b"", True)
 
 
-def gh_file_views(piece: GhText, reader: TermMatcher) -> Iterator[tuple[str, list[GhViewMatch]]]:
-    """The views gh_findings reads of the file gh_contents left unread for PIECE (GhText.chunked), which gh_values
-    gives as itself, with READER's matches in each (gh_view_findings), each read in chunks (GhChunkScan): its text as
-    written, then, where undoing CommonMark's escapes changes it (MarkdownUnescaper), its text so undone, from a second
-    reading of the file."""
+def gh_file_views(piece: GhText, reader: TermMatcher) -> Iterator[tuple[str, GhViewMatch]]:
+    """Each of READER's matches in the views gh_findings reads of the file gh_contents left unread for PIECE
+    (GhText.chunked), which gh_values gives as itself, with how its view reads the file (gh_view_findings), each view
+    read in chunks (GhChunkScan) and each match given as its chunk is read: its text as written, then, where undoing
+    CommonMark's escapes changes it (MarkdownUnescaper), its text so undone, from a second reading of the file."""
     written = GhChunkScan(reader)
     unescaper = MarkdownUnescaper()
     for text in gh_file_texts(piece):
-        written.feed(text)
+        yield from (("", match) for match in written.feed(text))
         if not unescaper.changed:
             unescaper.feed(text)
     if not unescaper.changed:
         unescaper.feed("", True)
-    yield "", written.finish()
+    yield from (("", match) for match in written.finish())
     if not unescaper.changed:
         return
+    how = "Markdown escapes undone"
     rendered = GhChunkScan(reader)
     unescaper = MarkdownUnescaper()
     for text in gh_file_texts(piece):
-        rendered.feed(unescaper.feed(text))
-    rendered.feed(unescaper.feed("", True))
-    yield "Markdown escapes undone", rendered.finish()
+        yield from ((how, match) for match in rendered.feed(unescaper.feed(text)))
+    yield from ((how, match) for match in rendered.feed(unescaper.feed("", True)))
+    yield from ((how, match) for match in rendered.finish())
 
 
 class GhChunkScan:
@@ -5836,12 +5828,13 @@ class GhChunkScan:
     A chunk gives the matches that start from CONTEXT past its start to CONTEXT past the next chunk's start, the first
     from the view's start and the last to its end, so no match is given twice, and one so kept no longer than the
     overlap less twice CONTEXT lies whole in the chunk that gives it, with CONTEXT on each side: its line, excerpt,
-    allowed tokens and own names read as in the whole view. finish gives them in the view's order, as gh_view_findings
-    takes them, each with the part of the view around it (gh_name_window). A chunk's reading starts afresh at its start,
-    so a run of matches of a term that overlaps itself (`aa` in `aaaa…`), from before a chunk's start to more than
-    CONTEXT past it, may be found one character off from a reading of the whole view: the same term, one place over.
-    Until the tester's red test at 4ec5827e (dispatch://INFRA-4957, rulings-md v68 item 2) each run was kept whole, and
-    a term whose words 10,000 spaces part was missed across a chunk's edge."""
+    allowed tokens and own names read as in the whole view. feed and finish give them, in the view's order, as each
+    chunk is read, each with the part of the view around it (gh_name_window), and keep none of them: a text may hold a
+    term by the hundred thousand (GH_MATCH_LIMIT). A chunk's reading starts afresh at its start, so a run of matches of
+    a term that overlaps itself (`aa` in `aaaa…`), from before a chunk's start to more than CONTEXT past it, may be
+    found one character off from a reading of the whole view: the same term, one place over. Until the tester's red
+    test at 4ec5827e (dispatch://INFRA-4957, rulings-md v68 item 2) each run was kept whole, and a term whose words
+    10,000 spaces part was missed across a chunk's edge."""
 
     def __init__(self, reader: TermMatcher) -> None:
         self.reader = reader
@@ -5855,9 +5848,10 @@ class GhChunkScan:
         self.start = 0
         self.lines = 0
         self.owned = 0
-        self.found: list[GhViewMatch] = []
 
-    def feed(self, text: str) -> None:
+    def feed(self, text: str) -> Iterator[GhViewMatch]:
+        """Take TEXT, the next piece of the view, and give the matches of each chunk that is whole once it has come
+        (chunks)."""
         text = self.run + text
         if len(text) > 2 * self.context:
             text = self.long_run.sub(self.kept, text)
@@ -5865,31 +5859,37 @@ class GhChunkScan:
         settled = max(len(text.rstrip()), text.rfind("\n") + 1)
         self.text += text[:settled]
         self.run = text[settled:]
-        while len(self.text) >= GH_CHUNK + self.overlap:
-            self.read(self.text[:GH_CHUNK + self.overlap], self.start + GH_CHUNK + self.context)
-            self.lines += self.text.count("\n", 0, GH_CHUNK)
-            self.start += GH_CHUNK
-            self.text = self.text[GH_CHUNK:]
+        return self.chunks()
 
     def kept(self, run: re.Match[str]) -> str:
         """RUN, a run of in-line whitespace longer than 2 CONTEXT, as its first and last CONTEXT characters."""
         start, end = run.span()
         return run.string[start:start + self.context] + run.string[end - self.context:end]
 
-    def finish(self) -> list[GhViewMatch]:
-        self.text += self.run
-        self.read(self.text, self.start + len(self.text))
-        return self.found
+    def chunks(self) -> Iterator[GhViewMatch]:
+        """The matches of each whole chunk of what came so far, each chunk read as its matches are taken and dropped
+        once they all are, so a piece whose matches nobody took leaves them to the next."""
+        while len(self.text) >= GH_CHUNK + self.overlap:
+            yield from self.read(self.text[:GH_CHUNK + self.overlap], self.start + GH_CHUNK + self.context)
+            self.lines += self.text.count("\n", 0, GH_CHUNK)
+            self.start += GH_CHUNK
+            self.text = self.text[GH_CHUNK:]
 
-    def read(self, chunk: str, until: int) -> None:
+    def finish(self) -> Iterator[GhViewMatch]:
+        """The matches of the rest of the view, once all of it has come."""
+        self.text += self.run
+        self.run = ""
+        yield from self.chunks()
+        yield from self.read(self.text, self.start + len(self.text))
+
+    def read(self, chunk: str, until: int) -> Iterator[GhViewMatch]:
         """The matches in CHUNK, the view from START on, that start from OWNED to UNTIL."""
         line, counted = self.lines + 1, 0
         for span in self.reader.spans(paragraph_view(chunk)):
             if self.owned <= self.start + span.start < until:
                 line += chunk.count("\n", counted, span.start)
                 counted = span.start
-                self.found.append((line, *excerpt(chunk, span.start, span.end),
-                                   *gh_name_window(chunk, span, self.start == 0)))
+                yield (line, *excerpt(chunk, span.start, span.end), *gh_name_window(chunk, span, self.start == 0))
         self.owned = until
 
 
@@ -6605,65 +6605,110 @@ def gh_targets(repositories: Sequence[GhRepository], made_public: bool = False) 
     return reached
 
 
-def gh_terms(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText], bool],
-             unreadable: list[tuple[GhText, str]]) -> tuple[TermMatcher | None, str | None, list[GhMatch]]:
+def gh_terms(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText], bool]
+             ) -> tuple[TermMatcher | None, str | None, Iterator[GhMatch]]:
     """The term list's matcher, the problem that kept the list from being read (None when it was read), and a GhMatch
-    for each listed term in CONTENTS (gh_findings, GRAPHQL saying which text is a GraphQL document or carries one).
-    The list is decrypted only when a text is not empty, a file left to be read in chunks holding bytes
-    (GhText.chunked), with every scoped list, the knives registry's included: which ones apply depends on where the
-    text goes, which is read only once a term is found. Where such a file cannot be read again (GhFileError), as when
-    it is gone, it is added to UNREADABLE, the caller's texts that cannot be read, with no matcher and no match."""
+    for each listed term in CONTENTS, given as it is found (gh_findings, GRAPHQL saying which text is a GraphQL document
+    or carries one). The list is decrypted only when a text is not empty, a file left to be read in chunks holding
+    bytes (GhText.chunked), with every scoped list, the knives registry's included: which ones apply depends on where
+    the text goes, which is read only once a term is found."""
     if not any(text or piece.chunked for piece, text in contents):
-        return None, None, []
+        return None, None, iter(())
     try:
         matcher = load_terms(repositories=EVERY_REPOSITORY)
     except ListError as error:
-        return None, c_escape(str(error)), []
+        return None, c_escape(str(error)), iter(())
+    return matcher, None, gh_findings(contents, graphql, matcher)
+
+
+# The most matches of one term, in one list, in one text, that a refusal shows (gh_refusal), which says how many more
+# it does not show. A text may hold a term by the hundred thousand, and until the review of 053ef618
+# (dispatch://INFRA-4957, rulings-md v66 item 2: "The check reads a file in bounded memory") the check held each match
+# it found: the review measured 231 MiB for an asset of 5 MB that holds a term 200,000 times, and 1,211 MiB for 8 MB of
+# one term. Holding only the matches it shows, the check took 69 MiB for 5 MB that holds the canary 200,000 times, and
+# its refusal showed 20 of them where it had shown all 200,000 (2026-11-27).
+GH_MATCH_LIMIT = 20
+
+
+def gh_refusal(name: str, reach: Callable[[], Sequence[GhTarget]], contents: Sequence[tuple[GhText, str]],
+               graphql: Callable[[GhText], bool], unreadable: list[tuple[GhText, str]],
+               advice: Callable[[], str] = lambda: "") -> int:
+    """The verdict on the call NAME (`gh pr comment`) that sends CONTENTS (gh_terms, GRAPHQL saying which text is a
+    GraphQL document or carries one), whose targets REACH gives, read once a term is found, or a text or the list
+    cannot be read: 0 when no target is open, or when no match counts for an open target, every text was read
+    (UNREADABLE, the caller's texts that cannot be read, empty) and so was the list; else the refusal, printed with each
+    match that counts, up to GH_MATCH_LIMIT of each term of each list in each text and how many more there are, each
+    text that cannot be read and the list's problem, and ADVICE's after the advice of a refusal for a term: FOUND_EXIT,
+    LIST_EXIT or TEXT_EXIT.
+
+    Each match is judged as it is found (gh_findings), and none is kept but those the refusal shows, so a text that
+    holds a term by the hundred thousand is read in bounded memory: a call whose targets are all closed goes out at its
+    first match, read no further, and a match that counts for nothing takes none of the refusal's places, however many
+    such matches come before one that counts. Where a file cannot be read again (GhFileError), as when it is gone, it is
+    added to UNREADABLE, and no match is shown."""
+    matcher, list_problem, matches = gh_terms(contents, graphql)
+    scopes = matcher.scopes if matcher is not None else {}
+    reached: Sequence[GhTarget] | None = None
+    shown: list[Finding] = []
+    # How many matches of each text, term and list the refusal shows, and how many more count; the value the last match
+    # is in, the open targets that value goes to (gh_goes_to), and the term, list and allowed tokens of each match of
+    # its as-written view that counts, which every match of a later view that has them has for a twin (gh_findings).
+    taken: dict[tuple[GhText, int, str], int] = {}
+    more = 0
+    value = -1
+    targets: list[GhTarget] = []
+    counted: set[tuple[int, str, tuple[str, ...]]] = set()
     try:
-        return matcher, None, gh_findings(contents, graphql, matcher)
+        for found in matches:
+            if reached is None:
+                reached = reach()
+                if not any(target.open for target in reached):
+                    return 0
+            if found.value != value:
+                value, counted = found.value, set()
+                targets = [target for target in reached if target.open and gh_goes_to(found.piece, target.tie)]
+            # A match counts for an open target its value goes to, that its list's scope reaches, that no allowed token
+            # of that target holds, and whose own name, public already, does not hold it (gh_own_name); a match of a
+            # later view counts only when none of its twins does, since a twin that counts shows the same term.
+            span = found.span
+            if not any((not span.scope or scopes[span.scope].reaches([target.repository]))
+                       and not span.allowed_for(target.repository) and not gh_own_name(target, found.view, span)
+                       for target in targets):
+                continue
+            twin = (span.term, span.scope, span.allowed_in)
+            if not found.how:
+                counted.add(twin)
+            elif twin in counted:
+                continue
+            key = (found.piece, span.term, span.scope)
+            if taken.get(key, 0) < GH_MATCH_LIMIT:
+                taken[key] = taken.get(key, 0) + 1
+                shown.append(found.finding)
+            else:
+                more += 1
     except GhFileError as error:
         unreadable.append(error.args)
-        return None, None, []
-
-
-def gh_refusal(name: str, reached: Sequence[GhTarget], matcher: TermMatcher | None, findings: Sequence[GhMatch],
-               unreadable: Sequence[tuple[GhText, str]], list_problem: str | None, advice: str = "") -> int:
-    """The verdict on the call NAME (`gh pr comment`), whose targets are REACHED: 0 when no target is open, or when no
-    match of FINDINGS counts for an open target, every text was read (UNREADABLE empty) and so was the list
-    (LIST_PROBLEM None); else the refusal, printed with each match that counts, each text that cannot be read and the
-    list's problem, and ADVICE after the advice of a refusal for a term: FOUND_EXIT, LIST_EXIT or TEXT_EXIT."""
+        shown, more = [], 0
+    if not shown and list_problem is None and not unreadable:
+        return 0
+    if reached is None:
+        reached = reach()
     if not any(target.open for target in reached):
         return 0
-    kept_findings = list(findings)
-    if matcher is not None:
-        # A match counts for an open target its value goes to (gh_goes_to), that its list's scope reaches, that no
-        # allowed token of that target holds, and whose own name, public already, does not hold it (gh_own_name); a
-        # match of a later view counts only when none of its twins does, since a twin that counts shows the same term
-        # (gh_findings).
-        def counts(span: Span, view: str, targets: Sequence[GhTarget]) -> bool:
-            return any((not span.scope or matcher.scopes[span.scope].reaches([target.repository]))
-                       and not span.allowed_for(target.repository) and not gh_own_name(target, view, span)
-                       for target in targets)
-
-        def kept(found: GhMatch) -> bool:
-            targets = [target for target in reached if target.open and gh_goes_to(found.piece, target.tie)]
-            return (counts(found.span, found.view, targets)
-                    and not any(counts(span, view, targets) for span, view in found.twins))
-
-        kept_findings = [found for found in findings if kept(found)]
-    if not kept_findings and list_problem is None and not unreadable:
-        return 0
     target = ", ".join(c_escape(item.shown) for item in reached)
-    for found in kept_findings:
-        print(f"leak terms: {name} to {target}: {found.finding}", file=sys.stderr)
+    for finding in shown:
+        print(f"leak terms: {name} to {target}: {finding}", file=sys.stderr)
+    if more:
+        print(f"leak terms: {name} to {target}: {more} more matches of these terms, not shown: a refusal shows at most "
+              f"{GH_MATCH_LIMIT} of each term in each text", file=sys.stderr)
     for piece, reason in unreadable:
         print(f"leak terms: {name} to {target}: cannot read {piece.shown()}: {c_escape(reason)}", file=sys.stderr)
     if list_problem:
         print(list_problem, file=sys.stderr)
         print(f"leak terms: {name} to {target}: its text cannot be checked without the list", file=sys.stderr)
-    remedy = f" To send it, {REMOVE_ADVICE}.{advice}" if kept_findings else ""
+    remedy = f" To send it, {REMOVE_ADVICE}.{advice()}" if shown else ""
     print(f"leak terms: {name}: refused before gh ran, so nothing was sent.{remedy}", file=sys.stderr)
-    return FOUND_EXIT if kept_findings else LIST_EXIT if list_problem else TEXT_EXIT
+    return FOUND_EXIT if shown else LIST_EXIT if list_problem else TEXT_EXIT
 
 
 # Where `gh stack feedback` sends its title: the discussion form of github/gh-stack, a public repository, whatever
@@ -6895,16 +6940,16 @@ def gh_stack_check(sub: str, arguments: Sequence[str], environment: Mapping[str,
         return GH_STDIN_EXIT
     contents, unread = gh_contents(texts, environment)
     unreadable += unread
-    matcher, list_problem, findings = gh_terms(contents, lambda piece: False, unreadable)
-    if not findings and list_problem is None and not unreadable:
-        return 0
-    if sub == "feedback":
-        reached = [GH_STACK_FEEDBACK]
-    elif (condition := gh_plain_case(environment)) is not None:
-        reached = [GhTarget(f"wherever gh-stack sends it, read as public, since {condition}", "", True)]
-    else:
-        reached = gh_targets(gh_base_repositories(gh_bases(environment, True))) or [GH_NO_REPOSITORY]
-    return gh_refusal(f"gh stack {sub}", reached, matcher, findings, unreadable, list_problem)
+
+    def reach() -> list[GhTarget]:
+        """Where gh-stack sends the call, read once a term is found (gh_refusal)."""
+        if sub == "feedback":
+            return [GH_STACK_FEEDBACK]
+        if (condition := gh_plain_case(environment)) is not None:
+            return [GhTarget(f"wherever gh-stack sends it, read as public, since {condition}", "", True)]
+        return gh_targets(gh_base_repositories(gh_bases(environment, True))) or [GH_NO_REPOSITORY]
+
+    return gh_refusal(f"gh stack {sub}", reach, contents, lambda piece: False, unreadable)
 
 
 def gh_check(arguments: Sequence[str]) -> int:
@@ -7011,24 +7056,25 @@ def gh_check(arguments: Sequence[str]) -> int:
         """Whether PIECE is a GraphQL call's document (its `query` field) or carries one (its JSON body's `.query`)."""
         return graphql_call and (piece.json_body or piece.key == "query")
 
-    matcher, list_problem, findings = gh_terms(contents, graphql, unreadable)
-    if not findings and list_problem is None and not unreadable:
-        return 0
-    if graphql_call:
-        # A call judged as GraphQL, on any host, is one target read as public: GH_GRAPHQL_TARGET for a mutation, else
-        # GH_GRAPHQL_UNREAD_TARGET, since the text that cannot be read may be the mutation.
-        reached = [GhTarget(GH_GRAPHQL_TARGET if mutation else GH_GRAPHQL_UNREAD_TARGET, "", True)]
-    elif (condition := gh_plain_case(environment)) is not None:
-        # Outside the plain case the check does not read where gh sends the call: it is one target read as public,
-        # with no repository, so every list counts and no own name is exempt, as for a raw GraphQL mutation.
-        reached = [GhTarget(f"wherever gh sends it, read as public, since {condition}", "", True)]
-    else:
+    def reach() -> list[GhTarget]:
+        """Where gh sends the call, read once a term is found (gh_refusal)."""
+        if graphql_call:
+            # A call judged as GraphQL, on any host, is one target read as public: GH_GRAPHQL_TARGET for a mutation,
+            # else GH_GRAPHQL_UNREAD_TARGET, since the text that cannot be read may be the mutation.
+            return [GhTarget(GH_GRAPHQL_TARGET if mutation else GH_GRAPHQL_UNREAD_TARGET, "", True)]
+        if (condition := gh_plain_case(environment)) is not None:
+            # Outside the plain case the check does not read where gh sends the call: it is one target read as public,
+            # with no repository, so every list counts and no own name is exempt, as for a raw GraphQL mutation.
+            return [GhTarget(f"wherever gh sends it, read as public, since {condition}", "", True)]
         new_visibility = gh_new_visibility(read, address, contents) if group == "api" else ""
-        reached = gh_reach(GhCall(group, sub, tuple(read), address, made_public, new_visibility), bases)
-    # The refusal of a raw GraphQL mutation for a term names what to use instead (gh_graphql_advice); a GraphQL call
-    # that is not known to be a mutation (GH_GRAPHQL_UNREAD_TARGET), and a refusal with no term, get none.
-    advice = f" {gh_graphql_advice(gh_graphql_documents(contents, graphql))}." if mutation else ""
-    return gh_refusal(f"gh {group} {sub}".rstrip(), reached, matcher, findings, unreadable, list_problem, advice)
+        return gh_reach(GhCall(group, sub, tuple(read), address, made_public, new_visibility), bases)
+
+    def advice() -> str:
+        """The refusal of a raw GraphQL mutation for a term names what to use instead (gh_graphql_advice); a GraphQL
+        call that is not known to be a mutation (GH_GRAPHQL_UNREAD_TARGET), and a refusal with no term, get none."""
+        return f" {gh_graphql_advice(gh_graphql_documents(contents, graphql))}." if mutation else ""
+
+    return gh_refusal(f"gh {group} {sub}".rstrip(), reach, contents, graphql, unreadable, advice)
 
 
 # `diff` and `message` --repository: a GitHub repository as OWNER/NAME. A value of any other shape (a bare name, a URL,
