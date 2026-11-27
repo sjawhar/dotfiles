@@ -3764,22 +3764,23 @@ class GhLeakTerms(unittest.TestCase):
         # chunks and across the edge of the second and the third, sends nothing new there, and the call goes out
         # (gh_own_name, which reads the part of a chunk around the match, gh_name_window). Each name stands after 599
         # letters and a space, more than GH_CHUNK_CONTEXT, which the check reads before a match to find where an own
-        # name may begin. Control: the owner in a word it only begins, `theorem-labs-internal`, in the same places, is
+        # name may begin. Control: YGO's owner in a word it only begins, `<owner>-internal`, in the same places, is
         # refused.
         env = self.ygo_fork()
         self.answer(YGO, "public")
         chunk = load_check().GH_CHUNK
         lines = ("x" * 99 + "\n") * (3 * chunk // 100)
         argv = ["release", "upload", "v1", "asset.txt", "-R", YGO]
-        for word, refused in ((f"https://github.com/{YGO}.git", False), ("see theorem-labs-internal", True)):
+        owner = YGO.partition("/")[0]
+        for word, refused in ((f"https://github.com/{YGO}.git", False), (f"see {owner}-internal", True)):
             text = lines
-            for at in (chunk + chunk // 2, 2 * chunk - word.index("theorem-labs") - 5):
+            for at in (chunk + chunk // 2, 2 * chunk - word.index(owner) - 5):
                 text = text[:at - 600] + "y" * 599 + " " + word + " " + "z" * 99 + text[at + len(word) + 100:]
             with self.subTest(word=word):
                 self.file("asset.txt", text)
                 self.setUp_calls()
                 if refused:
-                    self.assert_refused(self.run_gh(argv, env=env), "argument 2 asset.txt", "theorem-labs", YGO_LIST)
+                    self.assert_refused(self.run_gh(argv, env=env), "argument 2 asset.txt", owner, YGO_LIST)
                 else:
                     self.assert_sent(self.run_gh(argv, env=env), argv)
 
