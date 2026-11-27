@@ -88,6 +88,7 @@ ensure_link "${DOTFILES_DIR}/omp/extensions/refusal-cooldown.ts" "${OMP_AGENT_DI
 rm -f "${OMP_AGENT_DIR}/extensions/served-model-notice.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/running-script-guard.ts" "${OMP_AGENT_DIR}/extensions/running-script-guard.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/decision-review-gate.ts" "${OMP_AGENT_DIR}/extensions/decision-review-gate.ts"
+ensure_link "${DOTFILES_DIR}/omp/extensions/zlib-reader-guard.ts" "${OMP_AGENT_DIR}/extensions/zlib-reader-guard.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/path-guard.ts" "${OMP_AGENT_DIR}/extensions/path-guard.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/span-account.ts" "${OMP_AGENT_DIR}/extensions/span-account.ts"
 # The experiments extension: several session features, each behind its own gate (omp/extensions/experiments/index.ts).
@@ -294,12 +295,12 @@ ensure_vendor https://github.com/pulumi/agent-skills.git pulumi-agent-skills 251
 # `gh skill install` places it in ~/.agents/skills (user scope), which OMP's
 # built-in "agents" discovery provider already reads natively (on by default) -
 # no skills-sources.json entry needed. This block only materializes/pins it:
-# pinned to the cli/cli v2.98.0 tag commit, matching mise.toml's
-# `gh = "2.98.0"` pin (a newer skill documents flags, e.g. `--attach`, that an
+# pinned to the cli/cli v2.106.0 tag commit, matching mise.toml's
+# `gh = "2.106.0"` pin (a newer skill documents flags, e.g. `--attach`, that an
 # older installed `gh` rejects) - re-pin here whenever mise.toml's gh version
 # moves. Non-fatal when `gh` is absent (agent boxes without it) or `gh skill`
 # is unavailable.
-GH_SKILL_PIN="a255baf71d13fe5947a4eb7ad521ffd412d64cee"
+GH_SKILL_PIN="529111a21612ff1e29dc45e567a157df24e0e243"
 GH_SKILL_FILE="${HOME}/.agents/skills/gh/SKILL.md"
 if command -v gh &>/dev/null; then
     gh_skill_present=0

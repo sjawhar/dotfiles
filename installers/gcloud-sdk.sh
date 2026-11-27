@@ -37,11 +37,14 @@ GCLOUD_SDK_ROOT="$HOME/.gcloud"
 GCLOUD_SDK_BIN="$GCLOUD_SDK_ROOT/google-cloud-sdk/bin/gcloud"
 KUBE_PROJECT=theorem-agent-infra
 # dispatch: box doctors and the build pool (namespaces builds-*). grade-us-west1: the grade Jobs
-# of S3 (namespace grade). sami-rocqperf's ~/.kube/config on 2026-11-03 had these two and three
-# stockprobe-gke-* contexts, whose clusters no longer exist (`gcloud container clusters list`).
+# of S3 (namespace grade). theorem-us-central1: linux-sched's cluster since 2026-11-26, which
+# sched-service.sh and the tools it runs name by default (dispatch://INFRA-4466, asked for by
+# dispatch://INFRA-5098 R3). sami-rocqperf's ~/.kube/config on 2026-11-03 had the first two and
+# three stockprobe-gke-* contexts, whose clusters no longer exist (`gcloud container clusters list`).
 KUBE_CLUSTERS=(
     "dispatch us-west1"
     "grade-us-west1 us-west1-b grade-us-west1.config"
+    "theorem-us-central1 us-central1"
 )
 KUBE_DEFAULT_CONTEXT="gke_${KUBE_PROJECT}_us-west1_dispatch"
 

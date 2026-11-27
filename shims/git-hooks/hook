@@ -1,7 +1,8 @@
 #!/bin/bash
 # git-trailer-and-leak-hooks: shims/git points `core.hooksPath` here for every ordinary
-# `git commit` to scan its staged diff and cleaned message, and for the agent-session
-# `git merge`, `git pull`, `git cherry-pick` or `git revert` that needs an Omp-Session trailer.
+# `git commit` outside a throwaway repository (scripts/throwaway-repository.sh) to scan its
+# staged diff and cleaned message, and for the agent-session `git merge`, `git pull`,
+# `git cherry-pick` or `git revert` that needs an Omp-Session trailer.
 # Every hook name here is a link to this file.
 #
 # For the scanned commit, prepare-commit-msg records Git's auto comment character before the

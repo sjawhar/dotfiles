@@ -22,16 +22,16 @@ set -euo pipefail
 # shellcheck source=installers/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-VERSION=0.1.2
+VERSION=0.3.0
 TAG="theorem-session-v$VERSION"
 REPO=theorem-labs/agent-infra
-# Release theorem-session-v0.1.2 (its tag is commit 2da11f26926), read on 2026-11-23: each
+# Release theorem-session-v0.3.0 (its tag is commit dce415201ef), read on 2026-11-27: each
 # archive's line in its SHA256SUMS, which GitHub's own digest of the asset agrees with, and the
 # sha256 of the theorem-session each archive holds.
-SHA256_AMD64=b84bdc32e185a78dc6deea1215da4889f89c0621317b8edba73b23c01bbb6c25
-SHA256_ARM64=1b5d211d5a473708f0b20eaaa693c5f73d12a7d1fe87a3651bafc4a8779631c6
-BINARY_SHA256_AMD64=521b60696c990d665db4c27b32ff922c222da7b47061d20e46596dff9a9c1240
-BINARY_SHA256_ARM64=4af5c63674e681de7919cc0014d3d1820283cdbeaff0242f2c646d299b1554b8
+SHA256_AMD64=59e399cbd48e69a52b93ba9381613fdb4ec416ad5b64831c739201b3dfb9e150
+SHA256_ARM64=d3d60636e9c900a9efcc282684d90aa632fd45288d81f5120baf8d215f523623
+BINARY_SHA256_AMD64=ffac17a9f062f3b2e6dc4bd87165c0e195bfaa07b974a2051b813690c539fd42
+BINARY_SHA256_ARM64=21dfe8fe0ceedf778517bf8e8d704c00ae24042f36149f10ccccba210232b288
 BIN_DIR="$HOME/.local/bin"
 BIN="$BIN_DIR/theorem-session"
 

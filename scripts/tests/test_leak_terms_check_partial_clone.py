@@ -10,7 +10,8 @@ Each case makes a bare repository whose `main` has two commits, so a clone of it
 and whose `side` branch a single-branch clone never fetches. The clone is `--filter=blob:none --single-branch` of
 `main` over file://, and the bare repository serves lazy fetches. The check runs in push mode as the pre-push hook runs
 it, with git's update lines on stdin, and GIT_TRACE records every git process it starts, so a fetch shows as
-`built-in: git fetch`.
+`built-in: git fetch`. Each git the check starts runs through a wrapper that keeps a copy of what git writes to
+standard error, so a case can see git warn that it met an object the clone lacks with lazy fetch off.
 """
 
 from __future__ import annotations
@@ -30,6 +31,20 @@ GIT = "/usr/bin/git"
 ZERO = "0" * 40
 TERM = TEST_TERMS[1]
 FOUND_EXIT = 3
+# What git (promisor-remote.c) writes when it meets an object a partial clone lacks with lazy fetch off. It then reads
+# every object of every promisor pack (is_promisor_object) before it answers: in the blobless clone of
+# cybermonklabs/legion that agents push from (11,204 promisor packs on 2026-11-26), 140 s for a single such object.
+LAZY_FETCH_OFF = "lazy fetching disabled"
+# The real git, with each call's arguments and a copy of what it writes to standard error added to $GIT_STDERR_LOG.
+GIT_WRAPPER = f"""#!/bin/sh
+err=$(mktemp) || exit 125
+{GIT} "$@" 2>"$err"
+status=$?
+cat "$err" >&2
+{{ printf 'git %s\\n' "$*"; cat "$err"; }} >>"$GIT_STDERR_LOG"
+rm -f "$err"
+exit "$status"
+"""
 
 
 class PartialClonePush(unittest.TestCase):
@@ -68,6 +83,11 @@ class PartialClonePush(unittest.TestCase):
         self.old_file = self.rev(self.origin, "main~1:old.txt")
         self.assertFalse(self.holds(self.clone, self.side), "the clone holds side, so no case could fetch it")
         self.assertFalse(self.holds(self.clone, self.old_file), "the clone holds the old file, so no case could fetch it")
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        (self.bin / "git").write_text(GIT_WRAPPER, encoding="utf-8")
+        (self.bin / "git").chmod(0o755)
+        self.git_stderr: list[str] = []
 
     def git(self, *arguments: str, cwd: Path | None = None, stdin: str | None = None) -> str:
         completed = subprocess.run([GIT, *arguments], cwd=cwd, env=self.env, input=stdin, capture_output=True,
@@ -93,13 +113,16 @@ class PartialClonePush(unittest.TestCase):
     def push(self, local_ref: str, local: str, repository: Path | None = None
              ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
         """Run the check in REPOSITORY (the blobless clone) as the pre-push hook runs it, for a push of LOCAL to a ref
-        of the same name that the destination lacks; return its result and the fetches GIT_TRACE saw."""
+        of the same name that the destination lacks; return its result and the fetches GIT_TRACE saw. What each git it
+        started wrote to standard error, after a line with that git's arguments, is left in self.git_stderr."""
         trace = Path(tempfile.mkstemp(prefix="trace-", dir=self.root)[1])
+        log = Path(tempfile.mkstemp(prefix="git-stderr-", dir=self.root)[1])
         result = subprocess.run(
             [str(CHECK), "push", "--remote", "origin", "--url", self.url],
             input=f"{local_ref} {local} {local_ref} {ZERO}\n",
             cwd=repository or self.clone,
-            env={**self.env, **leak_check_environment("/usr/bin:/bin"), "GIT_TRACE": str(trace)},
+            env={**self.env, **leak_check_environment(f"{self.bin}:/usr/bin:/bin"), "GIT_TRACE": str(trace),
+                 "GIT_STDERR_LOG": str(log), "TMPDIR": str(self.root)},
             capture_output=True,
             text=True,
             timeout=300,
@@ -108,6 +131,9 @@ class PartialClonePush(unittest.TestCase):
         traced = trace.read_text(encoding="utf-8").splitlines()
         # GIT_TRACE saw the read of what the clone holds, so it would have seen a fetch that read started.
         self.assertTrue(any("built-in: git cat-file" in line for line in traced), "GIT_TRACE recorded no git call")
+        self.git_stderr = log.read_text(encoding="utf-8", errors="replace").splitlines()
+        self.assertTrue(any(line.startswith("git cat-file --batch-check") for line in self.git_stderr),
+                        "the wrapper saw no read of what the clone holds, so it could not see a warning there")
         return result, [line for line in traced if "built-in: git fetch" in line]
 
     def test_a_clean_push_fetches_nothing(self) -> None:
@@ -169,6 +195,77 @@ class PartialClonePush(unittest.TestCase):
         self.assertIn("planted.txt:1", result.stderr)
         self.assertEqual(fetches, [])
         self.assertFalse(self.holds(self.clone, self.old_file), "the check fetched the old file")
+
+    def test_the_read_of_what_the_clone_holds_never_takes_gits_path_for_an_object_it_lacks(self) -> None:
+        # The destination advertises `side`, which the clone lacks. Asked of the clone itself with lazy fetch off, git
+        # warns and then reads every promisor pack before it answers (LAZY_FETCH_OFF); the control shows the wrapper
+        # sees that warning here. The check's read of what the clone holds must answer without it.
+        log = self.root / "control-stderr"
+        control = subprocess.run([str(self.bin / "git"), "cat-file", "--batch-check"], cwd=self.clone,
+                                 input=f"{self.side}\n", capture_output=True, text=True, timeout=60, check=False,
+                                 env={**self.env, "GIT_NO_LAZY_FETCH": "1", "GIT_STDERR_LOG": str(log),
+                                      "TMPDIR": str(self.root)})
+        self.assertEqual(control.stdout, f"{self.side} missing\n", control.stderr)
+        self.assertIn(LAZY_FETCH_OFF, log.read_text(encoding="utf-8"))
+        commit = self.commit(self.clone, "clean.txt", "nothing listed here\n")
+        result, fetches = self.push("refs/heads/feature", commit)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(fetches, [])
+        self.assertEqual([line for line in self.git_stderr if LAZY_FETCH_OFF in line], [])
+
+    def test_a_new_branch_on_a_pushed_commit_reads_only_its_new_commits(self) -> None:
+        # The destination holds `held`, a commit with a listed term, and a new branch on it sends what follows it. That
+        # alone is read, from the clone and from a linked worktree of it: the held term is not refused, and a term in a
+        # new commit is.
+        held = self.commit(self.clone, "held.txt", f"a line with {TERM}\n")
+        self.git("push", "-q", self.url, f"{held}:refs/heads/held", cwd=self.clone)
+        worktree = self.root / "worktree"
+        self.git("worktree", "add", "-q", "--detach", str(worktree), held, cwd=self.clone)
+        for repository in (self.clone, worktree):
+            with self.subTest(repository=repository.name):
+                clean = self.commit(repository, f"clean-{repository.name}.txt", "nothing listed here\n")
+                result, fetches = self.push("refs/heads/new", clean, repository)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(fetches, [])
+                planted = self.commit(repository, f"fresh-{repository.name}.txt", f"a line with {TERM}\n")
+                result, fetches = self.push("refs/heads/new", planted, repository)
+                self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
+                self.assertIn(f"fresh-{repository.name}.txt:1", result.stderr)
+                self.assertNotIn("held.txt", result.stderr)
+                self.assertEqual(fetches, [])
+
+    def test_a_merge_of_main_reads_only_what_the_destination_lacks(self) -> None:
+        # Someone else puts a commit with a listed term on the destination's main, and the clone merges main into its
+        # branch. The destination holds that commit, so the push of the merge reads only the branch's commit and the
+        # merge, and passes. A term in a commit merged in from a branch the destination lacks is refused.
+        work = self.root / "work"
+        self.git("clone", "-q", "--branch", "main", self.url, str(work))
+        self.commit(work, "main-only.txt", f"a line with {TERM}\n")
+        self.git("push", "-q", "origin", "main", cwd=work)
+        self.git("fetch", "-q", "origin", cwd=self.clone)
+        self.commit(self.clone, "clean.txt", "nothing listed here\n")
+        self.git("merge", "-q", "--no-edit", "origin/main", cwd=self.clone)
+        result, fetches = self.push("refs/heads/feature", self.rev(self.clone, "HEAD"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(fetches, [])
+        self.git("checkout", "-q", "-b", "extra", "origin/main", cwd=self.clone)
+        self.commit(self.clone, "extra.txt", f"a line with {TERM}\n")
+        self.git("checkout", "-q", "feature", cwd=self.clone)
+        self.git("merge", "-q", "--no-edit", "extra", cwd=self.clone)
+        result, fetches = self.push("refs/heads/feature", self.rev(self.clone, "HEAD"))
+        self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
+        self.assertIn("extra.txt:1", result.stderr)
+        self.assertNotIn("main-only.txt", result.stderr)
+        self.assertEqual(fetches, [])
+
+    def test_a_branch_whose_base_the_destination_lacks_reads_every_new_commit(self) -> None:
+        base = self.commit(self.clone, "base.txt", f"a line with {TERM}\n")
+        commit = self.commit(self.clone, "clean.txt", "nothing listed here\n")
+        result, fetches = self.push("refs/heads/feature", commit)
+        self.assertEqual(result.returncode, FOUND_EXIT, result.stderr)
+        self.assertIn("base.txt:1", result.stderr)
+        self.assertIn(base[:12], result.stderr)
+        self.assertEqual(fetches, [])
 
 
 if __name__ == "__main__":

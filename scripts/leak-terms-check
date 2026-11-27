@@ -25,8 +25,10 @@ import pwd
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
+import tempfile
 import threading
 import sys
 import tomllib
@@ -239,16 +241,50 @@ def repository_name(url: str) -> str:
     return url.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1].removesuffix(".git").lower()
 
 
-def knives_forbidden(environment: Mapping[str, str]) -> list[tuple[Scope, list[str]]]:
-    """The `forbidden` list of each entry of knives's fork registry, repos.toml's then repos.local.toml's (knives adds
-    the private file's values to the entries it names), each for every repository named as the entry's upstream,
-    origin or release, whatever its owner: a fork keeps its upstream's name, and oh-my-pi's fork moved from sjawhar to
-    cybermonklabs while the registry still names sjawhar. A machine with no registry has no such list; a registry that
-    cannot be read refuses, as the encrypted list does."""
+# A GitHub repository URL, in the forms git takes, as this check reads one of knives's registry (repository_slug):
+# a scheme URL (`https://github.com/o/n`, `ssh://git@github.com/o/n`), a remote helper's `<helper>::<url>`, which
+# the first group drops, or scp form (`git@github.com:o/n`). The host is GitHub's, the path is exactly `owner/name`
+# (git's own forms, not a browser's `.../o/n/tree/main`), and the `.git` suffix and a trailing `/` do not count.
+GITHUB_URL = re.compile(
+    r"(?:[A-Za-z][A-Za-z0-9+.-]*::)?"
+    r"(?:[A-Za-z][A-Za-z0-9+.-]*://(?:[^/@]*@)?(?:www\.|ssh\.)?github\.com(?::[0-9]+)?/"
+    r"|(?:[^/@]*@)?(?:www\.|ssh\.)?github\.com:)"
+    r"(?P<owner>[^/]+)/(?P<name>[^/]+?)(?:\.git)?/?",
+    re.IGNORECASE,
+)
+
+
+def repository_slug(url: str) -> str:
+    """The `owner/name` a GitHub URL names, in lower case (GITHUB_URL), or "" for a URL that names no GitHub
+    repository. It reads the registry's URLs, which are written as https://github.com/<owner>/<name>[.git], and the
+    URL git would read one of them through (rewritten_upstream); a push reads its destination through
+    scripts/github-repo-visibility --slug (repository_of), which resolves an ssh host alias as git's ssh does."""
+    found = GITHUB_URL.fullmatch(url)
+    return f"{found['owner']}/{found['name']}".lower() if found else ""
+
+
+@dataclass(frozen=True)
+class KnivesEntry:
+    """One entry of knives's fork registry (knives_entries): SCOPE, every repository it names as its upstream, origin
+    or release, whatever the owner; REPOSITORIES, those it names whole, as `owner/name` in lower case
+    (repository_slug); FORBIDDEN, its `forbidden` list; UPSTREAMS, the URLs it names as its upstream."""
+
+    scope: Scope
+    repositories: frozenset[str]
+    forbidden: tuple[str, ...]
+    upstreams: tuple[str, ...]
+
+
+def knives_entries(environment: Mapping[str, str]) -> list[KnivesEntry]:
+    """The entries of knives's fork registry, repos.toml's then repos.local.toml's (knives adds the private file's
+    values to the entries it names), each scoped to every repository named as the entry's upstream, origin or release,
+    whatever its owner: a fork keeps its upstream's name, and oh-my-pi's fork moved from sjawhar to cybermonklabs while
+    the registry still names sjawhar. A machine with no registry has no entry; a registry that cannot be read refuses,
+    as the encrypted list does."""
     directory = knives_registry_directory(environment)
     if directory is None:
         return []
-    entries: dict[str, tuple[list[str], list[str]]] = {}
+    entries: dict[str, tuple[list[str], list[str], list[str]]] = {}
     for name in ("repos.toml", "repos.local.toml"):
         path = directory / name
         if not path.exists():
@@ -264,14 +300,42 @@ def knives_forbidden(environment: Mapping[str, str]) -> list[tuple[Scope, list[s
             forbidden = entry.get("forbidden", [])
             if not isinstance(forbidden, list) or not all(isinstance(term, str) for term in forbidden):
                 raise list_error(problem)
-            terms, urls = entries.setdefault(key, ([], []))
+            terms, urls, upstreams = entries.setdefault(key, ([], [], []))
             terms += [term.strip() for term in forbidden if term.strip()]
             urls += [entry[role] for role in ("upstream", "origin", "release") if isinstance(entry.get(role), str)]
+            upstreams += [entry["upstream"]] if isinstance(entry.get("upstream"), str) else []
     return [
-        (Scope(f"knives {key}", tuple(sorted({f"*/{repository_name(url)}" for url in urls})), registry=True), terms)
-        for key, (terms, urls) in entries.items()
-        if terms and urls
+        KnivesEntry(Scope(f"knives {key}", tuple(sorted({f"*/{repository_name(url)}" for url in urls})), registry=True),
+                    frozenset(slug for url in urls if (slug := repository_slug(url))),
+                    tuple(terms), tuple(dict.fromkeys(upstreams)))
+        for key, (terms, urls, upstreams) in entries.items()
+        if urls
     ]
+
+
+def knives_forbidden(environment: Mapping[str, str]) -> list[tuple[Scope, list[str]]]:
+    """The `forbidden` list of each knives registry entry that has one (knives_entries), for the entry's scope."""
+    return [(entry.scope, list(entry.forbidden)) for entry in knives_entries(environment) if entry.forbidden]
+
+
+def knives_upstreams(environment: Mapping[str, str], repositories: Sequence[str]) -> list[str]:
+    """The upstream URLs of the knives registry entry the push's REPOSITORIES (`owner/name`) belong to: the entries
+    that name one of them whole, as their own upstream, origin or release (repository_slug). A destination no entry
+    names belongs to the one entry whose scope reaches it, since a fork keeps its upstream's name and may have moved
+    owner (oh-my-pi's moved from sjawhar to cybermonklabs while the registry named sjawhar); where two entries of one
+    repository name reach it, which fork it is cannot be read, and it gets no upstream. So one entry's upstream
+    exempts nothing in a push to another's fork, and a repository nobody could name (EVERY_REPOSITORY), which reaches
+    every scope, gets none at all."""
+    named = [repository for repository in repositories if repository]
+    if not named:
+        return []
+    wanted = {repository.lower() for repository in named}
+    entries = knives_entries(environment)
+    owned = [entry for entry in entries if wanted & entry.repositories]
+    if not owned:
+        reached = [entry for entry in entries if entry.scope.reaches(named)]
+        owned = reached if len(reached) == 1 else []
+    return list(dict.fromkeys(upstream for entry in owned for upstream in entry.upstreams))
 
 
 def load_terms(environment: Mapping[str, str] | None = None, repositories: Sequence[str] = ()) -> "TermMatcher":
@@ -1715,22 +1779,41 @@ def decode_git_message(message: bytes, declared_encoding: bytes | None = None) -
         return None if configured is None else iconv_reencode(message, configured)
 
 
-def git_output(arguments: Sequence[str], standard_input: bytes, failure: str) -> bytes:
-    """Run one Git producer and fail closed, naming it with FAILURE, when it cannot provide complete output."""
+def git_output(arguments: Sequence[str], standard_input: bytes, failure: str, timeout: float | None = None) -> bytes:
+    """Run one Git producer and fail closed, naming it with FAILURE, when it cannot provide complete output. TIMEOUT,
+    in seconds, bounds a read that reaches the network (public_upstream_tips): git runs in a process group of its own,
+    and on expiry the group is killed, the transport helper git started included, since a helper that holds the pipe
+    would keep a wait after a kill of git alone. Without it a push waits on such a read for as long as it takes."""
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             ["git", *arguments],
-            input=standard_input,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             env=git_environment(),
-            check=False,
+            start_new_session=timeout is not None,
         )
     except OSError as error:
         raise TextError(failure) from error
-    if completed.returncode:
+    try:
+        output, _ = process.communicate(standard_input, timeout=timeout)
+    except BaseException as error:
+        # Every exceptional exit ends the child, as subprocess.run does: the bound's own TimeoutExpired, an OSError,
+        # and an interrupt of this process, which would otherwise leave git running in the session it was given.
+        try:
+            if timeout is None:
+                process.kill()
+            else:
+                os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            process.kill()
+        process.wait()
+        if isinstance(error, (subprocess.TimeoutExpired, OSError)):
+            raise TextError(failure) from error
+        raise
+    if process.returncode:
         raise TextError(failure)
-    return completed.stdout
+    return output
 
 
 def git_chunks(arguments: Sequence[str], standard_input: bytes) -> Iterator[bytes]:
@@ -1819,67 +1902,89 @@ def push_destination(remote: str, url: str) -> str:
     return url
 
 
-# git's message, untranslated under LC_ALL=C, when a read with lazy fetch off needs an object the clone lacks and an
-# object the clone received from its promisor names it (local_object_ids).
-PROMISOR_NAMED_MISSING = re.compile(
-    r"^fatal: could not fetch ([0-9a-f]{40}(?:[0-9a-f]{24})?) from promisor remote$", re.M
-)
+# The variables that choose a repository, its work tree, index or object directory, or how git reads its history. The
+# read of what this repository holds (local_object_ids) sets its own GIT_DIR and GIT_OBJECT_DIRECTORY instead.
+REPOSITORY_VARIABLES = frozenset((
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE", "GIT_PREFIX",
+    "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE",
+))
 
 
 def local_object_ids(candidates: Sequence[str]) -> set[str]:
     """Return the advertised IDs that this repository actually has, as a full clone with the same refs has them.
 
-    git is asked with lazy fetch off (GIT_NO_LAZY_FETCH=1). With it on, in a partial clone, each advertised ID the clone
-    lacks started its own fetch from the promisor, each carrying the whole history that ID reaches: on 2026-11-21 a push
-    through the shims from a blobless clone stalled for many minutes that way, as the shared leak check did before
-    dispatch://INFRA-4682. A fetched ID also counted as held where a full clone holds nothing. An ID the clone lacks
-    excludes nothing, so more is scanned, never less.
+    An ID the clone lacks excludes nothing, so more is scanned, never less, and git never fetches one here: with lazy
+    fetch on, in a partial clone, each advertised ID the clone lacked started its own fetch from the promisor, each
+    carrying the whole history that ID reaches (on 2026-11-21 a push through the shims from a blobless clone stalled for
+    many minutes that way, as the shared leak check did before dispatch://INFRA-4682), and a fetched ID counted as held
+    where a full clone holds nothing.
 
-    A git that carries the variable only with its CVE-2024-32465 fix (Ubuntu 24.04's 1:2.43.0-1ubuntu7.4) reads such an
-    ID as missing too, unless an object the clone received from its promisor names it (an older commit's file, a
-    submodule's commit): then git stops with exit 128 and `fatal: could not fetch <id> from promisor remote` after the
-    answers for the IDs before it (dispatch://INFRA-4891, dispatch://INFRA-4945). The clone lacks that ID, so it is not
-    held, and the read goes on from the next one. Any other failure refuses."""
+    git is asked through a git directory of its own, empty and with no configuration, over this repository's object
+    directory, its alternates included: it reads every object this repository holds and knows no promisor remote, so an
+    ID the clone lacks reads `missing` at once. Asked of a partial clone itself, even with lazy fetch off
+    (GIT_NO_LAZY_FETCH=1), git answers such an ID only after it has read every object of every promisor pack
+    (promisor-remote.c, is_promisor_object), and stops with exit 128 where an object it holds names the ID
+    (dispatch://INFRA-4891, dispatch://INFRA-4945). In the blobless clone of cybermonklabs/legion that agents push from,
+    with 11,266 promisor packs, that took 167 s for one such ID, and 235 s of a 246 s check of a one-commit push
+    (2026-11-26); through the empty git directory the same ID took 0.3 s. Any failure refuses."""
     pending = list(dict.fromkeys(candidates))
-    held: set[str] = set()
-    environment = {**git_environment(), "GIT_NO_LAZY_FETCH": "1", "LC_ALL": "C"}
+    if not pending:
+        return set()
     failure = "git could not check which advertised objects this repository holds"
-    while pending:
-        try:
+    location = git_output(
+        ["rev-parse", "--path-format=absolute", "--git-path", "objects", "--show-object-format"], b"", failure
+    ).decode("utf-8", errors="surrogateescape").split("\n")
+    if len(location) != 3 or location[2] or not location[0].startswith("/") or location[1] not in {"sha1", "sha256"}:
+        raise TextError(failure)
+    objects, object_format = location[:2]
+    environment = {
+        **{name: value for name, value in git_environment().items()
+           if name not in REPOSITORY_VARIABLES and not name.startswith("GIT_CONFIG")},
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "LC_ALL": "C",
+    }
+    try:
+        with tempfile.TemporaryDirectory(prefix="leak-terms-objects-") as view:
+            made = subprocess.run(
+                ["git", "init", "--quiet", "--bare", "--template=", f"--object-format={object_format}", view],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=environment,
+                check=False,
+            )
+            if made.returncode:
+                raise TextError(failure)
             completed = subprocess.run(
                 ["git", "cat-file", "--batch-check=%(objectname) %(objecttype)"],
                 input=("\n".join(pending) + "\n").encode(),
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=environment,
+                stderr=subprocess.DEVNULL,
+                env={**environment, "GIT_DIR": view, "GIT_OBJECT_DIRECTORY": objects, "GIT_NO_LAZY_FETCH": "1"},
                 check=False,
             )
-        except OSError as error:
-            raise TextError(failure) from error
-        lines = completed.stdout.decode("utf-8", errors="surrogateescape").split("\n")
-        # Each answer ends with a newline, so the last piece is empty unless an answer was cut off.
-        if lines.pop() != "" or len(lines) > len(pending):
-            raise TextError("git gave an incomplete object advertisement")
-        for candidate, line in zip(pending, lines):
-            fields = line.split()
-            if len(fields) < 2 or not OBJECT_ID.fullmatch(fields[0]):
-                raise TextError("git gave a malformed object advertisement")
-            if fields[1] != "missing":
-                held.add(candidate)
-        if completed.returncode == 0:
-            if len(lines) != len(pending):
-                raise TextError("git gave an incomplete object advertisement")
-            return held
-        named = PROMISOR_NAMED_MISSING.findall(completed.stderr.decode("utf-8", errors="surrogateescape"))
-        if completed.returncode != 128 or len(lines) == len(pending) or named != [pending[len(lines)].lower()]:
-            raise TextError(failure)
-        pending = pending[len(lines) + 1 :]
+    except OSError as error:
+        raise TextError(failure) from error
+    if completed.returncode:
+        raise TextError(failure)
+    lines = completed.stdout.decode("utf-8", errors="surrogateescape").split("\n")
+    # Each answer ends with a newline, so the last piece is empty unless an answer was cut off.
+    if lines.pop() != "" or len(lines) != len(pending):
+        raise TextError("git gave an incomplete object advertisement")
+    held: set[str] = set()
+    for candidate, line in zip(pending, lines):
+        fields = line.split()
+        if len(fields) < 2 or not OBJECT_ID.fullmatch(fields[0]):
+            raise TextError("git gave a malformed object advertisement")
+        if fields[1] != "missing":
+            held.add(candidate)
     return held
 
 
-def remote_advertisement(destination: str) -> list[str]:
-    """Read all refs advertised by the exact transport Git will use to push."""
-    output = git_output(["ls-remote", "--", destination], b"", "git could not read the destination's advertised refs")
+def remote_advertisement(destination: str, *selection: str, timeout: float | None = None,
+                         failure: str = "git could not read the destination's advertised refs") -> list[str]:
+    """The object IDs of the refs DESTINATION advertises, as `git ls-remote SELECTION…` lists them (every ref when
+    SELECTION is empty), read by the transport git takes for it: for the push's destination, the one git pushes by.
+    TIMEOUT bounds the read (git_output)."""
+    output = git_output(["ls-remote", *selection, "--", destination], b"", failure, timeout)
     object_ids: list[str] = []
     for line in output.decode("utf-8", errors="surrogateescape").splitlines():
         fields = line.split("\t", 1)
@@ -1887,6 +1992,82 @@ def remote_advertisement(destination: str) -> list[str]:
             raise TextError("git gave a malformed remote advertisement")
         object_ids.append(fields[0])
     return object_ids
+
+
+# The seconds an upstream's advertisement read may take. It is one `git ls-remote --heads --tags` of a public
+# repository: upstream oh-my-pi's 1,989 refs took 0.6 s on sami-devbox (2026-11-26). A read that passes this bound
+# exempts nothing, as a failed one does, so the push is checked in full rather than waiting on the network.
+UPSTREAM_READ_SECONDS = 60
+
+
+def shown_url(url: str) -> str:
+    """URL as a refusal shows it, with the user information of a scheme URL taken out: such a URL can carry a name
+    and a password or token (`https://user:token@host/o/n`), and no refusal shows a credential. The user of an scp
+    URL (`git@host:o/n`) is part of the address git is given, and no credential, so it stays."""
+    scheme, found, rest = url.rpartition("://")
+    if not found:
+        return url
+    authority, at, tail = rest.partition("@")
+    return f"{scheme}{found}{tail}" if at and "/" not in authority else url
+
+
+def unrewritten_upstream(upstream: str) -> bool:
+    """Whether a read of UPSTREAM reaches the GitHub repository it names: `url.<base>.insteadOf` of the caller's git
+    configuration rewrites a URL before any transport sees it (`git ls-remote --get-url` expands it and talks to
+    nothing), and the read then advertises the refs of whatever it reaches. The exemption holds what GitHub shows as
+    public, so the rewritten URL must name that same repository on GitHub (repository_slug): a rewrite of the
+    transport (https to ssh, a helper) keeps it, while one that names another repository, or any host but GitHub's,
+    does not, whatever it mirrors. A configuration that cannot be read, or a URL that is no GitHub repository,
+    counts the same way: the exemption fails closed, and nothing else here rests on this read."""
+    slug = repository_slug(upstream)
+    if not slug:
+        return False
+    try:
+        expanded = git_output(["ls-remote", "--get-url", "--", upstream], b"", "unread", UPSTREAM_READ_SECONDS)
+    except TextError:
+        return False
+    return repository_slug(expanded.decode("utf-8", errors="surrogateescape").strip()) == slug
+
+
+def public_upstream_tips(upstreams: Sequence[str]) -> tuple[list[tuple[str, list[str]]], list[str]]:
+    """([(upstream, the object IDs its branches and tags name)], [why an upstream gave none]) for UPSTREAMS, the push's
+    knives upstreams (knives_upstreams). Each is read live, with `git ls-remote --heads --tags` (a peeled tag's commit
+    included), and only when its visibility reads public (gh_visibility) and a read of it reaches that GitHub
+    repository (unrewritten_upstream): what those refs reach is public already, so a push counts it as held, as it
+    counts the destination's own refs (scan_push). Upstream oh-my-pi's a64fe021 names a public model whose name holds
+    a term of the entry's forbidden list, so until 2026-11-26 every push to the fork of a port built on upstream's
+    main from then on was refused for that upstream commit. Only a branch or a tag counts: an upstream's
+    `refs/pull/*` name whatever anyone proposes, our own commits included, and an object that is only present in the
+    fork network, as everything pushed to the fork is, counts for nothing. An upstream that is not public, or that
+    git cannot list, exempts nothing: the push's commits are all read, and its refusal says why (shown_url).
+
+    One thing the exemption takes as given, as the rest of this check takes it: the visibility is the leak check's
+    own, which holds a `public` answer for 600 s (scripts/github-repo-visibility). So an upstream that went private
+    within that time still reads public here, as it does for the destination of a push, which decides whether the
+    push is read at all."""
+    readable: list[tuple[str, list[str]]] = []
+    problems: list[str] = []
+    for upstream in upstreams:
+        shown = shown_url(upstream)
+        visibility = gh_visibility(upstream)
+        if visibility != "public":
+            problems.append(f"cannot read upstream {shown} as public (its visibility reads {visibility}), so none "
+                            "of its commits is exempt from this check")
+            continue
+        if not unrewritten_upstream(upstream):
+            problems.append(f"cannot read upstream {shown}: a read of it does not reach that repository on GitHub, "
+                            "since this repository's git configuration rewrites the URL; so none of its commits is "
+                            "exempt from this check")
+            continue
+        failure = (f"cannot read upstream {shown}: git could not list its branches and tags within "
+                   f"{UPSTREAM_READ_SECONDS} s")
+        try:
+            readable.append((upstream, remote_advertisement(upstream, "--heads", "--tags",
+                                                            timeout=UPSTREAM_READ_SECONDS, failure=failure)))
+        except TextError:
+            # A malformed listing names no upstream of its own, so the reason is this one either way.
+            problems.append(f"{failure}, so none of its commits is exempt from this check")
+    return readable, problems
 
 
 def outgoing_commit_ids(local: Sequence[str], held: Sequence[str]) -> list[str]:
@@ -2666,16 +2847,31 @@ def scan_push(text: str, remote: str, url: str) -> list[Finding]:
     """Scan outgoing commits, tags (their headers and messages), direct file and folder objects, and created or updated
     ref names, against the list every repository has and each scoped list, the knives registry's included, whose scope
     reaches the destination URL (load_terms); a ref name, an identity, a tag's name and the names a message's trailers
-    hold are read as names (TermMatcher), without the registry's lists."""
+    hold are read as names (TermMatcher), without the registry's lists. What the destination's refs reach is held, and
+    so is what the branches and tags of its public knives upstream reach (public_upstream_tips), where this clone holds
+    them: an advertised object the clone lacks holds nothing (local_object_ids), and a refusal names each upstream
+    that could not be read in full, so its commits were read too."""
     local, prior_remote = push_updates(text)
     if not local:
         return []
     destination = push_destination(remote, url)
-    advertised = remote_advertisement(destination)
-    held = local_object_ids([*advertised, *prior_remote])
+    advertised = [*remote_advertisement(destination), *prior_remote]
+    repositories = repository_of(url)
+    upstreams, notes = public_upstream_tips(knives_upstreams(os.environ, repositories))
+    held = local_object_ids([*advertised, *(tip for _, tips in upstreams for tip in tips)])
+    for upstream, tips in upstreams:
+        lacking = len(set(tips) - held)
+        if lacking:
+            # `git fetch <url>` alone brings that repository's HEAD, so it leaves every other branch missing: the
+            # correction names the refspec that brings them all, and the tags.
+            shown = shown_url(upstream)
+            notes.append(f"cannot read upstream {shown} in full: this clone lacks {lacking} of the objects its "
+                         "branches and tags name, so a commit that only those reach is not exempt from this check; "
+                         f"fetch them (git fetch --tags {shown} '+refs/heads/*:refs/remotes/upstream-read/*') and "
+                         "push again")
     commits = outgoing_commit_ids([object_id for _, object_id in local], sorted(held))
-    tags, objects = outgoing_tags(local, [*advertised, *prior_remote], held)
-    matcher = load_terms(repositories=repository_of(url))
+    tags, objects = outgoing_tags(local, advertised, held)
+    matcher = load_terms(repositories=repositories)
     findings = scan_outgoing_commits(commits, matcher)
     for name, content in tags:
         findings.extend(object_findings(content, f"tag {c_escape(name)}", matcher, True))
@@ -2683,6 +2879,9 @@ def scan_push(text: str, remote: str, url: str) -> list[Finding]:
     for remote_ref, _ in local:
         name = remote_ref.removeprefix("refs/heads/").removeprefix("refs/tags/")
         findings.extend(name_findings(f"ref {c_escape(name)}", name, matcher.names().spans(name)))
+    if findings:
+        for note in notes:
+            print(f"leak terms: {c_escape(note)}", file=sys.stderr)
     return findings
 
 

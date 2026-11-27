@@ -127,14 +127,16 @@ Follow restores the managed marketplace lock before it calls the sync.
    as `installers/knives.sh` does, and records what the render depends on in
    `~/.config/knives/repos.toml.source-sha256`: the sha256 of the file it rendered, the oh-my-pi
    workspaces path it wrote (`/mnt/nvme/<home name>/omp-worktrees/branches` where the big local
-   disk's directory `/mnt/nvme/<home name>` exists, else `~/.worktrees/oh-my-pi`), and the sha256
-   of `scripts/knives-registry-render` itself, whose sed is the render's rule. It writes nothing
-   while the copy is a plain file and the record holds all three as this run has them. So a
-   merged change to the registry reaches the machine with no person's command, and
+   disk's directory `/mnt/nvme/<home name>` exists and the deepest existing directory of that path
+   is writable, else `~/.worktrees/oh-my-pi`; an agent box mounts that directory owned by root),
+   and the sha256 of `scripts/knives-registry-render` itself, whose sed is the render's rule. It
+   writes nothing while the copy is a plain file and the record holds all three as this run has
+   them. So a merged change to the registry reaches the machine with no person's command, and
    `scripts/leak-terms-check`, which reads the same copy, sees it too; a copy rendered while that
-   directory was absent is rendered again once it is there; and a merged change to the render
-   script renders again although `knives/repos.toml` did not change. A copy that a person edited
-   by hand is replaced when the file changes, as an install replaces it, and a symlink at the
+   directory was absent or not writable is rendered again once it can be used; and a merged
+   change to the render script renders again although `knives/repos.toml` did not change. A copy
+   that a person edited by hand is replaced when the file changes, as an install replaces it, and
+   a symlink at the
    copy's path is replaced by a plain file. A directory there is never replaced: the render
    fails. The first run of this version renders once, since no record of this form exists yet.
    A failed render is a condition and stops nothing: the tools step still runs. A `~/.dotfiles`
@@ -155,16 +157,16 @@ Follow restores the managed marketplace lock before it calls the sync.
    `plugins: <repo> is not ~/.dotfiles; marketplace plugins not upgraded`, runs no omp command
    and goes on to the pin check.
    `mise install` holds `$MISE_DATA_DIR/.dotfiles-install.lock` (waiting for it at most
-   `--mise-timeout`), the lock `dotfiles-sync`'s tools step, `agent-session`, `shims/knives`,
-   `installers/mise.sh` and `installers/librarian-harness-host.sh` hold too, so installs on one
-   `MISE_DATA_DIR` never run side by side and a launch waits for a running install. That
-   `mise install` alone gets `DOTFILES_INSTALL_LOCK_HELD=1`, so a knives call under it that lacks
-   its pin exits 127 at once instead of waiting on the lock. mise, Bun, the omp commands and the
-   pin check get the `MISE_CACHE_DIR` that the checkout's `.bashrc` gives a shell (read under
-   `--check-timeout`), so this mise and a session's take the same per-version lock in mise's cache.
-   A unique `installed_plugins.json` record identifies its source. Lock entries with no record
-   are silently skipped: these include vendored plugins such as compound-engineering and new
-   marketplace plugins not yet bootstrapped. Bootstrapping stays an `install.sh` job; follow
+   `--mise-timeout`), the lock `oryx/install.sh`'s `op` step, `dotfiles-sync`'s tools step,
+   `agent-session`, `shims/knives`, `installers/mise.sh` and `installers/librarian-harness-host.sh`
+   hold too, so installs on one `MISE_DATA_DIR` never run side by side and a launch waits
+   for a running install. That `mise install` alone gets `DOTFILES_INSTALL_LOCK_HELD=1`, so a knives
+   call under it that lacks its pin exits 127 at once instead of waiting on the lock. mise, Bun,
+   the omp commands and the pin check get the `MISE_CACHE_DIR` that the checkout's `.bashrc` gives a
+   shell (read under `--check-timeout`), so this mise and a session's take the same per-version lock
+   in mise's cache. A unique `installed_plugins.json` record identifies its source. Lock entries
+   with no record are silently skipped: these include vendored plugins such as compound-engineering
+   and new marketplace plugins not yet bootstrapped. Bootstrapping stays an `install.sh` job; follow
    only upgrades existing installs. Multiple matching records are a reported ambiguity.
    Each below-entry registered plugin is attempted even if another fails, with a 60 s command cap
    and 300 s marketplace-phase budget. Normal cleanup tries to restore the tracked lock in a

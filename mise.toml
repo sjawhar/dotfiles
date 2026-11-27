@@ -114,32 +114,49 @@ _.path = ['{{ env.DOTFILES_DIR | default(value=env.HOME ~ "/.dotfiles") }}/shims
 
 [tools]
 "github:sjawhar/jj" = "0.46.0-sami.20261125-112159"  # upstream 0.46.0 + gitattr filter drivers (jj-vcs/jj#8719, LFS) + #10097 + #10130 + #10159 + #10160 + #10163 + #10164 + #10166 + sparse paths skip-worktree in colocated Git indexes + chunked pack mapping (sjawhar/jj#3: gix-pack maps packs in 8 MiB chunks under a 512 MiB budget, JJ_PACK_MAPPED_LIMIT) + sjawhar/jj#4 (a merge of two commits with more than one merge base keeps what both sides hold; 20261120-120102 silently dropped it, jj-vcs/jj#6369); #10129 and #10127 dropped. cybermonklabs/legion's CI and worker image run this same release (cybermonklabs/legion#4565, .github/ci-tools.yaml)
-"github:sjawhar/knives" = "6.1.7"  # keep equal to the plugin tag in omp/plugins/package.json: the plugin runs whichever binary this installs
+"github:sjawhar/knives" = "6.1.11"  # keep equal to the plugin tag in omp/plugins/package.json: the plugin runs whichever binary this installs
 "github:sjawhar/legion" = "legion-v10.3.0"  # the Go `legion` CLI on an agent session's PATH outside a Legion pane (a pane puts its daemon's own <state_dir>/bin/legion first); it shares the Go daemons' registry, ~/.local/state/legion/legions.json, which a TypeScript cli-v* `legion` would rewrite as an object no Go daemon can read. Speaks daemon API contract 17 (with @sjawhar/pi-legion 8.5.0): `legion controller start` refuses a daemon or a pi-legion of another contract
 # omp daily driver: fork releases built from the sami branch; the wrapper execs this.
 # upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec
 # them for hub/worker spawns.
 #
-# v18.18.6-sami.20261119-162325 (commit b40fd3c3), the build dispatch://INFRA-4638 pins for INFRA's
-# pods, carries 230bc2fa (cybermonklabs/oh-my-pi#48, dispatch://INFRA-4512): after a classifier
-# refusal, no fallback in the same turn sends the request again to the model that refused it, by
-# any name, route or provider, and the walk keeps its retry budget and provider exclusion past a
-# spent fallback. The pin before it, v18.18.6-sami.20261117-053702, lacked it, and new sessions
-# multiplied OpenAI cyber_policy refusals (dispatch://INFRA-1484). Over 053702 it also brings: the
-# fallback walk passes over a model in cooldown or with spent usage (#19); a turn whose `!command`
-# key prints nothing is retried, and `--restore` continues it (#22); subagents share Hindsight's
-# recall pause (#28); `--session-id <uuid>`; model discovery yields the event loop every 10 ms; and
-# fixes to the shell builtins (rm, mv, find, grep), the directory walker and robomp. Its session-store
-# changes (SQL leases, PostgreSQL writes opened read-write) apply only under `session.storage: sql`,
-# which no config here sets, and its `secrets.maskSessionStore` is off by default. A `!command` value
-# now runs in a session of its own with no terminal; scripts/gateway-token and
-# scripts/gcloud-token-fast each print a token so (measured 2026-11-21). It keeps the 11-17 probe fix
-# (dispatch://INFRA-4027), the 11-10 memory-leak fix (dispatch://INFRA-1876) and setup version 3.
-# The linux-x64 asset (sha256 9fd84e4ff44cddef87f323100e5cb30ca235284033c8a05192f90c69481fea68) is
-# smoke-tested: `omp --version` gives omp/18.18.6 and `omp --smoke-test` gives `smoke-test: ok`.
-# packages/mnemopi changed only to keep mnemopi's state under OMP_CONFIG_ROOT when that is set, and
-# nothing here sets it, so "npm:@oh-my-pi/pi-mnemopi" below stays 18.18.6.
-# Release: https://github.com/cybermonklabs/oh-my-pi/releases/tag/v18.18.6-sami.20261119-162325
+# v18.18.6-sami.20261126-222037 (commit 5a19b165, Cut15) carries one fix of dispatch://INFRA-5923
+# that the pin before it, v18.18.6-sami.20261126-110039 (Cut14, 34021711), lacked: fork member
+# fix/built-in-provider-discovery-and-restore (5c7bd962 and 328dc97a, landed as 635518b6).
+# - A built-in provider whose baseUrl is not its vendor's (omp/models.local.yml gives `anthropic`
+#   and `openai` the model gateway) runs its model discovery against that baseUrl, caches the result
+#   under a key of that endpoint, and keeps only that vendor's own model families. On this box's
+#   models.yml, Cut14's `omp models anthropic` listed 18 GPT and Gemini rows (anthropic/gpt-6.1-sol,
+#   anthropic/openai/gpt-6-astra, anthropic/gemini-4-neon, ...) and Cut15's lists Claude rows only
+#   (measured 2026-11-26 near 23:51Z). Both still list the gateway's 24 `anthropic/claude-*` group
+#   names as doubled `anthropic/anthropic/claude-*` selectors.
+# - A session whose saved selector names a provider that models.yml no longer declares resumes on
+#   that selector's own exact retry.fallbackChains key to the same model, or refuses and names
+#   --model and the key to add, instead of resuming on the default role's model. Such a key whose
+#   steps resolve no longer warns that it references an unknown model.
+# Cut14 is its first parent and every commit of Cut14 is carried, so it keeps both fixes of
+# dispatch://HOME-311 (a memory row with no text id or no text no longer turns memory off at every
+# start: the embedding rebuild skips it with a warning, fork member 941ae277, upstream
+# can1357/oh-my-pi#20613; a /resume or /move while memory is off moves the session with a warning,
+# fork member e89d9e3d) and, through 20261119 (b40fd3c3), the classifier-refusal fallback fix
+# (230bc2fa, dispatch://INFRA-4512), the 11-17 probe fix (dispatch://INFRA-4027), the 11-10
+# memory-leak fix (dispatch://INFRA-1876), setup version 3, dispatch://INFRA-3530's session-memory
+# change (Cut12), obash no longer waiting for ever on a subshell that a fatal expansion error ends
+# (Cut13, #301) and the grep -o / rg --null-data anchor fixes (#295). Its other members since Cut14
+# are obash fixes, Claude receiving no other model's thinking, a classifier refusal sent again to
+# the same model twice before the fallback chain, --session-id resuming or creating the session
+# with that id, and --resume preferring an exact id; the release notes list each.
+# The linux-x64 asset (sha256 cf15c8c6c9f3e03712455ede9c6390699f7884cf92f7ae3796e50e90d9ab6e08) is
+# smoke-tested: `omp --version` gives omp/18.18.6, as every 18.18.6 cut does, and `omp
+# --smoke-test` gives `smoke-test: ok` (measured 2026-11-26). On a private copy of the theorem
+# database with the bad row, Cut14 logged one skip warning for rowid 1374389534721 where 20261119
+# logged "backend startup failed" (measured 2026-11-26); Cut15's packages/mnemopi is identical to
+# Cut14's (`git diff 34021711 5a19b165 -- packages/mnemopi` is empty, where the same diff from
+# b40fd3c3 to 34021711 lists 11 files).
+# packages/mnemopi changed in the fork (the row fix, guarded model calls, a banks.ts refactor that
+# keeps the bank layout) with no schema change, so "npm:@oh-my-pi/pi-mnemopi" below stays 18.18.6.
+# That upstream CLI keeps the row bug until upstream ships #20613.
+# Release: https://github.com/cybermonklabs/oh-my-pi/releases/tag/v18.18.6-sami.20261126-222037
 #
 # There is NO macOS split here, and do not add one. The fork's CI builds and smoke-tests a
 # darwin-arm64 asset on a macos-15 runner, but no Mac of Sami's runs it. On 2026-11-10 this file
@@ -147,11 +164,15 @@ _.path = ['{{ env.DOTFILES_DIR | default(value=env.HOME ~ "/.dotfiles") }}/shims
 # plainly that he does not have a Mac and runs Linux (dispatch://INFRA-1876/ask/6ad5d62f). The hold
 # protected nobody and would have rotted into a permanently stale second pin.
 #
-# This release is an Actions build: run 44565315084 of "Build sami branch"
-# (https://github.com/cybermonklabs/oh-my-pi/actions/runs/44565315084) built and smoke-tested
-# linux-x64 on ubuntu-22.04 and darwin-arm64 on macos-15. GitHub records no build attestation for
-# its assets (`gh attestation verify` answers 404), so the digest above is the check.
-"github:sjawhar/oh-my-pi" = "18.18.6-sami.20261119-162325"
+# This release is an Actions build: run 45903893773 of "Build sami branch" on release-candidate
+# (https://github.com/cybermonklabs/oh-my-pi/actions/runs/45903893773) built and smoke-tested
+# linux-x64 on ubuntu-22.04 and darwin-arm64 on macos-15, and run 45906529843 on sami published it
+# at 2026-11-26 22:44:44Z. Its linux-x64 archive has a build attestation: `gh attestation verify
+# <archive> --owner cybermonklabs` finds one SLSA provenance v1 attestation, from sami-build.yml on
+# release-candidate at 5a19b165 (run 45903893773), and answers 404 for a file with none. The
+# release-candidate "sami checks" run 45903894088 failed on pi-shell Bazel tests outside its
+# known-failure list, as Cut14's run 45806183844 failed.
+"github:sjawhar/oh-my-pi" = "18.18.6-sami.20261126-222037"
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
 # broker asset and gives it its own install dir alongside forward's.
@@ -171,7 +192,7 @@ bun = "1.4.4"
 eza = "0.23.5"
 fd = "10.4.2"
 fzf = "0.74.3"
-gh = "2.98.0"  # was "latest"
+gh = "2.106.0"  # was "latest"; 2.98.0 truncated `gh run view --log` at a 64 KiB line
 glow = "3.0.0"
 jq = "1.8.2"
 neovim = "0.12.5"
@@ -235,11 +256,6 @@ shellcheck = "0.11.0"
 "github:str4d/age-plugin-yubikey" = "0.5.0"  # Hardware-backed age identities (YubiKey PIV); 0.5.1 has no linux release assets
 age = "1.3.1"       # Modern file encryption (for sops)
 sops = "3.13.3"
-# op: the 1Password CLI, which agents use to read secrets. Pinned to the newest
-# stable release that was at least 14 days old when chosen; an exact pin skips
-# minimum_release_age, so check a new version's release date by hand before a bump.
-# The `op` alias in [tool_alias] selects the backend.
-op = "2.41.1"
 
 # Observability
 "cargo:cargo-deny" = "0.20.2"  # was "latest"
@@ -257,10 +273,6 @@ forward = "github:sjawhar/forward"
 secrets = "github:sjawhar/forward"
 agent-secrets = "github:sjawhar/legion"
 mautrix-instagram = "github:mautrix/meta"
-# aqua downloads 1Password's binary from its release host without a plugin repository;
-# plain `op` chooses a vfox plugin cloned at unpinned HEAD. This alias keeps `op`,
-# so `mise install op` installs this pin rather than a vfox copy.
-op = "aqua:1password/cli"
 
 [tools.forward]
 # 3.8.4 or later: a pane's browser grant needs it under the hardened secretsd (sjawhar/forward#79)
@@ -375,19 +387,20 @@ platforms.macos-arm64 = { asset_pattern = "ctx-aarch64-apple-darwin.tar.gz" }
 
 # CodeGraph CLI (colbymchenry/codegraph), which the omp `codegraph` tool runs from PATH
 # (@bopstack/pi-codegraph in omp/plugins/package.json; without the CLI every call answers "CodeGraph
-# CLI is unavailable on PATH"). Same version as Legion's worker image, which pins it in
-# cybermonklabs/legion packages/daemon/docker/codegraph/package.json. Each release archive holds the
+# CLI is unavailable on PATH"). Same version as the Legion worker image's pin in
+# cybermonklabs/legion#5755 (packages/daemon/docker/codegraph/package.json), the change that moves
+# that image from 1.5.0 to this version. Each release archive holds the
 # npm per-platform package (@colbymchenry/codegraph-<platform>): bin/codegraph is a sh wrapper that
 # execs the Node 24 bundled beside it, so it needs no system node. The npm `@colbymchenry/codegraph`
 # package is only a `#!/usr/bin/env node` launcher for that same bundle. A box finds it through
 # ~/.mise/shims, the shared tool store. Digests are the ones GitHub recorded at upload (`gh release
 # view v<version> -R colbymchenry/codegraph --json assets`); bump them with the version.
 [tools."github:colbymchenry/codegraph"]
-version = "1.5.0"
-platforms.linux-x64   = { asset_pattern = "codegraph-linux-x64.tar.gz", checksum = "sha256:2ba65e87a1210b706bb1e67d5e48b5fc4a1935e43dbb3fb5f31c5597840d2e58" }
-platforms.linux-arm64 = { asset_pattern = "codegraph-linux-arm64.tar.gz", checksum = "sha256:9f17750aedf45d51f68caae39ed21d6e2a7290b2326e5c53f95a165918ebd1d8" }
-platforms.macos-x64   = { asset_pattern = "codegraph-darwin-x64.tar.gz", checksum = "sha256:0a0ccc29bf7da9d10be1458d89d7e15c55927ae24cd95e9fa3de4bdfea059dde" }
-platforms.macos-arm64 = { asset_pattern = "codegraph-darwin-arm64.tar.gz", checksum = "sha256:cf5ee435a6e44d097b2f98f2b7b8b9422bb1094844404efed82519c5da1af2cf" }
+version = "1.6.4"
+platforms.linux-x64   = { asset_pattern = "codegraph-linux-x64.tar.gz", checksum = "sha256:8477f3841cba6ac8c45847d42eb5254f1f2d7fbc3045baf333e1cbe92267022d" }
+platforms.linux-arm64 = { asset_pattern = "codegraph-linux-arm64.tar.gz", checksum = "sha256:e9cd2bebb29ce6aa83b4489755f76a36f3e22658beac5ebef023b874be7cfce1" }
+platforms.macos-x64   = { asset_pattern = "codegraph-darwin-x64.tar.gz", checksum = "sha256:f16a56e5df375a1652ed717ce8bd0fb466725e64b52a53dc0070d6e8c281363c" }
+platforms.macos-arm64 = { asset_pattern = "codegraph-darwin-arm64.tar.gz", checksum = "sha256:daa9142732eefed5b6d187aa82a2ca9c4f3ebce10d394fb79cf6c45b367618cc" }
 
 # Device management CLI (osquery/MDM). Each fleetdm/fleet release bundles two
 # binaries — fleet (server) + fleetctl — so asset_pattern selects the fleetctl
