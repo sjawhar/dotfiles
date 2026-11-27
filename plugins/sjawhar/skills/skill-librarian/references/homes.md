@@ -13,9 +13,7 @@ A preference of Sami's is not a company rule. A rule is company-wide only when a
 Also:
 
 - Theorem material never goes into CLAUDE.md: Sami's preference about Theorem work goes to its one repository, or to memory.
-- Make every repository fix yourself, and do not send it to another session: no agent owns a repository.
-- Give a lesson that shows a defect in a tool a code fix in that tool, not a doc line that works around it.
-  - Say so in the ledger.
+- No agent owns a repository, so make every repository fix yourself; do not send it to another session. A lesson that shows a defect in a tool gets a code fix in that tool, not a doc line that works around it. Say so in the ledger.
 - Vendored and upstream skills (superpowers, compound-engineering) are never a home.
 - Propose an edit to Sami's CLAUDE.md or skills only for his own words not yet written there, or a failure that passes step 1 of `writing-agent-skills`. Else drop the lesson.
 - Before you create or edit a skill, follow `writing-agent-skills`.
