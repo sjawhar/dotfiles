@@ -3383,12 +3383,12 @@ GH_UNKNOWN_REFUSAL = ("no table of the check names this command of gh, and it is
 # DisableFlagParsing), and gh-stack sends its text with its own client (internal/github/github.go), so the check reads
 # it as a command like any other (dispatch://INFRA-4957, rulings-md v66, the tester's findings at c8d749df, item 4):
 # each of its subcommands by its name as `gh stack <name> --help` gives it at github/gh-stack GH_STACK_COMMIT
-# (2026-11-16), with (its class, why). `text`: the check reads what it sends (gh_stack_check). `refused`: the check
-# cannot read what it sends, so it refuses the call for a target not confirmed private, as it refuses a text it cannot
-# read (gh_contents), and WHY is the refusal; with its help flag on it goes out (gh_help). `quiet`: it sends GitHub no
-# text, WHY beginning with its kind as GH_QUIET_COMMANDS gives it, or `git push` where its only text is a push of the
-# stack's branches, which git checks as it checks any push (shims/git, .gitconfig:136-141). A subcommand none names, as
-# one a newer gh-stack adds, is refused as a command no table names (gh_unknown). shims/tests/test_gh_leak_terms.py
+# (2026-11-16), with (its class, why). `text`: the check reads what it sends (gh_stack_check), and refuses what of it
+# the check cannot read for a target not confirmed private, as it refuses a text it cannot read (gh_contents). `quiet`:
+# it sends GitHub no text, WHY beginning with its kind as GH_QUIET_COMMANDS gives it, or `git push` where its only text
+# is a push of the stack's branches, which git checks as it checks any push (shims/git, .gitconfig:136-141). With its
+# help flag on, a subcommand prints its help and sends nothing, and goes out (gh_help). A subcommand none names, as one
+# a newer gh-stack adds, is refused as a command no table names (gh_unknown). shims/tests/test_gh_leak_terms.py
 # compares the names with the source at GH_STACK_COMMIT and with the installed gh-stack.
 GH_STACK_COMMIT = "80b6d6e910cc1b7eaa26b961d7721ade21084fed"
 GH_STACK_COMMANDS: dict[str, tuple[str, str]] = {
@@ -3411,11 +3411,13 @@ GH_STACK_COMMANDS: dict[str, tuple[str, str]] = {
     "modify": ("quiet", "local: restructures the stack in this machine's git (cmd/modify.go:69)"),
     "push": ("quiet", "git push: pushes the stack's branches with git (cmd/push.go:113)"),
     "rebase": ("quiet", "local: rebases the stack's branches in this machine's git (cmd/rebase.go:121)"),
-    "submit": ("refused", "gh-stack takes them from its editor, or with --auto or outside a terminal from each "
-                          "branch's commits, its name and the repository's pull request template once GitHub has said "
-                          "which branches have none (cmd/submit.go:503-527), and the check does not read them: create "
-                          "each pull request with gh pr create, or push the branches and run gh stack link, whose text "
-                          "the check reads"),
+    "submit": ("text", "pushes the stack's branches with git and creates a pull request for each branch of the current "
+                       "stack that has none: its head the branch, its base the nearest branch below it that is neither "
+                       "merged nor queued, else the trunk, its title the subject of the one commit `git log base..head` "
+                       "lists, else the branch with each `-` and `_` a space, and its body the repository's pull "
+                       "request template, else that commit's body and gh-stack's footer (cmd/submit.go:252-281, "
+                       "503-578; internal/stack/stack.go:170-184); without --auto, where its output is a terminal, it "
+                       "takes them from its editor (cmd/submit.go:229-243)"),
     "switch": ("quiet", "local: checks out the branch of the stack the account picks (cmd/switch.go:90)"),
     "sync": ("quiet", "git push: fetches, rebases and pushes the stack's branches with git, and adds their pull "
                       "requests to the stack on GitHub by their numbers (cmd/sync.go:325, 381; cmd/submit.go:869)"),
@@ -3428,9 +3430,9 @@ GH_STACK_COMMANDS: dict[str, tuple[str, str]] = {
 # gh-stack's aliases of its subcommands (cmd/unstack.go:24), which gh_extension_command reads as the subcommand they
 # name.
 GH_STACK_ALIASES = {"delete": "unstack"}
-# The options of each subcommand of GH_STACK_COMMANDS that gh_stack_check reads or whose help lifts its refusal, as
-# GH_TEXT_COMMANDS gives them: its source's (cmd/feedback.go, cmd/link.go:84-87, cmd/submit.go:74-77) and the help flag
-# cobra adds to every command, `-h/--help`, so that `-h=false` turns it off (gh_help).
+# The options of each subcommand of GH_STACK_COMMANDS that gh_stack_check reads, as GH_TEXT_COMMANDS gives them: its
+# source's (cmd/feedback.go, cmd/link.go:84-87, cmd/submit.go:74-77) and the help flag cobra adds to every command,
+# `-h/--help`, with which the call goes out, so that `-h=false` turns it off (gh_help).
 GH_STACK_OPTIONS: dict[str, tuple[str, str]] = {
     "feedback": ("", "-h/--help"),
     "link": ("--base --remote", "-h/--help --no-atomic --open"),
@@ -4177,9 +4179,11 @@ def gh_extension_command(name: str, rest: Sequence[str]) -> tuple[str, str, list
     (pkg/cmd/extension/command.go:694-701), takes an alias only where no command, an extension included, has its name
     (pkg/cmd/alias/shared/validations.go:15-29), and registers a stub only where no extension has (root.go:243-252).
     gh-stack's call is read by GH_STACK_COMMANDS, its subcommand found as cobra finds it (gh_next_command, with no
-    flags) through its aliases (GH_STACK_ALIASES): ("stack", the subcommand, the words it reads) for a `text` one, and
-    for a `refused` one whose help flag is off (gh_help); None for a `quiet` one and for a call that names none, which
-    prints gh-stack's help or its version. Any other extension, and a subcommand of gh-stack no entry names, is a
+    flags) through its aliases (GH_STACK_ALIASES): ("stack", the subcommand, the words it reads) for a `text` one whose
+    help flag is off (gh_help); None for a `quiet` one, for one whose help flag is on, which prints its help and sends
+    nothing (cobra v1.10.2, the version gh-stack's go.mod pins, command.go:925-936: execute returns flag.ErrHelp before
+    it runs the command; gh-stack's help function only prints, cmd/root.go:96-106), and for a call that names none,
+    which prints gh-stack's help or its version. Any other extension, and a subcommand of gh-stack no entry names, is a
     command no table names (gh_unknown)."""
     if name != "stack":
         return gh_unknown(name, rest)
@@ -4191,7 +4195,7 @@ def gh_extension_command(name: str, rest: Sequence[str]) -> tuple[str, str, list
     kind = GH_STACK_COMMANDS[sub][0] if sub in GH_STACK_COMMANDS else ""
     if not kind:
         return gh_unknown(f"stack {word}", arguments)
-    if kind == "quiet" or (kind == "refused" and gh_help(arguments, GH_STACK_OPTIONS[sub])):
+    if kind == "quiet" or gh_help(arguments, GH_STACK_OPTIONS[sub]):
         return None
     return "stack", sub, arguments
 
@@ -4781,12 +4785,13 @@ GH_PR_TEMPLATE = re.compile(r"pull[_-]request[_-]template(?:\.|\Z)", re.IGNORECA
 
 
 def gh_pr_templates() -> list[str]:
-    """The path of each file `gh stack link` may send as the body of a pull request it creates: the repository's
-    default pull request template (internal/pr/template.go:12-17), which githubtemplate.FindLegacy looks for under the
-    root of this directory's checkout (`git rev-parse --show-toplevel`, internal/git/gitops.go:131-133) in `.github`,
-    the root and `docs`: a file that is neither a directory nor a link and whose name GH_PR_TEMPLATE matches. FindLegacy
-    takes the first it finds; every one is read, and each whole, front matter too, where gh-stack sends what follows
-    it. None outside a checkout."""
+    """The path of each file `gh stack link` and `gh stack submit --auto` may send as the body of a pull request they
+    create: the repository's default pull request template (internal/pr/template.go:12-17; cmd/link.go:699-717,
+    cmd/submit.go:218-222), which githubtemplate.FindLegacy looks for under the root of this directory's checkout (`git
+    rev-parse --show-toplevel`, internal/git/gitops.go:131-133) in `.github`, the root and `docs`: a file that is
+    neither a directory nor a link and whose name GH_PR_TEMPLATE matches. FindLegacy takes the first it finds; every
+    one is read, and each whole, front matter too, where gh-stack sends what follows it, trimmed, and `submit` sends a
+    branch's commit body where that is empty. None outside a checkout."""
     printed = gh_git(["rev-parse", "--show-toplevel"])
     if printed is None:
         return []
@@ -6553,23 +6558,194 @@ def gh_refusal(name: str, reached: Sequence[GhTarget], matcher: TermMatcher | No
 GH_STACK_FEEDBACK = GhTarget("the discussion form of github/gh-stack (https://gh.io/stacks-feedback-form), read as "
                              "public", "github/gh-stack", True)
 # gh-stack's humanize (cmd/submit.go:581-588), with which `gh stack link` makes a branch argument the title of the pull
-# request it creates: each `-` and `_` a space.
+# request it creates, and `gh stack submit` a branch of other than one commit: each `-` and `_` a space.
 GH_STACK_TITLE = str.maketrans("-_", "  ")
+# The footer of the body gh-stack builds from a branch's commits where the repository has no pull request template
+# (cmd/submit.go:560-578; feedbackURL, cmd/feedback.go:13).
+GH_STACK_FOOTER = ('<sub>Stack created with <a href="https://github.com/github/gh-stack">GitHub Stacks CLI</a> • <a '
+                   'href="https://gh.io/stacks-feedback">Give Feedback 💬</a></sub>')
+# The characters Go's strings.TrimSpace trims, Unicode's White_Space (unicode.IsSpace), with which gh-stack trims a
+# commit's message, its subject and its body (internal/git/gitops.go:608-652, cmd/submit.go:552).
+GO_SPACE = ("\t\n\v\f\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029"
+            "\u202f\u205f\u3000")
+# The highest schema version of the stack file gh-stack at GH_STACK_COMMIT reads (internal/stack/stack.go:15, 342-344).
+GH_STACK_SCHEMA = 1
+# Why `gh stack submit` without --auto is refused for a target not confirmed private: the check cannot see whether
+# gh-stack's output is a terminal, where it opens its editor (cmd/submit.go:229-243; internal/config/config.go:229-231).
+GH_STACK_SUBMIT_EDITOR = ("without --auto gh-stack takes them from its editor where its output is a terminal "
+                          "(cmd/submit.go:230), which the check cannot tell: run gh stack submit --auto, whose titles "
+                          "and bodies the check reads from the stack's commits, or push the branches and run gh stack "
+                          "link, whose text the check reads")
+
+
+class GhStackFileError(Exception):
+    """Why the check cannot find the stack `gh stack submit --auto` submits, as a refusal names it
+    (gh_stack_current)."""
+
+
+def gh_stack_member(value: object, name: str, kind: type, where: str) -> object:
+    """The member NAME of VALUE, a JSON object of the stack file at WHERE (`stacks[0]`, "" for its root), as
+    encoding/json's Unmarshal reads it into gh-stack's field of type KIND (internal/stack/stack.go:21-49, 229-239):
+    KIND's empty value where VALUE gives none, or null, which leaves the field as it was. GhStackFileError where the
+    check cannot read it so: VALUE is no object, or the member is no KIND, which Unmarshal refuses too; or VALUE names
+    it more than once, or in another letter case: Unmarshal takes the last member whose name is the field's in any
+    letter case (bytes.EqualFold, `ſ` as `s` and the Kelvin sign as `k`), and the check reads only one member, spelled
+    as gh-stack writes it."""
+    place = f"{where}.{name}" if where else name
+    if not isinstance(value, JsonObject):
+        raise GhStackFileError(f"{where or 'its root'} is no JSON object")
+    named = [(key, member) for key, member in value if key.replace("\u017f", "s").lower() == name.lower()]
+    if len(named) > 1 or any(key != name for key, _ in named):
+        raise GhStackFileError(f"it gives {place} more than once, or in another letter case")
+    member = named[0][1] if named else None
+    if member is None:
+        return kind()
+    if (not isinstance(member, kind) or (kind is list and isinstance(member, JsonObject))
+            or (kind is int and isinstance(member, bool))):
+        raise GhStackFileError(f"its {place} is no JSON {'array' if kind is list else kind.__name__}")
+    return member
+
+
+def gh_stack_current() -> tuple[str, list[str]]:
+    """(trunk, branches from the bottom up) of the stack `gh stack submit` submits, found as gh-stack at
+    GH_STACK_COMMIT finds it: in the stack file, `gh-stack` in git's common directory (`git rev-parse
+    --path-format=absolute --git-common-dir`; cmd/submit.go:83-97, cmd/worktree_utils.go:18-33, 62-93, 210-278,
+    internal/stack/stack.go:309-349), the one stack whose trunk or one of whose branches is the current branch, `git
+    symbolic-ref --quiet HEAD` without `refs/heads/` (gh_current_branch; cmd/submit.go:99-118, internal/stack/
+    stack.go:81-87, 241-250). GhStackFileError, saying why, where the check cannot find it so: git names no common
+    directory or no current branch; a linked worktree's administration directory in it holds a stack file, or a
+    migration is pending (`gh-stack-migration`), so that gh-stack would first merge them into the file
+    (internal/stack/migration.go:61-74, cmd/worktree_utils.go:274), or, for a legacy modify journal of that worktree,
+    read its stack file in place of the file (cmd/worktree_utils.go:224-267), which the check does not read; the file
+    is missing, is no regular file, cannot be read, holds more than GH_WHOLE_LIMIT bytes, is not JSON, is of a schema
+    version gh-stack does not read, or is in a layout gh_stack_member does not read; or no stack, or more than one,
+    holds the current branch. gh-stack submits nothing where it finds no stack, but the check does not read what else
+    it may read then."""
+    printed = gh_git(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    if printed is None:
+        raise GhStackFileError("git names no common Git directory here, which holds the stack file")
+    common = printed.removesuffix("\n")
+    try:
+        entries = sorted(os.listdir(os.path.join(common, "worktrees")))
+    except FileNotFoundError:
+        entries = []
+    except OSError as error:
+        raise GhStackFileError(f"the worktrees of {common} cannot be listed: {error.strerror}") from None
+    if os.path.lexists(os.path.join(common, "gh-stack-migration")) or any(
+            os.path.lexists(os.path.join(common, "worktrees", entry, "gh-stack")) for entry in entries):
+        raise GhStackFileError(f"gh-stack would first merge into {common}/gh-stack the stack files of linked worktrees "
+                               "(internal/stack/migration.go:61-74), which the check does not read")
+    path = os.path.join(common, "gh-stack")
+    try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            raise GhStackFileError(f"the stack file {path} is no regular file")
+        with open(path, "rb") as handle:
+            data = handle.read(GH_WHOLE_LIMIT + 1)
+    except FileNotFoundError:
+        raise GhStackFileError(f"the stack file {path} does not exist") from None
+    except OSError as error:
+        raise GhStackFileError(f"the stack file {path} cannot be read: {error.strerror or type(error).__name__}"
+                               ) from None
+    if len(data) > GH_WHOLE_LIMIT:
+        raise GhStackFileError(f"the stack file {path} holds more than the {GH_WHOLE_LIMIT >> 20} MiB the check reads "
+                               "of a file it parses whole")
+    try:
+        decoded = json.loads(data.decode("utf-8", errors="replace"), object_pairs_hook=JsonObject)
+    except (ValueError, RecursionError) as error:
+        raise GhStackFileError(f"the stack file {path} is not JSON: {error}") from None
+    try:
+        version = cast(int, gh_stack_member(decoded, "schemaVersion", int, ""))
+        if version > GH_STACK_SCHEMA:
+            raise GhStackFileError(f"it has schema version {version}, which gh-stack at {GH_STACK_COMMIT[:8]} does not "
+                                   "read")
+        stacks: list[tuple[str, list[str]]] = []
+        for number, entry in enumerate(cast(list, gh_stack_member(decoded, "stacks", list, ""))):
+            where = f"stacks[{number}]"
+            trunk = gh_stack_member(entry, "trunk", JsonObject, where)
+            listed = cast(list, gh_stack_member(entry, "branches", list, where))
+            stacks.append((cast(str, gh_stack_member(trunk, "branch", str, f"{where}.trunk")),
+                           [cast(str, gh_stack_member(item, "branch", str, f"{where}.branches[{index}]"))
+                            for index, item in enumerate(listed)]))
+    except GhStackFileError as error:
+        raise GhStackFileError(f"the stack file {path} is not one the check reads as gh-stack does: {error}") from None
+    branch = gh_current_branch()
+    if branch is None:
+        raise GhStackFileError("git names no current branch, as on a detached HEAD, so gh-stack finds no stack "
+                               "(cmd/submit.go:99-103)")
+    found = [(trunk, branches) for trunk, branches in stacks if branch == trunk or branch in branches]
+    if len(found) != 1:
+        raise GhStackFileError(f"the stack file {path} names {'no stack' if not found else 'more than one stack'} that "
+                               f"holds the current branch {branch}, so gh-stack submits none (cmd/submit.go:109-117)")
+    return found[0]
+
+
+def gh_stack_one_commit(base: str, head: str) -> tuple[str, str, str] | None:
+    """(commit, subject, body) of the one commit of HEAD that BASE does not hold, from which gh-stack's
+    defaultPRTitleBody takes a pull request's title and body (cmd/submit.go:546-555): what `git log BASE..HEAD
+    --format=%H%x01%B%x01%at%x00` prints, trimmed of Go's spaces (GO_SPACE), split at each NUL into records, each
+    trimmed and split at its first two U+0001 into three parts, one of fewer skipped; of the one record, the message
+    trimmed, its subject its first line and its body the rest trimmed, and the commit the last line before the message,
+    where log.showSignature puts lines above it (internal/git/gitops.go:608-652). None where git lists other than one
+    commit, or fails, where gh-stack takes the branch's name for the title and no body: the check runs the call gh-stack
+    runs, in the same directory, so a range git cannot list for the check it cannot list for gh-stack."""
+    printed = gh_git(["log", f"{base}..{head}", "--format=%H%x01%B%x01%at%x00"])
+    if printed is None:
+        return None
+    records = [record.strip(GO_SPACE).split("\x01", 2) for record in printed.strip(GO_SPACE).split("\0")]
+    commits = [parts for parts in records if len(parts) == 3]
+    if len(commits) != 1:
+        return None
+    subject, _, body = commits[0][1].strip(GO_SPACE).partition("\n")
+    return commits[0][0].rpartition("\n")[2], subject, body.strip(GO_SPACE)
+
+
+def gh_stack_submit_texts(trunk: str, branches: Sequence[str]) -> list[GhText]:
+    """Every text `gh stack submit --auto` may send in the pull requests it creates for the stack of TRUNK and BRANCHES
+    (gh_stack_current; cmd/submit.go:503-578), for each branch, whether or not it has one already, which only GitHub
+    knows: the trunk, a base, and each branch, a head, each a name; the branch with each `-` and `_` a space
+    (GH_STACK_TITLE), its title where `git log base..head` lists other than one commit, read as a text where it is not
+    the name; for each base the branch may take, the trunk or any branch below it, since its base is the nearest one
+    below it that GitHub has not said is merged or queued (internal/stack/stack.go:170-184, cmd/submit.go:268), the
+    subject of the one commit that lists (gh_stack_one_commit), its title, and the commit's body with gh-stack's
+    footer, its body, as generatePRBody joins them; and the footer alone, the body of a pull request of other than one
+    commit. gh-stack sends the repository's pull request template in place of either body, which gh_stack_check reads
+    as `link`'s (gh_pr_templates), the commit's body read too."""
+    pieces = [GhText("--auto", f"trunk {trunk}", text=trunk, is_name=True),
+              GhText("--auto", "footer", text=GH_STACK_FOOTER)]
+    seen: set[str] = set()
+    for index, branch in enumerate(branches):
+        pieces.append(GhText("--auto", f"branch {branch}", text=branch, is_name=True))
+        if branch.translate(GH_STACK_TITLE) != branch:
+            pieces.append(GhText("--auto", f"branch {branch}", part="title", text=branch.translate(GH_STACK_TITLE)))
+        for base in (trunk, *branches[:index]):
+            one = gh_stack_one_commit(base, branch)
+            if one is None or one[0] in seen:
+                continue
+            commit, subject, body = one
+            seen.add(commit)
+            pieces.append(GhText("--auto", f"commit {commit[:12]}", part="title", text=subject))
+            pieces.append(GhText("--auto", f"commit {commit[:12]}", part="body",
+                                 text=f"{body}\n\n---\n\n{GH_STACK_FOOTER}" if body else GH_STACK_FOOTER))
+    return pieces
 
 
 def gh_stack_check(sub: str, arguments: Sequence[str], environment: Mapping[str, str]) -> int:
-    """The verdict on `gh stack SUB ARGUMENTS…`, of a `text` or `refused` subcommand of GH_STACK_COMMANDS, as gh_check
-    gives it for a call of gh's own (gh_refusal), ARGUMENTS read as pflag reads them with SUB's options
-    (GH_STACK_OPTIONS, gh_walk). `feedback` sends the words of the call, joined by spaces, as the title of a discussion
-    of the public github/gh-stack (GH_STACK_FEEDBACK, cmd/feedback.go:38-44), whatever repository the call is in.
-    `link` sends each argument, a branch, as the head of a pull request, a name, and with each `-` and `_` a space as
-    its title (GH_STACK_TITLE), the --base branch, a name, and the repository's pull request template as its body
+    """The verdict on `gh stack SUB ARGUMENTS…`, of a `text` subcommand of GH_STACK_COMMANDS, as gh_check gives it for
+    a call of gh's own (gh_refusal), ARGUMENTS read as pflag reads them with SUB's options (GH_STACK_OPTIONS,
+    gh_walk). `feedback` sends the words of the call, joined by spaces, as the title of a discussion of the public
+    github/gh-stack (GH_STACK_FEEDBACK, cmd/feedback.go:38-44), whatever repository the call is in. `link` sends each
+    argument, a branch, as the head of a pull request, a name, and with each `-` and `_` a space as its title
+    (GH_STACK_TITLE), the --base branch, a name, and the repository's pull request template as its body
     (gh_pr_templates), each read whether or not the argument has a pull request already, which only GitHub knows
-    (cmd/link.go:577-593, 699-717). `submit` sends text the check cannot read (GH_STACK_COMMANDS). gh-stack sends the
-    pull requests of `link` and `submit` to the repository go-gh's repository.Current takes (internal/config/
-    config.go:233-249; go-gh v2.16.2 pkg/repository/repository.go:119-170): GH_REPO's, else one of the remotes, by its
-    `gh-resolved` or else in an order of its own, each of which gh_bases gives, read as gh_reach reads a base
-    repository; outside the plain case (gh_plain_case), one target read as public."""
+    (cmd/link.go:577-593, 699-717). `submit` with --auto sends the titles and bodies it builds from the current stack's
+    commits (gh_stack_current, gh_stack_submit_texts) or the template; where the check cannot find the stack it cannot
+    read them, and without --auto it cannot (GH_STACK_SUBMIT_EDITOR). The skill gh-stack, vendored at vendor/gh-stack
+    (skills-sources.json), tells agents to run `submit --auto`.
+    gh-stack sends the pull requests of `link` and `submit` to the repository go-gh's repository.Current takes
+    (internal/config/config.go:233-249; go-gh v2.16.2 pkg/repository/repository.go:119-170), whatever --remote names
+    to push to: GH_REPO's, else one of the remotes, by its `gh-resolved` or else in an order of its own, each of which
+    gh_bases gives, read as gh_reach reads a base repository; outside the plain case (gh_plain_case), one target read
+    as public."""
     table = GH_STACK_OPTIONS[sub]
     read = gh_walk(arguments, gh_options(table))
     long = gh_long_names(table)
@@ -6586,8 +6762,14 @@ def gh_stack_check(sub: str, arguments: Sequence[str], environment: Mapping[str,
         pieces += [GhText("--base", text=value, is_name=True) for option, value in read
                    if option and long.get(option, option) == "--base" and value is not None]
         pieces += [GhText("pull request template", path, path=path) for path in gh_pr_templates()]
+    elif sub == "submit" and gh_flag(read, long, "--auto"):
+        try:
+            pieces += gh_stack_submit_texts(*gh_stack_current())
+        except GhStackFileError as error:
+            unreadable.append((GhText("the titles and bodies of the pull requests it creates"), str(error)))
+        pieces += [GhText("pull request template", path, path=path) for path in gh_pr_templates()]
     else:
-        unreadable.append((GhText("the titles and bodies of the pull requests it creates"), GH_STACK_COMMANDS[sub][1]))
+        unreadable.append((GhText("the titles and bodies of the pull requests it creates"), GH_STACK_SUBMIT_EDITOR))
     texts = gh_contents(pieces, environment)
     if texts is None:
         return GH_STDIN_EXIT

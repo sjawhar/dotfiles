@@ -3348,6 +3348,24 @@ class GhLeakTerms(unittest.TestCase):
             self.install_extension("stack")
         return {**self.env, "GH_REPO": repo}
 
+    def stack_repo(self, *branches: tuple[str, list[str]]) -> Path:
+        """A checkout in the work directory, made anew: a commit on `main`, the trunk, and above it each of BRANCHES,
+        bottom first, a name and the messages of its commits, each branch made from the one below it and the top one
+        checked out; and the stack file gh-stack writes for them, `gh-stack` in git's common directory
+        (internal/stack/stack.go:309-312, 459-468; its repository as cmd/init.go:107 writes it), which this returns."""
+        shutil.rmtree(self.work / ".git", ignore_errors=True)
+        self.git("init", "-q", "-b", "main")
+        self.git("commit", "-q", "--allow-empty", "-m", "base")
+        for name, messages in branches:
+            self.git("checkout", "-q", "-b", name)
+            for message in messages:
+                self.git("commit", "-q", "--allow-empty", "-m", message)
+        stack = {"schemaVersion": 1, "repository": f"github.com:{PUBLIC}",
+                 "stacks": [{"trunk": {"branch": "main"}, "branches": [{"branch": name} for name, _ in branches]}]}
+        path = self.work / ".git" / "gh-stack"
+        path.write_text(json.dumps(stack, indent=2), encoding="utf-8")
+        return path
+
     def test_an_installed_extension_no_table_names_is_refused_and_its_help_goes_out(self) -> None:
         # gh runs an installed extension as the top-level command of its name, and the extension sends its text with
         # its own client, so the check reads it as a command like any other: one no table names is refused before gh
@@ -3403,11 +3421,14 @@ class GhLeakTerms(unittest.TestCase):
     def test_each_quiet_gh_stack_subcommand_and_the_skills_gh_stack_calls_go_out(self) -> None:
         # With gh-stack installed, each of its subcommands that sends GitHub no text (GH_STACK_COMMANDS, `quiet`), by its
         # name and by its alias (`delete` of `unstack`), goes to gh unread, whatever words it gives, and so do `gh
-        # stack` alone, its version and its help. So do the calls the repository's skills make (`git grep -o 'gh stack
-        # [a-z-]+'`: squash-stack, landing-a-pr): `view --json`, `unstack`, `unstack 7`, `sync --prune`, `rebase
-        # --upstack`, and `link` of clean branches to a public repository. gh's data directory is ~/.local/share/gh
-        # under the test's HOME, XDG_DATA_HOME being unset. Control: before gh-stack is installed, `gh stack view
-        # --json` runs gh's stub of it, a command no table names, and is refused.
+        # stack` alone, its version and its help. So do the calls the skills make (`git grep -h -o -E 'gh stack
+        # [a-z-]+( +--?[a-z-]+)*' -- plugins`): squash-stack's `view --json`, `sync --prune`, `rebase --upstack`,
+        # `unstack`, `unstack 7`, `merge --squash`, which it tells agents not to run, and `link`, which landing-a-pr's
+        # references/repo-merge-rules.md names too, here of clean branches to a public repository; and `submit --auto`,
+        # which the skill gh-stack, vendored at vendor/gh-stack (skills-sources.json), tells agents to run
+        # (skills/gh-stack/SKILL.md:53, 93 at GH_STACK_COMMIT), here of a clean stack to a public repository. gh's data
+        # directory is ~/.local/share/gh under the test's HOME, XDG_DATA_HOME being unset. Control: before gh-stack is
+        # installed, `gh stack view --json` runs gh's stub of it, a command no table names, and is refused.
         self.env.pop("XDG_DATA_HOME", None)
         self.env["GH_REPO"] = PUBLIC
         with self.subTest(control="gh-stack not installed"):
@@ -3416,10 +3437,11 @@ class GhLeakTerms(unittest.TestCase):
         module = load_check()
         quiet = [name for name, (kind, _) in module.GH_STACK_COMMANDS.items() if kind == "quiet"]
         self.assertGreater(len(quiet), 15, "too few quiet gh-stack subcommands to read")
+        self.stack_repo(("feat-a", ["Add the parser\n\nIt reads the file."]), ("feat-b", ["one", "two"]))
         calls = [*(["stack", name, TEXT.strip()] for name in [*quiet, *module.GH_STACK_ALIASES]), ["stack"],
                  ["stack", "--version"], ["stack", "-h"], ["stack", "view", "--json"], ["stack", "unstack"],
                  ["stack", "unstack", "7"], ["stack", "sync", "--prune"], ["stack", "rebase", "--upstack"],
-                 ["stack", "link", "feat-a", "feat-b"]]
+                 ["stack", "merge", "--squash"], ["stack", "link", "feat-a", "feat-b"], ["stack", "submit", "--auto"]]
         for argv in calls:
             with self.subTest(call=" ".join(argv)):
                 self.setUp_calls()
@@ -3473,29 +3495,156 @@ class GhLeakTerms(unittest.TestCase):
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv, env=env), argv)
 
-    def test_gh_stack_submit_is_refused_as_a_text_the_check_cannot_read(self) -> None:
-        # `gh stack submit` creates pull requests whose titles and bodies come from its editor, or from the stack's
-        # commits once GitHub has said which branches have none (cmd/submit.go:503-527), which the check does not read:
-        # to a public repository it is refused as a text the check cannot read, naming what to run instead, and to a
-        # private one it goes out. With its help flag on, `--help` or cobra's `-h`, it prints its help and goes out; a
-        # later `-h=false` or `--help=false` turns the flag off, and the call is refused again (gh_help).
-        argv = ["stack", "submit", "--auto"]
-        checked = self.check(argv, self.stack_env(PUBLIC))
-        stderr = checked.stderr.decode("utf-8", "replace")
-        self.assertEqual(checked.returncode, 4, stderr)
-        self.assertIn("cannot read the titles and bodies of the pull requests it creates", stderr)
-        self.assertIn("gh stack link", stderr)
-        for refused in (argv, [*argv, "-h", "-h=false"], [*argv, "--help", "--help=false"]):
+    def test_gh_stack_submit_without_auto_is_refused_as_a_text_the_check_cannot_read(self) -> None:
+        # Without --auto, where its output is a terminal, `gh stack submit` takes the titles and bodies of the pull
+        # requests it creates from its editor (cmd/submit.go:229-243; internal/config/config.go:229-231), and the check
+        # cannot tell whether it is: to a public repository the call is refused as a text the check cannot read, naming
+        # --auto and `gh stack link` as what to run instead, and so are `--auto=false` and an --auto a later
+        # `--auto=false` turns off, though the stack is clean and its `--auto` goes out. To a private repository it goes
+        # out. With its help flag on, `--help` or cobra's `-h`, it prints its help and goes out, after `--auto=false`
+        # too; a later `-h=false` or `--help=false` turns the flag off, and the call is refused again (gh_help).
+        self.stack_repo(("feat-a", ["Add the parser"]))
+        argv = ["stack", "submit"]
+        for refused in (argv, [*argv, "--auto=false"], [*argv, "--auto", "--auto=false"]):
+            with self.subTest(checked=" ".join(refused)):
+                checked = self.check(refused, self.stack_env(PUBLIC))
+                stderr = checked.stderr.decode("utf-8", "replace")
+                self.assertEqual(checked.returncode, 4, stderr)
+                self.assertIn("cannot read the titles and bodies of the pull requests it creates: without --auto",
+                              stderr)
+                self.assertIn("run gh stack submit --auto", stderr)
+                self.assertIn("gh stack link", stderr)
+        for refused in (argv, [*argv, "--auto=false"], [*argv, "-h", "-h=false"], [*argv, "--help", "--help=false"]):
             with self.subTest(refused=" ".join(refused)):
                 self.setUp_calls()
                 result = self.run_gh(refused, env=self.stack_env(PUBLIC))
                 self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
                 self.assertEqual(self.gh_calls(), [])
-        for sent, repo in ((argv, PRIVATE), ([*argv, "--help"], PUBLIC), (["stack", "submit", "-h"], PUBLIC),
-                           (["stack", "submit", "--help=false", "-h"], PUBLIC)):
+        for sent, repo in ((argv, PRIVATE), ([*argv, "--help"], PUBLIC), ([*argv, "-h"], PUBLIC),
+                           ([*argv, "--help=false", "-h"], PUBLIC), ([*argv, "--auto=false", "--help"], PUBLIC),
+                           ([*argv, "--auto"], PUBLIC)):
             with self.subTest(sent=" ".join(sent), repo=repo):
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(sent, env=self.stack_env(repo)), sent)
+
+    def test_gh_stack_submit_auto_of_a_clean_stack_goes_out(self) -> None:
+        # `gh stack submit --auto` creates a pull request for each branch of the current stack that has none, its title
+        # and body built from the branch's commits (cmd/submit.go:503-578), which the check reads from the stack file
+        # and git as gh-stack builds them (gh_stack_current, gh_stack_submit_texts): of a clean stack, a branch of one
+        # commit with a body and one of two commits, it goes out to a public repository, with --open, --no-atomic and
+        # --remote too, as `--auto=true`, and from the trunk, which the stack holds too (internal/stack/stack.go:81-87).
+        self.stack_repo(("feat-a", ["Add the parser\n\nIt reads the file."]), ("feat-b", ["one", "two"]))
+        calls = (["stack", "submit", "--auto"], ["stack", "submit", "--auto", "--open", "--no-atomic", "--remote", "x"],
+                 ["stack", "submit", "--auto=true"])
+        for argv in calls:
+            with self.subTest(call=" ".join(argv)):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=self.stack_env(PUBLIC)), argv)
+        self.git("checkout", "-q", "main")
+        with self.subTest(branch="main"):
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(calls[0], env=self.stack_env(PUBLIC)), calls[0])
+
+    def test_gh_stack_submit_auto_reads_the_subject_and_body_of_a_branch_s_one_commit(self) -> None:
+        # A branch of one commit gets that commit's subject as the title of its pull request, and its body, with
+        # gh-stack's footer, as its body (cmd/submit.go:546-578): a term in either is refused for a public repository,
+        # naming the commit, and goes out to a private one, as for `gh pr create`. The subject is that of feat-b's one
+        # commit above feat-a, two above the trunk: the branch's base is the nearest branch below it that GitHub has not
+        # said is merged or queued (internal/stack/stack.go:170-184), so the check reads each base it may take. The
+        # body is that of feat-a's one commit above the trunk.
+        argv = ["stack", "submit", "--auto"]
+        for part, holder, branches in (
+                ("title", "feat-b", (("feat-a", ["Add the parser"]),
+                                     ("feat-b", [f"Add {CANARY.upper()} support\n\nIt reads the file."]))),
+                ("body", "feat-a", (("feat-a", [f"Add the parser\n\n{TEXT}"]), ("feat-b", ["one"])))):
+            self.stack_repo(*branches)
+            commit = self.git("rev-parse", holder)[:12]
+            with self.subTest(part=part, repo=PUBLIC):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(argv, env=self.stack_env(PUBLIC)), f"--auto commit {commit} ({part})",
+                                    line=1)
+            with self.subTest(part=part, repo=PRIVATE):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=self.stack_env(PRIVATE)), argv)
+
+    def test_gh_stack_submit_auto_reads_the_name_of_a_branch_of_more_than_one_commit(self) -> None:
+        # A branch of other than one commit gets its name, each `-` and `_` a space, as the title of its pull request
+        # (cmd/submit.go:549-555, 580-588): a term the spaces make is refused for a public repository, naming the
+        # branch, and goes out to a private one.
+        name = TEST_TERMS[0].replace(" ", "-")
+        self.stack_repo(("feat-a", ["Add the parser"]), (name, ["one", "two"]))
+        argv = ["stack", "submit", "--auto"]
+        self.assert_refused(self.run_gh(argv, env=self.stack_env(PUBLIC)), f"--auto branch {name} (title)",
+                            TEST_TERMS[0], line=1)
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv, env=self.stack_env(PRIVATE)), argv)
+
+    def test_gh_stack_submit_auto_reads_the_pull_request_template(self) -> None:
+        # Where the repository has a pull request template, gh-stack sends it as the body of each pull request it
+        # creates (cmd/submit.go:218-222, 560-563; internal/pr/template.go:12-17): a term in
+        # `.github/pull_request_template.md` of the checkout is refused for a public repository, naming the file, and
+        # goes out to a private one. Control: a clean template goes out to a public repository.
+        self.stack_repo(("feat-a", ["Add the parser"]))
+        (self.work / ".github").mkdir()
+        template = self.work / ".github" / "pull_request_template.md"
+        template.write_text(TEXT, encoding="utf-8")
+        root = self.git("rev-parse", "--show-toplevel")
+        argv = ["stack", "submit", "--auto"]
+        self.assert_refused(self.run_gh(argv, env=self.stack_env(PUBLIC)),
+                            f"pull request template {root}/.github/pull_request_template.md", line=1)
+        for text, repo in ((TEXT, PRIVATE), (CLEAN, PUBLIC)):
+            template.write_text(text, encoding="utf-8")
+            with self.subTest(repo=repo):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=self.stack_env(repo)), argv)
+
+    def test_gh_stack_submit_auto_of_a_stack_the_check_cannot_find_is_refused(self) -> None:
+        # The check finds the stack `gh stack submit --auto` submits as gh-stack does: in the stack file `gh-stack` of
+        # git's common directory, the one stack that holds the current branch (gh_stack_current). Where it cannot, it
+        # cannot read the titles and bodies, and the call is refused for a public repository, saying why: the file is
+        # missing; it is of a schema version gh-stack at GH_STACK_COMMIT does not read; after its `branches` it gives
+        # `Branches`, which Go's encoding/json reads as the same member, the last one winning, here with one more
+        # branch; no stack holds the current branch, or git names none, on a detached HEAD; or gh-stack would first
+        # merge into it the stack file of a linked worktree. Each goes out to a private repository.
+        path = self.stack_repo(("feat-a", ["Add the parser"]))
+        stack = path.read_text(encoding="utf-8")
+        common = self.git("rev-parse", "--path-format=absolute", "--git-common-dir")
+
+        def legacy() -> None:
+            (path.parent / "worktrees" / "x").mkdir(parents=True)
+            (path.parent / "worktrees" / "x" / "gh-stack").write_text(stack, encoding="utf-8")
+
+        def cased() -> None:
+            data = json.loads(stack)
+            data["stacks"][0]["Branches"] = [{"branch": "feat-a"}, {"branch": "feat-b"}]
+            path.write_text(json.dumps(data), encoding="utf-8")
+
+        cases = (("missing", path.unlink, f"the stack file {common}/gh-stack does not exist"),
+                 ("schema version 2", lambda: path.write_text(stack.replace('"schemaVersion": 1', '"schemaVersion": 2'),
+                                                              encoding="utf-8"),
+                  "has schema version 2, which gh-stack at "),
+                 ("another letter case", cased, "it gives stacks[0].branches more than once, or in another letter case"),
+                 ("no stack", lambda: self.git("checkout", "-q", "-b", "other"),
+                  "names no stack that holds the current branch other"),
+                 ("detached HEAD", lambda: self.git("checkout", "-q", "--detach"), "git names no current branch"),
+                 ("a linked worktree's stack file", legacy, f"gh-stack would first merge into {common}/gh-stack"))
+        argv = ["stack", "submit", "--auto"]
+        for name, change, reason in cases:
+            self.stack_repo(("feat-a", ["Add the parser"]))
+            change()
+            with self.subTest(case=name, repo=PUBLIC):
+                checked = self.check(argv, self.stack_env(PUBLIC))
+                stderr = checked.stderr.decode("utf-8", "replace")
+                self.assertEqual(checked.returncode, 4, stderr)
+                self.assertIn("cannot read the titles and bodies of the pull requests it creates: ", stderr)
+                self.assertIn(reason, stderr)
+                self.setUp_calls()
+                result = self.run_gh(argv, env=self.stack_env(PUBLIC))
+                self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
+                self.assertEqual(self.gh_calls(), [])
+            with self.subTest(case=name, repo=PRIVATE):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=self.stack_env(PRIVATE)), argv)
 
     def test_a_term_in_a_release_asset_is_refused_for_a_public_repository(self) -> None:
         # gh 2.106.0 uploads each asset file of `release upload` and `release create`, `<file>[#<label>]`
@@ -3932,7 +4081,7 @@ class Tables(unittest.TestCase):
 
     def test_the_shim_hands_every_text_command_to_the_check(self) -> None:
         # Each command whose text the check reads, each command it refuses (GH_REFUSED_COMMANDS), and each gh-stack
-        # subcommand it reads or refuses (GH_STACK_COMMANDS, `text` and `refused`) is a call shims/gh hands to the check.
+        # subcommand it reads (GH_STACK_COMMANDS, `text`) is a call shims/gh hands to the check.
         # gh's config directory holds no config.yml, so no alias the user's may hold makes it a call the shim hands over
         # for that.
         text = GH.read_text(encoding="utf-8")
@@ -4160,7 +4309,7 @@ class Tables(unittest.TestCase):
         module = self.scanner()
         self.assertLessEqual(set(module.GH_STACK_OPTIONS), set(module.GH_STACK_COMMANDS))
         self.assertLessEqual(set(module.GH_STACK_ALIASES.values()), set(module.GH_STACK_COMMANDS))
-        self.assertEqual({kind for kind, _ in module.GH_STACK_COMMANDS.values()}, {"text", "quiet", "refused"})
+        self.assertEqual({kind for kind, _ in module.GH_STACK_COMMANDS.values()}, {"text", "quiet"})
         self.assertEqual({name for name, (kind, _) in module.GH_STACK_COMMANDS.items() if kind != "quiet"},
                          set(module.GH_STACK_OPTIONS))
         names = {*module.GH_STACK_COMMANDS, *module.GH_STACK_ALIASES}
