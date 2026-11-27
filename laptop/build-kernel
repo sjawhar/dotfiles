@@ -1,0 +1,88 @@
+#!/bin/bash
+# build-kernel — build a kernel.org stable kernel as .deb packages, configured from
+# the newest installed Pop!_OS kernel, for laptop/local-kernel.sh.
+#
+# Why: Pop's kernels stop at 7.2, which upstream ended at 7.2.15 (2026-11-01). 7.2
+# lacks AMD's fix e7ba638b8116 "drm/amd/display: Avoid closing unowned DDC pins"
+# (CVE-2026-99628; first stable release with it: 7.3.5). Without it, unplugging a
+# Thunderbolt dock or monitor can oops amdgpu in dal_ddc_open() while it retrains
+# the link; the display then stops updating until a hard reset.
+#
+# Builds in ~/src/kernel/linux-$VERSION and leaves the packages in ~/src/kernel.
+# The tarball must carry a signature from Greg Kroah-Hartman's or Linus Torvalds's
+# kernel.org key. Rust is off: on Pop it builds only the Rust Android binder and
+# NVIDIA's nova driver, which this laptop does not use.
+#
+#   laptop/build-kernel            build the packages
+#   laptop/build-kernel --install  install them and make the kernel the boot default (root)
+#   laptop/build-kernel --release  print the kernel release string
+set -euo pipefail
+
+VERSION=7.3.6
+LOCALVERSION=-local
+RELEASE=$VERSION$LOCALVERSION
+SRC=$HOME/src/kernel
+TREE=$SRC/linux-$VERSION
+# kernel.org signing keys: Greg Kroah-Hartman (stable), Linus Torvalds (mainline)
+SIGNERS=(647F28654894E3BD457199BE38DBBDC86092693E ABAF11C65A2970B130ABE3C479BE3E4300411886)
+
+error() {
+    printf 'build-kernel: %s\n' "$*" >&2
+    exit 1
+}
+
+install_packages() {
+    local image headers
+    image=$(ls "$SRC"/linux-image-"$RELEASE"_*.deb 2>/dev/null) || error "no linux-image-$RELEASE package in $SRC; build it first"
+    headers=$(ls "$SRC"/linux-headers-"$RELEASE"_*.deb 2>/dev/null) || error "no linux-headers-$RELEASE package in $SRC; build it first"
+    sudo dpkg -i "$image" "$headers"
+    # The kbuild package's postinst runs /etc/kernel/postinst.d with DEB_MAINT_PARAMS set,
+    # so Pop's xx-update-initrd-links skips the symlinks and kernelstub copies the old
+    # kernel. Point /boot/vmlinuz at this one (the previous kernel becomes vmlinuz.old,
+    # the boot menu's previous-kernel entry), then let kernelstub copy both to the ESP.
+    sudo linux-update-symlinks install "$RELEASE" "/boot/vmlinuz-$RELEASE"
+    sudo kernelstub --verbose --preserve-live-mode
+    [[ $(readlink -f /boot/vmlinuz) == "/boot/vmlinuz-$RELEASE" ]] || error "/boot/vmlinuz does not point at $RELEASE"
+    dkms status -k "$RELEASE"
+}
+
+case ${1:-} in
+    --release) echo "$RELEASE"; exit 0 ;;
+    --install) install_packages; exit 0 ;;
+    "") ;;
+    *) error "unknown argument: $1" ;;
+esac
+
+for tool in flex bison pahole gawk; do
+    command -v "$tool" >/dev/null || error "$tool is missing: sudo apt-get install flex bison gawk libssl-dev libelf-dev libdw-dev dwarves debhelper"
+done
+
+configs=(/boot/config-*-generic)
+[[ -e ${configs[0]} ]] || error "no Pop kernel config (/boot/config-*-generic) to start from"
+pop_config=$(printf '%s\n' "${configs[@]}" | sort -V | tail -1)
+
+mkdir -p "$SRC"
+cd "$SRC"
+tarball=linux-$VERSION.tar.xz
+[[ -f $tarball ]] || curl -fsSLO "https://cdn.kernel.org/pub/linux/kernel/v${VERSION%%.*}.x/$tarball"
+[[ -f linux-$VERSION.tar.sign ]] || curl -fsSLO "https://cdn.kernel.org/pub/linux/kernel/v${VERSION%%.*}.x/linux-$VERSION.tar.sign"
+
+GNUPGHOME=$(mktemp -d)
+export GNUPGHOME
+trap 'rm -rf "$GNUPGHOME"' EXIT
+gpg -q --auto-key-locate clear,wkd --locate-keys gregkh@kernel.org torvalds@kernel.org >/dev/null 2>&1 \
+    || error "could not fetch the kernel.org signing keys"
+signer=$(xz -dc "$tarball" | gpg --status-fd 1 --verify "linux-$VERSION.tar.sign" - 2>/dev/null \
+    | awk '$2 == "VALIDSIG" {print $3}')
+[[ " ${SIGNERS[*]} " == *" $signer "* ]] || error "$tarball has no valid signature from a kernel.org signing key"
+
+[[ -d $TREE ]] || tar -xf "$tarball"
+cd "$TREE"
+cp "$pop_config" .config
+scripts/config --set-str SYSTEM_TRUSTED_KEYS "" --set-str SYSTEM_REVOCATION_KEYS "" \
+    --set-str LOCALVERSION "$LOCALVERSION" --disable LOCALVERSION_AUTO --disable RUST
+make -s olddefconfig
+[[ $(make -s kernelrelease) == "$RELEASE" ]] || error "configured release $(make -s kernelrelease) is not $RELEASE"
+
+DEB_BUILD_PROFILES=pkg.linux-upstream.nokerneldbg nice -n 19 make -j"$(nproc)" bindeb-pkg KDEB_PKGVERSION="$VERSION-1"
+echo "Built $RELEASE from $pop_config; install with: ${BASH_SOURCE[0]} --install"
