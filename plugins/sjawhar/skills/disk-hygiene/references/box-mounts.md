@@ -4,18 +4,38 @@ Read this before you move data onto a mount, count on data on a mount to survive
 
 ## Which mounts survive a machine stop
 
-A mount's name does not say, and `/mnt/nvme` means opposite things on the two machines. Read the device before you move data onto a mount or treat anything on it as safe. Name the machine with the mount.
+A mount's name does not say. `/mnt/nvme` means opposite things on the two machines. Read the device before you move data onto a mount or treat anything on it as safe. Name the machine with the mount.
 
-- sami-devbox: `/mnt/nvme` and `/mnt/durable` are persistent disks and survive; `/mnt/scratch` is raid0 over local SSD and is empty after a stop.
-- sami-rocqperf: `/mnt/durable` is a managed disk and survives; `/mnt/nvme` is raid0 over local NVMe and is empty after a stop.
-- On an unfamiliar machine, read the devices under the mount: `lsblk -s -no NAME,MODEL,TYPE "$(findmnt -no SOURCE <mount>)"`, or `sudo nvme list`. On Google Cloud a persistent disk's model is `nvme_card-pd` and a local SSD's is `nvme_card<N>`. On Azure a managed disk shows as `MSFT NVMe Accelerator` with serial `00000` and a local one as `Microsoft NVMe Direct Disk`; an empty `/dev/disk/azure/data/by-lun` does not mean there is no data disk, because an NVMe data disk is not listed there. The surest check on Azure: a managed disk shares a controller with the namespace `/dev/disk/azure/os` points at, and that OS disk survives a stop.
+| Machine | Mount | Disk | After a stop |
+| --- | --- | --- | --- |
+| sami-devbox | `/mnt/nvme` | persistent disk | survives |
+| sami-devbox | `/mnt/durable` | persistent disk | survives |
+| sami-devbox | `/mnt/scratch` | raid0 over local SSD | empty |
+| sami-rocqperf | `/mnt/durable` | managed disk | survives |
+| sami-rocqperf | `/mnt/nvme` | raid0 over local NVMe | empty |
+
+- On an unfamiliar machine, read the devices under the mount: `lsblk -s -no NAME,MODEL,TYPE "$(findmnt -no SOURCE <mount>)"`, or `sudo nvme list`.
+
+  | Cloud | Disk | Shows as |
+  | --- | --- | --- |
+  | Google Cloud | persistent disk | model `nvme_card-pd` |
+  | Google Cloud | local SSD | model `nvme_card<N>` |
+  | Azure | managed disk | `MSFT NVMe Accelerator`, serial `00000` |
+  | Azure | local disk | `Microsoft NVMe Direct Disk` |
+
+  - On Azure, an empty `/dev/disk/azure/data/by-lun` does not mean there is no data disk, because an NVMe data disk is not listed there.
+  - The surest check on Azure: a managed disk shares a controller with the namespace `/dev/disk/azure/os` points at. That OS disk survives a stop.
 
 ## Inside an agent box
 
-- `/mnt/scratch` in a box is the container overlay, not the local SSD. The SSD reaches a box only as its own filesystem: `/tmp` and `$HOME` live in the box's sparse disk image.
-- Put a large sort, extract or build in box `/tmp`. When it fills, grow the image online with `agentbox grow <box|session-id> <size>`; never move `TMPDIR` to a `--dir` path, which is a disk every session on the host shares.
+- `/mnt/scratch` in a box is the container overlay, not the local SSD.
+- The local SSD reaches a box only as its own filesystem: `/tmp` and `$HOME` live in the box's sparse disk image.
+- Put a large sort, extract or build in box `/tmp`.
+- When box `/tmp` fills, grow the image online with `agentbox grow <box|session-id> <size>`.
+- When box `/tmp` fills, never move `TMPDIR` to a `--dir` path, which is a disk every session on the host shares.
 - Check a mount from inside the namespace that writes to it (`findmnt -T <path>`, `stat -f <path>`), never from the host.
-- From a box, `systemd-run --user` starts its command on the host, through the relayed session bus (`agentbox/README.md`), where the box's own paths (`/tmp`, `$HOME`) are other files. Never run a delete or `apply` that way; run a long one as a named bash service, or with `setsid <cmd> </dev/null >log 2>&1 &`.
+- From a box, `systemd-run --user` starts its command on the host, through the relayed session bus (`agentbox/README.md`), where the box's own paths (`/tmp`, `$HOME`) are other files. Never run a delete or `apply` that way.
+  - Run a long one as a named bash service, or with `setsid <cmd> </dev/null >log 2>&1 &`.
 
 ## Box bind-mount sources
 
