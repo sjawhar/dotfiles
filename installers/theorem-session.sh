@@ -1,8 +1,9 @@
 #!/bin/bash
 # theorem-session, agent-infra's command that starts, lists, opens and ends agent sessions on the
 # dispatch cluster (theorem-labs/agent-infra sessions/), from its pinned GitHub release, checked by
-# SHA-256, at ~/.local/bin/theorem-session: on PATH in a host shell and in every agent box
-# (agentbox/mounts binds ~/.local/bin). Devbox role installer: devbox/install.sh runs it.
+# SHA-256, at ~/.local/bin/theorem-session: on PATH in a login shell (~/.profile) and in every
+# agent box (agentbox/mounts binds ~/.local/bin), not in an agent session on the host or a command
+# sshd runs. Devbox role installer: devbox/install.sh runs it.
 #
 # theorem-labs/agent-infra is private, so the download needs a GitHub token: an installation token
 # of the GitHub App for owner theorem-labs, narrowed to agent-infra and read access, that
