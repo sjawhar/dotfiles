@@ -229,11 +229,13 @@ gh_shim_is_write() {
 }
 # gh_shim_may_send_text ARGV…: true when scripts/leak-terms-check must read this call, and it then decides: a write
 # (gh_shim_is_write), a first word that is not one of gh 2.106.0's own commands, which can be an option before the
-# command, a gh alias of the user's that the check expands, an installed extension or a command no table of the check
+# command, a gh alias of the user's that the check expands, an installed extension, which the check reads as a command
+# like any other (gh-stack by its GH_STACK_COMMANDS, any other refused as unknown), or a command no table of the check
 # names, a command under which gh's config.yml may hold an alias (gh_shim_has_nested_alias), and any call of one of
 # those commands that gh_shim_is_quiet does not name, a verb gh does not have included: the check refuses a command
 # that no table of it names. It may be wider than the check's own tables, never narrower
-# (shims/tests/test_gh_leak_terms.py); a call gh_shim_is_quiet names never starts the check.
+# (shims/tests/test_gh_leak_terms.py); a call gh_shim_is_quiet names never starts the check, and it names no `gh stack`
+# call, so each one starts the check, which tells an installed gh-stack from gh's stub of it.
 gh_shim_may_send_text() {
     gh_shim_is_write "$@" && return 0
     (($#)) || return 1

@@ -14,6 +14,10 @@ new place. Each refusal is shown with its control: the same text to a private re
 same stdin."""
 from __future__ import annotations
 
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
 import json
 import os
 import re
@@ -105,6 +109,17 @@ exit 0
 def write_executable(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
     path.chmod(0o755)
+
+
+def load_check():
+    """scripts/leak-terms-check loaded anew as a module, for a test that calls its functions or reads its constants."""
+    loader = importlib.machinery.SourceFileLoader("leak_terms_check_gh", str(CHECK))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
 
 
 class GhLeakTerms(unittest.TestCase):
@@ -3282,18 +3297,20 @@ class GhLeakTerms(unittest.TestCase):
 
     # --- a command no table names, and a release's assets (dispatch://INFRA-4957, items 2 to 4) -----------------------
 
-    UNKNOWN = ("no table of the check names this command of gh, and it is no gh alias and no installed extension, so "
-               "the check does not know what the call sends and refuses it")
+    UNKNOWN = ("no table of the check names this command of gh, and it is no gh alias, so the check does not know what "
+               "the call sends and refuses it")
 
     def test_a_command_no_table_names_is_refused_and_its_help_goes_out(self) -> None:
-        # A command that none of the check's tables names, that is no gh alias and no installed extension, is refused
-        # before gh runs, the refusal naming it: a verb gh does not have under a group, under a group's alias and under
-        # a group of a group, a top-level name gh does not have, and the official extension stubs `aw`, `stack` and
-        # `webhook`, which stay unknown until a table sorts them. shims/gh hands each to the check, though none is a
-        # write. With `--help` or `-h`, which gh reads as its help flag, each goes to gh, which prints help and sends
-        # nothing. Controls: a `--help` that an option before it may take as its value does not count; quiet commands,
-        # by gh's aliases too, a group alone, `gh help`, `gh version` and git's credential helper go out. gh's data
-        # directory, where an installed extension would stand, is an empty one of the test's.
+        # A command that none of the check's tables names and that is no gh alias is refused before gh runs, the
+        # refusal naming it: a verb gh does not have under a group, under a group's alias and under a group of a group,
+        # a top-level name gh does not have, and the official extension stubs `aw`, `stack` and `webhook`, which gh
+        # runs where no extension of that name is installed. shims/gh hands each to the check, though none is a
+        # write. With `--help`, which gh reads as its help flag, each goes to gh, which prints help and sends nothing. A
+        # bare `-h` does not count: of a command no table names the check knows no option, and 12 commands of gh
+        # 2.106.0 give `-h` a value (dispatch://INFRA-4957, rulings-md v66), so each stays refused with it. Controls: a
+        # `--help` that an option before it may take as its value does not count; quiet commands, by gh's aliases too, a
+        # group alone, `gh help`, `gh version` and git's credential helper go out. gh's data directory, where an
+        # installed extension would stand, is an empty one of the test's.
         self.env["XDG_DATA_HOME"] = str(self.tmp / "data")
         for name, argv in (("pr bogus", ["pr", "bogus", "1"]), ("pr bogus", ["pr", "-R", PRIVATE, "bogus"]),
                            ("cs bogus", ["cs", "bogus"]), ("issue artifact bogus", ["issue", "artifact", "bogus", "4"]),
@@ -3301,10 +3318,11 @@ class GhLeakTerms(unittest.TestCase):
                            ("webhook", ["webhook", "forward"])):
             with self.subTest(call=" ".join(argv)):
                 self.assert_command_refused(argv, name, self.UNKNOWN)
-            for flag in ("--help", "-h"):
-                with self.subTest(call=" ".join(argv), help=flag):
-                    self.setUp_calls()
-                    self.assert_sent(self.run_gh([*argv, flag]), [*argv, flag])
+            with self.subTest(call=" ".join(argv), help="--help"):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh([*argv, "--help"]), [*argv, "--help"])
+            with self.subTest(call=" ".join(argv), help="-h"):
+                self.assert_command_refused([*argv, "-h"], name, self.UNKNOWN)
         with self.subTest(control="--help as the value of an option"):
             self.assert_command_refused(["pr", "bogus", "--title", "--help"], "pr bogus", self.UNKNOWN)
         for argv in (["release", "list", "-R", PUBLIC], ["release", "ls", "-R", PUBLIC], ["pr", "co", "1"],
@@ -3314,26 +3332,170 @@ class GhLeakTerms(unittest.TestCase):
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv), argv)
 
-    def test_an_installed_extension_goes_out_and_an_extension_stub_is_refused(self) -> None:
-        # gh runs an installed extension, `gh-NAME` in the `extensions` directory of its data directory, as the
-        # top-level command NAME, in place of gh's own stub of that name. An extension sends its text with its own
-        # client, so it is local (item 4): a call of it goes out. Control: with no such extension, `stack` is gh's
-        # official extension stub, a command no table names, and is refused. gh's data directory is ~/.local/share/gh
-        # under the test's HOME, and XDG_DATA_HOME/gh where that is set.
+    # --- an installed extension and gh-stack (rulings-md v66, the tester's findings at c8d749df, item 4) -------------
+
+    def install_extension(self, name: str) -> None:
+        """An extension NAME installed for gh: `gh-NAME` in the `extensions` directory of gh's data directory, which is
+        XDG_DATA_HOME/gh where the test sets XDG_DATA_HOME, else ~/.local/share/gh under its HOME (gh_extension)."""
+        data = Path(self.env["XDG_DATA_HOME"]) if "XDG_DATA_HOME" in self.env else self.tmp / "home" / ".local" / "share"
+        (data / "gh" / "extensions" / f"gh-{name}").mkdir(parents=True)
+
+    def stack_env(self, repo: str) -> dict[str, str]:
+        """The test's environment with gh-stack installed under XDG_DATA_HOME, and GH_REPO naming REPO, the repository
+        gh-stack sends a pull request to (go-gh's repository.Current, gh_stack_check)."""
+        self.env["XDG_DATA_HOME"] = str(self.tmp / "data")
+        if not (self.tmp / "data" / "gh" / "extensions" / "gh-stack").exists():
+            self.install_extension("stack")
+        return {**self.env, "GH_REPO": repo}
+
+    def test_an_installed_extension_no_table_names_is_refused_and_its_help_goes_out(self) -> None:
+        # gh runs an installed extension as the top-level command of its name, and the extension sends its text with
+        # its own client, so the check reads it as a command like any other: one no table names is refused before gh
+        # runs as a command no table names, and with `--help` it goes to gh; so is a subcommand of gh-stack that
+        # GH_STACK_COMMANDS does not name. gh runs an extension in place of a gh alias of its name, which gh takes only
+        # where no command has that name (pkg/cmd/alias/shared/validations.go:15-29), and in place of gh's stub of an
+        # official extension (`aw`). Until rulings-md v66 a call of any installed extension went out unread. Controls:
+        # with gh-foo gone, the alias `foo` of `pr view`, a quiet command, runs and goes out; gh-stack's `view` goes out.
+        self.env["XDG_DATA_HOME"] = str(self.tmp / "data")
+        config = self.tmp / "config" / "gh"
+        config.mkdir()
+        (config / "config.yml").write_text(gh_config_yml("\n    foo: pr view\n"), encoding="utf-8")
+        for name in ("foo", "aw", "stack"):
+            self.install_extension(name)
+        for name, argv in (("foo", ["foo", "1"]), ("aw", ["aw", "run"]), ("stack bogus", ["stack", "bogus", "x"]),
+                           ("stack bogus", ["stack", "-R", PRIVATE, "bogus"])):
+            with self.subTest(call=" ".join(argv)):
+                self.assert_command_refused(argv, name, self.UNKNOWN)
+            with self.subTest(call=" ".join(argv), help="--help"):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh([*argv, "--help"]), [*argv, "--help"])
+        for argv in (["stack", "view"], ["stack", "-R", PRIVATE, "view"]):
+            with self.subTest(control=" ".join(argv)):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+        (self.tmp / "data" / "gh" / "extensions" / "gh-foo").rmdir()
+        with self.subTest(control="alias foo"):
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(["foo", "1"]), ["foo", "1"])
+
+    def test_a_name_that_is_a_command_of_gh_and_an_installed_extension_is_read_as_gh_s(self) -> None:
+        # gh registers no extension whose name a command of its own takes (pkg/cmd/root/root.go:197-206) and refuses to
+        # install one (pkg/cmd/extension/command.go:694-701), so with gh-pr, gh-cs and gh-help installed `gh pr`, `gh
+        # cs` (codespace's alias) and `gh help` stay gh's: the check lets a read of each go, where it refuses a command
+        # no table names, and so does shims/gh, and a term in the --body of `pr comment` to a public repository is
+        # refused for that --body. Control: gh-foo, which names no command of gh's, is refused as a command no table
+        # names.
+        self.env["XDG_DATA_HOME"] = str(self.tmp / "data")
+        for name in ("pr", "cs", "help", "foo"):
+            self.install_extension(name)
+        for argv in (["pr", "view", "1"], ["cs", "list"], ["help", "pr"]):
+            with self.subTest(call=" ".join(argv)):
+                checked = self.check(argv, self.env)
+                self.assertEqual(checked.returncode, 0, checked.stderr.decode("utf-8", "replace"))
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+        with self.subTest(call="pr comment --body"):
+            self.setUp_calls()
+            self.assert_refused(self.run_gh(["pr", "comment", "1", "-R", PUBLIC, "--body", TEXT]), "--body")
+        with self.subTest(control="foo"):
+            self.assert_command_refused(["foo", "x"], "foo", self.UNKNOWN)
+
+    def test_each_quiet_gh_stack_subcommand_and_the_skills_gh_stack_calls_go_out(self) -> None:
+        # With gh-stack installed, each of its subcommands that sends GitHub no text (GH_STACK_COMMANDS, `quiet`), by its
+        # name and by its alias (`delete` of `unstack`), goes to gh unread, whatever words it gives, and so do `gh
+        # stack` alone, its version and its help. So do the calls the repository's skills make (`git grep -o 'gh stack
+        # [a-z-]+'`: squash-stack, landing-a-pr): `view --json`, `unstack`, `unstack 7`, `sync --prune`, `rebase
+        # --upstack`, and `link` of clean branches to a public repository. gh's data directory is ~/.local/share/gh
+        # under the test's HOME, XDG_DATA_HOME being unset. Control: before gh-stack is installed, `gh stack view
+        # --json` runs gh's stub of it, a command no table names, and is refused.
         self.env.pop("XDG_DATA_HOME", None)
-        argv = ["stack", "push", "--title", TEXT.strip()]
-        self.assert_command_refused(argv, "stack", self.UNKNOWN)
-        (self.tmp / "home" / ".local" / "share" / "gh" / "extensions" / "gh-stack").mkdir(parents=True)
-        self.setUp_calls()
-        self.assert_sent(self.run_gh(argv), argv)
-        # Under XDG_DATA_HOME the same call is refused until the extension stands there too.
-        env = {**self.env, "XDG_DATA_HOME": str(self.tmp / "data")}
-        self.setUp_calls()
-        self.assertEqual(self.run_gh(argv, env=env).returncode, 2)
-        self.assertEqual(self.gh_calls(), [])
-        (self.tmp / "data" / "gh" / "extensions" / "gh-stack").mkdir(parents=True)
-        self.setUp_calls()
-        self.assert_sent(self.run_gh(argv, env=env), argv)
+        self.env["GH_REPO"] = PUBLIC
+        with self.subTest(control="gh-stack not installed"):
+            self.assert_command_refused(["stack", "view", "--json"], "stack", self.UNKNOWN)
+        self.install_extension("stack")
+        module = load_check()
+        quiet = [name for name, (kind, _) in module.GH_STACK_COMMANDS.items() if kind == "quiet"]
+        self.assertGreater(len(quiet), 15, "too few quiet gh-stack subcommands to read")
+        calls = [*(["stack", name, TEXT.strip()] for name in [*quiet, *module.GH_STACK_ALIASES]), ["stack"],
+                 ["stack", "--version"], ["stack", "-h"], ["stack", "view", "--json"], ["stack", "unstack"],
+                 ["stack", "unstack", "7"], ["stack", "sync", "--prune"], ["stack", "rebase", "--upstack"],
+                 ["stack", "link", "feat-a", "feat-b"]]
+        for argv in calls:
+            with self.subTest(call=" ".join(argv)):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+
+    def test_gh_stack_link_reads_its_branches_its_base_and_the_template(self) -> None:
+        # `gh stack link` pushes its branch arguments and creates a pull request for each one that has none: its head
+        # the argument, its title the argument with each `-` and `_` a space, its base --base or the argument before it,
+        # and its body the repository's pull request template (cmd/link.go:699-717), in the repository go-gh's
+        # repository.Current takes, GH_REPO's here. A term in each is refused for a public repository, naming where it
+        # is: in an argument, in a title only the spaces make (`quillfeather_lane-9`), in --base, and in
+        # `.github/pull_request_template.md` of the checkout. Controls: clean branches and a clean template go out to a
+        # public repository, and each term goes out to a private one.
+        subprocess.run(["git", "init", "-q", str(self.work)], check=True, timeout=60)
+        (self.work / ".github").mkdir()
+        template = self.work / ".github" / "pull_request_template.md"
+        root = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=self.work, capture_output=True, text=True,
+                              check=True, timeout=60).stdout.strip()
+        term = CANARY.upper()
+        calls = (("argument", ["stack", "link", "feat-a", term], CLEAN, "argument 2", term),
+                 ("title", ["stack", "link", "quillfeather_lane-9", "feat-b"], CLEAN, "argument 1 (title)",
+                  "quillfeather lane 9"),
+                 ("--base", ["stack", "link", "--base", term, "feat-a", "feat-b"], CLEAN, "--base", term),
+                 ("template", ["stack", "link", "feat-a", "feat-b"], TEXT,
+                  f"pull request template {root}/.github/pull_request_template.md", term))
+        for name, argv, body, field, matched in calls:
+            template.write_text(body, encoding="utf-8")
+            with self.subTest(term=name, repo=PUBLIC):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(argv, env=self.stack_env(PUBLIC)), field, matched, line=1)
+            with self.subTest(term=name, repo=PRIVATE):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=self.stack_env(PRIVATE)), argv)
+        template.write_text(CLEAN, encoding="utf-8")
+        for argv in (["stack", "link", "feat-a", "feat-b"], ["stack", "link", "--base", "main", "7", "feat-c"]):
+            with self.subTest(control=" ".join(argv)):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=self.stack_env(PUBLIC)), argv)
+
+    def test_gh_stack_feedback_reads_its_title_to_the_public_feedback_form(self) -> None:
+        # `gh stack feedback [title]` opens the launcher's browser at the discussion form of github/gh-stack, a public
+        # repository, with the words of the call as its title (cmd/feedback.go:35-44), whatever repository the call is
+        # in: a term in them is refused, though GH_REPO names a private repository. Controls: clean words, and none, go
+        # out.
+        env = self.stack_env(PRIVATE)
+        result = self.run_gh(["stack", "feedback", "See", CANARY.upper(), "please"], env=env)
+        self.assert_refused(result, "title", line=1)
+        self.assertIn("github/gh-stack", result.stderr.decode("utf-8", "replace"))
+        for argv in (["stack", "feedback", "nice", "tool"], ["stack", "feedback"]):
+            with self.subTest(control=" ".join(argv)):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv, env=env), argv)
+
+    def test_gh_stack_submit_is_refused_as_a_text_the_check_cannot_read(self) -> None:
+        # `gh stack submit` creates pull requests whose titles and bodies come from its editor, or from the stack's
+        # commits once GitHub has said which branches have none (cmd/submit.go:503-527), which the check does not read:
+        # to a public repository it is refused as a text the check cannot read, naming what to run instead, and to a
+        # private one it goes out. With its help flag on, `--help` or cobra's `-h`, it prints its help and goes out; a
+        # later `-h=false` or `--help=false` turns the flag off, and the call is refused again (gh_help).
+        argv = ["stack", "submit", "--auto"]
+        checked = self.check(argv, self.stack_env(PUBLIC))
+        stderr = checked.stderr.decode("utf-8", "replace")
+        self.assertEqual(checked.returncode, 4, stderr)
+        self.assertIn("cannot read the titles and bodies of the pull requests it creates", stderr)
+        self.assertIn("gh stack link", stderr)
+        for refused in (argv, [*argv, "-h", "-h=false"], [*argv, "--help", "--help=false"]):
+            with self.subTest(refused=" ".join(refused)):
+                self.setUp_calls()
+                result = self.run_gh(refused, env=self.stack_env(PUBLIC))
+                self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
+                self.assertEqual(self.gh_calls(), [])
+        for sent, repo in ((argv, PRIVATE), ([*argv, "--help"], PUBLIC), (["stack", "submit", "-h"], PUBLIC),
+                           (["stack", "submit", "--help=false", "-h"], PUBLIC)):
+            with self.subTest(sent=" ".join(sent), repo=repo):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(sent, env=self.stack_env(repo)), sent)
 
     def test_a_term_in_a_release_asset_is_refused_for_a_public_repository(self) -> None:
         # gh 2.106.0 uploads each asset file of `release upload` and `release create`, `<file>[#<label>]`
@@ -3402,6 +3564,173 @@ class GhLeakTerms(unittest.TestCase):
                 self.assertEqual(returncode, code, probe.stderr)
                 self.assertLess(peak * 1024, 40 * len(data), f"the check took a peak of {peak // 1024} MiB for a "
                                                              f"{len(data) >> 20} MiB asset")
+
+    def test_an_asset_that_holds_a_term_many_times_is_read_in_bounded_memory(self) -> None:
+        # Each match of a later view of a text (Markdown escapes undone) has the as-written view's matches of its term
+        # for twins (gh_findings). Until the review of dispatch://INFRA-4957 each held a tuple of its own, so a text
+        # that holds a term N times and one escape took memory as N squared: gh_findings over an asset of 75 KB that
+        # holds a term 5,000 times took 197 MiB so (tracemalloc). The check on such an asset, the canary 5,000 times, to
+        # a private repository, where it reads every match and lets the call go, must stay within the 160 MiB that the
+        # 4 MiB asset of test_a_binary_release_asset_is_read_in_bounded_memory may take.
+        self.file("many.txt", f"a {CANARY} b\n" * 5000 + "\\-\n")
+        probe = subprocess.run(
+            [sys.executable, "-c", "import resource, subprocess, sys\n"
+             "done = subprocess.run(sys.argv[1:], stdin=subprocess.DEVNULL, capture_output=True)\n"
+             "print(done.returncode, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)",
+             str(CHECK), "gh", "--", "release", "upload", "v1", "many.txt", "-R", PRIVATE],
+            env=self.env, cwd=self.work, capture_output=True, text=True, timeout=600, check=False)
+        returncode, peak = (int(word) for word in probe.stdout.split())
+        self.assertEqual(returncode, 0, probe.stderr)
+        self.assertIn(f"repos/{PRIVATE}", self.visibility_reads(), "the check found no match, so it read no target")
+        self.assertLess(peak, 160 << 10, f"the check took a peak of {peak >> 10} MiB")
+
+    def test_a_term_across_a_chunk_edge_of_an_asset_is_refused_as_in_the_whole_file(self) -> None:
+        # The check reads an asset in chunks of GH_CHUNK characters, each overlapping the last (GhChunkScan). A term
+        # across the edge where the first chunk would end without the overlap, split there after each of three of its
+        # characters, lies whole in the overlap: the call is refused, and the refusal names the term's line in the whole
+        # file and shows that line as it shows the line of any text. The term is on a long line among lines of 100
+        # characters, three chunks of them. Control: the same asset without the term goes out.
+        chunk = load_check().GH_CHUNK
+        term = CANARY.upper()
+        lines = ("x" * 99 + "\n") * (3 * chunk // 100)
+        argv = ["release", "upload", "v1", "asset.txt", "-R", PUBLIC]
+        for split in (1, len(term) // 2, len(term) - 1):
+            at = chunk - split
+            with self.subTest(split=split):
+                self.file("asset.txt", lines[:at - 100] + "y" * 100 + term + "z" * 100 + lines[at + len(term) + 100:])
+                self.setUp_calls()
+                shown = self.assert_refused(self.run_gh(argv), "argument 2 asset.txt", term,
+                                            line=lines[:at - 100].count("\n") + 1)
+                self.assertEqual(shown, "…" + "y" * 80 + term + "z" * 80 + "…")
+        with self.subTest(control="no term"):
+            self.file("asset.txt", lines)
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(argv), argv)
+
+    def test_the_own_name_of_the_public_repository_counts_for_nothing_in_every_chunk_of_an_asset(self) -> None:
+        # Given the knives ygo-fork list and its public release repository theorem-labs/ygo, whose name holds a term of
+        # that list: an asset of its release that names the repository, in the middle of the second of the check's
+        # chunks and across the edge of the second and the third, sends nothing new there, and the call goes out
+        # (gh_own_name, which reads the part of a chunk around the match, gh_name_window). Each name stands after 599
+        # letters and a space, more than GH_CHUNK_CONTEXT, which the check reads before a match to find where an own
+        # name may begin. Control: the owner in a word it only begins, `theorem-labs-internal`, in the same places, is
+        # refused.
+        env = self.ygo_fork()
+        self.answer(YGO, "public")
+        chunk = load_check().GH_CHUNK
+        lines = ("x" * 99 + "\n") * (3 * chunk // 100)
+        argv = ["release", "upload", "v1", "asset.txt", "-R", YGO]
+        for word, refused in ((f"https://github.com/{YGO}.git", False), ("see theorem-labs-internal", True)):
+            text = lines
+            for at in (chunk + chunk // 2, 2 * chunk - word.index("theorem-labs") - 5):
+                text = text[:at - 600] + "y" * 599 + " " + word + " " + "z" * 99 + text[at + len(word) + 100:]
+            with self.subTest(word=word):
+                self.file("asset.txt", text)
+                self.setUp_calls()
+                if refused:
+                    self.assert_refused(self.run_gh(argv, env=env), "argument 2 asset.txt", "theorem-labs", YGO_LIST)
+                else:
+                    self.assert_sent(self.run_gh(argv, env=env), argv)
+
+    def test_an_asset_gone_before_its_chunks_are_read_is_refused_as_a_file_that_cannot_be_read(self) -> None:
+        # The check learns whether an asset can be read when it reads the call's texts (gh_contents), and reads its
+        # bytes later, in chunks, once the term list is read (gh_file_views). An asset gone by then is a text that
+        # cannot be read (GhFileError), so the call to a public repository is refused. Control: the same call with the
+        # asset in place goes out.
+        module = load_check()
+        asset = self.work / "asset.bin"
+        read = module.gh_contents
+
+        def then_gone(texts, environment):
+            found = read(texts, environment)
+            asset.unlink()
+            return found
+
+        for gone in (True, False):
+            with self.subTest(gone=gone):
+                asset.write_text(CLEAN, encoding="utf-8")
+                stderr = io.StringIO()
+                with mock.patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stderr(stderr), \
+                        mock.patch.object(module, "gh_contents", then_gone if gone else read):
+                    code = module.gh_check(["release", "upload", "v1", str(asset), "-R", PUBLIC])
+                self.assertEqual(code, module.TEXT_EXIT if gone else 0, stderr.getvalue())
+                if gone:
+                    self.assertIn(f"cannot read argument 2 {asset}: No such file or directory", stderr.getvalue())
+
+    def peak(self, argv: list[str], env: dict[str, str]) -> tuple[int, int, str]:
+        """scripts/leak-terms-check on the call ARGV, with ENV, as shims/gh runs it: its exit status, the peak resident
+        memory of the largest process it ran, in KiB (getrusage), and what it wrote to stderr."""
+        probe = subprocess.run(
+            [sys.executable, "-c", "import resource, subprocess, sys\n"
+             "done = subprocess.run(sys.argv[1:], stdin=subprocess.DEVNULL, capture_output=True)\n"
+             "sys.stderr.write(done.stderr.decode('utf-8', 'replace'))\n"
+             "print(done.returncode, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)",
+             str(CHECK), "gh", "--", *argv],
+            env=env, cwd=self.work, capture_output=True, text=True, timeout=600, check=False)
+        returncode, peak = (int(word) for word in probe.stdout.split())
+        return returncode, peak, probe.stderr
+
+    def test_a_large_text_is_read_in_bounded_memory(self) -> None:
+        # rulings-md v66 item 2: "The check reads a file in bounded memory ... A file is scanned in chunks". The check
+        # read each file but a release asset and an --attach file whole, and standard input from the shim's buffer,
+        # and the views of a text took about 100 bytes for each of its bytes. It reads in chunks each file whose text no
+        # reader takes whole, standard input among them (gh_contents), and reads a JSON body, which json.loads parses,
+        # whole up to 64 MiB (GH_WHOLE_LIMIT), each view of each of its values in chunks (gh_view_matches). The check on
+        # 4 MiB of text to a public repository, in a file and on standard input, as a --body-file and as an --input
+        # JSON body, must stay within the 40 times its size that test_a_binary_release_asset_is_read_in_bounded_memory
+        # gives an asset. Control: the same text with the term in it is refused (exit 3), so the check read all of it.
+        line = "lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do\n"
+        clean = line * ((4 << 20) // len(line))
+        texts = (("clean", clean, 0), ("term", clean[:1 << 20] + TEXT + clean[1 << 20:], 3))
+        forms = (("--body-file FILE", ["pr", "comment", "1", "-R", PUBLIC, "--body-file", "body.md"], False, False),
+                 ("--body-file -", ["pr", "comment", "1", "-R", PUBLIC, "--body-file", "-"], False, True),
+                 ("--input FILE", ["api", f"repos/{PUBLIC}/issues", "--input", "body.json"], True, False),
+                 ("--input -", ["api", f"repos/{PUBLIC}/issues", "--input", "-"], True, True))
+        for name, argv, as_json, stdin in forms:
+            for which, text, code in texts:
+                with self.subTest(form=name, text=which):
+                    data = (json.dumps({"title": "t", "body": text}) if as_json else text).encode()
+                    path = self.tmp / "stdin-buffer" if stdin else self.work / argv[-1]
+                    path.write_bytes(data)
+                    env = {**self.env, "DOTFILES_LEAK_TERMS_GH_STDIN": str(path)} if stdin else self.env
+                    returncode, peak, stderr = self.peak(argv, env)
+                    self.assertEqual(returncode, code, stderr)
+                    self.assertLess(peak * 1024, 40 * len(data), f"the check took a peak of {peak >> 10} MiB for "
+                                                                 f"{len(data) >> 20} MiB of {name}")
+
+    def test_a_term_across_a_chunk_edge_of_a_text_is_refused_as_in_the_whole_text(self) -> None:
+        # The check reads a file in chunks of GH_CHUNK characters, each overlapping the last (GhChunkScan), standard
+        # input too, and each view of a text it holds whole in such chunks, a JSON body's values among them
+        # (gh_view_matches). A term across the edge where the first chunk would end without the overlap, split there
+        # after each of three of its characters, lies whole in the overlap: the call is refused, and the refusal names
+        # the term's line in the whole text and shows that line as it shows any. The term is on a long line among lines
+        # of 100 characters, three chunks of them, in a --body-file, on standard input as `--body-file -`, and in the
+        # `body` member of an --input JSON body. Control: the same texts without the term go out.
+        chunk = load_check().GH_CHUNK
+        term = CANARY.upper()
+        lines = ("x" * 99 + "\n") * (3 * chunk // 100)
+        forms = (("--body-file FILE", ["pr", "comment", "1", "-R", PUBLIC, "--body-file", "body.md"],
+                  "--body-file body.md", False, False),
+                 ("--body-file -", ["pr", "comment", "1", "-R", PUBLIC, "--body-file", "-"],
+                  "--body-file - (standard input)", False, True),
+                 ("--input FILE", ["api", f"repos/{PUBLIC}/issues", "--input", "body.json"], "--input body.json .body",
+                  True, False))
+        for name, argv, field, as_json, stdin in forms:
+            for split in (1, len(term) // 2, len(term) - 1, None):
+                at = chunk - (split or 0)
+                text = (lines[:at - 100] + "y" * 100 + term + "z" * 100 + lines[at + len(term) + 100:] if split
+                        else lines)
+                data = (json.dumps({"body": text}) if as_json else text).encode()
+                if not stdin:
+                    (self.work / argv[-1]).write_bytes(data)
+                with self.subTest(form=name, split=split):
+                    self.setUp_calls()
+                    result = self.run_gh(argv, data if stdin else b"")
+                    if split is None:
+                        self.assert_sent(result, argv, data if stdin else b"")
+                        continue
+                    shown = self.assert_refused(result, field, term, line=lines[:at - 100].count("\n") + 1)
+                    self.assertEqual(shown, "…" + "y" * 80 + term + "z" * 80 + "…")
 
     # --- what a refusal shows (dispatch://INFRA-4383, R2) -----------------------------------------------------------
 
@@ -3473,16 +3802,7 @@ class Tables(unittest.TestCase):
     it."""
 
     def scanner(self):
-        import importlib.machinery
-        import importlib.util
-        import sys
-        loader = importlib.machinery.SourceFileLoader("leak_terms_check_gh", str(CHECK))
-        spec = importlib.util.spec_from_loader(loader.name, loader)
-        assert spec is not None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[loader.name] = module
-        loader.exec_module(module)
-        return module
+        return load_check()
 
     def real_gh(self) -> str | None:
         """The gh the shim hands a call to: the first gh on PATH that is not a shim."""
@@ -3504,15 +3824,18 @@ class Tables(unittest.TestCase):
         commands = set(module.GH_TEXT_COMMANDS)
         self.assertLessEqual(module.GH_REPOSITORY_ARGUMENT, commands)
         self.assertLessEqual(module.GH_URL_ARGUMENT, commands)
-        # The options of a refused command, which the check reads to let some of its calls go (gh_refusal_lifted), are
-        # compared the same way.
-        self.assertLessEqual(set(module.GH_REFUSED_OPTIONS), set(module.GH_REFUSED_COMMANDS))
-        tables = [*module.GH_TEXT_COMMANDS.items(),
-                  *((tuple(name.split(" ", 1)), table) for name, table in module.GH_REFUSED_OPTIONS.items())]
-        for (group, sub), table in tables:
-            with self.subTest(command=f"{group} {sub}"):
-                text = subprocess.run([gh, group, *([sub] if sub else []), "--help"], capture_output=True, text=True,
-                                      check=True, timeout=60).stdout
+        # The options of each refused command, which the check reads to let some of its calls go (gh_refusal_lifted)
+        # and to read a bare `-h` as gh's help where the command gives no option that letter, are compared the same way,
+        # its help read by all of its words (`gh issue artifact create --help`); its usage names no repository the
+        # check reads, since it refuses the command whatever its target.
+        self.assertEqual(set(module.GH_REFUSED_OPTIONS), set(module.GH_REFUSED_COMMANDS))
+        tables = [*(((group, sub), [group, *([sub] if sub else [])], table) for (group, sub), table
+                    in module.GH_TEXT_COMMANDS.items()),
+                  *((None, name.split(), table) for name, table in module.GH_REFUSED_OPTIONS.items())]
+        for key, words, table in tables:
+            with self.subTest(command=" ".join(words)):
+                text = subprocess.run([gh, *words, "--help"], capture_output=True, text=True, check=True,
+                                      timeout=60).stdout
                 values, flags, section, usage = set(), set(), "", []
                 for help_line in text.splitlines():
                     if help_line and not help_line.startswith(" "):
@@ -3524,16 +3847,17 @@ class Tables(unittest.TestCase):
                 options = module.gh_options(table)
                 self.assertEqual({name for name, takes in options.items() if takes}, values)
                 self.assertEqual({name for name, takes in options.items() if not takes}, flags)
+                self.assertEqual(usage[:len(words) + 1], ["gh", *words], text)
+                if key is None:
+                    continue
                 # The command's usage line, such as `gh repo edit [<repository>] [flags]`: a command whose first
                 # argument is `<repository>` is in GH_REPOSITORY_ARGUMENT, and no other; one whose arguments it names
                 # by URL, such as `gh pr comment [<number> | <url> | <branch>]`, is in GH_URL_ARGUMENT, and no other.
-                words = ["gh", group, *([sub] if sub else [])]
-                self.assertEqual(usage[:len(words)], words, text)
-                arguments = [word.strip("[]{}.") for word in usage[len(words):]]
+                arguments = [word.strip("[]{}.") for word in usage[len(words) + 1:]]
                 first = arguments[0] if arguments else ""
-                self.assertEqual((group, sub) in module.GH_REPOSITORY_ARGUMENT, first == "<repository>", usage)
+                self.assertEqual(key in module.GH_REPOSITORY_ARGUMENT, first == "<repository>", usage)
                 urls = {"<url>", "<urls>", "<discussion-url>", "<comment-url>"}
-                self.assertEqual((group, sub) in module.GH_URL_ARGUMENT, bool(urls.intersection(arguments)), usage)
+                self.assertEqual(key in module.GH_URL_ARGUMENT, bool(urls.intersection(arguments)), usage)
 
     def test_every_command_of_the_installed_gh_is_in_exactly_one_table(self) -> None:
         # When gh 2.106.0 added `issue artifact`, which uploads files, nothing failed: no table listed every command.
@@ -3607,9 +3931,10 @@ class Tables(unittest.TestCase):
                 self.assertEqual(set(re.findall(r"`\{([a-z]+)\}`", found[1])), filled, found[0])
 
     def test_the_shim_hands_every_text_command_to_the_check(self) -> None:
-        # Each command whose text the check reads, and each command it refuses (GH_REFUSED_COMMANDS), is a write to
-        # shims/gh. gh's config directory holds no config.yml, so no alias the user's may hold makes it a call the shim
-        # hands over for that.
+        # Each command whose text the check reads, each command it refuses (GH_REFUSED_COMMANDS), and each gh-stack
+        # subcommand it reads or refuses (GH_STACK_COMMANDS, `text` and `refused`) is a call shims/gh hands to the check.
+        # gh's config directory holds no config.yml, so no alias the user's may hold makes it a call the shim hands over
+        # for that.
         text = GH.read_text(encoding="utf-8")
         functions = ""
         for name in ("gh_shim_is_write", "gh_shim_may_send_text", "gh_shim_has_nested_alias"):
@@ -3619,6 +3944,7 @@ class Tables(unittest.TestCase):
         calls = [[group, *([sub] if sub else ["-X", "POST", "repos/o/r/issues"])]
                  for group, sub in module.GH_TEXT_COMMANDS]
         calls.extend(name.split() for name in module.GH_REFUSED_COMMANDS)
+        calls.extend(["stack", name] for name, (kind, _) in module.GH_STACK_COMMANDS.items() if kind != "quiet")
         with tempfile.TemporaryDirectory() as config:
             for argv in calls:
                 with self.subTest(command=" ".join(argv)):
@@ -3752,10 +4078,13 @@ class Tables(unittest.TestCase):
         # command in none of the check's tables went to gh unchecked. A call the shim does not hand to the check must be
         # one the check lets go (gh_check exits 0), for each command the tables name, by its words and by gh's aliases
         # of them, and for each pair of a top-level word the shim knows and a word gh_shim_is_quiet holds, so a verb the
-        # shim lets go that the check does not know is found too. Controls: a verb gh does not have, under a group, a
-        # group's alias, a group of a group and after an empty word, a top-level name gh does not have, after an empty
-        # word too, and an official extension stub are handed to the check; the reads agents run most, git's credential
-        # helper, `gh help` and `gh version` are not.
+        # shim lets go that the check does not know is found too; and for each gh-stack subcommand, by its name and its
+        # aliases (GH_STACK_COMMANDS, GH_STACK_ALIASES), both where gh-stack is installed, where the check reads its
+        # table, and where it is not, where `gh stack` is gh's stub of it, which the check refuses: the shim hands every
+        # `gh stack` call to the check today, and a list of quiet gh-stack calls in the shim must hold to both.
+        # Controls: a verb gh does not have, under a group, a group's alias, a group of a group and after an empty word,
+        # a top-level name gh does not have, after an empty word too, and an official extension stub are handed to the
+        # check; the reads agents run most, git's credential helper, `gh help` and `gh version` are not.
         module = self.scanner()
         text = GH.read_text(encoding="utf-8")
         functions = ""
@@ -3781,32 +4110,135 @@ class Tables(unittest.TestCase):
         self.assertIn("checks", held)
         calls.update((top, word) for top in tops for word in held)
         calls.update((top,) for top in tops)
+        calls.update(("stack", name) for name in (*module.GH_STACK_COMMANDS, *module.GH_STACK_ALIASES))
+        calls.add(("stack",))
         unknown = [("pr", "bogus"), ("cs", "bogus"), ("issue", "artifact", "bogus"), ("pr", "", "bogus"),
                    ("no-such-command",), ("", "no-such-command"), ("aw",)]
         hot = [("pr", "view", "1"), ("pr", "checks", "1"), ("run", "view"), ("api", "repos/o/r"),
                ("auth", "git-credential", "get"), ("help",), ("version",)]
         ordered = [*sorted(calls), *unknown, *hot]
-        with tempfile.TemporaryDirectory() as config:
+        with tempfile.TemporaryDirectory() as config, tempfile.TemporaryDirectory() as installed:
+            (Path(installed) / "gh" / "extensions" / "gh-stack").mkdir(parents=True)
             script = functions
             for call in ordered:
                 quoted = " ".join(f"'{a}'" for a in call)
                 script += f"\ngh_shim_may_send_text {quoted} && echo yes || echo no"
-            answers = subprocess.run(["bash", "-c", script], env={**os.environ, "GH_CONFIG_DIR": config},
-                                     capture_output=True, text=True, timeout=120).stdout.split()
-            self.assertEqual(len(answers), len(ordered))
-            handed = dict(zip(ordered, (answer == "yes" for answer in answers)))
-            unread = sorted(call for call in {*calls, *hot} if not handed[call])
-            self.assertGreater(len(unread), 100, "the shim lets too few calls go unread to compare them with the check")
-            with mock.patch.dict(os.environ, {"GH_CONFIG_DIR": config, "HOME": config}):
-                for call in unread:
-                    with self.subTest(call=" ".join(call)):
-                        self.assertEqual(module.gh_check(list(call)), 0)
-        for call in unknown:
-            with self.subTest(control=" ".join(call)):
-                self.assertTrue(handed[call])
-        for call in hot:
-            with self.subTest(read=" ".join(call)):
-                self.assertFalse(handed[call])
+            for data in (config, installed):
+                env = {"GH_CONFIG_DIR": config, "HOME": config, "XDG_DATA_HOME": data}
+                # The script, some 440 KB, goes on standard input: Linux refuses one argument past 128 KiB
+                # (MAX_ARG_STRLEN), and a CI runner's `bash -c` of it failed with E2BIG.
+                answers = subprocess.run(["bash", "-s"], input=script, env={**os.environ, **env}, capture_output=True,
+                                         text=True, timeout=120).stdout.split()
+                self.assertEqual(len(answers), len(ordered))
+                handed = dict(zip(ordered, (answer == "yes" for answer in answers)))
+                unread = sorted(call for call in {*calls, *hot} if not handed[call])
+                self.assertGreater(len(unread), 100, "the shim lets too few calls go unread to compare them with the "
+                                                     "check")
+                with mock.patch.dict(os.environ, env):
+                    for call in unread:
+                        with self.subTest(call=" ".join(call), gh_stack=data == installed):
+                            self.assertEqual(module.gh_check(list(call)), 0)
+                for call in unknown:
+                    with self.subTest(control=" ".join(call), gh_stack=data == installed):
+                        self.assertTrue(handed[call])
+                for call in hot:
+                    with self.subTest(read=" ".join(call), gh_stack=data == installed):
+                        self.assertFalse(handed[call])
+
+    def test_the_gh_stack_table_names_each_subcommand_of_gh_stack(self) -> None:
+        # GH_STACK_COMMANDS and GH_STACK_ALIASES name each subcommand of gh-stack and each alias of one, and no other,
+        # and GH_STACK_OPTIONS gives the options of each subcommand it lists, as gh-stack's own source gives them at
+        # GH_STACK_COMMIT: a subcommand is the first word of a `Use:` of cmd/*.go, but the root's `stack` and the `gh`
+        # of the wrapper it runs under; an alias is a word of an `Aliases:`; an option is each `cmd.Flags()` definition
+        # of the subcommand's file, a Bool one taking no value, with the `-h/--help` cobra adds. The source is a clone
+        # of github/gh-stack that holds GH_STACK_COMMIT: DOTFILES_GH_STACK_SOURCE, else vendor/gh-stack, which
+        # installers/omp.sh clones. The gh-stack the gh on PATH runs, where one is installed, must give the same:
+        # `gh stack --help` lists the subcommands in its sections, and each `gh stack <name> --help` its aliases under
+        # `Aliases:` and its options under `Flags:`. ensure_vendor clones gh-stack unpinned, so a newer one that adds a
+        # subcommand, an alias or an option fails here until the tables have it, as
+        # test_every_command_of_the_installed_gh_is_in_exactly_one_table fails for gh. Skipped where neither can be read.
+        module = self.scanner()
+        self.assertLessEqual(set(module.GH_STACK_OPTIONS), set(module.GH_STACK_COMMANDS))
+        self.assertLessEqual(set(module.GH_STACK_ALIASES.values()), set(module.GH_STACK_COMMANDS))
+        self.assertEqual({kind for kind, _ in module.GH_STACK_COMMANDS.values()}, {"text", "quiet", "refused"})
+        self.assertEqual({name for name, (kind, _) in module.GH_STACK_COMMANDS.items() if kind != "quiet"},
+                         set(module.GH_STACK_OPTIONS))
+        names = {*module.GH_STACK_COMMANDS, *module.GH_STACK_ALIASES}
+        options = {name: module.gh_options(table) for name, table in module.GH_STACK_OPTIONS.items()}
+        compared = []
+        clone = Path(os.environ.get("DOTFILES_GH_STACK_SOURCE") or DOTFILES / "vendor" / "gh-stack")
+        commit = module.GH_STACK_COMMIT
+
+        def git(*arguments: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(["git", "-C", str(clone), *arguments], capture_output=True, text=True, timeout=60,
+                                  check=False)
+
+        if clone.is_dir() and git("cat-file", "-e", f"{commit}^{{commit}}").returncode == 0:
+            compared.append(f"the source at {clone}")
+            flag = re.compile(r'\.Flags\(\)\.((?:Bool|Count|Duration|Float|Int|String|Uint)\w*?)(?:Var)?(P)?\('
+                              r'(?:&[\w.]+, )?"([\w-]+)"(?:, "(\w)")?')
+            found: set[str] = set()
+            given: dict[str, dict[str, bool]] = {}
+            for path in git("ls-tree", "--name-only", commit, "cmd/").stdout.split():
+                if not path.endswith(".go") or path.endswith("_test.go"):
+                    continue
+                source = git("show", f"{commit}:{path}").stdout
+                uses = [use for use in re.findall(r'^\s*Use:\s*"([^" ]+)', source, re.MULTILINE)
+                        if use not in ("stack", "gh")]
+                found.update(uses)
+                for listed in re.findall(r"Aliases:\s*\[\]string\{([^}]*)\}", source):
+                    found.update(re.findall(r'"([^"]+)"', listed))
+                if len(uses) == 1:
+                    given[uses[0]] = {"-h": False, "--help": False}
+                    for kind, short, long, letter in flag.findall(source):
+                        given[uses[0]].update({f"--{long}": kind != "Bool",
+                                               **({f"-{letter}": kind != "Bool"} if short and letter else {})})
+            self.assertGreater(len(found), 15, "the source gave too few subcommands to compare")
+            self.assertEqual(found, names)
+            for name, table in options.items():
+                with self.subTest(source=name):
+                    self.assertEqual(given.get(name), table)
+        gh = self.real_gh()
+        if gh is not None and module.gh_extension("stack", os.environ):
+            compared.append("the installed gh-stack")
+            with tempfile.TemporaryDirectory() as config:
+                env = {**os.environ, "GH_CONFIG_DIR": config, "GH_STACK_NO_UPDATE_NOTIFIER": "1",
+                       "GH_NO_EXTENSION_UPDATE_NOTIFIER": "1"}
+
+                def help_of(*words: str) -> dict[str, list[str]]:
+                    text = subprocess.run([gh, "stack", *words, "--help"], capture_output=True, text=True, timeout=60,
+                                          env=env, cwd=config, stdin=subprocess.DEVNULL, check=True).stdout
+                    sections: dict[str, list[str]] = {}
+                    section = ""
+                    for help_line in text.splitlines():
+                        if help_line.endswith(":") and not help_line.startswith(" "):
+                            section = help_line
+                        elif help_line.strip():
+                            sections.setdefault(section, []).append(help_line)
+                    return sections
+
+                listed = [line.split()[0] for title, lines in help_of().items()
+                          if title not in ("", "Usage:", "Examples:", "Flags:", "Learn more:") for line in lines]
+                self.assertGreater(len(listed), 15, "the installed gh-stack listed too few subcommands to compare")
+                installed = set(listed)
+                for name in listed:
+                    sections = help_of(name)
+                    for line in sections.get("Aliases:", []):
+                        installed.update(word.strip() for word in line.split(",")[1:])
+                    if name in options:
+                        with self.subTest(installed=name):
+                            shown: dict[str, bool] = {}
+                            for line in sections.get("Flags:", []):
+                                found_flag = re.match(r"\s+(?:(-\w), )?(--[\w-]+)( \S+)?\s", line)
+                                self.assertIsNotNone(found_flag, line)
+                                assert found_flag is not None
+                                shown.update({spelled: bool(found_flag[3]) for spelled in found_flag.group(1, 2)
+                                              if spelled})
+                            self.assertEqual(shown, options[name])
+                self.assertEqual(installed, names)
+        if not compared:
+            self.skipTest(f"no clone of github/gh-stack holding {commit} (DOTFILES_GH_STACK_SOURCE, {clone}) and no "
+                          "gh-stack installed for the gh on PATH, so the table has nothing to be compared with")
 
 
 class Writes(unittest.TestCase):

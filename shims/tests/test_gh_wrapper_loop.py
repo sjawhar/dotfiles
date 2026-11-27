@@ -156,16 +156,17 @@ class GhWrapperLoop(LeakTestCase):
 
     def test_another_call_below_the_real_gh_still_reaches_it(self):
         """The control: gh runs git, and git runs gh's credential helper, a call of its own, through this shim. The
-        marker the outer call left names the gh it was handed to, and must skip nothing for another call."""
+        marker the outer call left names the gh it was handed to, and must skip nothing for another call. Both calls
+        are reads (`gh api` GETs), which the leak-term check lets go."""
         executable(self.real / "gh", f'#!/bin/bash\nprintf "%s\\n" "$*" >> {self.real_log}\n'
-                                     '[[ "$1" == outer ]] && gh inner\nexit 0\n')
+                                     '[[ "$2" == repos/o/outer ]] && gh api repos/o/inner\nexit 0\n')
         for name, path, by_path in (("shims on PATH", [SHIMS, self.real, "/usr/bin", "/bin"], False),
                                     ("through a wrapper", [self.wrap, self.real, "/usr/bin", "/bin"], True)):
             with self.subTest(name):
                 self.real_log.unlink(missing_ok=True)
-                result = self.run_gh(path, "outer", by_path=by_path)
+                result = self.run_gh(path, "api", "repos/o/outer", by_path=by_path)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(self.real_calls(), ["outer", "inner"])
+                self.assertEqual(self.real_calls(), ["api repos/o/outer", "api repos/o/inner"])
 
     def assert_stopped_by_the_hop_count(self, result, path: list[Path | str]) -> None:
         self.assertEqual(result.returncode, 127, result.stderr)
@@ -193,17 +194,19 @@ class GhWrapperLoop(LeakTestCase):
 
     def test_the_hop_count_lets_every_hand_off_up_to_its_bound_through(self):
         """The control of the bound: calls nested one in another, each a call of its own (gh, git under it, its
-        credential helper…), reach the real gh at every depth up to the bound, and the next one is refused."""
+        credential helper…), reach the real gh at every depth up to the bound, and the next one is refused. Each is a
+        read, `gh api depth/N`, which the leak-term check lets go, and the real gh reads its depth N from it."""
         executable(self.real / "gh", f'#!/bin/bash\nprintf "%s\\n" "$*" >> {self.real_log}\n'
-                                     'if (($1 > 1)); then gh $(($1 - 1)) || exit $?; fi\nexit 0\n')
+                                     'depth=${2#depth/}\n'
+                                     'if ((depth > 1)); then gh api "depth/$((depth - 1))" || exit $?; fi\nexit 0\n')
         path = [SHIMS, self.real, "/usr/bin", "/bin"]
-        result = self.run_gh(path, str(MAX_HOPS))
+        result = self.run_gh(path, "api", f"depth/{MAX_HOPS}")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.real_calls(), [str(n) for n in range(MAX_HOPS, 0, -1)])
+        self.assertEqual(self.real_calls(), [f"api depth/{n}" for n in range(MAX_HOPS, 0, -1)])
         self.real_log.unlink()
-        result = self.run_gh(path, str(MAX_HOPS + 1))
+        result = self.run_gh(path, "api", f"depth/{MAX_HOPS + 1}")
         self.assertEqual(result.returncode, 127, result.stderr)
-        self.assertEqual(self.real_calls(), [str(n) for n in range(MAX_HOPS + 1, 1, -1)])
+        self.assertEqual(self.real_calls(), [f"api depth/{n}" for n in range(MAX_HOPS + 1, 1, -1)])
         self.assertIn(f"{MAX_HOPS} times through this shim", result.stderr)
 
 
