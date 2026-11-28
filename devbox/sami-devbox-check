@@ -55,9 +55,13 @@ TAILNET=tail12ec1c.ts.net
 # ACCOUNT fails (dispatch://INFRA-1433).
 ACCOUNT="dev-box@theorem-agent-infra.iam.gserviceaccount.com"
 APPLIER_ACCOUNT="infra-applier@theorem-agent-infra.iam.gserviceaccount.com"
+# dispatch: the checks of its objects in namespace envoy, which are not Jobs (identity_limits_check).
 KUBE_CONTEXT=gke_theorem-agent-infra_us-west1_dispatch
-# S3's grade Jobs: namespace grade of grade-us-west1 (installers/gcloud-sdk.sh, KUBE_CLUSTERS).
-GRADE_KUBE_CONTEXT=gke_theorem-agent-infra_us-west1-b_grade-us-west1
+# The Kueue MultiKueue manager theorem-multikueue (installers/gcloud-sdk.sh, KUBE_CLUSTERS). A box
+# creates its build Jobs and its grade Jobs there, and the manager sends each Job to a worker. So each
+# check of a right to create a Job, and each read of Jobs, asks the manager, and wants the answer that
+# agent-infra's grants on the manager give ACCOUNT (dispatch://INFRA-5858, R3).
+MANAGER_KUBE_CONTEXT=gke_theorem-agent-infra_us-central1_theorem-multikueue
 # The box-identity paths scripts from sami-rocqperf name (installers/gcloud-boxid.sh); the box half
 # gets the directory at the same path (agentbox binds it into every box). Named from HOME, not
 # `id -un`: a box's user is not the host's (ubuntu), and its HOME is the host user's /home/<user>,
@@ -146,9 +150,13 @@ in_box() {
     fi
     identity_limits_check "in the box"
 
-    # The build pool: the GKE cluster the builds run in, through the box's ~/.kube.
-    got="$(kubectl --context "$KUBE_CONTEXT" -n builds auth can-i create jobs 2>&1)"
-    [[ "$got" == yes ]] && ok "build pool: kubectl -n builds auth can-i create jobs: yes" || fail "build pool: kubectl -n builds auth can-i create jobs: $got"
+    # The build pool: the MultiKueue manager, through the box's ~/.kube. ACCOUNT may create Jobs in
+    # builds there: in each build namespace the manager gives each team account the Job verbs that it
+    # holds there on dispatch (agent-infra cluster-grants/managersubmit.go, managerSubmitGrants and
+    # managerSubmitTeam).
+    got="$(kubectl --context "$MANAGER_KUBE_CONTEXT" -n builds auth can-i create jobs 2>&1)"
+    [[ "$got" == yes ]] && ok "build pool: kubectl --context $MANAGER_KUBE_CONTEXT -n builds auth can-i create jobs: yes" \
+        || fail "build pool: kubectl --context $MANAGER_KUBE_CONTEXT -n builds auth can-i create jobs: want yes, got: $(tail -1 <<<"$got")"
     grade_pool_check "in the box"
     # Artifact Registry: retrieve through Docker's configured helper, store, or inline auth.
     if out="$("$DOTFILES_DIR/scripts/docker-registry-auth-check" us-east1-docker.pkg.dev retrieve --timeout 60)"; then
@@ -221,9 +229,11 @@ host_sshd_check() {
 
 # Scripts written on sami-rocqperf (the cost lead's spend loaders, sre-reading, bqq) name
 # CLOUDSDK_CONFIG=/mnt/nvme/sami/boxid/gcloud-box and KUBECONFIG=/mnt/nvme/sami/boxid/infra-kubeconfig.
-# installers/gcloud-boxid.sh makes both here as the account the metadata server serves; through
-# each, from the box, a token Google says is ACCOUNT's and the build pool's submit, which the team
-# set gives ACCOUNT (move census row U07).
+# installers/gcloud-boxid.sh makes both here as the account the metadata server serves. Through
+# each, from the box: a token Google says is ACCOUNT's, and the build pool's submit on the
+# MultiKueue manager, the kubeconfig's second context (MANAGER_KUBE_CONTEXT; its current context
+# stays dispatch's). The team set gives ACCOUNT that submit (move census row U07; agent-infra
+# cluster-grants/managersubmit.go, managerSubmitGrants and managerSubmitTeam).
 boxid_check() {
     local tok got
     if tok="$(CLOUDSDK_CONFIG="$BOXID_DIR/gcloud-box" gcloud auth print-access-token 2>&1)"; then
@@ -232,9 +242,9 @@ boxid_check() {
     else
         fail "boxid: CLOUDSDK_CONFIG=$BOXID_DIR/gcloud-box gcloud auth print-access-token: $(tail -1 <<<"$tok")"
     fi
-    got="$(CLOUDSDK_CONFIG="$BOXID_DIR/gcloud-box" kubectl --kubeconfig "$BOXID_DIR/infra-kubeconfig" -n builds auth can-i create jobs 2>&1)"
-    [[ "$got" == yes ]] && ok "boxid: kubectl --kubeconfig $BOXID_DIR/infra-kubeconfig -n builds auth can-i create jobs: yes" \
-        || fail "boxid: kubectl --kubeconfig $BOXID_DIR/infra-kubeconfig -n builds auth can-i create jobs: $(tail -1 <<<"$got")"
+    got="$(CLOUDSDK_CONFIG="$BOXID_DIR/gcloud-box" kubectl --kubeconfig "$BOXID_DIR/infra-kubeconfig" --context "$MANAGER_KUBE_CONTEXT" -n builds auth can-i create jobs 2>&1)"
+    [[ "$got" == yes ]] && ok "boxid: kubectl --kubeconfig $BOXID_DIR/infra-kubeconfig --context $MANAGER_KUBE_CONTEXT -n builds auth can-i create jobs: yes" \
+        || fail "boxid: kubectl --kubeconfig $BOXID_DIR/infra-kubeconfig --context $MANAGER_KUBE_CONTEXT -n builds auth can-i create jobs: want yes, got: $(tail -1 <<<"$got")"
 }
 
 # A session moved here from sami-rocqperf can bring a gcloud config dir of its own (CLOUDSDK_CONFIG)
@@ -304,14 +314,15 @@ github_check() {
 #      (not shallow, not partial), on the state disk;
 #   2. the build bucket and its URL signer: ACCOUNT reads one object of gs://theorem-build-io (the
 #      team set) and signs as build-io-signer@ (census row U23's exception);
-#   3. what the farm's own pods do now (n6_routes_check): ACCOUNT mints no token of ossv-runs-signer@,
-#      lists nothing in gs://theorem-ossv-runs and creates no Job in builds-ossv;
+#   3. the farm's routes (n6_routes_check): ACCOUNT mints no token of ossv-runs-signer@ and lists
+#      nothing in gs://theorem-ossv-runs, which the farm's own pods use, and creates Jobs in
+#      builds-ossv on the MultiKueue manager;
 #   4. a release asset of the repository through shims/gh and the GitHub App;
 #   5. disk-gate on /mnt/nvme: status, and a reserve and release round trip; in a box also the
 #      farm's work root and run index bound from the host (scripts/agentbox, agentbox/mounts).
 OVPI_DIR="$HOME/src/oss-verify-proofs-internal"
 OVPI_REPO=theorem-labs/oss-verify-proofs-internal
-# The farm's namespace (its own pods submit there now) and the account the farm signs its URLs with.
+# The farm's namespace, where a box creates the farm's Jobs on the MultiKueue manager.
 N6_NAMESPACE=builds-ossv
 # A refusal, told apart from any other failure: an error that is not a refusal says nothing about
 # the grant, so it fails the line.
@@ -332,7 +343,8 @@ n6_check() {
     n="$(gcloud storage cat -r 0-63 "$obj" 2>/dev/null | wc -c)"
     [[ -n "$obj" && "$n" -gt 0 ]] && ok "N6 bucket $where: read $n bytes of $obj" \
         || fail "N6 bucket $where: gs://theorem-build-io: no object read under out/ossv/ (newest prefix '${prefix:-none}', object '${obj:-none}')"
-    # 3. The box's own URL signer, and what moved to the farm's own pods.
+    # 3. The box's own URL signer, the farm's signer and run bucket, which the farm's own pods use,
+    #    and the farm's Jobs on the manager.
     n6_box_signer_check "$where"
     n6_routes_check "$where"
     # 4. A release asset through shims/gh, as an agent session's call (the App's token; the marker
@@ -372,15 +384,19 @@ n6_check() {
 }
 
 # What the move census (dispatch://INFRA-1433, move-census.md) routes off the box, read from the
-# box: each is refused, and a failure that is not a refusal (REFUSED) fails the line.
-#   grade Jobs: a Legion pod acting as grade-submit@ (row U15);
-#   the farm's URL signer ossv-runs-signer@, its run bucket and its Jobs in builds-ossv: the farm's
-#   own pods (U05).
+# box: the farm's URL signer ossv-runs-signer@ and its run bucket, which the farm's own pods use
+# (row U05). Each is refused, and a failure that is not a refusal (REFUSED) fails the line.
+#
+# The grade pool: the MultiKueue manager, where a box creates its grade Jobs (dispatch://INFRA-5858,
+# R3). On grade-us-west1 ACCOUNT may create no grade Job: a Legion pod submits them there as
+# grade-submit@ (the census's row U15). On the manager the RoleBinding submit of namespace grade
+# names ACCOUNT, and its Role submit holds create on Jobs (agent-infra
+# grade/testdata/manager-grade.yaml, the render of grade/managergrade_test.go's managerGradeRender).
 grade_pool_check() {
     local where="$1" got
-    got="$(kubectl --context "$GRADE_KUBE_CONTEXT" -n grade auth can-i create jobs 2>&1)"
-    refused "$got" && ok "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: no (a Legion pod submits as grade-submit@)" \
-        || fail "grade pool $where: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: want no, got: $(tail -1 <<<"$got")"
+    got="$(kubectl --context "$MANAGER_KUBE_CONTEXT" -n grade auth can-i create jobs 2>&1)"
+    [[ "$got" == yes ]] && ok "grade pool $where: kubectl --context $MANAGER_KUBE_CONTEXT -n grade auth can-i create jobs: yes" \
+        || fail "grade pool $where: kubectl --context $MANAGER_KUBE_CONTEXT -n grade auth can-i create jobs: want yes, got: $(tail -1 <<<"$got")"
 }
 # signer_try SA: mint SA's token and sign a blob as it. Sets sign_tok_rc, sign_tok_out (the token,
 # or the mint's error), sign_tok_note (what a line may print of it: a token's length, never the
@@ -427,9 +443,13 @@ n6_routes_check() {
     grep -qE "$REFUSED" <<<"$out" && ! grep -q '^gs://' <<<"$out" \
         && ok "N6 bucket $where: $ACCOUNT is refused the listing of gs://theorem-ossv-runs/out/ossv/ (the farm's pods write it)" \
         || fail "N6 bucket $where: gs://theorem-ossv-runs/out/ossv/: want a refusal, got: $(tail -1 <<<"$out")"
-    got="$(kubectl --context "$KUBE_CONTEXT" -n "$N6_NAMESPACE" auth can-i create jobs 2>&1)"
-    refused "$got" && ok "N6 farm $where: kubectl -n $N6_NAMESPACE auth can-i create jobs: no (the farm's pods submit)" \
-        || fail "N6 farm $where: kubectl -n $N6_NAMESPACE auth can-i create jobs: want no, got: $(tail -1 <<<"$got")"
+    # The farm's namespace on the MultiKueue manager: ACCOUNT may create Jobs there. In each build
+    # namespace, builds-ossv too, the manager gives each team account the Job verbs that it holds
+    # there on dispatch (agent-infra cluster-grants/managersubmit.go, managerSubmitGrants and
+    # managerSubmitTeam).
+    got="$(kubectl --context "$MANAGER_KUBE_CONTEXT" -n "$N6_NAMESPACE" auth can-i create jobs 2>&1)"
+    [[ "$got" == yes ]] && ok "N6 farm $where: kubectl --context $MANAGER_KUBE_CONTEXT -n $N6_NAMESPACE auth can-i create jobs: yes" \
+        || fail "N6 farm $where: kubectl --context $MANAGER_KUBE_CONTEXT -n $N6_NAMESPACE auth can-i create jobs: want yes, got: $(tail -1 <<<"$got")"
 }
 
 # The host half of check 1: the repository is on the state disk (through the /home bind), not on root.
@@ -1362,11 +1382,13 @@ global_hooks_host_check() {
 # /usr/local/bin. SSH_PATH is `ssh sami@sami-devbox 'echo $PATH'` as read on 2026-11-03, and
 # MISE_DATA_DIR is set in that shell too (without it the shim installs a second kubectl). That shell
 # also gets GCE_METADATA_HOST, _ROOT and _IP from .bashrc once the host's clients read the metadata
-# relay (installers/agent-identity.sh), so each one set here is passed on. The namespace is builds,
-# which the box account's team set reads (move census row U07). The list is one request for one
-# job (`?limit=1`); the server's remainingItemCount gives the total. It was `get jobs --chunk-size
-# 1`, one request per job: over the 1,910 jobs of 2026-11-22 that paging ran for 220 s, outlived
-# its continue token and failed with `Error from server (Expired)`, which read as an expired
+# relay (installers/agent-identity.sh), so each one set here is passed on. It reads the Jobs of
+# builds on the MultiKueue manager, where a box creates them (MANAGER_KUBE_CONTEXT). The box
+# account's team set reads them there, as on dispatch (move census row U07; agent-infra
+# cluster-grants/managersubmit.go, managerSubmitGrants and managerSubmitTeam). The list is one
+# request for one job (`?limit=1`); the server's remainingItemCount gives the total. It was `get jobs
+# --chunk-size 1`, one request per job: over the 1,910 jobs of 2026-11-22 that paging ran for 220 s,
+# outlived its continue token and failed with `Error from server (Expired)`, which read as an expired
 # credential.
 SSH_PATH="$HOME/.cargo/bin:$HOME/.dotfiles/shims:$HOME/.dotfiles/bin:$HOME/.dotfiles/scripts:$HOME/.npm-global/bin:$HOME/.mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
 host_plain_path_kubectl() {
@@ -1376,7 +1398,7 @@ host_plain_path_kubectl() {
         [[ -n "${!name:-}" ]] && relay+=("$name=${!name}")
     done
     out="$(env -i HOME="$HOME" MISE_DATA_DIR="$HOME/.mise" KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" PATH="$SSH_PATH" \
-        ${relay[@]+"${relay[@]}"} kubectl --context "$KUBE_CONTEXT" get --raw "/apis/batch/v1/namespaces/builds/jobs?limit=1" 2>&1)" || rc=$?
+        ${relay[@]+"${relay[@]}"} kubectl --context "$MANAGER_KUBE_CONTEXT" get --raw "/apis/batch/v1/namespaces/builds/jobs?limit=1" 2>&1)" || rc=$?
     n="$(jq -r 'select(.kind == "JobList") | (.items | length) + (.metadata.remainingItemCount // 0)' <<<"$out" 2>/dev/null)"
     (( rc == 0 )) && [[ "$n" =~ ^[0-9]+$ ]] && ok "ssh-PATH kubectl: env -i kubectl get --raw /apis/batch/v1/namespaces/builds/jobs?limit=1: exit 0 ($n jobs)" \
         || fail "ssh-PATH kubectl: env -i kubectl get --raw /apis/batch/v1/namespaces/builds/jobs?limit=1: exit $rc: $(tail -1 <<<"$out" | cut -c1-300)"

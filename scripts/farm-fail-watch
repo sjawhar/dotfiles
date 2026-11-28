@@ -23,9 +23,10 @@ memory raise.
 
 Evidence, in the order it is preferred (each part is optional; the message says what was
 missing):
-  the pod            `kubectl -n <ns> get pod <pod> -o json`: the job container's
-                     terminated reason and exit code, and the container's own memory limit
-                     and ephemeral-storage request. A killed pod is often already gone.
+  the pod            `kubectl --context <worker> -n <ns> get pod <pod> -o json`, on each build
+                     worker in turn (BUILD_WORKERS): the job container's terminated reason and
+                     exit code, and the container's own memory limit and ephemeral-storage
+                     request. A killed pod is often already gone.
   result.json        the farm's own record, gs://<bucket>/out/ossv/<run>/result.json:
                      memory_peak_bytes, disk_peak_bytes, oom_kill, the failed pods.
   usage.json         the sampler's last sample, beside it, when result.json has no peaks.
@@ -47,6 +48,7 @@ does not fix it; where it reports a disk kill of a job whose size came from the 
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 import glob
 import json
@@ -86,6 +88,14 @@ ALONE_CORES = 1.5
 # The N6 farm's runs bucket, where a run's job.json and result.json live when this machine
 # has no job-buckets record of the run (devbox/sami-devbox-check, N6_BUCKETS).
 RUNS_BUCKET = "gs://theorem-ossv-runs"
+# The build workers of the Kueue MultiKueue manager theorem-multikueue, in the order the manager
+# lists them (agent-infra cluster-grants/manager.go, managerWorkerNames): the manager sends a
+# builds-ossv Job to dispatch or to theorem-us-central1, and runs no pod itself
+# (dispatch://INFRA-5858, R3). read_pod says why it reads each of them.
+BUILD_WORKERS = (
+    "gke_theorem-agent-infra_us-west1_dispatch",
+    "gke_theorem-agent-infra_us-central1_theorem-us-central1",
+)
 
 # Monitoring samples every 60 s, occasionally 120 s. Allow 5 s of timestamp jitter,
 # 0.10 GiB of drawdown from the running high, and pauses shorter than five minutes.
@@ -833,15 +843,44 @@ def read_object(bucket: str, path: str) -> dict | None:
         return None
 
 
-def read_pod(namespace: str, pod: str, context: str) -> dict | None:
-    text = run_text(["kubectl", "--context", context, "-n", namespace, "get", "pod", pod, "-o", "json"])
-    try:
-        return json.loads(text) if text else None
-    except json.JSONDecodeError:
-        return None
+def cluster_names(contexts: Sequence[str]) -> str:
+    """The clusters that kubectl contexts name, for a message: the last field of each
+    gke_<project>_<location>_<cluster>."""
+    return " or ".join(context.rsplit("_", 1)[-1] for context in contexts)
 
 
-def collect_pod(ref: str, context: str) -> tuple[dict, list[str]]:
+def pod_gone(pod: str, contexts: Sequence[str]) -> str:
+    """What a message says of a pod that no worker of contexts holds: why it is gone, and where
+    its evidence remains (dispatch://INFRA-5858/comment/c1a9cbcd-928e-47a3-955b-d0becfcfb3e1).
+    A missing pod is not a wrong name: it is the usual state of a pod whose Job ended."""
+    return (f"the pod {pod}, which no worker holds ({cluster_names(contexts)} read): Kueue deletes"
+            " the Job's copy on the worker, and its pods, seconds after the Job ends, and the"
+            " evidence remains in the farm's record (result.json) and in Cloud Logging")
+
+
+def read_pod(namespace: str, pod: str, contexts: Sequence[str]) -> dict | None:
+    """The pod, from the first of contexts that holds it.
+
+    A farm Job is created on the MultiKueue manager, which runs no pod: the pod runs on the one
+    worker that the Job's Workload names. This tool has the pod's name (result.json's
+    failed_pods, or --pod) and not the manager Job's uid, which finds the Workload. A lane that
+    deletes a killed Job also deletes its Workload. So the pod is read by its name on each
+    worker in turn: one name is one pod, of one Job, on one worker. Kueue deletes the worker's
+    copy of a Job, and its pods, seconds after the Job ends, so a pod of an ended Job is on no
+    worker (pod_gone).
+    """
+    for context in contexts:
+        text = run_text(["kubectl", "--context", context, "-n", namespace, "get", "pod", pod, "-o", "json"])
+        try:
+            found = json.loads(text) if text else None
+        except json.JSONDecodeError:
+            found = None
+        if found is not None:
+            return found
+    return None
+
+
+def collect_pod(ref: str, contexts: Sequence[str]) -> tuple[dict, list[str]]:
     """The evidence for a pod named directly: "<namespace>/<pod>", or "<pod>" in builds-ossv.
 
     A lane outside OSS Verify has a pod name and no run id. The failure notice tells the owner
@@ -860,9 +899,9 @@ def collect_pod(ref: str, context: str) -> tuple[dict, list[str]]:
     namespace, _, name = ref.rpartition("/")
     namespace = namespace or "builds-ossv"
     missing: list[str] = []
-    pod = read_pod(namespace, name, context)
+    pod = read_pod(namespace, name, contexts)
     if pod is None:
-        missing.append(f"the pod {namespace}/{name} (not in the cluster)")
+        missing.append(pod_gone(f"{namespace}/{name}", contexts))
     found = evidence(None, None, pod)
     found.setdefault("namespace", namespace)
     found["pod_found"] = pod is not None
@@ -874,7 +913,7 @@ def collect_pod(ref: str, context: str) -> tuple[dict, list[str]]:
     return found, missing
 
 
-def collect(run_id: str, context: str) -> tuple[dict, list[str]]:
+def collect(run_id: str, contexts: Sequence[str]) -> tuple[dict, list[str]]:
     """The evidence for a job id ("farm/<run>" or "<run>"), and what could not be read."""
     run = run_id.split("/", 1)[1] if "/" in run_id else run_id
     missing: list[str] = []
@@ -895,9 +934,9 @@ def collect(run_id: str, context: str) -> tuple[dict, list[str]]:
     names = [pod.get("name") for pod in ((result or {}).get("failed_pods") or []) if pod.get("name")]
     namespace = (job or {}).get("namespace") or "builds-ossv"
     if names:
-        pod = read_pod(namespace, names[-1], context)
+        pod = read_pod(namespace, names[-1], contexts)
         if pod is None:
-            missing.append(f"the pod {names[-1]} (gone from the cluster)")
+            missing.append(pod_gone(names[-1], contexts))
     else:
         missing.append("the pod (no failed pod recorded)")
     found = evidence(job, result, pod)
@@ -937,8 +976,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Say what killed a farm job, and what its lane should do about it.")
     parser.add_argument("job", nargs="?", help="the job id, farm/<run> or <run>")
-    parser.add_argument("--context", default="gke_theorem-agent-infra_us-west1_dispatch",
-                        help="the kubectl context the farm's namespace is in")
+    parser.add_argument("--context", action="append", dest="contexts",
+                        help="a kubectl context to read the pod in; repeatable, read in turn"
+                             " (default: each build worker of the MultiKueue manager, dispatch"
+                             " then theorem-us-central1)")
     parser.add_argument("--send", action="store_true",
                         help="send the message to the job's owning session over Envoy"
                              " (without it, the message is printed and nobody is told)")
@@ -954,13 +995,15 @@ def main(argv: list[str] | None = None) -> int:
     if bool(options.job) == bool(options.pod):
         parser.error("give exactly one of the job id or --pod NAMESPACE/POD")
 
-    found, missing = (collect_pod(options.pod, options.context) if options.pod
-                      else collect(options.job, options.context))
+    contexts = options.contexts or list(BUILD_WORKERS)
+    found, missing = (collect_pod(options.pod, contexts) if options.pod
+                      else collect(options.job, contexts))
     call = verdict(found)
     if options.pod and not found.get("pod_found"):
-        text = (f"{options.pod}: not in the cluster, so there is nothing to read. A pod that"
-                " has been deleted keeps its kill only in the farm's record, which exists for"
-                " OSS Verify runs; for another namespace the evidence is gone with the pod."
+        text = (f"{options.pod}: no worker holds this pod ({cluster_names(contexts)} read), so there is"
+                " nothing to read. Kueue deletes the Job's copy on the worker, and its pods, seconds"
+                " after the Job ends. The evidence remains in the farm's record (result.json), which"
+                " OSS Verify runs write, and in Cloud Logging."
                 "\nCatch the next one while it is still there, or keep the kill yourself: the"
                 " kernel's own line in the node's journal survives the pod.")
     elif options.pod and not found.get("reason") and found.get("exit_code") is None:
@@ -973,7 +1016,7 @@ def main(argv: list[str] | None = None) -> int:
                    else f", and it finished at {found['finished_at']}.")
                 + "\nIf you expected a kill here, the pod you want is a previous one: a"
                 " restarted container's kill lives in its last state, and a deleted pod's"
-                " lives only in the farm's record.")
+                " lives in the farm's record and in Cloud Logging.")
     else:
         text = message(found, call)
     if missing:

@@ -9,11 +9,19 @@ set -euo pipefail
 #                                            installers/gcloud-box.sh's Google branch, run against
 #                                            this dir (installers/agent-identity.sh runs it again
 #                                            through the host's relay);
-#   /mnt/nvme/<user>/boxid/infra-kubeconfig  a kubeconfig (KUBECONFIG) with the one context
-#                                            gke_theorem-agent-infra_us-west1_dispatch, taken from
-#                                            ~/.kube/config (installers/gcloud-sdk.sh writes it);
-#                                            it holds no credential: gke-gcloud-auth-plugin takes
-#                                            its token from gcloud.
+#   /mnt/nvme/<user>/boxid/infra-kubeconfig  a kubeconfig (KUBECONFIG) with two contexts, taken
+#                                            from ~/.kube/config (installers/gcloud-sdk.sh writes
+#                                            both): gke_theorem-agent-infra_us-west1_dispatch, its
+#                                            current context, so a script that names no context
+#                                            reads dispatch as before; and
+#                                            gke_theorem-agent-infra_us-central1_theorem-multikueue,
+#                                            the Kueue MultiKueue manager, where a box creates and
+#                                            reads its build Jobs (dispatch://INFRA-5858, R3). It
+#                                            holds no credential: gke-gcloud-auth-plugin takes its
+#                                            token from gcloud. While ~/.kube/config has no context
+#                                            of the manager (installers/gcloud-sdk.sh ran before it
+#                                            named the manager), the file holds dispatch's context
+#                                            alone, and a line says to run gcloud-sdk.sh first.
 # On sami-rocqperf a person made the same two paths by hand on 2026-10-18, with the Azure
 # federation credential in the dir: that copy breaks gcloud on a Google VM and is not copied.
 # An agent box reaches them by `--dir /mnt/nvme/<user>/boxid`, and there gcloud reaches the
@@ -24,6 +32,7 @@ set -euo pipefail
 here="$(dirname "${BASH_SOURCE[0]}")"
 BOXID_DIR="${GCLOUD_BOXID_DIR:-/mnt/nvme/$(id -un)/boxid}"
 KUBE_CONTEXT=gke_theorem-agent-infra_us-west1_dispatch
+MANAGER_KUBE_CONTEXT=gke_theorem-agent-infra_us-central1_theorem-multikueue
 
 if ! "$here/../scripts/on-google-vm"; then
     echo "gcloud-boxid: not a Google VM; nothing changed."
@@ -37,11 +46,30 @@ fi
 
 CLOUDSDK_CONFIG="$BOXID_DIR/gcloud-box" bash "$here/gcloud-box.sh" | sed 's/^gcloud-box:/gcloud-boxid: gcloud-box:/'
 
-new="$(mktemp)"
-trap 'rm -f "$new"' EXIT
-(umask 077 && kubectl --kubeconfig "$HOME/.kube/config" config view --minify --flatten --context "$KUBE_CONTEXT" >"$new")
-if ! cmp -s "$new" "$BOXID_DIR/infra-kubeconfig"; then
-    install -m 600 "$new" "$BOXID_DIR/infra-kubeconfig"
-    echo "gcloud-boxid: wrote $BOXID_DIR/infra-kubeconfig (context $KUBE_CONTEXT)"
+# `config view --minify` takes one context, so each context goes into a file of its own, and a merge
+# of the two makes the kubeconfig. In a merge the first file that sets a value wins, so the current
+# context is dispatch's. A ~/.kube/config with no context of the manager is no failure of this
+# installer: installers/agent-identity.sh runs it, and a failure there takes back the account
+# switch. So the file then holds dispatch's context alone, as before the manager, and the boxid
+# line of devbox/sami-devbox-check fails on the missing context until gcloud-sdk.sh writes it.
+listed="$(kubectl --kubeconfig "$HOME/.kube/config" config get-contexts -o name)"
+new="$(mktemp -d)"
+trap 'rm -rf "$new"' EXIT
+(umask 077 && kubectl --kubeconfig "$HOME/.kube/config" config view --minify --flatten --context "$KUBE_CONTEXT" >"$new/config")
+written="context $KUBE_CONTEXT"
+if grep -qxF "$MANAGER_KUBE_CONTEXT" <<<"$listed"; then
+    (
+        umask 077
+        kubectl --kubeconfig "$HOME/.kube/config" config view --minify --flatten --context "$MANAGER_KUBE_CONTEXT" >"$new/manager"
+        KUBECONFIG="$new/config:$new/manager" kubectl config view --flatten >"$new/both"
+    )
+    mv -f "$new/both" "$new/config"
+    written="contexts $KUBE_CONTEXT, the current one, and $MANAGER_KUBE_CONTEXT"
+else
+    echo "gcloud-boxid: ~/.kube/config has no context $MANAGER_KUBE_CONTEXT; run installers/gcloud-sdk.sh, then this installer again"
+fi
+if ! cmp -s "$new/config" "$BOXID_DIR/infra-kubeconfig"; then
+    install -m 600 "$new/config" "$BOXID_DIR/infra-kubeconfig"
+    echo "gcloud-boxid: wrote $BOXID_DIR/infra-kubeconfig ($written)"
 fi
 echo "gcloud-boxid: $BOXID_DIR/gcloud-box and $BOXID_DIR/infra-kubeconfig act as the account the metadata server serves"

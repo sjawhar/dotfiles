@@ -91,3 +91,22 @@ def test_a_pending_pod_raises_demand_without_raising_capacity(monkeypatch):
 
 def test_a_node_with_no_instance_type_label_is_named_rather_than_dropped():
     assert "unknown" not in mod.DEFAULT_CONTEXTS  # guard against a careless rename
+
+
+def test_with_no_context_it_reads_each_worker_of_the_multikueue_manager(monkeypatch, capsys):
+    """The manager theorem-multikueue runs no pod, so the pool is its workers: dispatch and
+    theorem-us-central1 run the build Jobs, grade-us-west1 the grade Jobs (dispatch://INFRA-5858, R3)."""
+    asked = []
+
+    def read(context, kind):
+        asked.append((context, kind))
+        return {"items": []}
+
+    monkeypatch.setattr(mod, "read", read)
+    assert mod.main([]) == 0
+    capsys.readouterr()
+    assert asked == [(context, kind) for context in (
+        "gke_theorem-agent-infra_us-west1_dispatch",
+        "gke_theorem-agent-infra_us-central1_theorem-us-central1",
+        "gke_theorem-agent-infra_us-west1-b_grade-us-west1",
+    ) for kind in ("nodes", "pods")]
