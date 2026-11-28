@@ -2900,10 +2900,10 @@ def scan_push(text: str, remote: str, url: str) -> list[Finding]:
     return findings
 
 
-# The text a gh call sends to GitHub, read before gh runs. shims/gh hands this check every call that can carry text, as
-# `gh -- ARGV…`, on the pass that runs gh. Until 2026-11-17 nothing read that text, and an agent's
-# `gh pr edit` put a listed term into a public pull request's body, where GitHub keeps it in the body's edit history,
-# which only an admin can delete (dispatch://INFRA-4102).
+# The text a gh call sends to GitHub, read before gh runs. shims/gh hands this check every call, as `gh -- ARGV…`, on
+# the pass that runs gh. Until 2026-11-17 nothing read that text, and an agent's `gh pr edit` put a listed term into a
+# public pull request's body, where GitHub keeps it in the body's edit history, which only an admin can delete
+# (dispatch://INFRA-4102).
 #
 # The threat is an agent's accidental leak of a listed term through gh. The check does not try to stop a deliberate
 # evasion: anyone set on leaking can use curl. So it reads where a call goes only in the plain case, where every host
@@ -3102,8 +3102,9 @@ GH_TEXT_COMMANDS: dict[tuple[str, str], tuple[str, str]] = {
 # as it runs: a call of a command in it goes to gh unread, and a call of a command no table names is refused
 # (gh_command), so a command gh adds is refused until a table sorts it. Until the rulings on the tester's findings at
 # 1c15219b (dispatch://INFRA-4957) nothing read this table at run time, and on a machine whose gh was not the pin a
-# command in none of the tables went to gh unchecked. shims/gh lets the one- and two-word commands here go without
-# starting the check (gh_shim_is_quiet).
+# command in none of the tables went to gh unchecked. Until the findings at 3e4d1931
+# (dispatch://INFRA-4957/artifact/rulings-md v76) shims/gh let the one- and two-word commands here go without starting
+# the check; it now hands the check every call.
 GH_QUIET_COMMANDS: dict[str, str] = {
     "auth login": "local: signs in to a GitHub host and stores its token on this machine",
     "auth logout": "local: revokes the account's gh token and removes it from this machine",
@@ -3410,7 +3411,7 @@ GH_HIDDEN_COMMANDS: dict[str, str] = {
 GH_UNKNOWN_REFUSAL = ("no table of the check names this command of gh, and it is no gh alias, so the check does not "
                       "know what the call sends and refuses it")
 # The places where gh 2.106.0 runs a gh alias of the user's in place of a command the tables name, which gh_command
-# reads through the alias (gh_alias_in_place): GH_LATE_COMMANDS, the commands cobra adds to gh's root only in
+# reads through the alias (gh_alias_at): GH_LATE_COMMANDS, the commands cobra adds to gh's root only in
 # ExecuteC, after gh has registered the aliases (pkg/cmd/root/root.go:209-240), so that an alias of the same name is
 # registered and runs in their place: measured 2026-11-28 with gh 2.106.0, `gh alias set` takes `__complete` and
 # `__completeNoDesc`, and a `help:` key written into config.yml by hand ran in 6 of 6 runs of `gh help x y`; and
@@ -3859,17 +3860,124 @@ def gh_yaml_flow(line: str, start: int) -> tuple[dict[str, str], int] | None:
         index = gh_blanks_end(line, index + 1)
 
 
+def gh_shlex_split(text: str) -> list[str] | None:
+    """TEXT split into words as google/shlex's Split splits it (shlex.go scanStream, at the e7afc7fbc510 that gh
+    2.106.0's go.mod pins), which gh splits an alias's key with; None where Split returns an error, a quote left open
+    or an escape at the end, for which gh takes no alias. Its blanks are a space, a tab, a carriage return and a line
+    feed; a `\\` keeps the next character in the word outside quotes, and drops itself before any character inside
+    double quotes; single quotes keep every character; a `#` where a word would begin starts a comment to the end of
+    the line. Python's shlex keeps the `\\` inside double quotes before a character other than `\\`, `"`, `$` or a
+    backquote, and reads no comment, so it splits some keys otherwise than gh does."""
+    words: list[str] = []
+    value: list[str] = []
+    state = "start"
+    for character in text:
+        if state == "start":
+            if character in " \t\r\n":
+                continue
+            value = []
+            state = {'"': "double", "'": "single", "\\": "escape", "#": "comment"}.get(character, "word")
+            if state == "word":
+                value.append(character)
+        elif state == "word":
+            if character in " \t\r\n":
+                words.append("".join(value))
+                state = "start"
+            else:
+                state = {'"': "double", "'": "single", "\\": "escape"}.get(character, "word")
+                if state == "word":
+                    value.append(character)
+        elif state in ("escape", "double escape"):
+            value.append(character)
+            state = "word" if state == "escape" else "double"
+        elif state == "double":
+            if character == '"':
+                state = "word"
+            elif character == "\\":
+                state = "double escape"
+            else:
+                value.append(character)
+        elif state == "single":
+            if character == "'":
+                state = "word"
+            else:
+                value.append(character)
+        elif character == "\n":
+            state = "start"
+    if state == "word":
+        words.append("".join(value))
+    elif state != "start" and state != "comment":
+        return None
+    return words
+
+
+def gh_child(parent: str, word: str) -> str:
+    """The command WORD names under the command PARENT ("" for gh's root), as gh_commands names it: through gh's
+    aliases of it (GH_GROUP_ALIASES at the root, GH_SUBCOMMAND_ALIASES under a command), as cobra's Find finds it."""
+    if not parent:
+        return GH_GROUP_ALIASES.get(word, word)
+    return f"{parent} {GH_SUBCOMMAND_ALIASES.get((parent, word), word)}"
+
+
+def gh_alias_place(key: str, commands: frozenset[str]) -> tuple[str, str, bool] | None:
+    """(the command, "" for gh's root; the name; whether the name is the key's whole last word) under which gh 2.106.0
+    registers a gh alias of the user's whose config.yml key is KEY, as yaml.v3 decodes it, COMMANDS gh_commands; None
+    where gh registers none (pkg/cmd/root/root.go:209-241, pkg/cmd/alias/shared/validations.go:15-30). gh splits KEY
+    with google/shlex (gh_shlex_split) and finds with cobra's Find the command the words but the last lead to, each
+    through gh's aliases of it (gh_child). It takes the alias where that command runs nothing itself, gh's root, a
+    group or one of GH_ALIAS_PARENTS, and where the last word, whole, names no command under it but `help`,
+    `__complete` and `__completeNoDesc`, which cobra adds to the root after the aliases (GH_LATE_COMMANDS). An empty
+    word or an option (`-…`) before the last leaves cobra's Find more than one word, so gh takes none. The alias's
+    `Use` is the last word, and cobra names a command by its `Use` up to the first space (Command.Name): so `"version
+    x"` registers a command named `version` at the root, beside gh's own, and `pr "checks zz"` one named `checks` under
+    `pr`, and `environment  x` (two spaces) and `telemetry "y"` are `x` under `environment` and `y` under `telemetry`.
+    A name that is empty or an option is one no call reaches (cobra reads such a word as an option), and is None
+    here."""
+    words = gh_shlex_split(key)
+    if not words:
+        return None
+
+    def known(command: str) -> bool:
+        return command in commands or any(name.startswith(f"{command} ") for name in commands)
+
+    parent = ""
+    for word in words[:-1]:
+        if not word or word.startswith("-"):
+            return None
+        parent = gh_child(parent, word)
+        if parent not in GH_ALIAS_PARENTS and (parent in commands or not known(parent)):
+            return None
+    last = words[-1]
+    whole = gh_child(parent, last)
+    if known(whole) and not (not parent and whole in GH_LATE_COMMANDS):
+        return None
+    name = last.split(" ", 1)[0]
+    if not name or name.startswith("-"):
+        return None
+    return parent, name, name == last
+
+
+@dataclass(frozen=True)
+class GhAlias:
+    """A gh alias of the user's: KEY as config.yml decodes it, its EXPANSION, the 1-based LINE its key is on, and
+    WHOLE, whether the name gh registers it by is the key's whole last word (gh_alias_place)."""
+
+    key: str
+    expansion: str
+    line: int
+    whole: bool
+
+
 @dataclass(frozen=True)
 class GhAliases:
-    """gh's aliases in config.yml at PATH, as gh_aliases reads and refuses them: EXPANSIONS, the expansion of each
-    alias with the 1-based line of config.yml its key is on; or, where gh_aliases refuses config.yml, REFUSED, which
-    names the line and why, and TEXT, config.yml's text (gh_config_text), in which gh_alias_named looks for a call's
-    alias name. EXPANSIONS is then empty."""
+    """gh's aliases in config.yml at PATH, as gh_aliases reads and refuses them: EXPANSIONS, each alias gh registers,
+    under (the command it registers it under, "" for the root; its name) (gh_alias_place), more than one where several
+    keys take the same place; or, where gh_aliases refuses config.yml, REFUSED, which names the line and why, and
+    EXPANSIONS is then empty."""
 
     path: Path
-    expansions: dict[str, tuple[str, int]]
+    expansions: dict[tuple[str, str], tuple[GhAlias, ...]]
     refused: str = ""
-    text: str = ""
 
 
 @lru_cache(maxsize=None)
@@ -3880,35 +3988,50 @@ def gh_aliases(path: Path) -> GhAliases:
     alias delete` removed the last alias; each key and value plain (gh_yaml_plain) or quoted (gh_yaml_quoted, yaml.v3's
     escapes included), a key longer than yaml.v3's simple keys (128 bytes) after a `? `, and in a block mapping a value
     of several lines a `|` block scalar (gh_yaml_literal). gh reads each alias of these forms as the reader does. The
-    reader drops a byte order mark and reads each CRLF as one line feed, as yaml.v3 does (gh_config_text). A call
-    through an alias is judged as the command it expands to (gh_alias_command).
+    reader drops a byte order mark and reads each CRLF as one line feed, as yaml.v3 does (gh_config_text). Each alias
+    is kept under the command and the name gh registers it by (gh_alias_place), which its key's text alone does not
+    give: until the review of 3e4d1931 (its findings 1 and 2) the check looked an alias up by its key's text, and
+    `environment  x` (two spaces) and `telemetry "y"`, which `gh alias set` writes, ran in gh unread. A call through an
+    alias is judged as the command it expands to (gh_alias_command, gh_alias_at).
 
-    Refused, where the reader cannot read the aliases exactly: a call whose name stands nowhere in config.yml before a
-    `:` goes on; a name that stands anywhere there before a `:` is refused, whether it is an alias key, a word of
-    another alias's value, a key of gh's own config or a word of one of its comments (gh_alias_named). A refused call
-    exits TEXT_EXIT, the refusal naming the line and why (GhAliases.refused). Two causes count. One is a line break
-    other than a line feed (gh_config_break), which gh writes as itself in a `|` or a single-quoted value whose text
-    holds a line or a paragraph separator (U+2028, U+2029), measured with `gh alias set note -` and `gh config set
-    pager`: the reader looks for one in the whole file before it looks for the aliases key, which a break can hide from
-    a reader that splits at line feeds (`editor: vim<U+2028>aliases:`). The other is a form the reader does not read,
-    where it meets a value it does not read exactly, or a line it does not read where the aliases may end, so the
-    aliases never end short of where yaml.v3 ends them. gh writes such forms itself: the key of a name that holds a
-    line break, which gh runs as the words around the break (`gh trail` for `trail\\n\\n`), a `? |` block scalar in a
-    block mapping (`? |4-` for a first line feed) and a double-quoted key with yaml.v3's escape of the break in a block
-    or a flow mapping (`? "cr\\r"`, `{? "pr say\\n" : …}`). The others gh does not write: a folded `>` scalar, an
-    anchor, an alias or a tag, an escape yaml.v3 does not write, a key indented otherwise than the first, an aliases key
-    given twice, a line at column 0 that holds no key at the root, a flow mapping or a block scalar the reader does not
-    read, and a `|` block scalar that runs to the end of a file with no final line feed, which yaml.v3 reads with no
-    final break. A call through an alias whose expansion, with the call's arguments in place of its `$N`, shlex cannot
-    split is refused (gh_alias_command, gh_unsplit); one whose `$N` the arguments do not fill goes to gh, which refuses
-    it. A config.yml that cannot be read holds no alias: gh does not start with it, so it sends nothing."""
+    Refused, where the reader cannot read the aliases exactly: every call of a command is refused (gh_alias_at), since
+    the check cannot tell which name a key it does not read takes, and a key may take the name of any command of gh's
+    own (gh_alias_place). Until the review of 3e4d1931 a call whose name stood nowhere in config.yml's text went on, and
+    a key with yaml.v3's escapes, as `"environment \\x78"`, ran unread. A refused call exits TEXT_EXIT, the refusal
+    naming the line and why (GhAliases.refused). Two causes count. One is a line break other than a line feed
+    (gh_config_break), which gh writes as itself in a `|` or a single-quoted value whose text holds a line or a
+    paragraph separator (U+2028, U+2029), measured with `gh alias set note -` and `gh config set pager`: the reader
+    looks for one in the whole file before it looks for the aliases key, which a break can hide from a reader that
+    splits at line feeds (`editor: vim<U+2028>aliases:`). The other is a form the reader does not read, where it meets a
+    value it does not read exactly, or a line it does not read where the aliases may end, so the aliases never end short
+    of where yaml.v3 ends them. gh writes such forms itself: the key of a name that holds a line break, which gh runs as
+    the words around the break (`gh trail` for `trail\\n\\n`), a `? |` block scalar in a block mapping (`? |4-` for a
+    first line feed) and a double-quoted key with yaml.v3's escape of the break in a block or a flow mapping (`?
+    "cr\\r"`, `{? "pr say\\n" : …}`). The others gh does not write: a folded `>` scalar, an anchor, an alias or a tag,
+    an escape yaml.v3 does not write, a key indented otherwise than the first, an aliases key given twice, a line at
+    column 0 that holds no key at the root, a flow mapping or a block scalar the reader does not read, and a `|` block
+    scalar that runs to the end of a file with no final line feed, which yaml.v3 reads with no final break. A call
+    through an alias whose expansion, with the call's arguments in place of its `$N`, shlex cannot split is refused
+    (gh_alias_command, gh_unsplit); one whose `$N` the arguments do not fill goes to gh, which refuses it. A config.yml
+    that cannot be read holds no alias: gh does not start with it, so it sends nothing."""
     try:
         text = gh_config_text(path.read_bytes().decode("utf-8"))
     except (OSError, UnicodeDecodeError):
         return GhAliases(path, {})
 
     def refused(why: str) -> GhAliases:
-        return GhAliases(path, {}, f"{path} holds {why}, so the check cannot read gh's aliases: fix that line", text)
+        return GhAliases(path, {}, f"{path} holds {why}, so the check cannot read gh's aliases: fix that line")
+
+    commands = gh_commands()
+    places: dict[tuple[str, str], list[GhAlias]] = {}
+
+    def place(key: str, value: str, line: int) -> None:
+        found = gh_alias_place(key, commands)
+        if found is not None and value:
+            places.setdefault(found[:2], []).append(GhAlias(key, value, line, found[2]))
+
+    def read() -> GhAliases:
+        return GhAliases(path, {where: tuple(each) for where, each in places.items()})
 
     broken = gh_config_break(text)
     if broken is not None:
@@ -3934,10 +4057,11 @@ def gh_aliases(path: Path) -> GhAliases:
             return unread(start, "a flow mapping")
         if any(not breaks.isdisjoint(name) for name in found[0]):
             return unread(start, "an alias key that holds a line break")
-        return GhAliases(path, {name: (value, start + 1) for name, value in found[0].items() if value})
+        for name, value in found[0].items():
+            place(name, value, start + 1)
+        return read()
     if not re.fullmatch(r"aliases:(?:[ \t]+#.*)?[ \t]*", lines[start]):
         return unread(start, "an aliases key written otherwise than `aliases:` at column 0")
-    expansions: dict[str, tuple[str, int]] = {}
     indent = 0
     number = start + 1
     while number < len(lines):
@@ -3982,24 +4106,8 @@ def gh_aliases(path: Path) -> GhAliases:
             if value is None:
                 return unread(row, "a value")
             number = row + 1
-        if value:
-            expansions.setdefault(name, (value, key_line))
-    return GhAliases(path, expansions)
-
-
-def gh_alias_named(name: str, text: str) -> bool:
-    """Whether the alias name NAME, a call's first word or first two words, stands in TEXT, the text of a config.yml
-    gh_aliases refuses, before a `:`: whole, with nothing before it but a blank, a line break, a `{`, a `,`, a quote, a
-    `?` or yaml.v3's escape of a line break (`\\n`, `\\r`, `\\N`, `\\L`, `\\P`), in quotes or not, and between it and
-    the `:` any such escapes, a quote and any whitespace, line feeds and empty lines included: as gh writes the key of a
-    name that holds a line break (`? |+` with an empty line before the `:` for a name that ends with two line feeds,
-    `{? "pr say\\n" : …}`, `{? "\\nlead" : …}`). It is looked for wherever it stands, since the check cannot know
-    where yaml.v3 begins a line or a key there: a call whose name stands nowhere in config.yml before a `:` goes on; a
-    name that stands anywhere there before a `:` is refused, whether it is an alias key, a word of another alias's
-    value, a key of gh's own config or a word of one of its comments."""
-    escape = r"\\[nrNLP]"
-    return re.search(rf"""(?:(?<![^\s{{,'"?])|(?<={escape})){re.escape(name)}(?:{escape})*["']?\s*:""",
-                     text) is not None
+        place(name, value, key_line)
+    return read()
 
 
 def gh_expand_alias(expansion: str, arguments: Sequence[str]) -> list[str] | None:
@@ -4081,42 +4189,57 @@ def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
     subcommand (`gh pr`, whose help gh prints; `gh codespace ports`, which lists ports), of no command, of a refused
     command that gh_refusal_lifted lets go, of a quiet gh-stack command, and of `extension exec` whose first argument
     names no installed extension, which gh refuses before it sends anything (GH_EXEC_COMMANDS). SEEN holds the gh
-    aliases the call ran through to reach ARGUMENTS (gh_alias_command). The command is read word by word as cobra
-    finds it (gh_next_command), each word through gh's aliases of it (GH_GROUP_ALIASES, GH_SUBCOMMAND_ALIASES), until
-    the tables name it; a first word that leaves it under no entry of the tables is an installed extension, which gh
-    runs in place of an alias of that name (gh_extension, gh_extension_command), else, as a word under a command, a gh
-    alias of the user's, of the first word (`co`) or under a command (`gh alias set 'pr say' 'pr comment'`), which gh
-    runs as what it expands to, or else a command no table names (gh_alias_command, gh_unknown). A name that is both a
-    command of gh's and an installed extension is read as gh's command, as gh runs it (gh_extension_command), but after
-    `extension exec`, which runs the extension (GH_EXEC_COMMANDS). Until 2026-11-17 only an alias of the first word was
-    read, so `gh pr say 11 --body …` went out unchecked; until the rulings on the tester's findings at 1c15219b
-    (dispatch://INFRA-4957) a command no table named went out unchecked, until rulings-md v66 an installed extension
-    did, and until the review of 053ef618 (finding 1) one run by `extension exec` did. GhUnjudgedError for a call the
-    check cannot judge: one that may run an alias it cannot read (gh_alias_command), a call of a command
-    GH_REFUSED_COMMANDS lists, whatever its target, refused as the call writes it (`gh issue -R o/r artifact new 4` is
-    `issue artifact create`, refused as `issue artifact new`), and a call of a command no table names (gh_unknown).
-    A call whose first word is `help`, of an installed extension, is read as gh runs it (gh_help_of_extension), and a
-    call of a command in whose place gh runs a gh alias of the user's is read through that alias (gh_alias_in_place)."""
+    aliases the call ran through to reach ARGUMENTS, by their keys (gh_alias_command). The command is read word by word
+    as cobra finds it (gh_next_command), each word through gh's aliases of it (gh_child), until the tables name it, and
+    at each word the check asks whether gh runs a gh alias of the user's for it (gh_alias_at): one of a name no
+    command of gh's takes, of the first word (`co`) or under a command (`gh alias set 'pr say' 'pr comment'`), which gh
+    runs as what it expands to (gh_alias_command); one of `help`, `__complete` or `__completeNoDesc`, which gh runs in
+    place of its own command of that name (GH_LATE_COMMANDS); one a word under a command of GH_ALIAS_PARENTS takes
+    (`gh environment x`); and one whose key takes the name of gh's own command by the part of its last word before a
+    space (`"version x"`), which gh_alias_at refuses. A first word no command of gh's takes is an installed extension,
+    which gh runs in place of an alias whose key is that name (gh_extension, gh_extension_command), else a gh alias, or
+    else a command no table names (gh_unknown); so is `help`, `__complete` or `__completeNoDesc` where an extension of
+    that name is installed, which gh registers before cobra adds its own (pkg/cmd/root/root.go:197-206), and which the
+    check read as gh's own until the review of 3e4d1931 (finding 3). A name that is both a command of gh's and an
+    installed extension is read as gh's command, as gh runs it (gh_extension_command), but after `extension exec`,
+    which runs the extension (GH_EXEC_COMMANDS). Until 2026-11-17 only an alias of the first word was read, so `gh pr
+    say 11 --body …` went out unchecked; until the rulings on the tester's findings at 1c15219b (dispatch://INFRA-4957)
+    a command no table named went out unchecked, until rulings-md v66 an installed extension did, and until the review
+    of 053ef618 (finding 1) one run by `extension exec` did. GhUnjudgedError for a call the check cannot judge: one
+    that may run an alias it cannot read or cannot tell from another command (gh_alias_at, gh_alias_command), a call of
+    a command GH_REFUSED_COMMANDS lists, whatever its target, refused as the call writes it (`gh issue -R o/r artifact
+    new 4` is `issue artifact create`, refused as `issue artifact new`), and a call of a command no table names
+    (gh_unknown). A call whose first word is `help`, of an installed extension, is read as gh runs it
+    (gh_help_of_extension)."""
     arguments = gh_help_of_extension(arguments, environment) if not seen else arguments
     found = gh_next_command(arguments)
     if found is None:
         return None
     typed, rest = found
     commands = gh_commands()
-    command = GH_GROUP_ALIASES.get(typed, typed)
-    while command not in commands:
-        if not any(name.startswith(f"{command} ") for name in commands):
-            if " " not in typed and gh_extension(typed, environment):
-                return gh_extension_command(typed, rest)
-            return gh_alias_command(typed, rest, environment, seen)
+    parent, word, command = "", typed, gh_child("", typed)
+    while True:
+        own = command in commands or any(name.startswith(f"{command} ") for name in commands)
+        late = not parent and command in GH_LATE_COMMANDS
+        extension = not parent and (late or not own) and gh_extension(word, environment)
+        alias = gh_alias_at(typed, parent, word, (own and not late) or extension, environment)
+        if alias is not None:
+            return gh_alias_command(typed, alias, rest, environment, seen)
+        if extension:
+            return gh_extension_command(word, rest)
+        if not own:
+            return gh_unknown(typed, rest)
+        if command in commands:
+            break
         found = gh_next_command(rest)
         if found is None:
             return None
         word, rest = found
-        typed, command = f"{typed} {word}", f"{command} {GH_SUBCOMMAND_ALIASES.get((command, word), word)}"
-    in_place = gh_alias_in_place(typed, command, rest, environment)
-    if in_place is not None:
-        return gh_alias_command(*in_place, environment, seen)
+        typed, parent, command = f"{typed} {word}", command, gh_child(command, word)
+    if command in GH_ALIAS_PARENTS and (found := gh_next_command(rest)) is not None:
+        alias = gh_alias_at(f"{typed} {found[0]}", command, found[0], False, environment)
+        if alias is not None:
+            return gh_alias_command(f"{typed} {found[0]}", alias, found[1], environment, seen)
     if command in GH_EXEC_COMMANDS:
         return gh_extension_command(rest[0], rest[1:]) if rest and gh_extension(rest[0], environment) else None
     if command in GH_REFUSED_COMMANDS:
@@ -4153,23 +4276,37 @@ def gh_help_of_extension(arguments: Sequence[str], environment: Mapping[str, str
     return [*arguments[1:], "--help"] if gh_extension(found[0], environment) else arguments
 
 
-def gh_alias_in_place(typed: str, command: str, rest: Sequence[str], environment: Mapping[str, str]
-                      ) -> tuple[str, Sequence[str]] | None:
-    """(the alias's name, the words after it) where gh runs a gh alias of the user's in place of COMMAND, a command
-    the tables name (TYPED as the call writes it, REST the call's other words): one of COMMAND's own name where COMMAND
-    is in GH_LATE_COMMANDS, and one of COMMAND and the next word cobra finds (gh_next_command) where COMMAND is in
-    GH_ALIAS_PARENTS; also where gh_aliases refuses config.yml and that name stands in it (gh_alias_named), for which
-    gh_alias_command refuses the call. None where config.yml holds no such alias."""
-    if command in GH_LATE_COMMANDS:
-        name, after = typed, rest
-    elif command in GH_ALIAS_PARENTS and (found := gh_next_command(rest)) is not None:
-        name, after = f"{typed} {found[0]}", found[1]
-    else:
-        return None
+def gh_alias_at(typed: str, parent: str, word: str, own: bool, environment: Mapping[str, str]) -> GhAlias | None:
+    """The gh alias of the user's that gh runs for WORD, a word of the call as cobra finds it under the command PARENT
+    ("" for gh's root), TYPED the call's words to WORD; OWN tells whether gh registered a command of its own there
+    before the aliases (a command or a group of the tables, by gh's aliases of it too, or at the root an installed
+    extension; not one of GH_LATE_COMMANDS, which cobra adds after them). None where gh runs none there: config.yml
+    holds no alias of that place (gh_aliases), or one whose key's whole last word is the name of gh's own command
+    there, which gh does not register (gh_alias_place). The check reads each call through this one lookup, so no way
+    of finding an alias is known to one reader and not to another. GhUnjudgedError, refusing the call, where gh_aliases
+    refuses config.yml (GhAliases.refused); where two keys or more take the place, as `environment x` and `environment
+    x` with two spaces, or `at zz` and `attestation zz`; and where OWN and a key takes it by the part of its last word
+    before a space (`"version x"`, `pr "checks zz"`). cobra then runs the first command of that name it meets, in the
+    order the Go map of the aliases and cobra's sort of the commands give: measured 2026-11-28 with gh 2.106.0, `gh
+    version` ran the alias of `"version x"` in 20 of 20 runs, `gh pr view 1` that of `"pr x"` in 3 of 20
+    (dispatch://INFRA-4957/artifact/space-key-probe-txt), and two keys of one name ran one or the other, 16 of 20
+    against 4 (the review of 3e4d1931, finding 1)."""
     aliases = gh_aliases(gh_config_directory(environment) / "config.yml")
-    if name in aliases.expansions or (aliases.refused and gh_alias_named(name, aliases.text)):
-        return name, after
-    return None
+    if aliases.refused:
+        raise GhUnjudgedError(typed, aliases.refused)
+    found = [alias for alias in aliases.expansions.get((parent, word), ()) if not (own and alias.whole)]
+    if not found:
+        return None
+    if len(found) > 1:
+        lines = ", ".join(str(alias.line) for alias in found)
+        raise GhUnjudgedError(typed, f"gh's aliases on lines {lines} of {aliases.path} each take the name {word}, and "
+                                     "gh runs one of them as the order of its aliases falls, so the check cannot judge "
+                                     "the call: fix those lines")
+    if own:
+        raise GhUnjudgedError(typed, f"gh's alias {found[0].key}, on line {found[0].line} of {aliases.path}, takes the "
+                                     f"name of gh's own command {typed}, and gh runs one or the other as the order of "
+                                     "its commands falls, so the check cannot judge the call: fix that line")
+    return found[0]
 
 
 def gh_refusal_lifted(command: str, rest: Sequence[str]) -> bool:
@@ -4296,10 +4433,13 @@ def gh_extension(name: str, environment: Mapping[str, str]) -> bool:
 
 def gh_extension_command(name: str, rest: Sequence[str]) -> tuple[str, str, list[str]] | None:
     """gh_command of a call of the installed extension NAME (gh_extension), REST the call's other words. gh runs it as
-    the top-level command NAME in place of an alias or a stub of that name, never in place of a command of its own: gh
-    2.106.0 registers no extension whose name its own commands take (pkg/cmd/root/root.go:197-206, cmd.Find), refuses
-    to install one (pkg/cmd/extension/command.go:694-701), takes an alias only where no command, an extension included,
-    has its name (pkg/cmd/alias/shared/validations.go:15-29), and registers a stub only where no extension has
+    the top-level command NAME in place of an alias whose key is that name and of a stub of that name, and in place of
+    `help`, `__complete` and `__completeNoDesc`, which cobra adds to gh's root only after gh registered its extensions
+    (GH_LATE_COMMANDS; until the review of 3e4d1931, finding 3, the check read such a call as gh's own); never in place
+    of another command of its own: gh 2.106.0 registers no extension whose name one of those commands takes
+    (pkg/cmd/root/root.go:197-206, cmd.Find), refuses to install one (pkg/cmd/extension/command.go:694-701), takes an
+    alias whose key names an extension only by the part of its last word before a space, which gh_alias_at refuses
+    (gh_alias_place, pkg/cmd/alias/shared/validations.go:15-30), and registers a stub only where no extension has
     (root.go:243-252). Through `extension exec NAME` gh runs it whatever command of its own has that name, an installed
     gh-label in place of `gh label` (GH_EXEC_COMMANDS), and that call is read here the same. gh-stack's call is read by
     GH_STACK_COMMANDS, its subcommand found as cobra finds it (gh_next_command, with no flags) through its aliases
@@ -4340,47 +4480,41 @@ def gh_unknown(name: str, rest: Sequence[str]) -> None:
     raise GhUnjudgedError(name, GH_UNKNOWN_REFUSAL)
 
 
-def gh_alias_command(name: str, rest: Sequence[str], environment: Mapping[str, str],
+def gh_alias_command(typed: str, alias: GhAlias, rest: Sequence[str], environment: Mapping[str, str],
                      seen: tuple[str, ...]) -> tuple[str, str, list[str]] | None:
-    """gh_command of what the gh alias NAME runs with REST, SEEN the aliases the call ran through to NAME, in order;
-    gh_unknown for no such alias; None for a shell alias (`!…`), which runs a shell whose own gh calls come back through
-    shims/gh, and for one whose `$N` REST does not fill, which goes to gh, which refuses it itself (`not enough
-    arguments for alias`). An alias that runs another is followed however many run in a row: gh 2.106.0 runs what an
-    alias expands to as a call of its own, with no limit (pkg/cmd/root/alias.go:53-77, `root.SetArgs(expandedArgs);
-    return root.Execute()`), and on 2026-11-27 its `gh a1`, config.yml holding `a4: version`, `a3: a4`, `a2: a3` and
-    `a1: a2`, printed gh's version in 33 of 60 runs. gh registers an alias only where what it runs is a command it has
-    registered already (pkg/cmd/root/root.go:213-240, pkg/cmd/alias/shared/validations.go:36-51), in the order of a Go
-    map, which Go does not fix (internal/config/config.go:815-826), so a chain runs in some runs only. Until the review
-    of 053ef618 (finding 2) a call past three aliases in a row went out unread. GhUnjudgedError, refusing the call,
-    where gh_aliases refuses config.yml and NAME stands in it (gh_alias_named); where the call comes back to NAME (NAME
-    in SEEN), a loop of aliases, which gh 2.106.0 does not register (on 2026-11-27 `gh c1`, config.yml holding `c1: c2`
-    and `c2: c1`, failed with `unknown command "c1"` in 40 of 40 runs) and the check does not follow; and where shlex
-    cannot split NAME's expansion with REST in place of its `$N` (gh_expand_alias, which tests the `$N` first): only
-    then is the expansion as config.yml holds it split on its own, to choose the refusal's message (gh_unsplit). gh
-    splits an alias with google/shlex, which splits text Python's shlex refuses, a `#` beginning a comment there."""
-    aliases = gh_aliases(gh_config_directory(environment) / "config.yml")
-    if aliases.refused:
-        if gh_alias_named(name, aliases.text):
-            raise GhUnjudgedError(name, aliases.refused)
-        return gh_unknown(name, rest)
-    found = aliases.expansions.get(name)
-    if found is None:
-        return gh_unknown(name, rest)
-    if name in seen:
-        raise GhUnjudgedError(name, f"the call comes back to gh's alias {name}, on line {found[1]} of {aliases.path}, "
-                                    f"after the aliases {', '.join(seen)}: a loop of aliases, which the check "
-                                    "cannot follow, so it cannot judge the call: fix the loop")
-    if found[0].startswith("!"):
+    """gh_command of what ALIAS, the gh alias of the user's that gh runs for the call's words TYPED (gh_alias_at),
+    runs with REST, SEEN the keys of the aliases the call ran through to it, in order; None for a shell alias (`!…`),
+    which runs a shell whose own gh calls come back through shims/gh, and for one whose `$N` REST does not fill, which
+    goes to gh, which refuses it itself (`not enough arguments for alias`). An alias that runs another is followed
+    however many run in a row: gh 2.106.0 runs what an alias expands to as a call of its own, with no limit
+    (pkg/cmd/root/alias.go:53-77, `root.SetArgs(expandedArgs); return root.Execute()`), and on 2026-11-27 its `gh a1`,
+    config.yml holding `a4: version`, `a3: a4`, `a2: a3` and `a1: a2`, printed gh's version in 33 of 60 runs. gh
+    registers an alias only where what it runs is a command it has registered already (pkg/cmd/root/root.go:213-240,
+    pkg/cmd/alias/shared/validations.go:36-51), in the order of a Go map, which Go does not fix
+    (internal/config/config.go:815-826), so a chain runs in some runs only. Until the review of 053ef618 (finding 2) a
+    call past three aliases in a row went out unread. GhUnjudgedError, refusing the call, where the call comes back to
+    ALIAS (its key in SEEN), a loop of aliases, which gh 2.106.0 does not register (on 2026-11-27 `gh c1`, config.yml
+    holding `c1: c2` and `c2: c1`, failed with `unknown command "c1"` in 40 of 40 runs) and the check does not follow;
+    and where shlex cannot split ALIAS's expansion with REST in place of its `$N` (gh_expand_alias, which tests the `$N`
+    first): only then is the expansion as config.yml holds it split on its own, to choose the refusal's message
+    (gh_unsplit). gh splits an alias with google/shlex, which splits text Python's shlex refuses, a `#` beginning a
+    comment there."""
+    path = gh_config_directory(environment) / "config.yml"
+    if alias.key in seen:
+        raise GhUnjudgedError(typed, f"the call comes back to gh's alias {alias.key}, on line {alias.line} of {path}, "
+                                     f"after the aliases {', '.join(seen)}: a loop of aliases, which the check "
+                                     "cannot follow, so it cannot judge the call: fix the loop")
+    if alias.expansion.startswith("!"):
         return None
     try:
-        expanded = gh_expand_alias(found[0], rest)
+        expanded = gh_expand_alias(alias.expansion, rest)
     except ValueError as error:
         try:
-            shlex.split(found[0])
+            shlex.split(alias.expansion)
         except ValueError as own:
-            raise GhUnjudgedError(name, gh_unsplit(name, found[1], aliases.path, own, filled=False)) from None
-        raise GhUnjudgedError(name, gh_unsplit(name, found[1], aliases.path, error, filled=True)) from None
-    return gh_command(expanded, environment, seen + (name,)) if expanded else None
+            raise GhUnjudgedError(typed, gh_unsplit(alias.key, alias.line, path, own, filled=False)) from None
+        raise GhUnjudgedError(typed, gh_unsplit(alias.key, alias.line, path, error, filled=True)) from None
+    return gh_command(expanded, environment, seen + (alias.key,)) if expanded else None
 
 
 def gh_walk(arguments: Sequence[str], options: Mapping[str, bool]) -> list[tuple[str | None, str | None]]:
@@ -4967,18 +5101,19 @@ def gh_config_condition(directory: Path) -> str | None:
     where gh does not read it: a conservative reading. gh 2.106.0's `gh config get api_host --host github.com` read the
     key plain, quoted, in a flow mapping and as an explicit key `? api_host`, and none under `users:` or behind `<<`
     (measured 2026-11-27). A hosts.yml that is absent, empty or holds only `{}`, which gh writes once `gh auth logout`
-    logged out of the last host (measured 2026-11-20 with gh 2.98.0, which then takes github.com), lists none.
-    config.yml holds no line break other than a line feed (gh_config_break): the check reads its lines at its line
-    feeds, and yaml.v3 begins a line at each break, so a key after such a break, a `hosts` key among them, would be one
-    the check does not see. Nor does it hold a `hosts` key at its root (gh_root_keys): gh takes the hosts of that key
-    before those of hosts.yml, and the check reads none of them, so such a key takes a call out of the plain case; an
-    alias named `hosts`, which `gh alias set hosts …` writes inside the aliases, is no such key. Any layout this does
-    not read is not plain: a host indented at the root; a value on a host's line, such as a flow mapping, an anchor or
-    an alias; a merge key; an indented line that begins with no key gh_yaml_key reads, such as a flow mapping, an
-    explicit key `? …`, an anchor, an alias, a tag, a list item or a scalar's indented continuation; a `---`; a file
-    that cannot be read. hosts.yml is split by str.splitlines, which splits at each break yaml.v3 reads and more. The
-    hosts.yml gh writes is plain, and so is the agent config directory of scripts/gh-agent-config, whose hosts.yml lists
-    `github.com:` with `users`, `git_protocol`, `user` and `oauth_token` below it, and whose config.yml is the user's."""
+    logged out of the last host (measured 2026-11-20 with gh 2.98.0, which then takes github.com), lists none. A
+    config.yml that holds a line break other than a line feed, behind which yaml.v3 may begin a `hosts` key the check
+    does not see, refuses every call before this is read (gh_aliases, gh_alias_at; until the review of 3e4d1931 such a
+    break took a call out of the plain case here). config.yml holds no `hosts` key at its root (gh_root_keys): gh takes
+    the hosts of that key before those of hosts.yml, and the check reads none of them, so such a key takes a call out of
+    the plain case; an alias named `hosts`, which `gh alias set hosts …` writes inside the aliases, is no such key. Any
+    layout this does not read is not plain: a host indented at the root; a value on a host's line, such as a flow
+    mapping, an anchor or an alias; a merge key; an indented line that begins with no key gh_yaml_key reads, such as a
+    flow mapping, an explicit key `? …`, an anchor, an alias, a tag, a list item or a scalar's indented continuation; a
+    `---`; a file that cannot be read. hosts.yml is split by str.splitlines, which splits at each break yaml.v3 reads
+    and more. The hosts.yml gh writes is plain, and so is the agent config directory of scripts/gh-agent-config, whose
+    hosts.yml lists `github.com:` with `users`, `git_protocol`, `user` and `oauth_token` below it, and whose config.yml
+    is the user's."""
     texts: dict[str, str] = {}
     for name in ("hosts.yml", "config.yml"):
         try:
@@ -5010,9 +5145,6 @@ def gh_config_condition(directory: Path) -> str | None:
             return layout
         host = entry[0]
     config = gh_config_text(texts["config.yml"])
-    broken = gh_config_break(config)
-    if broken is not None:
-        return f"gh's config.yml holds {broken}, a line break other than a line feed, which the check does not read"
     if gh_root_keys(newline_lines(config), "hosts"):
         return "gh's config.yml has a hosts key, which the check does not read"
     return None
