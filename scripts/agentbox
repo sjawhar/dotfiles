@@ -10800,9 +10800,12 @@ probe_gcloud() {
     echo "${a:-gcloud names no active account}"; return 1
 }
 probe_gke() {
-    # The build pool the agents submit jobs to; the plugin that gets its credential
-    # (gke-gcloud-auth-plugin) is a symlink into the SDK, so this fails wherever gcloud does.
-    k="$(timeout 60 kubectl --context gke_theorem-agent-infra_us-west1_dispatch -n builds auth can-i create jobs 2>&1 | grep -v "^[[:space:]]*$" | tail -1)"
+    # The build pool the agents submit jobs to: the Kueue MultiKueue manager, which sends each Job
+    # to a worker (dispatch://INFRA-5858, R3). Each account holds the Job verbs there that it holds
+    # in builds on dispatch (agent-infra cluster-grants/managersubmit.go, managerSubmitGrants). The
+    # plugin that gets its credential (gke-gcloud-auth-plugin) is a symlink into the SDK, so this
+    # fails wherever gcloud does.
+    k="$(timeout 60 kubectl --context gke_theorem-agent-infra_us-central1_theorem-multikueue -n builds auth can-i create jobs 2>&1 | grep -v "^[[:space:]]*$" | tail -1)"
     [ "$k" = yes ] && { echo "can create jobs in the builds namespace"; return 0; }
     echo "$k"; return 1
 }
@@ -10868,7 +10871,7 @@ probe_label() {
         aws)         echo "aws" ;;
         google)      echo "google-user-token" ;;
         gcloud)      echo "gcloud auth list" ;;
-        gke)         echo "kubectl auth can-i create jobs (builds)" ;;
+        gke)         echo "kubectl auth can-i create jobs (builds, the MultiKueue manager)" ;;
     esac
 }
 probe_command() {
@@ -10878,7 +10881,7 @@ probe_command() {
         aws)         echo "aws sts get-caller-identity" ;;
         google)      echo "google-user-token" ;;
         gcloud)      echo "gcloud auth list" ;;
-        gke)         echo "kubectl --context gke_theorem-agent-infra_us-west1_dispatch -n builds auth can-i create jobs" ;;
+        gke)         echo "kubectl --context gke_theorem-agent-infra_us-central1_theorem-multikueue -n builds auth can-i create jobs" ;;
     esac
 }
 PROBE_NAMES=(secrets dockerhub aws google gcloud gke)

@@ -100,7 +100,8 @@ class AgentIdentity(unittest.TestCase):
         write_stub(stubs, "systemctl", SYSTEMCTL)
         write_stub(stubs, "tmux", TMUX)
         write_stub(stubs, "sleep", "#!/bin/bash\nexit 0\n")
-        # installers/gcloud-boxid.sh copies the dispatch context out of ~/.kube/config; STUB_KUBECTL_FAIL fails it.
+        # installers/gcloud-boxid.sh copies the dispatch and manager contexts out of ~/.kube/config (test_gcloud_boxid.py
+        # holds what it writes); STUB_KUBECTL_FAIL fails it.
         write_stub(stubs, "kubectl", "#!/bin/bash\n[[ -z \"${STUB_KUBECTL_FAIL:-}\" ]] || exit 1\necho 'apiVersion: v1'\n")
         (self.root / "nvme").mkdir()
         self.boxid = self.root / "nvme" / "boxid"

@@ -6,7 +6,9 @@ Usage: cluster-packing [--context NAME]... [--json]
 For every machine class (a node's GKE machine type, since the build farm's pools are
 auto-provisioned and their names carry no meaning), it prints the nodes in that class, the vCPU
 and memory they hold, what the pods on them ask for, and the share that is asked for -- the
-packing. It reads nodes and pods and writes nothing.
+packing. It reads nodes and pods and writes nothing. With no --context it reads each worker
+cluster of the Kueue MultiKueue manager theorem-multikueue, since the manager sends each build or
+grade Job to one of them and runs no pod itself (dispatch://INFRA-5858, R3).
 
 Why it is here rather than in /tmp: this reading is half of the build-farm target in the speed
 log (dispatch://INFRA-6), and the two helper scripts that used to take it lived in /tmp, were
@@ -26,8 +28,12 @@ import json
 import subprocess
 import sys
 
+# The manager's workers, in the order it lists them (agent-infra cluster-grants/manager.go,
+# managerWorkerNames): dispatch and theorem-us-central1 run the build Jobs, grade-us-west1 the grade
+# Jobs.
 DEFAULT_CONTEXTS = (
     "gke_theorem-agent-infra_us-west1_dispatch",
+    "gke_theorem-agent-infra_us-central1_theorem-us-central1",
     "gke_theorem-agent-infra_us-west1-b_grade-us-west1",
 )
 
@@ -118,7 +124,8 @@ def share(part: float, whole: float) -> str:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--context", action="append", dest="contexts",
-                        help="a kubectl context; repeatable (default: the farm and the grade cluster)")
+                        help="a kubectl context; repeatable (default: each worker cluster of the"
+                             " MultiKueue manager: dispatch, theorem-us-central1, grade-us-west1)")
     parser.add_argument("--json", action="store_true", help="print the reading as JSON")
     options = parser.parse_args(argv)
     out = []

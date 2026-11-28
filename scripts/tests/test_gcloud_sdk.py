@@ -11,8 +11,8 @@ also sets the property in each named configuration, which every gcloud reading t
 Technique: the real installer against a stand-in SDK under a scratch HOME. The stand-in gcloud logs
 its argv, answers `version` with the installer's pinned version (so nothing is downloaded), writes
 the property line a `--configuration <name> config set` asks for and the kubeconfig
-`get-credentials` asks for; a stand-in kubectl answers the context reads. The metadata host is a
-closed port, so the Google VM branch (sudo) never runs.
+`get-credentials` asks for; a stand-in kubectl logs its argv and answers the context reads. The
+metadata host is a closed port, so the Google VM branch (sudo) never runs.
 """
 
 from __future__ import annotations
@@ -40,8 +40,10 @@ case "$1" in
       printf 'disable_file_logging = true\n' >> "${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/configurations/config_$2" ;;
 esac
 """
+# STUB_CONTEXT is the current context it answers; unset, a context is current already.
 KUBECTL = r"""#!/bin/bash
-[[ "$*" != "config current-context" ]] || echo stub-context
+printf '%s\n' "$*" >> "$LOG/kubectl.argv"
+[[ "$*" != "config current-context" ]] || echo "${STUB_CONTEXT-stub-context}"
 """
 
 
@@ -121,6 +123,18 @@ class GcloudSdkInstallerTest(unittest.TestCase):
                 (self.log / "gcloud.argv").unlink()
                 again = self.run_installer()
                 self.assertEqual([call for call in again if call.startswith("--configuration ")], [])
+
+    def test_the_multikueue_manager_gets_a_context_and_dispatch_stays_the_default(self) -> None:
+        """A box creates its build and grade Jobs on the manager theorem-multikueue (dispatch://INFRA-5858, R3), so
+        the installer writes the manager's context beside the others. A kubeconfig with no current context still
+        gets dispatch's: the manager runs no pod, so a bare read of a Job's pods there would find none."""
+        self.env["STUB_CONTEXT"] = ""
+        calls = self.run_installer()
+        self.assertIn("container clusters get-credentials theorem-multikueue --location us-central1"
+                      " --project theorem-agent-infra", calls)
+        self.assertTrue((self.home / ".kube" / "config.d" / "theorem-multikueue").is_file())
+        kubectl = (self.log / "kubectl.argv").read_text().splitlines()
+        self.assertIn("config use-context gke_theorem-agent-infra_us-west1_dispatch", kubectl)
 
 
 if __name__ == "__main__":

@@ -102,6 +102,15 @@ CAN_I_ANSWERS = (
     ("error: You must be logged in to the server", "FAIL"),
     ("nope", "FAIL"),
 )
+# Each answer of `kubectl auth can-i` and what it makes of a line that wants a grant: `yes` alone passes.
+CAN_I_GRANT_ANSWERS = (
+    ("yes", "ok"),
+    ("no", "FAIL"),
+    (CAN_I_ANSWERS[1][0], "FAIL"),
+    ("", "FAIL"),
+    ("error: You must be logged in to the server", "FAIL"),
+    ("yesterday", "FAIL"),
+)
 
 
 def write_stub(directory: Path, name: str, body: str) -> None:
@@ -248,12 +257,15 @@ cat "$STUB_DIR/az-reader"
 """
 DISPATCH = "gke_theorem-agent-infra_us-west1_dispatch"
 GRADE = "gke_theorem-agent-infra_us-west1-b_grade-us-west1"
+# The Kueue MultiKueue manager: each check of a right to create Jobs asks it (dispatch://INFRA-5858, R3).
+MANAGER = "gke_theorem-agent-infra_us-central1_theorem-multikueue"
 FARM_SIGNER = "ossv-runs-signer@theorem-agent-infra.iam.gserviceaccount.com"
 BOX_SIGNER = "build-io-signer@theorem-agent-infra.iam.gserviceaccount.com"
 
 
 class RoutedOffTheBox(CheckCase):
-    """Uses the move census routes off the box: the box's own answer is a refusal."""
+    """The move census's routes off the box are refused: the farm's signer and its run bucket. The Job rights are
+    asked of the MultiKueue manager, whose grants give dev-box@ the create of grade Jobs and of farm Jobs."""
 
     LABELS = ("grade pool", "N6 signer", "N6 bucket", "N6 farm")
 
@@ -261,14 +273,14 @@ class RoutedOffTheBox(CheckCase):
         super().setUp()
         for name, body in (("kubectl", ROUTED_KUBECTL), ("gcloud", ROUTED_GCLOUD), ("az-reader", AZ_READER)):
             write_stub(self.bin, name, body)
-        self.refused_everywhere()
+        self.plain_dev_box()
 
     def set(self, name: str, value: str) -> None:
         (self.root / name).write_text(value + "\n", encoding="utf-8")
 
-    def refused_everywhere(self) -> None:
-        self.set(f"kubectl.{GRADE}.grade", "no")
-        self.set(f"kubectl.{DISPATCH}.builds-ossv", "no")
+    def plain_dev_box(self) -> None:
+        self.set(f"kubectl.{MANAGER}.grade", "yes")
+        self.set(f"kubectl.{MANAGER}.builds-ossv", "yes")
         self.set(f"mint.{FARM_SIGNER}", "refused")
         self.set(f"sign.{FARM_SIGNER}", "refused")
         self.set("ls.ossv-runs", "refused")
@@ -278,20 +290,29 @@ class RoutedOffTheBox(CheckCase):
         self.assertEqual(len(out), 4, out)
         return {label: line.split(" ", 1)[0] for label in self.LABELS for line in out if f" {label} " in f" {line} "}
 
-    def test_the_plain_dev_box_is_refused_grade_and_the_farms_signer_bucket_and_namespace(self) -> None:
+    def test_the_plain_dev_box_is_refused_the_farms_signer_and_bucket_and_creates_jobs_on_the_manager(self) -> None:
         self.assertEqual(self.lines(), dict.fromkeys(self.LABELS, "ok"))
 
-    def test_each_reach_fails_only_its_own_line(self) -> None:
-        for label, name, value in (("grade pool", f"kubectl.{GRADE}.grade", "yes"),
-                                   ("N6 farm", f"kubectl.{DISPATCH}.builds-ossv", "yes"),
+    def test_each_answer_fails_only_its_own_line(self) -> None:
+        for label, name, value in (("grade pool", f"kubectl.{MANAGER}.grade", "no"),
+                                   ("N6 farm", f"kubectl.{MANAGER}.builds-ossv", "no"),
                                    ("N6 bucket", "ls.ossv-runs", "ok"),
                                    ("N6 signer", f"mint.{FARM_SIGNER}", "ok"),
                                    ("N6 signer", f"sign.{FARM_SIGNER}", "ok")):
             with self.subTest(name=name):
-                self.refused_everywhere()
+                self.plain_dev_box()
                 self.set(name, value)
                 want = {other: ("FAIL" if other == label else "ok") for other in self.LABELS}
                 self.assertEqual(self.lines(), want)
+
+    def test_the_job_rights_are_asked_of_the_manager_and_not_of_a_worker(self) -> None:
+        """A grant on dispatch or on grade-us-west1 says nothing about the manager, where a box creates its Jobs."""
+        (self.root / f"kubectl.{MANAGER}.grade").unlink()
+        (self.root / f"kubectl.{MANAGER}.builds-ossv").unlink()
+        self.set(f"kubectl.{GRADE}.grade", "yes")
+        self.set(f"kubectl.{DISPATCH}.builds-ossv", "yes")
+        got = self.lines()
+        self.assertEqual((got["grade pool"], got["N6 farm"]), ("FAIL", "FAIL"))
 
     def test_a_failure_that_is_no_refusal_is_no_pass(self) -> None:
         """A transport error of the mint, beside a real refusal of sign-blob, says nothing about the mint's grant.
@@ -299,17 +320,17 @@ class RoutedOffTheBox(CheckCase):
         for label, name, value in (("N6 signer", f"mint.{FARM_SIGNER}", "transport"),
                                    ("N6 signer", f"sign.{FARM_SIGNER}", "transport"),
                                    ("N6 bucket", "ls.ossv-runs", "transport"),
-                                   ("grade pool", f"kubectl.{GRADE}.grade", "error: You must be logged in to the server")):
+                                   ("grade pool", f"kubectl.{MANAGER}.grade", "error: You must be logged in to the server")):
             with self.subTest(name=name, value=value):
-                self.refused_everywhere()
+                self.plain_dev_box()
                 self.set(name, value)
                 self.assertEqual(self.lines()[label], "FAIL")
 
-    def test_a_refusal_with_or_without_its_reason_passes_and_every_other_answer_fails(self) -> None:
-        for label, name in (("grade pool", f"kubectl.{GRADE}.grade"), ("N6 farm", f"kubectl.{DISPATCH}.builds-ossv")):
-            for answer, want in CAN_I_ANSWERS:
+    def test_a_grant_passes_and_every_other_answer_fails(self) -> None:
+        for label, name in (("grade pool", f"kubectl.{MANAGER}.grade"), ("N6 farm", f"kubectl.{MANAGER}.builds-ossv")):
+            for answer, want in CAN_I_GRANT_ANSWERS:
                 with self.subTest(label=label, answer=answer):
-                    self.refused_everywhere()
+                    self.plain_dev_box()
                     self.set(name, answer)
                     self.assertEqual(self.lines()[label], want)
 
@@ -338,11 +359,11 @@ class RoutedOffTheBox(CheckCase):
             self.assertTrue(line.startswith("FAIL "), line)
             self.assertNotIn("ya29.", line)
 
-    def test_the_ssh_path_kubectl_line_carries_the_relay_and_reads_a_namespace_the_team_set_reads(self) -> None:
+    def test_the_ssh_path_kubectl_line_carries_the_relay_and_lists_the_jobs_of_builds_on_the_manager(self) -> None:
         """A command sshd runs gets the three GCE_METADATA_* values from .bashrc, so the line that stands in for one
-        passes them on. It lists Jobs in builds, which the team set reads (census row U07), not in builds-ossv: one
-        request for one Job, whose answer counts the rest (`--chunk-size 1` paged 1,910 Jobs on 2026-11-22 until its
-        continue token expired)."""
+        passes them on. It lists Jobs on the MultiKueue manager, where a box creates them, in builds, which the team
+        set reads (census row U07), not in builds-ossv: one request for one Job, whose answer counts the rest
+        (`--chunk-size 1` paged 1,910 Jobs on 2026-11-22 until its continue token expired)."""
         # env -i drops STUB_DIR, so the stub writes to a path baked into it.
         write_stub(self.bin, "kubectl", '#!/bin/bash\nprintf "%s\\n" "$*" "HOST=${GCE_METADATA_HOST:-}" '
                    f'"ROOT=${{GCE_METADATA_ROOT:-}}" "IP=${{GCE_METADATA_IP:-}}" >"{self.root}/kubectl.seen"\n'
@@ -352,7 +373,7 @@ class RoutedOffTheBox(CheckCase):
         self.assertTrue(line.startswith("ok "), line)
         self.assertIn("(1910 jobs)", line)
         seen = (self.root / "kubectl.seen").read_text(encoding="utf-8").splitlines()
-        self.assertIn("get --raw /apis/batch/v1/namespaces/builds/jobs?limit=1", seen[0])
+        self.assertEqual(seen[0], f"--context {MANAGER} get --raw /apis/batch/v1/namespaces/builds/jobs?limit=1")
         self.assertEqual(seen[1:], ["HOST=127.0.0.1:8170", "ROOT=127.0.0.1:8170", "IP=127.0.0.1:8170"])
 
     def test_an_ssh_path_kubectl_answer_that_is_no_job_list_fails(self) -> None:
@@ -405,14 +426,15 @@ done
 case "${rest[*]}|$ns|$ctx|$kc|${CLOUDSDK_CONFIG:-}" in
     "auth can-i get secrets|envoy|@DISPATCH@||"*) answer=envoy-secrets ;;
     "auth can-i create pods/exec|envoy|@DISPATCH@||"*) answer=envoy-exec ;;
-    "auth can-i create jobs|grade|@GRADE@||"*) answer=grade ;;
-    "auth can-i create jobs|builds||$STUB_BOXID/infra-kubeconfig|$STUB_BOXID/gcloud-box") answer=boxid ;;
+    "auth can-i create jobs|builds|@MANAGER@||"*) answer=build-pool ;;
+    "auth can-i create jobs|grade|@MANAGER@||"*) answer=grade ;;
+    "auth can-i create jobs|builds|@MANAGER@|$STUB_BOXID/infra-kubeconfig|$STUB_BOXID/gcloud-box") answer=boxid ;;
     *) echo "unexpected kubectl $all (CLOUDSDK_CONFIG=${CLOUDSDK_CONFIG:-})" >&2; exit 2 ;;
 esac
 got="$(cat "$STUB_DIR/kubectl.$answer")"
 echo "$got"
 [[ "$got" == yes ]]
-""".replace("@DISPATCH@", DISPATCH).replace("@GRADE@", GRADE)
+""".replace("@DISPATCH@", DISPATCH).replace("@MANAGER@", MANAGER)
 # timeout [-k N] DURATION CMD...: the command alone; a raw TCP probe of a tailnet name fails, as with no network.
 TIMEOUT = r"""#!/bin/bash
 [[ "$1" == -k ]] && shift 2
@@ -465,7 +487,8 @@ class WholeRunCase(CheckCase):
     def defaults(self) -> None:
         """Every identity answer of the plain dev box."""
         for name, value in (("tip.json", "{}"), ("kubectl.envoy-secrets", "no"), ("kubectl.envoy-exec", "no"),
-                            ("kubectl.grade", "no"), ("kubectl.boxid", "yes"), ("sessions", "0"), ("gcloud.boxid", "ok"),
+                            ("kubectl.build-pool", "yes"), ("kubectl.grade", "yes"), ("kubectl.boxid", "yes"),
+                            ("sessions", "0"), ("gcloud.boxid", "ok"),
                             (f"tokeninfo.{BOXID_TOKEN}", json.dumps({"email": DEV_BOX})),
                             ("az-reader", json.dumps({"user": "legion-reader", "type": "servicePrincipal", "subscription": "s"}))):
             self.set(name, value)
@@ -508,7 +531,7 @@ class TheRunsCallTheIdentityChecks(WholeRunCase):
             "infra-applier closed on the host": "ok", "no envoy secrets on the host": "ok",
             "no envoy exec on the host": "ok", "sessions on the host": "ok", "ssh-PATH kubectl": "ok"}
     BOX = {"metadata account in the box": "ok", "infra-applier closed in the box": "ok", "no envoy secrets in the box": "ok",
-           "no envoy exec in the box": "ok", "sessions in the box": "ok", "grade pool in the box": "ok",
+           "no envoy exec in the box": "ok", "sessions in the box": "ok", "build pool:": "ok", "grade pool in the box": "ok",
            "boxid: CLOUDSDK_CONFIG=": "ok", "boxid: kubectl --kubeconfig": "ok", "Azure:": "ok"}
 
     def count(self, out: list[str]) -> int:
@@ -546,7 +569,8 @@ class TheRunsCallTheIdentityChecks(WholeRunCase):
         self.assert_each_fault_fails_its_line("host", self.HOST_UNRELATED, self.HOST, self.faults("on the host"))
 
     def test_in_box_runs_the_identity_checks(self) -> None:
-        faults = self.faults("in the box") + [("grade pool in the box", "kubectl.grade", "yes"),
+        faults = self.faults("in the box") + [("build pool:", "kubectl.build-pool", "no"),
+                                              ("grade pool in the box", "kubectl.grade", "no"),
                                               ("boxid: kubectl --kubeconfig", "kubectl.boxid", "no"),
                                               ("boxid: CLOUDSDK_CONFIG=", "gcloud.boxid", "error"),
                                               ("Azure:", "az-reader", "AADSTS700213: No matching federated identity record found")]
@@ -555,7 +579,8 @@ class TheRunsCallTheIdentityChecks(WholeRunCase):
 
 class BoxidCheck(WholeRunCase):
     """boxid_check asks through the boxid config dir and kubeconfig: a token Google names as dev-box@'s, and the
-    build pool's submit in builds. The box's own token names no one here, so a call that drops CLOUDSDK_CONFIG fails."""
+    build pool's submit in builds on the MultiKueue manager, the kubeconfig's second context. The box's own token
+    names no one here, so a call that drops CLOUDSDK_CONFIG fails, and so does one that names no context."""
 
     BOX_TOKEN_EMAIL = None
     LABELS = ("boxid: CLOUDSDK_CONFIG=", "boxid: kubectl --kubeconfig")

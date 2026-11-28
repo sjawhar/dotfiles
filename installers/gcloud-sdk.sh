@@ -17,8 +17,8 @@
 # credentials_kubeconfig: on 2026-11-02 a switch to grade-us-west1 failed every session's builds-*
 # Jobs). So it writes into a file of its own, ~/.kube/config.d/<cluster>, the file shims/gcloud
 # tells an agent session to export, and that file is merged in behind the shared one, whose
-# current context wins, and renamed over it. A file with no current context gets dispatch's, the
-# context every box doctor and the build pool use without naming one. A third field names one more
+# current context wins, and renamed over it. A file with no current context gets dispatch's
+# (KUBE_DEFAULT_CONTEXT says why it is not the manager's). A third field names one more
 # standalone file, ~/.kube/<name>.config, for a path tools name: sami-rocqperf had
 # ~/.kube/grade-us-west1.config, which agent-infra's spend/sizejob/README.md exports, and a box
 # without it made a private kubeconfig instead (dispatch://INFRA-993).
@@ -36,16 +36,24 @@ GCLOUD_SDK_SHA256=f865da648f6fdae2015abb5b32eaa0eb10520e88f0ca735cfb33795868c8d2
 GCLOUD_SDK_ROOT="$HOME/.gcloud"
 GCLOUD_SDK_BIN="$GCLOUD_SDK_ROOT/google-cloud-sdk/bin/gcloud"
 KUBE_PROJECT=theorem-agent-infra
-# dispatch: box doctors and the build pool (namespaces builds-*). grade-us-west1: the grade Jobs
-# of S3 (namespace grade). theorem-us-central1: linux-sched's cluster since 2026-11-26, which
-# sched-service.sh and the tools it runs name by default (dispatch://INFRA-4466, asked for by
-# dispatch://INFRA-5098 R3). sami-rocqperf's ~/.kube/config on 2026-11-03 had the first two and
-# three stockprobe-gke-* contexts, whose clusters no longer exist (`gcloud container clusters list`).
+# dispatch: a build worker of theorem-multikueue (namespaces builds-*), and the default context.
+# grade-us-west1: the worker of the grade Jobs of S3 (namespace grade). theorem-us-central1:
+# linux-sched's cluster since 2026-11-26, which sched-service.sh and the tools it runs name by
+# default (dispatch://INFRA-4466, asked for by dispatch://INFRA-5098 R3), and a build worker of the
+# manager. theorem-multikueue: the Kueue MultiKueue manager, where a box creates its build and grade
+# Jobs and reads them, and which sends each Job to one of its workers, dispatch, theorem-us-central1
+# and grade-us-west1 (dispatch://INFRA-5858, R3). sami-rocqperf's ~/.kube/config on 2026-11-03 had
+# the first two and three stockprobe-gke-* contexts, whose clusters no longer exist (`gcloud
+# container clusters list`).
 KUBE_CLUSTERS=(
     "dispatch us-west1"
     "grade-us-west1 us-west1-b grade-us-west1.config"
     "theorem-us-central1 us-central1"
+    "theorem-multikueue us-central1"
 )
+# The current context of a kubeconfig that has none stays dispatch's. Every kubectl that names no
+# context uses it, and on the manager a read of a Job's pods finds none, because the manager runs no
+# pod: such a read would then print nothing and not fail. A Job create names the manager's context.
 KUBE_DEFAULT_CONTEXT="gke_${KUBE_PROJECT}_us-west1_dispatch"
 
 # The Artifact Registry hosts docker authenticates to through docker-credential-gcloud, which

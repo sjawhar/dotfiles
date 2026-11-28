@@ -600,7 +600,7 @@ class AJobWhoseMemoryIsUnboundedIsNotToldToBuyMore(unittest.TestCase):
         with patch.object(WATCH, "read_object", side_effect=[job, result]), \
                 patch.object(WATCH, "read_pod", return_value=None), \
                 patch.object(WATCH, "run_text", side_effect=commands):
-            found, _ = WATCH.collect("farm/test-run", "test-context")
+            found, _ = WATCH.collect("farm/test-run", ["test-context"])
         self.assertEqual([Path(args[0]).name for args in calls], ["pod-memory-series", "gcloud"])
         self.assertIsNone(found["script_error"])
         self.assertNotIn("--memory", WATCH.message(found))
@@ -964,9 +964,9 @@ class APodNamedDirectly(unittest.TestCase):
             self.assertEqual(WATCH.main(argv), 0)
         return out.getvalue()
 
-    def test_a_pod_the_cluster_does_not_have_says_so_and_does_not_claim_it_is_running(self) -> None:
+    def test_a_pod_no_worker_has_says_so_and_does_not_claim_it_is_running(self) -> None:
         text = self.main(["--pod", "builds-bet/gone"], None)
-        self.assertIn("not in the cluster", text)
+        self.assertIn("not on dispatch or theorem-us-central1", text)
         self.assertNotIn("still running", text)
 
     def test_a_pod_with_no_kill_says_there_is_nothing_to_explain(self) -> None:
@@ -980,13 +980,63 @@ class APodNamedDirectly(unittest.TestCase):
 
     def test_the_namespace_defaults_to_the_farms_own(self) -> None:
         with patch.object(WATCH, "read_pod", return_value=None) as read_pod:
-            WATCH.collect_pod("just-a-pod", "test-context")
+            WATCH.collect_pod("just-a-pod", ["test-context"])
         self.assertEqual(read_pod.call_args.args[:2], ("builds-ossv", "just-a-pod"))
 
     def test_a_run_id_and_a_pod_together_are_refused(self) -> None:
         for argv in (["farm/run", "--pod", "ns/pod"], []):
             with self.assertRaises(SystemExit):
                 WATCH.main(argv)
+
+
+class APodIsReadOnTheWorkerThatRunsIt(unittest.TestCase):
+    """The MultiKueue manager theorem-multikueue runs no pod: it sends a builds-ossv Job to dispatch or to
+    theorem-us-central1 (dispatch://INFRA-5858, R3). The watch has the pod's name and not the Job's, so it reads
+    the pod by that name on each build worker in turn and keeps the first that has it."""
+
+    DISPATCH = "gke_theorem-agent-infra_us-west1_dispatch"
+    CENTRAL = "gke_theorem-agent-infra_us-central1_theorem-us-central1"
+
+    def run_main(self, argv: list[str], holder: str | None) -> tuple[list[str], dict]:
+        """main() with the pod in builds-ossv on holder alone; the contexts kubectl was asked, and the JSON."""
+        import contextlib
+        import io
+        asked: list[str] = []
+
+        def commands(args: list[str], timeout: int = 90) -> str | None:
+            if args[0] != "kubectl":
+                return None
+            asked.append(args[2])
+            if args[2] == holder and args[3:] == ["-n", "builds-ossv", "get", "pod", "p", "-o", "json"]:
+                return json.dumps(pod(name="p"))
+            return None
+
+        out = io.StringIO()
+        with patch.object(WATCH, "run_text", side_effect=commands), contextlib.redirect_stdout(out):
+            self.assertEqual(WATCH.main([*argv, "--pod", "builds-ossv/p", "--json"]), 0)
+        return asked, json.loads(out.getvalue())
+
+    def test_with_no_context_a_pod_on_theorem_us_central1_is_found_after_dispatch(self) -> None:
+        asked, got = self.run_main([], self.CENTRAL)
+        self.assertEqual(asked, [self.DISPATCH, self.CENTRAL])
+        self.assertTrue(got["evidence"]["pod_found"])
+        self.assertEqual(got["evidence"]["reason"], "OOMKilled")
+
+    def test_a_pod_on_dispatch_needs_no_second_read(self) -> None:
+        asked, got = self.run_main([], self.DISPATCH)
+        self.assertEqual(asked, [self.DISPATCH])
+        self.assertTrue(got["evidence"]["pod_found"])
+
+    def test_a_pod_on_no_worker_names_each_worker_it_read(self) -> None:
+        asked, got = self.run_main([], None)
+        self.assertEqual(asked, [self.DISPATCH, self.CENTRAL])
+        self.assertFalse(got["evidence"]["pod_found"])
+        self.assertIn("not on dispatch or theorem-us-central1", got["message"])
+
+    def test_a_context_given_is_the_only_one_read(self) -> None:
+        asked, got = self.run_main(["--context", self.CENTRAL], self.CENTRAL)
+        self.assertEqual(asked, [self.CENTRAL])
+        self.assertTrue(got["evidence"]["pod_found"])
 
 
 if __name__ == "__main__":

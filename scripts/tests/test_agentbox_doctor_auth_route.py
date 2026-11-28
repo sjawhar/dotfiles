@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""DockerHub doctor probes the configured route, not a hardcoded broker helper."""
+"""Doctor's probes ask the route a box uses: Docker Hub's configured credential route, not a hardcoded broker
+helper, and the build pool's Job right on the Kueue MultiKueue manager, where a box creates its build Jobs
+(dispatch://INFRA-5858, R3)."""
 
 from __future__ import annotations
 
@@ -16,6 +18,8 @@ DOTFILES = Path(__file__).resolve().parents[2]
 AGENTBOX = DOTFILES / "scripts/agentbox"
 HUB = "https://index.docker.io/v1/"
 SECRET = "fixture-doctor-secret-not-a-live-token"
+MANAGER = "gke_theorem-agent-infra_us-central1_theorem-multikueue"
+GKE_ASK = f"--context {MANAGER} -n builds auth can-i create jobs"
 
 
 class DoctorAuthRoute(unittest.TestCase):
@@ -75,6 +79,24 @@ class DoctorAuthRoute(unittest.TestCase):
         self.helper("secretsd", status=17)
         result = self.probe({"credHelpers": {HUB: "secretsd"}})
         self.assertNotEqual(result.returncode, 0)
+
+    def test_the_build_pool_probe_asks_the_manager(self) -> None:
+        """kubectl answers yes only to the manager's builds, so a probe of another cluster fails."""
+        path = self.bin / "kubectl"
+        path.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >>"$HELPER_LOG"\n'
+                        f'[ "$*" = "{GKE_ASK}" ] && {{ echo yes; exit 0; }}\necho no\nexit 1\n')
+        path.chmod(0o755)
+        result = subprocess.run(["bash"], input=self.functions + "\nprobe_gke\n",
+                                capture_output=True, text=True, env=self.env, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "can create jobs in the builds namespace")
+        self.assertEqual(self.log.read_text().splitlines(), [GKE_ASK])
+
+    def test_the_command_doctor_shows_for_the_build_pool_asks_the_manager(self) -> None:
+        shown = subprocess.run(["bash", "-c", f'source "{AGENTBOX}"; probe_command gke'],
+                               capture_output=True, text=True, timeout=30, env=self.env)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertEqual(shown.stdout.strip(), f"kubectl {GKE_ASK}")
 
 
 if __name__ == "__main__":
