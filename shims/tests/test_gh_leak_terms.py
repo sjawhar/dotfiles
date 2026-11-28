@@ -4396,6 +4396,22 @@ class Tables(unittest.TestCase):
                 return str(candidate)
         return None
 
+    def handed_over(self, argvs: list[tuple[str, ...]], env: dict[str, str],
+                    functions: str) -> dict[tuple[str, ...], bool]:
+        """For each of ARGVS, whether gh_shim_may_send_text hands the call to the check, in ENV over this process's
+        environment: FUNCTIONS, the shim's functions lifted out by text (shim_functions), run once for all of them."""
+        script = functions
+        for argv in argvs:
+            quoted = " ".join(f"'{a}'" for a in argv)
+            script += f"\ngh_shim_may_send_text {quoted} && echo yes || echo no"
+        # The script goes on standard input: Linux refuses one argument past 128 KiB (MAX_ARG_STRLEN), the comparison
+        # test's two scripts are some 410 KB and 560 KB, and a CI runner's `bash -c` of the first of them failed with
+        # E2BIG.
+        answers = subprocess.run(["bash", "-s"], input=script, env={**os.environ, **env}, capture_output=True,
+                                 text=True, timeout=120).stdout.split()
+        self.assertEqual(len(answers), len(argvs))
+        return dict(zip(argvs, (answer == "yes" for answer in answers)))
+
     def test_the_option_tables_are_the_installed_gh_s_own(self) -> None:
         gh = self.real_gh()
         if gh is None:
@@ -4525,23 +4541,20 @@ class Tables(unittest.TestCase):
         # every call under a command the shim knows was handed over, a text command moved to gh_shim_is_quiet too.
         functions = shim_functions()
         module = self.scanner()
-        calls = [[group, *([sub] if sub else ["-X", "POST", "repos/o/r/issues"])]
+        calls = [(group, *([sub] if sub else ["-X", "POST", "repos/o/r/issues"]))
                  for group, sub in module.GH_TEXT_COMMANDS]
-        calls.extend(name.split() for name in module.GH_REFUSED_COMMANDS)
+        calls.extend(tuple(name.split()) for name in module.GH_REFUSED_COMMANDS)
         for name in module.GH_EXEC_COMMANDS:
-            calls.extend(spellings(module, name))
-        calls.extend(["stack", name] for name, (kind, _) in module.GH_STACK_COMMANDS.items() if kind != "quiet")
+            calls.extend(tuple(spelled) for spelled in spellings(module, name))
+        calls.extend(("stack", name) for name, (kind, _) in module.GH_STACK_COMMANDS.items() if kind != "quiet")
+        control = ("pr", "view", "1")
         with tempfile.TemporaryDirectory() as config:
-            def answer(argv: list[str]) -> str:
-                script = functions + "\ngh_shim_may_send_text " + " ".join(f"'{a}'" for a in argv) + " && echo yes"
-                return subprocess.run(["bash", "-c", script], env={**os.environ, "GH_CONFIG_DIR": config},
-                                      capture_output=True, text=True, timeout=60).stdout.strip()
-
-            for argv in calls:
-                with self.subTest(command=" ".join(argv)):
-                    self.assertEqual(answer(argv), "yes")
-            with self.subTest(control="pr view 1"):
-                self.assertEqual(answer(["pr", "view", "1"]), "")
+            handed = self.handed_over([*calls, control], {"GH_CONFIG_DIR": config}, functions)
+        for argv in calls:
+            with self.subTest(command=" ".join(argv)):
+                self.assertTrue(handed[argv])
+        with self.subTest(control=" ".join(control)):
+            self.assertFalse(handed[control])
 
     def test_a_command_taken_out_of_every_table_is_refused_at_run_time(self) -> None:
         # The check reads its tables as it runs (gh_command), so they are the list of what passes
@@ -4681,10 +4694,14 @@ class Tables(unittest.TestCase):
         # would (dispatch://INFRA-4957/artifact/rulings-md v71, item 7): where the shim's own reading of where gh finds
         # the command differed from gh's, a call went to gh unread. So each call the shim lets go unread is handed to
         # the check with `--help`, `--version`, `-R o/r`, an empty word or `--` put before its first word, and, where
-        # that word is a group and a second word follows, between the two; a one-word command of the check's tables
-        # (`api`, `help`, `version`, ...) is quiet whatever follows it, so it takes each form before it only. The calls
-        # are those a first run of the shim's functions lets go unread, and a second run reads each spelling of them;
-        # more than 500 of the spellings put a form between two words, so the test cannot pass on too few of them.
+        # that word is a group, right after it: between the group and its verb (`gh pr -R o/r view 1`), and after a
+        # group alone (`gh pr --help`), which the shim read until c5704922 as a group with no verb and let go unread.
+        # Until the simplify review of c5704922 a group alone took each form before it only. A one-word command of the
+        # check's tables (`api`, `help`, `version`, ...) is quiet whatever follows it, so it takes each form before it
+        # only. The calls are those a first run of the shim's functions lets go unread, and a second run reads each
+        # spelling of them. One subtest for each form, each place and each environment lists the calls so spelled that
+        # the shim lets go unread; more than 550 of the spellings put a form right after the first word, so the test
+        # cannot pass on too few of them.
         # Controls: a verb gh does not have, under a group, a group's alias, a group of a group and after an empty word,
         # a top-level name gh does not have, after an empty word too, and an official extension stub are handed to the
         # check; the reads agents run most, git's credential helper, `gh help` and `gh version` are not.
@@ -4713,25 +4730,16 @@ class Tables(unittest.TestCase):
         ordered = [*sorted(calls), *unknown, *hot]
         forms = {"--help": ("--help",), "--version": ("--version",), "-R o/r": ("-R", "o/r"), "an empty word": ("",),
                  "--": ("--",)}
+        places = ("before the first word", "right after the first word")
         singles = {name for name in module.gh_commands() if " " not in name}
+        # A failing subtest below shows the whole list of the calls it names: past maxDiff, unittest cuts a list to a
+        # few of its characters and its first element.
+        self.maxDiff = None
         with tempfile.TemporaryDirectory() as config, tempfile.TemporaryDirectory() as installed:
             (Path(installed) / "gh" / "extensions" / "gh-stack").mkdir(parents=True)
-
-            def handed_over(argvs: list[tuple[str, ...]], env: dict[str, str]) -> dict[tuple[str, ...], bool]:
-                script = functions
-                for argv in argvs:
-                    quoted = " ".join(f"'{a}'" for a in argv)
-                    script += f"\ngh_shim_may_send_text {quoted} && echo yes || echo no"
-                # Each script, some 410 KB or 550 KB, goes on standard input: Linux refuses one argument past 128 KiB
-                # (MAX_ARG_STRLEN), and a CI runner's `bash -c` of the first failed with E2BIG.
-                answers = subprocess.run(["bash", "-s"], input=script, env={**os.environ, **env}, capture_output=True,
-                                         text=True, timeout=120).stdout.split()
-                self.assertEqual(len(answers), len(argvs))
-                return dict(zip(argvs, (answer == "yes" for answer in answers)))
-
             for data in (config, installed):
                 env = {"GH_CONFIG_DIR": config, "HOME": config, "XDG_DATA_HOME": data}
-                handed = handed_over(ordered, env)
+                handed = self.handed_over(ordered, env, functions)
                 unread = sorted(call for call in {*calls, *hot} if not handed[call])
                 self.assertGreater(len(unread), 100, "the shim lets too few calls go unread to compare them with the "
                                                      "check")
@@ -4744,13 +4752,17 @@ class Tables(unittest.TestCase):
                                 self.assertIsNone(module.gh_command(list(call), env))
                 variants = [(call, form, at, (*call[:at], *words, *call[at:])) for call in unread
                             for form, words in forms.items()
-                            for at in ((0, 1) if len(call) > 1 and call[0] not in singles else (0,))]
-                self.assertGreater(sum(1 for _, _, at, _ in variants if at), 500,
-                                   "too few unread calls take a form between their first two words")
-                spelled = handed_over([argv for *_, argv in variants], env)
+                            for at in ((0, 1) if call[0] not in singles else (0,))]
+                self.assertGreater(sum(1 for _, _, at, _ in variants if at), 550,
+                                   "too few unread calls take a form right after their first word")
+                spelled = self.handed_over([argv for *_, argv in variants], env, functions)
+                unread_spelled: dict[tuple[str, int], list[str]] = {(form, at): [] for form in forms for at in (0, 1)}
                 for call, form, at, argv in variants:
-                    with self.subTest(call=" ".join(call), form=form, before=call[at], gh_stack=data == installed):
-                        self.assertTrue(spelled[argv])
+                    if not spelled[argv]:
+                        unread_spelled[form, at].append(" ".join(call))
+                for (form, at), missed in unread_spelled.items():
+                    with self.subTest(form=form, place=places[at], gh_stack=data == installed):
+                        self.assertEqual(missed, [], f"the shim lets {len(missed)} calls so spelled go to gh unread")
                 for call in unknown:
                     with self.subTest(control=" ".join(call), gh_stack=data == installed):
                         self.assertTrue(handed[call])

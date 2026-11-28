@@ -274,11 +274,12 @@ gh_shim_may_send_text() {
 # are read exactly, as $1 and $2: until 2026-11-28 (dispatch://INFRA-4957/artifact/rulings-md v71, item 7) they were
 # found as gh_shim_is_write finds them (gh_shim_command_words), the shim's own copy of how cobra finds a command, and
 # where that copy read a call apart from gh the call went to gh unread. So an option, an empty word, --help, --version
-# or `--` before the first word or between the first two makes the call no quiet one: such a spelling of a quiet call
-# costs one run of the check, which lets it go. Any other call goes to the check, which refuses a command no table of
-# it names: until the rulings on the tester's findings at 1c15219b (dispatch://INFRA-4957, item 2) every call that was
-# no write passed here unread, and a command gh added went to gh unchecked. shims/tests/test_gh_leak_terms.py checks
-# that the check lets go each call this names, and that the shim hands the check each such spelling of one.
+# or `--` as the first word, or as the second word after a group (`gh pr --help`, `gh pr -R o/r view 1`), makes the
+# call no quiet one: such a spelling of a quiet call costs one run of the check, which lets it go. Any other call goes
+# to the check, which refuses a command no table of it names: until the rulings on the tester's findings at 1c15219b
+# (dispatch://INFRA-4957, item 2) every call that was no write passed here unread, and a command gh added went to gh
+# unchecked. shims/tests/test_gh_leak_terms.py checks that the check lets go each call this names, and that the shim
+# hands the check each such spelling of one.
 gh_shim_is_quiet() {
     local group="${1:-}" verb="${2:-}"
     case "$group" in
