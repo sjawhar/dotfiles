@@ -555,6 +555,47 @@ class GhLeakTerms(unittest.TestCase):
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv), argv)
 
+    def test_help_before_an_installed_extension_is_read_as_the_call_of_it_gh_runs(self) -> None:
+        # gh 2.106.0 runs `gh help <extension> <words>` as `gh <extension> <words> --help`
+        # (internal/ghcmd/cmd.go:190-193), and hands an extension its words unread (pkg/cmd/root/extension.go,
+        # DisableFlagParsing): after a `--` among the words, the `--help` gh puts last is an argument, not gh-stack's
+        # help flag, and gh-stack runs the subcommand. Measured 2026-11-28 through shims/gh with gh 2.106.0 and gh-stack
+        # v0.3.0, their HTTP sent to a unix socket by config.yml's http_unix_socket: `gh help stack submit --` ran
+        # submit (GET repos/o/pub/stacks) and the check never started, while `gh stack submit` and `gh stack submit --
+        # --help` are refused. Control: `gh help stack submit`, whose --help is gh-stack's help flag, goes out.
+        self.stack_repo(("feat-a", ["Add the parser"]))
+        self.setUp_calls()
+        result = self.run_gh(["help", "stack", "submit", "--"], env=self.stack_env(PUBLIC))
+        stderr = result.stderr.decode("utf-8", "replace")
+        self.assertEqual(result.returncode, 2, stderr)
+        self.assertEqual(self.gh_calls(), [])
+        self.assertIn("cannot read the titles and bodies of the pull requests it creates: without --auto", stderr)
+        with self.subTest(control="help stack submit"):
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(["help", "stack", "submit"], env=self.stack_env(PUBLIC)),
+                             ["help", "stack", "submit"])
+
+    def test_copilot_with_the_write_tools_of_its_github_mcp_server_on_is_not_let_go_unread(self) -> None:
+        # gh 2.106.0 hands the Copilot CLI every word after `copilot` unread (pkg/cmd/copilot/copilot.go:83,
+        # DisableFlagParsing; :96 and :174, exec.Command(copilotPath, opts.CopilotArgs...); after a `--`, the words
+        # after it, :87-100). The Copilot CLI's --add-github-mcp-tool '*', --add-github-mcp-toolset and
+        # --enable-all-github-mcp-tools turn on the write tools of its GitHub MCP server (github/copilot-cli
+        # changelog.md: "`--enable-all-github-mcp-tools` flag now enables read-write GitHub MCP tools"), which post with
+        # the CLI's own client, so the prompt's text can reach a public issue past shims/gh. Measured 2026-11-28 through
+        # shims/gh with gh 2.106.0 and a recorder named copilot first on PATH: each call below reached it whole, and the
+        # check never started. Control: `gh copilot --help` prints gh's help (copilot.go:102-104) and goes out.
+        for argv in (["copilot", "--add-github-mcp-tool", "*", "--allow-all-tools", "-p", TEXT],
+                     ["copilot", "--enable-all-github-mcp-tools", "--allow-all-tools", "-p", TEXT],
+                     ["copilot", "--", "--add-github-mcp-toolset", "all", "-p", TEXT]):
+            with self.subTest(call=" ".join(argv[:3])):
+                self.setUp_calls()
+                result = self.run_gh(argv)
+                self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
+                self.assertEqual(self.gh_calls(), [])
+        with self.subTest(control="copilot --help"):
+            self.setUp_calls()
+            self.assert_sent(self.run_gh(["copilot", "--help"]), ["copilot", "--help"])
+
     # --- a term listed for some repositories only ---------------------------------------------------------------
 
     def test_a_scoped_term_is_refused_only_for_a_public_repository_of_its_scope(self) -> None:
