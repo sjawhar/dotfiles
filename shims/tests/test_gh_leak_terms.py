@@ -125,7 +125,7 @@ def load_check():
 
 
 # The functions of shims/gh that decide whether a call goes to the check: gh_shim_may_send_text calls gh_shim_is_write,
-# gh_shim_is_quiet and gh_shim_has_nested_alias, and the first two read the call's command with gh_shim_command_words.
+# gh_shim_is_quiet and gh_shim_has_nested_alias, and the first reads the call's command with gh_shim_command_words.
 SHIM_GATE = ("gh_shim_command_words", "gh_shim_is_write", "gh_shim_may_send_text", "gh_shim_is_quiet",
              "gh_shim_has_nested_alias")
 
@@ -4677,6 +4677,14 @@ class Tables(unittest.TestCase):
         # an unread `gh api` call is a read, which must be one the check lets go (gh_check exits 0). Until the review
         # of 053ef618 (finding 4) every unread call was held only to gh_check exiting 0, which a text command called
         # with no text does too, so a text command moved to gh_shim_is_quiet passed here.
+        # gh_shim_is_quiet reads the call's first two words exactly, not past an option or an empty word as cobra
+        # would (dispatch://INFRA-4957/artifact/rulings-md v71, item 7): where the shim's own reading of where gh finds
+        # the command differed from gh's, a call went to gh unread. So each call the shim lets go unread is handed to
+        # the check with `--help`, `--version`, `-R o/r`, an empty word or `--` put before its first word, and, where
+        # that word is a group and a second word follows, between the two; a one-word command of the check's tables
+        # (`api`, `help`, `version`, ...) is quiet whatever follows it, so it takes each form before it only. The calls
+        # are those a first run of the shim's functions lets go unread, and a second run reads each spelling of them;
+        # more than 500 of the spellings put a form between two words, so the test cannot pass on too few of them.
         # Controls: a verb gh does not have, under a group, a group's alias, a group of a group and after an empty word,
         # a top-level name gh does not have, after an empty word too, and an official extension stub are handed to the
         # check; the reads agents run most, git's credential helper, `gh help` and `gh version` are not.
@@ -4703,20 +4711,27 @@ class Tables(unittest.TestCase):
         hot = [("pr", "view", "1"), ("pr", "checks", "1"), ("run", "view"), ("api", "repos/o/r"),
                ("auth", "git-credential", "get"), ("help",), ("version",)]
         ordered = [*sorted(calls), *unknown, *hot]
+        forms = {"--help": ("--help",), "--version": ("--version",), "-R o/r": ("-R", "o/r"), "an empty word": ("",),
+                 "--": ("--",)}
+        singles = {name for name in module.gh_commands() if " " not in name}
         with tempfile.TemporaryDirectory() as config, tempfile.TemporaryDirectory() as installed:
             (Path(installed) / "gh" / "extensions" / "gh-stack").mkdir(parents=True)
-            script = functions
-            for call in ordered:
-                quoted = " ".join(f"'{a}'" for a in call)
-                script += f"\ngh_shim_may_send_text {quoted} && echo yes || echo no"
-            for data in (config, installed):
-                env = {"GH_CONFIG_DIR": config, "HOME": config, "XDG_DATA_HOME": data}
-                # The script, some 440 KB, goes on standard input: Linux refuses one argument past 128 KiB
-                # (MAX_ARG_STRLEN), and a CI runner's `bash -c` of it failed with E2BIG.
+
+            def handed_over(argvs: list[tuple[str, ...]], env: dict[str, str]) -> dict[tuple[str, ...], bool]:
+                script = functions
+                for argv in argvs:
+                    quoted = " ".join(f"'{a}'" for a in argv)
+                    script += f"\ngh_shim_may_send_text {quoted} && echo yes || echo no"
+                # Each script, some 410 KB or 550 KB, goes on standard input: Linux refuses one argument past 128 KiB
+                # (MAX_ARG_STRLEN), and a CI runner's `bash -c` of the first failed with E2BIG.
                 answers = subprocess.run(["bash", "-s"], input=script, env={**os.environ, **env}, capture_output=True,
                                          text=True, timeout=120).stdout.split()
-                self.assertEqual(len(answers), len(ordered))
-                handed = dict(zip(ordered, (answer == "yes" for answer in answers)))
+                self.assertEqual(len(answers), len(argvs))
+                return dict(zip(argvs, (answer == "yes" for answer in answers)))
+
+            for data in (config, installed):
+                env = {"GH_CONFIG_DIR": config, "HOME": config, "XDG_DATA_HOME": data}
+                handed = handed_over(ordered, env)
                 unread = sorted(call for call in {*calls, *hot} if not handed[call])
                 self.assertGreater(len(unread), 100, "the shim lets too few calls go unread to compare them with the "
                                                      "check")
@@ -4727,6 +4742,15 @@ class Tables(unittest.TestCase):
                                 self.assertEqual(module.gh_check(list(call)), 0)
                             else:
                                 self.assertIsNone(module.gh_command(list(call), env))
+                variants = [(call, form, at, (*call[:at], *words, *call[at:])) for call in unread
+                            for form, words in forms.items()
+                            for at in ((0, 1) if len(call) > 1 and call[0] not in singles else (0,))]
+                self.assertGreater(sum(1 for _, _, at, _ in variants if at), 500,
+                                   "too few unread calls take a form between their first two words")
+                spelled = handed_over([argv for *_, argv in variants], env)
+                for call, form, at, argv in variants:
+                    with self.subTest(call=" ".join(call), form=form, before=call[at], gh_stack=data == installed):
+                        self.assertTrue(spelled[argv])
                 for call in unknown:
                     with self.subTest(control=" ".join(call), gh_stack=data == installed):
                         self.assertTrue(handed[call])
@@ -4859,7 +4883,7 @@ class Writes(unittest.TestCase):
                 self.assertFalse(self.is_write(argv), f"{argv} should not be a write")
 
     def test_an_empty_word_is_skipped_as_cobra_skips_it(self) -> None:
-        # cobra skips an empty word before the command and before its verb, and so does gh_shim_is_quiet; until the
+        # cobra skips an empty word before the command and before its verb, and so does gh_shim_command_words; until the
         # review of 053ef618 (finding 5) gh_shim_is_write read `pr '' comment 1` as the verb '' of `pr`, so no write.
         # Control: `pr '' view 1` is no write.
         for argv in (["pr", "", "comment", "1"], ["", "pr", "comment", "1"]):
