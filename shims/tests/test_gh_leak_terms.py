@@ -630,6 +630,36 @@ class GhLeakTerms(unittest.TestCase):
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv), argv)
 
+    def test_a_gh_alias_gh_runs_in_place_of_one_of_its_commands_is_read_through_the_alias(self) -> None:
+        # gh 2.106.0 registers the user's aliases before cobra adds `help`, `__complete` and `__completeNoDesc` to its
+        # root, so an alias of one of those names runs in its place, and it takes an alias one word under a command it
+        # does not run, a help topic or `actions` (GH_LATE_COMMANDS, GH_ALIAS_PARENTS): measured 2026-11-28 by the
+        # review of 845477ce, `gh environment x <text>` and `gh __complete <text>` posted the text. The check reads such
+        # a call through the alias, so a term in what the alias sends is refused, and a bare `gh help`, which runs a
+        # `help:` alias, goes to the check where config.yml holds that key (gh_shim_has_nested_alias). Until that review
+        # each went out unread. Controls: with no alias the same calls print gh's help or topic and go out.
+        config = self.tmp / "config" / "gh"
+        config.mkdir()
+        names = ("help", "__complete", "__completeNoDesc", "environment x", "actions x", "telemetry x")
+        text = f"See-{CANARY.upper()}"
+        calls = [[*name.split(), text] for name in names]
+        lines = "".join(f"\n    {name}: api repos/{PUBLIC}/issues/1/comments -f body=$1" for name in names)
+        (config / "config.yml").write_text(gh_config_yml(lines + "\n"), encoding="utf-8")
+        for argv in calls:
+            with self.subTest(refused=" ".join(argv[:-1])):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(argv), "--raw-field body", line=1)
+        (config / "config.yml").write_text(gh_config_yml(
+            f"\n    help: api repos/{PUBLIC}/issues/1/comments -f body={text}\n"), encoding="utf-8")
+        with self.subTest(refused="help, bare"):
+            self.setUp_calls()
+            self.assert_refused(self.run_gh(["help"]), "--raw-field body", line=1)
+        (config / "config.yml").write_text(gh_config_yml("\n    co: pr checkout\n"), encoding="utf-8")
+        for argv in [*calls, ["help"]]:
+            with self.subTest(control=" ".join(argv[:-1]) or "help"):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+
     # --- a term listed for some repositories only ---------------------------------------------------------------
 
     def test_a_scoped_term_is_refused_only_for_a_public_repository_of_its_scope(self) -> None:
@@ -4477,14 +4507,15 @@ class Tables(unittest.TestCase):
                 return str(candidate)
         return None
 
-    def handed_over(self, argvs: list[tuple[str, ...]], env: dict[str, str],
-                    functions: str) -> dict[tuple[str, ...], bool]:
-        """For each of ARGVS, whether gh_shim_may_send_text hands the call to the check, in ENV over this process's
-        environment: FUNCTIONS, the shim's functions lifted out by text (shim_functions), run once for all of them."""
+    def handed_over(self, argvs: list[tuple[str, ...]], env: dict[str, str], functions: str,
+                    function: str = "gh_shim_may_send_text") -> dict[tuple[str, ...], bool]:
+        """For each of ARGVS, whether FUNCTION, gh_shim_may_send_text unless named, is true for the call, which for
+        that function is whether the shim hands the call to the check, in ENV over this process's environment:
+        FUNCTIONS, the shim's functions lifted out by text (shim_functions), run once for all of them."""
         script = functions
         for argv in argvs:
             quoted = " ".join(f"'{a}'" for a in argv)
-            script += f"\ngh_shim_may_send_text {quoted} && echo yes || echo no"
+            script += f"\n{function} {quoted} && echo yes || echo no"
         # The script goes on standard input: Linux refuses one argument past 128 KiB (MAX_ARG_STRLEN), the comparison
         # test's two scripts are some 410 KB and 560 KB, and a CI runner's `bash -c` of the first of them failed with
         # E2BIG.
@@ -4539,6 +4570,34 @@ class Tables(unittest.TestCase):
                 self.assertEqual(key in module.GH_REPOSITORY_ARGUMENT, first == "<repository>", usage)
                 urls = {"<url>", "<urls>", "<discussion-url>", "<comment-url>"}
                 self.assertEqual(key in module.GH_URL_ARGUMENT, bool(urls.intersection(arguments)), usage)
+
+    def test_the_commands_gh_takes_an_alias_under_are_the_installed_gh_s_own(self) -> None:
+        # gh takes an alias one word under a command it does not run (pkg/cmd/alias/shared/validations.go,
+        # ValidAliasNameFunc), and the check reads a call there through the alias only under a group or under a
+        # command of GH_ALIAS_PARENTS (gh_alias_in_place). So of the one-word commands of the tables that name no
+        # command under them, `gh alias set '<command> zz' version` on the gh on PATH takes those of GH_ALIAS_PARENTS
+        # and no other, and it takes an alias of the name of `__complete` and `__completeNoDesc`, which cobra adds after
+        # the aliases (GH_LATE_COMMANDS; `help`, the third, it refuses, and an alias written by hand runs in its place).
+        # Skipped where no gh is on PATH.
+        gh = self.real_gh()
+        if gh is None:
+            self.skipTest("no gh on PATH")
+        module = self.scanner()
+        commands = module.gh_commands()
+        leaves = sorted(name for name in commands
+                        if " " not in name and not any(other.startswith(f"{name} ") for other in commands))
+        self.assertLessEqual(set(module.GH_ALIAS_PARENTS), set(leaves))
+        with tempfile.TemporaryDirectory() as config:
+            env = {**os.environ, "GH_CONFIG_DIR": config, "HOME": config, "GH_TELEMETRY": "false", "DO_NOT_TRACK": "1"}
+            env.pop("GH_TOKEN", None)
+
+            def takes(name: str) -> bool:
+                return subprocess.run([gh, "alias", "set", name, "version"], env=env, capture_output=True, text=True,
+                                      timeout=60, check=False).returncode == 0
+
+            self.assertEqual({name for name in leaves if takes(f"{name} zz")}, set(module.GH_ALIAS_PARENTS))
+            late = {name for name in module.GH_LATE_COMMANDS if takes(name)}
+            self.assertEqual(late, {"__complete", "__completeNoDesc"})
 
     def test_every_command_of_the_installed_gh_is_in_exactly_one_table(self) -> None:
         # When gh 2.106.0 added `issue artifact`, which uploads files, nothing failed: no table listed every command.
@@ -4759,8 +4818,10 @@ class Tables(unittest.TestCase):
     def test_the_shim_lets_a_call_go_unread_only_where_the_check_lets_it_go(self) -> None:
         # shims/gh starts the check for every call but those gh_shim_is_quiet names. Until the rulings on the tester's
         # findings at 1c15219b (dispatch://INFRA-4957, item 2) it let every call that was no write go unread, so a
-        # command in none of the check's tables went to gh unchecked. A call the shim does not hand to the check must be
-        # one the check reads no text of and refuses nothing of (gh_command gives None), for each command the tables
+        # command in none of the check's tables went to gh unchecked. A call the shim does not hand to the check, and
+        # each call gh_shim_is_quiet names, which gh_shim_is_write, asked first, hands to the check for some verbs of
+        # both (`pr checkout`, `repo clone`), must be one the check reads no text of and refuses nothing of (gh_command
+        # gives None), for each command the tables
         # name, by its words and by gh's aliases of them, and for each pair of a top-level word the shim knows and a
         # word gh_shim_is_quiet holds, so a verb the shim lets go that the check does not know is found too; and for
         # each gh-stack subcommand, by its name and its aliases (GH_STACK_COMMANDS, GH_STACK_ALIASES), both where
@@ -4826,7 +4887,13 @@ class Tables(unittest.TestCase):
             for data in (config, installed):
                 env = {"GH_CONFIG_DIR": config, "HOME": config, "XDG_DATA_HOME": data}
                 handed = self.handed_over(ordered, env, functions)
-                unread = sorted(call for call in {*calls, *hot} if not handed[call])
+                # Until the review of 845477ce (its finding 2) only the calls the shim lets go were compared, and a text
+                # command added to a verb list of gh_shim_is_quiet that gh_shim_is_write names too passed here. The gate
+                # asks gh_shim_is_quiet only for a call whose first word is one of its top-level words (`stack`, which
+                # is none, it hands to the check whatever gh_shim_is_quiet says).
+                quiet = self.handed_over(ordered, env, functions, "gh_shim_is_quiet")
+                unread = sorted(call for call in {*calls, *hot}
+                                if not handed[call] or (quiet[call] and call[0] in tops))
                 self.assertGreater(len(unread), 100, "the shim lets too few calls go unread to compare them with the "
                                                      "check")
                 variants = [(call, form, at, (*call[:at], *words, *call[at:])) for call in unread
@@ -5052,6 +5119,16 @@ class NestedAliases(unittest.TestCase):
                              ("block, no key under pr", "aliases:\n    prc: pr comment --body x\n")):
             with self.subTest(control=form):
                 self.assertFalse(self.has_nested_alias("pr", config))
+
+    def test_an_alias_of_the_command_s_own_name_is_found(self) -> None:
+        # gh runs a `help:` alias in place of `gh help` (scripts/leak-terms-check, GH_LATE_COMMANDS), so a key of the
+        # command's own name starts the check, in each form gh writes. Control: a key that only begins with the name.
+        for form, config in (("block", "aliases:\n    help: api x\n"), ("flow", "aliases: {help: api x}\n"),
+                             ("flow, quoted", "aliases: {'help' : api x}\n")):
+            with self.subTest(form=form):
+                self.assertTrue(self.has_nested_alias("help", config))
+        with self.subTest(control="helpx"):
+            self.assertFalse(self.has_nested_alias("help", "aliases:\n    helpx: api x\n"))
 
     def test_a_line_break_other_than_a_line_feed_starts_the_check(self) -> None:
         # yaml.v3 begins a line at a carriage return, a next line, a line separator and a paragraph separator, so a key

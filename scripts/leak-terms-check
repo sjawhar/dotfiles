@@ -3321,8 +3321,10 @@ GH_REFUSED_COMMANDS: dict[str, str] = {
 # publish` with --dry-run or --fix on ("Validate without publishing", "Auto-fix issues where possible without
 # publishing", `gh skill publish --help`) and of `ssh-key add` of an authentication key, whose title only the account
 # sees, which send nothing a public place shows. Until rulings-md v66 only those two had their options here, and the
-# check read a bare `-h` of the other five as help without knowing their options. shims/tests/test_gh_leak_terms.py
-# compares them with the gh on PATH, and each refused command has its entry.
+# check read a bare `-h` of the other five as help without knowing their options. `copilot`'s entry is read by no code
+# of the check, since gh reads none of `copilot`'s words as flags and gh_copilot_help reads them as gh does: it holds
+# gh's own flags of `copilot` for the test. shims/tests/test_gh_leak_terms.py compares them with the gh on PATH, and
+# each refused command has its entry.
 GH_REFUSED_OPTIONS: dict[str, tuple[str, str]] = {
     "copilot": ("", "--remove --help"),
     "gpg-key add": ("-t/--title", "--help"),
@@ -3407,6 +3409,20 @@ GH_HIDDEN_COMMANDS: dict[str, str] = {
 # included, and that is no gh alias (gh_unknown).
 GH_UNKNOWN_REFUSAL = ("no table of the check names this command of gh, and it is no gh alias, so the check does not "
                       "know what the call sends and refuses it")
+# The places where gh 2.106.0 runs a gh alias of the user's in place of a command the tables name, which gh_command
+# reads through the alias (gh_alias_in_place): GH_LATE_COMMANDS, the commands cobra adds to gh's root only in
+# ExecuteC, after gh has registered the aliases (pkg/cmd/root/root.go:209-240), so that an alias of the same name is
+# registered and runs in their place: measured 2026-11-28 with gh 2.106.0, `gh alias set` takes `__complete` and
+# `__completeNoDesc`, and a `help:` key written into config.yml by hand ran in 6 of 6 runs of `gh help x y`; and
+# GH_ALIAS_PARENTS, the commands of the tables that gh does not run (no Run or RunE: the help topics,
+# pkg/cmd/root/help_topic.go NewCmdHelpTopic, and `actions`, pkg/cmd/actions/actions.go), under which gh's
+# ValidAliasNameFunc takes an alias one word below (pkg/cmd/alias/shared/validations.go:15-28: a name is valid where
+# cobra's Find finds a command that is not runnable with one word left), as it does under a group:
+# `gh alias set 'environment x' …` was taken, and `gh environment x <text>` posted its text. Until the review of
+# 845477ce (dispatch://INFRA-4957, its finding 1) these calls were read as gh's own commands, which send nothing, and
+# went out unread. shims/tests/test_gh_leak_terms.py checks GH_ALIAS_PARENTS with `gh alias set` on the gh on PATH.
+GH_LATE_COMMANDS = ("help", "__complete", "__completeNoDesc")
+GH_ALIAS_PARENTS = ("actions", "environment", "exit-codes", "formatting", "mintty", "reference", "telemetry")
 # gh-stack, `gh stack`, GitHub's official extension for stacked pull requests (github/gh-stack, gh 2.106.0's
 # pkg/extensions/official.go), which the skills opening-a-pr, squash-stack, running-the-merge-queue and sdd tell agents
 # to use, and whose source installers/omp.sh:277 clones unpinned (installers/lib.sh, ensure_vendor). gh runs an installed
@@ -4079,7 +4095,8 @@ def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
     check cannot judge: one that may run an alias it cannot read (gh_alias_command), a call of a command
     GH_REFUSED_COMMANDS lists, whatever its target, refused as the call writes it (`gh issue -R o/r artifact new 4` is
     `issue artifact create`, refused as `issue artifact new`), and a call of a command no table names (gh_unknown).
-    A call whose first word is `help`, of an installed extension, is read as gh runs it (gh_help_of_extension)."""
+    A call whose first word is `help`, of an installed extension, is read as gh runs it (gh_help_of_extension), and a
+    call of a command in whose place gh runs a gh alias of the user's is read through that alias (gh_alias_in_place)."""
     arguments = gh_help_of_extension(arguments, environment) if not seen else arguments
     found = gh_next_command(arguments)
     if found is None:
@@ -4097,6 +4114,9 @@ def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
             return None
         word, rest = found
         typed, command = f"{typed} {word}", f"{command} {GH_SUBCOMMAND_ALIASES.get((command, word), word)}"
+    in_place = gh_alias_in_place(typed, command, rest, environment)
+    if in_place is not None:
+        return gh_alias_command(*in_place, environment, seen)
     if command in GH_EXEC_COMMANDS:
         return gh_extension_command(rest[0], rest[1:]) if rest and gh_extension(rest[0], environment) else None
     if command in GH_REFUSED_COMMANDS:
@@ -4131,6 +4151,25 @@ def gh_help_of_extension(arguments: Sequence[str], environment: Mapping[str, str
     if command in commands or any(name.startswith(f"{command} ") for name in commands):
         return arguments
     return [*arguments[1:], "--help"] if gh_extension(found[0], environment) else arguments
+
+
+def gh_alias_in_place(typed: str, command: str, rest: Sequence[str], environment: Mapping[str, str]
+                      ) -> tuple[str, Sequence[str]] | None:
+    """(the alias's name, the words after it) where gh runs a gh alias of the user's in place of COMMAND, a command
+    the tables name (TYPED as the call writes it, REST the call's other words): one of COMMAND's own name where COMMAND
+    is in GH_LATE_COMMANDS, and one of COMMAND and the next word cobra finds (gh_next_command) where COMMAND is in
+    GH_ALIAS_PARENTS; also where gh_aliases refuses config.yml and that name stands in it (gh_alias_named), for which
+    gh_alias_command refuses the call. None where config.yml holds no such alias."""
+    if command in GH_LATE_COMMANDS:
+        name, after = typed, rest
+    elif command in GH_ALIAS_PARENTS and (found := gh_next_command(rest)) is not None:
+        name, after = f"{typed} {found[0]}", found[1]
+    else:
+        return None
+    aliases = gh_aliases(gh_config_directory(environment) / "config.yml")
+    if name in aliases.expansions or (aliases.refused and gh_alias_named(name, aliases.text)):
+        return name, after
+    return None
 
 
 def gh_refusal_lifted(command: str, rest: Sequence[str]) -> bool:

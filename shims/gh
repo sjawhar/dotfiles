@@ -216,8 +216,9 @@ gh_shim_is_write() {
 # (gh_shim_has_nested_alias), and any call of one of those commands that gh_shim_is_quiet does not name, a verb gh does
 # not have included, and `extension exec`, which runs an installed extension the check reads as above
 # (GH_EXEC_COMMANDS): the check refuses a command that no table of it names. It may be wider than the check's own
-# tables, never narrower (shims/tests/test_gh_leak_terms.py); a call gh_shim_is_quiet names never starts the check, and
-# it names no `gh stack` call, so each one starts the check, which tells an installed gh-stack from gh's stub of it.
+# tables, never narrower (shims/tests/test_gh_leak_terms.py); a call gh_shim_is_quiet names starts the check only where
+# gh_shim_is_write names it too, which some of its verbs do (`pr checkout`, `repo clone`), and it names no `gh stack`
+# call, so each one starts the check, which tells an installed gh-stack from gh's stub of it.
 gh_shim_may_send_text() {
     gh_shim_is_write "$@" && return 0
     (($#)) || return 1
@@ -344,11 +345,14 @@ gh_shim_is_quiet() {
 }
 # gh_shim_has_nested_alias COMMAND: true when gh's config.yml (in gh's own config dir) may hold an
 # alias under COMMAND, such as `gh alias set 'pr say' 'pr comment'`, which gh runs as what it
-# expands to; the check then reads the call and decides. The alias's key starts an indented line of
-# a block mapping, or follows the `{` or a `,` of the flow mapping gh writes once the last alias was
-# deleted (`aliases: {pr say: pr comment}`). It is true too when config.yml holds a line break other
-# than a line feed, matched as bytes in any locale (a carriage return, and UTF-8's next line, line
-# separator and paragraph separator): yaml.v3 begins a line at each, so a key after one starts no
+# expands to, or an alias of COMMAND's own name, which gh runs in place of `gh help`: cobra adds
+# `help` to gh's root only after gh registered the aliases, and a `help:` key ran in 6 of 6 runs
+# (dispatch://INFRA-4957, the review of 845477ce, finding 1); the check then reads the call and
+# decides. The alias's key starts an indented line of a block mapping, or follows the `{` or a `,`
+# of the flow mapping gh writes once the last alias was deleted (`aliases: {pr say: pr comment}`).
+# It is true too when config.yml holds a line break other than a line feed, matched as bytes in any
+# locale (a carriage return, and UTF-8's next line, line separator and paragraph separator):
+# yaml.v3 begins a line at each, so a key after one starts no
 # line the pattern below finds. Until 2026-11-17 `gh pr say 11 --body …` was a read here, and its
 # text went out unchecked. It is true too when config.yml holds a `? ` key, at a line's start or
 # after a `{` or a `,`, matched as bytes the same way: gh writes `? ` before a key yaml.v3 does not
@@ -357,7 +361,8 @@ gh_shim_is_quiet() {
 # gh writes. The check judges a call through an alias as the command it expands to; where it cannot
 # read config.yml exactly, it refuses each call whose name stands there before a `:`
 # (scripts/leak-terms-check, gh_aliases). A line that only looks like an alias starts the check,
-# which on a config.yml it reads exactly finds no alias and lets the call go.
+# which on a config.yml it reads exactly finds no alias and lets the call go. A key of a group's own
+# name (`pr:`) starts it too, though gh registers no alias that a command's name takes.
 gh_shim_has_nested_alias() {
     local config="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/config.yml" text pattern
     local LC_ALL=C
@@ -367,7 +372,7 @@ gh_shim_has_nested_alias() {
         return 0
     pattern=$'(^|\n)[ \t]*\\?[ \t]|[{,][ \t]*\\?[ \t]'
     [[ "$text" =~ $pattern ]] && return 0
-    pattern=$'((^|\n)[ \t]+|[{,][ \t\n]*)["\']?'"$1"$'[ \t][^:\n]*:'
+    pattern=$'((^|\n)[ \t]+|[{,][ \t\n]*)["\']?'"$1"$'(["\']?[ \t]*:|[ \t][^:\n]*:)'
     [[ "$text" =~ $pattern ]]
 }
 # The text of a call that reads stdin (`--input -`, `--body-file -`, `-F name=@-`, …) is read by the checks below
