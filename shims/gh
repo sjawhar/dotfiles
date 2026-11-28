@@ -119,14 +119,16 @@ gh_shim_call_digest() {
     _digest="$(printf '%s\0' "$@" | sha256sum 2> /dev/null)" || _digest=""
     _digest="${_digest%% *}"
 }
-# gh_shim_is_write ARGV…: true when this call changes something on GitHub. `gh api` counts when
-# it names a method other than GET, which is how gh itself decides; every other verb is listed,
-# because a verb this misses is a write whose text goes out unchecked. Read verbs are never listed, so a
-# new read command keeps working without an edit here. The command and its verb are found as cobra
-# finds them, past the options before each (`gh -R o/r pr comment 1` and `gh pr -R o/r comment 1`
-# are `gh pr comment`): an option written apart from any value, but --help and --version, takes the
-# next word as its value. `issue artifact` and `repo autolink` count whatever their own verb: the check
-# refuses their writes and lets their reads go, as it lets `skill publish --dry-run` and an
+# gh_shim_is_write ARGV…: true when this call changes something on GitHub, so gh_shim_may_send_text hands it to the
+# check before it asks anything else: `gh api` whose method, as gh reads it, is neither GET nor HEAD (a field or an
+# --input body with no method makes gh POST), and a call of one of the write verbs listed below. It is not the gate:
+# gh_shim_may_send_text hands the check every call gh_shim_is_quiet does not name, so a write verb missed here still
+# goes to the check, as does a command gh adds, read or write, which the check refuses as one no table of it names
+# until a table sorts it. The command and its verb are found as cobra finds them, past the options before each (`gh -R
+# o/r pr comment 1` and `gh pr -R o/r comment 1` are `gh pr comment`), an empty word skipped as cobra and
+# gh_shim_is_quiet skip it (`gh pr '' comment 1` is `gh pr comment`): an option written apart from any value, but
+# --help and --version, takes the next word as its value. `issue artifact` and `repo autolink` count whatever their
+# own verb: the check refuses their writes and lets their reads go, as it lets `skill publish --dry-run` and an
 # authentication key's `ssh-key add` go (scripts/leak-terms-check, GH_REFUSED_COMMANDS).
 gh_shim_is_write() {
     local a method="" group="" verb="" skip=0 letters value kind pending="" body=0
@@ -137,7 +139,7 @@ gh_shim_is_write() {
         fi
         case "$a" in
             --) break ;;
-            --help | --version | -*=*) ;;
+            '' | --help | --version | -*=*) ;;
             --* | -?) skip=1 ;;
             -*) ;;
             *)

@@ -124,6 +124,25 @@ def load_check():
     return module
 
 
+# The functions of shims/gh that decide whether a call goes to the check: gh_shim_may_send_text calls the other three.
+SHIM_GATE = ("gh_shim_is_write", "gh_shim_may_send_text", "gh_shim_is_quiet", "gh_shim_has_nested_alias")
+
+
+def shim_functions(text: str | None = None) -> str:
+    """Every gh_shim_* function of shims/gh, or of TEXT, lifted out by text for a test to run (sourcing shims/gh runs
+    it): each definition from its `gh_shim_…() {` line to its closing `}` line. All of them, so no function one of them
+    calls is missing: a test that lifted gh_shim_may_send_text without gh_shim_is_quiet ran `! gh_shim_is_quiet` as a
+    command bash does not find (exit 127, so true), and every call under a command the shim knows read as handed to the
+    check, `gh pr view 1` too (review of 053ef618, finding 4). Fails where any function of SHIM_GATE is not found, so it
+    cannot lift nothing."""
+    text = GH.read_text(encoding="utf-8") if text is None else text
+    found = list(re.finditer(r"^(gh_shim_[a-z0-9_]+)\(\) \{$.*?^\}$", text, re.MULTILINE | re.DOTALL))
+    missing = sorted(set(SHIM_GATE) - {match[1] for match in found})
+    if missing:
+        raise AssertionError(f"shims/gh holds no definition of {', '.join(missing)} that the tests can lift out")
+    return "".join(f"{match[0]}\n" for match in found)
+
+
 class GhLeakTerms(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="gh-leak-terms-"))
@@ -4430,12 +4449,10 @@ class Tables(unittest.TestCase):
         # another the call names (GH_EXEC_COMMANDS), by gh's aliases of its words too (`ext exec`), and each gh-stack
         # subcommand it reads (GH_STACK_COMMANDS, `text`) is a call shims/gh hands to the check.
         # gh's config directory holds no config.yml, so no alias the user's may hold makes it a call the shim hands over
-        # for that.
-        text = GH.read_text(encoding="utf-8")
-        functions = ""
-        for name in ("gh_shim_is_write", "gh_shim_may_send_text", "gh_shim_has_nested_alias"):
-            start = text.index(f"{name}() {{")
-            functions += text[start:text.index("\n}\n", start) + 3]
+        # for that. Control: `pr view 1`, a read gh_shim_is_quiet names, is not handed over, so gh_shim_is_quiet ran and
+        # let it go: until the review of 053ef618 (finding 4) this test lifted gh_shim_may_send_text without it, and
+        # every call under a command the shim knows was handed over, a text command moved to gh_shim_is_quiet too.
+        functions = shim_functions()
         module = self.scanner()
         calls = [[group, *([sub] if sub else ["-X", "POST", "repos/o/r/issues"])]
                  for group, sub in module.GH_TEXT_COMMANDS]
@@ -4446,12 +4463,16 @@ class Tables(unittest.TestCase):
             calls.extend([spelled, *words] for spelled in spellings)
         calls.extend(["stack", name] for name, (kind, _) in module.GH_STACK_COMMANDS.items() if kind != "quiet")
         with tempfile.TemporaryDirectory() as config:
+            def answer(argv: list[str]) -> str:
+                script = functions + "\ngh_shim_may_send_text " + " ".join(f"'{a}'" for a in argv) + " && echo yes"
+                return subprocess.run(["bash", "-c", script], env={**os.environ, "GH_CONFIG_DIR": config},
+                                      capture_output=True, text=True, timeout=60).stdout.strip()
+
             for argv in calls:
                 with self.subTest(command=" ".join(argv)):
-                    script = functions + "\ngh_shim_may_send_text " + " ".join(f"'{a}'" for a in argv) + " && echo yes"
-                    out = subprocess.run(["bash", "-c", script], env={**os.environ, "GH_CONFIG_DIR": config},
-                                         capture_output=True, text=True, timeout=60).stdout
-                    self.assertEqual(out.strip(), "yes")
+                    self.assertEqual(answer(argv), "yes")
+            with self.subTest(control="pr view 1"):
+                self.assertEqual(answer(["pr", "view", "1"]), "")
 
     def test_a_command_taken_out_of_every_table_is_refused_at_run_time(self) -> None:
         # The check reads its tables as it runs (gh_command), so they are the list of what passes
@@ -4576,21 +4597,23 @@ class Tables(unittest.TestCase):
         # shims/gh starts the check for every call but those gh_shim_is_quiet names. Until the rulings on the tester's
         # findings at 1c15219b (dispatch://INFRA-4957, item 2) it let every call that was no write go unread, so a
         # command in none of the check's tables went to gh unchecked. A call the shim does not hand to the check must be
-        # one the check lets go (gh_check exits 0), for each command the tables name, by its words and by gh's aliases
-        # of them, and for each pair of a top-level word the shim knows and a word gh_shim_is_quiet holds, so a verb the
-        # shim lets go that the check does not know is found too; and for each gh-stack subcommand, by its name and its
-        # aliases (GH_STACK_COMMANDS, GH_STACK_ALIASES), both where gh-stack is installed, where the check reads its
-        # table, and where it is not, where `gh stack` is gh's stub of it, which the check refuses: the shim hands every
-        # `gh stack` call to the check today, and a list of quiet gh-stack calls in the shim must hold to both.
+        # one the check reads no text of and refuses nothing of (gh_command gives None), for each command the tables
+        # name, by its words and by gh's aliases of them, and for each pair of a top-level word the shim knows and a
+        # word gh_shim_is_quiet holds, so a verb the shim lets go that the check does not know is found too; and for
+        # each gh-stack subcommand, by its name and its aliases (GH_STACK_COMMANDS, GH_STACK_ALIASES), both where
+        # gh-stack is installed, where the check reads its table, and where it is not, where `gh stack` is gh's stub of
+        # it, which the check refuses: the shim hands every `gh stack` call to the check today, and a list of quiet
+        # gh-stack calls in the shim must hold to both. `gh api` is the one text command gh_shim_is_quiet names, since
+        # gh_shim_is_write tells its writes from its reads: an unread `gh api` call must be no write there and one the
+        # check lets go (gh_check exits 0). Until the review of 053ef618 (finding 4) every unread call was held only to
+        # gh_check exiting 0, which a text command called with no text does too, so a text command moved to
+        # gh_shim_is_quiet passed here.
         # Controls: a verb gh does not have, under a group, a group's alias, a group of a group and after an empty word,
         # a top-level name gh does not have, after an empty word too, and an official extension stub are handed to the
         # check; the reads agents run most, git's credential helper, `gh help` and `gh version` are not.
         module = self.scanner()
         text = GH.read_text(encoding="utf-8")
-        functions = ""
-        for name in ("gh_shim_is_write", "gh_shim_may_send_text", "gh_shim_is_quiet", "gh_shim_has_nested_alias"):
-            start = text.index(f"{name}() {{")
-            functions += text[start:text.index("\n}\n", start) + 3]
+        functions = shim_functions(text)
         calls: set[tuple[str, ...]] = set()
         for name in module.gh_commands():
             words = name.split()
@@ -4619,25 +4642,34 @@ class Tables(unittest.TestCase):
         ordered = [*sorted(calls), *unknown, *hot]
         with tempfile.TemporaryDirectory() as config, tempfile.TemporaryDirectory() as installed:
             (Path(installed) / "gh" / "extensions" / "gh-stack").mkdir(parents=True)
+            apis = [call for call in ordered if call[0] == "api"]
             script = functions
             for call in ordered:
                 quoted = " ".join(f"'{a}'" for a in call)
                 script += f"\ngh_shim_may_send_text {quoted} && echo yes || echo no"
+            for call in apis:
+                quoted = " ".join(f"'{a}'" for a in call)
+                script += f"\ngh_shim_is_write {quoted} && echo yes || echo no"
             for data in (config, installed):
                 env = {"GH_CONFIG_DIR": config, "HOME": config, "XDG_DATA_HOME": data}
                 # The script, some 440 KB, goes on standard input: Linux refuses one argument past 128 KiB
                 # (MAX_ARG_STRLEN), and a CI runner's `bash -c` of it failed with E2BIG.
                 answers = subprocess.run(["bash", "-s"], input=script, env={**os.environ, **env}, capture_output=True,
                                          text=True, timeout=120).stdout.split()
-                self.assertEqual(len(answers), len(ordered))
+                self.assertEqual(len(answers), len(ordered) + len(apis))
                 handed = dict(zip(ordered, (answer == "yes" for answer in answers)))
+                writes = dict(zip(apis, (answer == "yes" for answer in answers[len(ordered):])))
                 unread = sorted(call for call in {*calls, *hot} if not handed[call])
                 self.assertGreater(len(unread), 100, "the shim lets too few calls go unread to compare them with the "
                                                      "check")
                 with mock.patch.dict(os.environ, env):
                     for call in unread:
                         with self.subTest(call=" ".join(call), gh_stack=data == installed):
-                            self.assertEqual(module.gh_check(list(call)), 0)
+                            if call[0] == "api":
+                                self.assertFalse(writes[call])
+                                self.assertEqual(module.gh_check(list(call)), 0)
+                            else:
+                                self.assertIsNone(module.gh_command(list(call), env))
                 for call in unknown:
                     with self.subTest(control=" ".join(call), gh_stack=data == installed):
                         self.assertTrue(handed[call])
@@ -4746,11 +4778,9 @@ class Writes(unittest.TestCase):
 
     @staticmethod
     def is_write(argv: list[str]) -> bool:
-        """gh_shim_is_write, lifted out of the shim by text (sourcing shims/gh runs it), so these cases are checked
-        against the real file."""
-        text = GH.read_text(encoding="utf-8")
-        start = text.index("gh_shim_is_write() {")
-        script = text[start:text.index("\n}\n", start) + 3] + "\ngh_shim_is_write " + " ".join(f"'{a}'" for a in argv)
+        """gh_shim_is_write, lifted out of the shim by text with the shim's other functions (shim_functions), so these
+        cases are checked against the real file."""
+        script = shim_functions() + "\ngh_shim_is_write " + " ".join(f"'{a}'" for a in argv)
         return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60,
                               check=False).returncode == 0
 
@@ -4771,6 +4801,16 @@ class Writes(unittest.TestCase):
             with self.subTest(argv=argv):
                 self.assertFalse(self.is_write(argv), f"{argv} should not be a write")
 
+    def test_an_empty_word_is_skipped_as_cobra_skips_it(self) -> None:
+        # cobra skips an empty word before the command and before its verb, and so does gh_shim_is_quiet; until the
+        # review of 053ef618 (finding 5) gh_shim_is_write read `pr '' comment 1` as the verb '' of `pr`, so no write.
+        # Control: `pr '' view 1` is no write.
+        for argv in (["pr", "", "comment", "1"], ["", "pr", "comment", "1"]):
+            with self.subTest(argv=argv):
+                self.assertTrue(self.is_write(argv), f"{argv} should be a write")
+        with self.subTest(control=["pr", "", "view", "1"]):
+            self.assertFalse(self.is_write(["pr", "", "view", "1"]), "pr '' view 1 should not be a write")
+
 
 class NestedAliases(unittest.TestCase):
     """gh_shim_has_nested_alias makes shims/gh start the check for a call under a gh command whenever gh's config.yml
@@ -4779,11 +4819,9 @@ class NestedAliases(unittest.TestCase):
 
     @staticmethod
     def has_nested_alias(command: str, config: str, locale: str = "") -> bool:
-        """gh_shim_has_nested_alias COMMAND, lifted out of the shim by text (sourcing shims/gh runs it), with gh's
-        config.yml, in a new GH_CONFIG_DIR, holding CONFIG, in LOCALE (LC_ALL) when given."""
-        text = GH.read_text(encoding="utf-8")
-        start = text.index("gh_shim_has_nested_alias() {")
-        script = text[start:text.index("\n}\n", start) + 3] + f"\ngh_shim_has_nested_alias '{command}'"
+        """gh_shim_has_nested_alias COMMAND, lifted out of the shim by text with the shim's other functions
+        (shim_functions), with gh's config.yml, in a new GH_CONFIG_DIR, holding CONFIG, in LOCALE (LC_ALL) when given."""
+        script = shim_functions() + f"\ngh_shim_has_nested_alias '{command}'"
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / "config.yml").write_text(config, encoding="utf-8")
             env = {"PATH": os.environ["PATH"], "GH_CONFIG_DIR": directory, **({"LC_ALL": locale} if locale else {})}
