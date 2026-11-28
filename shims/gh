@@ -212,13 +212,21 @@ gh_shim_is_write() {
 # command (gh's own --help and --version too: gh runs a gh alias and an installed extension with flag parsing off, so
 # one before its name is an argument of it), a gh alias of the user's that the check expands, an installed extension,
 # which the check reads as a command like any other (gh-stack by its GH_STACK_COMMANDS, any other refused as unknown),
-# or a command no table of the check names, a command under which gh's config.yml may hold an alias
-# (gh_shim_has_nested_alias), and any call of one of those commands that gh_shim_is_quiet does not name, a verb gh does
-# not have included, and `extension exec`, which runs an installed extension the check reads as above
+# or a command no table of the check names, and any call of one of gh's commands that gh_shim_is_quiet does not name, a
+# verb gh does not have included, and `extension exec`, which runs an installed extension the check reads as above
 # (GH_EXEC_COMMANDS): the check refuses a command that no table of it names. It may be wider than the check's own
 # tables, never narrower (shims/tests/test_gh_leak_terms.py); a call gh_shim_is_quiet names starts the check only where
 # gh_shim_is_write names it too, which some of its verbs do (`pr checkout`, `repo clone`), and it names no `gh stack`
-# call, so each one starts the check, which tells an installed gh-stack from gh's stub of it.
+# call, so each one starts the check, which tells an installed gh-stack from gh's stub of it. A gh alias of the user's
+# never runs in place of a call gh_shim_is_quiet names: gh registers an alias only where no command of its own has the
+# name (pkg/cmd/root/root.go:209-241, pkg/cmd/alias/shared/validations.go:15-30), and `help`, `__complete` and
+# `__completeNoDesc`, which cobra adds after the aliases, are no quiet calls. With gh 2.106.0 and a config.yml holding
+# a shell alias named like each of the 1,081 calls gh_shim_is_quiet names, gh ran none of them, and ran `help`, `pr
+# say`, `environment x` and `zz-top` (shims/tests/test_gh_leak_terms.py, Tables, measured 2026-11-28). Until the
+# tester's findings at 75a41199 (dispatch://INFRA-4957/artifact/rulings-md v74, item 2) the shim read config.yml itself
+# (gh_shim_has_nested_alias) and started the check for a call under a command whose name or alias a key there might
+# be; since the quiet verbs were named (rulings on the tester's findings at 1c15219b, item 2) that decided only a bare
+# `help`, and its pattern missed an escaped, tagged or anchored key.
 gh_shim_may_send_text() {
     gh_shim_is_write "$@" && return 0
     (($#)) || return 1
@@ -228,29 +236,33 @@ gh_shim_may_send_text() {
             | extension | extensions | gist | gpg-key | help | issue | label | licenses | org | pr | preview \
             | project | release | repo | rs | ruleset | run | search | secret | skill | skills | ssh-key \
             | status | variable | version | workflow)
-            gh_shim_has_nested_alias "$1" && return 0
             ! gh_shim_is_quiet "$@"
             return
             ;;
     esac
     return 0
 }
-# gh_shim_is_quiet ARGV…: true when the call is one word, a group of gh's alone, whose help gh prints, or `help`
-# alone; or its first word is `api`, whose writes gh_shim_is_write tells apart, or a one-word command of gh 2.106.0
-# that scripts/leak-terms-check lets go whatever follows and that hands its words to no other program; or its first two
-# words are a two-word command the check lets go whatever the call gives, by its words or by gh's aliases of them
-# (GH_QUIET_COMMANDS, GH_HIDDEN_COMMANDS). `help` with a word after it is no quiet call: gh runs `gh help <extension>
-# <words>` as `gh <extension> <words> --help`, the extension's call (internal/ghcmd/cmd.go:189-193), which the check
-# reads as such. `copilot` is never one: gh hands its words to the Copilot CLI unread, and the check refuses it but for
-# gh's help of it. Until the rulings on the tester's findings at b134dfbd (dispatch://INFRA-4957/artifact/rulings-md
-# v72, items 1 and 2) both were quiet whatever followed, and `gh help stack submit --` ran gh-stack's submit unread. Of
-# the one-word commands left, gh 2.106.0 reads the words of each itself (no DisableFlagParsing) and none sends text to
-# GitHub: `browse` opens in the browser a URL it makes, `status` reads, and `completion`, `licenses` and `version`
-# print (pkg/cmd/browse, status, completion, licenses, version). The words are read exactly, as $1 and $2, here and in
-# gh_shim_is_write, never past an option or an empty word as cobra reads past one: a call whose command stands after
-# such a word is no quiet call, so gh_shim_may_send_text hands it to the check, which reads it as gh does, and the shim
-# keeps no reading of its own of where gh finds a command. Until 2026-11-28 it had one, a copy of how cobra finds a
-# command, by which gh_shim_is_write found the words, and this function too until c5704922
+# gh_shim_is_quiet ARGV…: true when the call is one word, a group of gh's alone, whose help gh prints; or its first word
+# is `api`, whose writes gh_shim_is_write tells apart, or a one-word command of gh 2.106.0 that scripts/leak-terms-check
+# lets go whatever follows and that hands its words to no other program; or its first two words are a two-word command
+# the check lets go whatever the call gives, by its words or by gh's aliases of them (GH_QUIET_COMMANDS,
+# GH_HIDDEN_COMMANDS). `help` is never one. Alone it runs a gh alias of the user's named `help` in place of gh's help,
+# since cobra adds `help` to gh's root only after gh registered the aliases (GH_LATE_COMMANDS), and the key of such an
+# alias can be spelled in YAML forms that yaml.v3 reads as `help` and no pattern of the shim's finds (`"\x68elp"`,
+# `!!str help`, `&a help`). With a word after it gh runs `gh help <extension> <words>` as `gh <extension> <words>
+# --help`, the extension's call (internal/ghcmd/cmd.go:189-193). The check reads each as gh does. `copilot` is never one
+# either: gh hands its words to the Copilot CLI unread, and the check refuses it but for gh's help of it. Until the
+# rulings on the tester's findings at b134dfbd (dispatch://INFRA-4957/artifact/rulings-md v72, items 1 and 2) both were
+# quiet whatever followed, and `gh help stack submit --` ran gh-stack's submit unread; until the tester's findings at
+# 75a41199 a bare `help` was quiet unless config.yml held a `help` key in a form the shim's pattern found (see
+# gh_shim_may_send_text). Of the one-word commands left, gh 2.106.0 reads the words of each itself (no
+# DisableFlagParsing) and none sends text to GitHub: `browse` opens in the browser a URL it makes, `status` reads, and
+# `completion`, `licenses` and `version` print (pkg/cmd/browse, status, completion, licenses, version). The words are
+# read exactly, as $1 and $2, here and in gh_shim_is_write, never past an option or an empty word as cobra reads past
+# one: a call whose command stands after such a word is no quiet call, so gh_shim_may_send_text hands it to the check,
+# which reads it as gh does, and the shim keeps no reading of its own of where gh finds a command. Until 2026-11-28 it
+# had one, a copy of how cobra finds a command, by which gh_shim_is_write found the words, and this function too until
+# c5704922
 # (dispatch://INFRA-4957/artifact/rulings-md v71, item 7); a call could go to gh unread where that copy found a quiet
 # command and gh ran another one, as it could where a quiet command hands its words to another program. So an option,
 # an empty word, --help, --version or `--` as the first word, or as the second word after a group (`gh pr --help`, `gh
@@ -271,7 +283,7 @@ gh_shim_is_quiet() {
     esac
     case "$group" in
         api | browse | completion | licenses | status | version) return 0 ;;
-        copilot) return 1 ;;
+        copilot | help) return 1 ;;
     esac
     (($# == 1)) && return 0
     case "$group" in
@@ -342,38 +354,6 @@ gh_shim_is_quiet() {
         workflow) case "$verb" in disable | enable | list | ls | view) return 0 ;; esac ;;
     esac
     return 1
-}
-# gh_shim_has_nested_alias COMMAND: true when gh's config.yml (in gh's own config dir) may hold an
-# alias under COMMAND, such as `gh alias set 'pr say' 'pr comment'`, which gh runs as what it
-# expands to, or an alias of COMMAND's own name, which gh runs in place of `gh help`: cobra adds
-# `help` to gh's root only after gh registered the aliases, and a `help:` key ran in 6 of 6 runs
-# (dispatch://INFRA-4957, the review of 845477ce, finding 1); the check then reads the call and
-# decides. The alias's key starts an indented line of a block mapping, or follows the `{` or a `,`
-# of the flow mapping gh writes once the last alias was deleted (`aliases: {pr say: pr comment}`).
-# It is true too when config.yml holds a line break other than a line feed, matched as bytes in any
-# locale (a carriage return, and UTF-8's next line, line separator and paragraph separator):
-# yaml.v3 begins a line at each, so a key after one starts no
-# line the pattern below finds. Until 2026-11-17 `gh pr say 11 --body …` was a read here, and its
-# text went out unchecked. It is true too when config.yml holds a `? ` key, at a line's start or
-# after a `{` or a `,`, matched as bytes the same way: gh writes `? ` before a key yaml.v3 does not
-# write as a simple key, one past 128 bytes or one whose name holds a line break (`? |`, `? "cr\r"`,
-# `{? "pr say\n" : …}`), in a block and in a flow mapping, so the check starts for every such key
-# gh writes. The check judges a call through an alias as the command it expands to; where it cannot
-# read config.yml exactly, it refuses each call whose name stands there before a `:`
-# (scripts/leak-terms-check, gh_aliases). A line that only looks like an alias starts the check,
-# which on a config.yml it reads exactly finds no alias and lets the call go. A key of a group's own
-# name (`pr:`) starts it too, though gh registers no alias that a command's name takes.
-gh_shim_has_nested_alias() {
-    local config="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/config.yml" text pattern
-    local LC_ALL=C
-    [[ -r "$config" ]] || return 1
-    text="$(< "$config")" || return 1
-    [[ "$text" == *$'\r'* || "$text" == *$'\xc2\x85'* || "$text" == *$'\xe2\x80\xa8'* || "$text" == *$'\xe2\x80\xa9'* ]] &&
-        return 0
-    pattern=$'(^|\n)[ \t]*\\?[ \t]|[{,][ \t]*\\?[ \t]'
-    [[ "$text" =~ $pattern ]] && return 0
-    pattern=$'((^|\n)[ \t]+|[{,][ \t\n]*)["\']?'"$1"$'(["\']?[ \t]*:|[ \t][^:\n]*:)'
-    [[ "$text" =~ $pattern ]]
 }
 # The text of a call that reads stdin (`--input -`, `--body-file -`, `-F name=@-`, …) is read by the checks below
 # before gh runs, and gh then gets the same bytes. gh_shim_buffer_stdin reads all of stdin (at most 64 MiB), once a
