@@ -125,9 +125,8 @@ def load_check():
 
 
 # The functions of shims/gh that decide whether a call goes to the check: gh_shim_may_send_text calls gh_shim_is_write,
-# gh_shim_is_quiet and gh_shim_has_nested_alias, and the first reads the call's command with gh_shim_command_words.
-SHIM_GATE = ("gh_shim_command_words", "gh_shim_is_write", "gh_shim_may_send_text", "gh_shim_is_quiet",
-             "gh_shim_has_nested_alias")
+# gh_shim_is_quiet and gh_shim_has_nested_alias.
+SHIM_GATE = ("gh_shim_is_write", "gh_shim_may_send_text", "gh_shim_is_quiet", "gh_shim_has_nested_alias")
 
 
 def shim_sources(text: str | None = None) -> dict[str, str]:
@@ -545,8 +544,11 @@ class GhLeakTerms(unittest.TestCase):
         self.assertIn("cannot read the titles and bodies of the pull requests it creates: without --auto", stderr)
 
     def test_gh_s_own_help_and_version_flags_go_out_unchanged(self) -> None:
-        # gh's own --help and --version, alone, together and before one of gh's own commands, send no text: shims/gh
-        # hands each such call to the check, which lets it go, and gh gets it once with the same arguments.
+        # gh's own --help and --version, alone, together and before one of gh's own commands, send no text, so each such
+        # call goes out: gh gets it once, with the same arguments. That shims/gh hands each to the check, which lets it
+        # go, is held in Tables.test_the_shim_lets_a_call_go_unread_only_where_the_check_lets_it_go: the three with no
+        # command among the calls it asserts the shim hands over, the others among its spellings of the calls the shim
+        # lets go unread.
         for argv in (["--version"], ["--help"], ["--version", "--help"], ["--help", "pr"], ["--version", "status"],
                      ["--help", "pr", "view", "1"]):
             with self.subTest(call=" ".join(argv)):
@@ -4690,21 +4692,25 @@ class Tables(unittest.TestCase):
         # an unread `gh api` call is a read, which must be one the check lets go (gh_check exits 0). Until the review
         # of 053ef618 (finding 4) every unread call was held only to gh_check exiting 0, which a text command called
         # with no text does too, so a text command moved to gh_shim_is_quiet passed here.
-        # gh_shim_is_quiet reads the call's first two words exactly, not past an option or an empty word as cobra
-        # would (dispatch://INFRA-4957/artifact/rulings-md v71, item 7): where the shim's own reading of where gh finds
-        # the command differed from gh's, a call went to gh unread. So each call the shim lets go unread is handed to
-        # the check with `--help`, `--version`, `-R o/r`, an empty word or `--` put before its first word, and, where
-        # that word is a group, right after it: between the group and its verb (`gh pr -R o/r view 1`), and after a
-        # group alone (`gh pr --help`), which the shim read until c5704922 as a group with no verb and let go unread.
-        # Until the simplify review of c5704922 a group alone took each form before it only. A one-word command of the
-        # check's tables (`api`, `help`, `version`, ...) is quiet whatever follows it, so it takes each form before it
-        # only. The calls are those a first run of the shim's functions lets go unread, and a second run reads each
-        # spelling of them. One subtest for each form, each place and each environment lists the calls so spelled that
-        # the shim lets go unread; more than 550 of the spellings put a form right after the first word, so the test
-        # cannot pass on too few of them.
+        # gh_shim_is_quiet reads the call's first two words exactly, not past an option or an empty word as cobra would
+        # (dispatch://INFRA-4957/artifact/rulings-md v71, item 7): until c5704922 it found them with the shim's own copy
+        # of how cobra finds a command, and a call could go to gh unread where that copy found a quiet command and gh
+        # ran another one. So each call the shim lets go unread is handed to the check with `--help`, `--version`,
+        # `-R o/r`, an empty word or `--` put before its first word, and, where that word is a group, right after it:
+        # between the group and its verb (`gh pr -R o/r view 1`), and after a group alone (`gh pr --help`), which the
+        # shim read until c5704922 as a group with no verb and let go unread. Until the simplify review of c5704922 a
+        # group alone took each form before it only. A one-word command of the check's tables (`api`, `help`, `version`,
+        # ...) is quiet whatever follows it, so it takes each form before it only. The calls are those a first run of
+        # the shim's functions lets go unread, and a second run reads each spelling of them. Each spelling is a call the
+        # check must let go, as it lets the call go (gh_check exits 0 for one of `api`, gh_command gives None for any
+        # other): such a spelling of a quiet call costs one run of the check (gh_shim_is_quiet), and a read an agent
+        # writes so must still go out. One subtest for each form, each place and each environment lists the calls so
+        # spelled that the shim lets go unread, and one more those so spelled that the check does not let go; more than
+        # 550 of the spellings put a form right after the first word, so the test cannot pass on too few of them.
         # Controls: a verb gh does not have, under a group, a group's alias, a group of a group and after an empty word,
-        # a top-level name gh does not have, after an empty word too, and an official extension stub are handed to the
-        # check; the reads agents run most, git's credential helper, `gh help` and `gh version` are not.
+        # a top-level name gh does not have, after an empty word too, an official extension stub, and gh's own
+        # --version, --help and --version --help are handed to the check; the reads agents run most, git's credential
+        # helper, `gh help` and `gh version` are not.
         module = self.scanner()
         text = GH.read_text(encoding="utf-8")
         functions = shim_functions(text)
@@ -4727,7 +4733,8 @@ class Tables(unittest.TestCase):
                    ("no-such-command",), ("", "no-such-command"), ("aw",)]
         hot = [("pr", "view", "1"), ("pr", "checks", "1"), ("run", "view"), ("api", "repos/o/r"),
                ("auth", "git-credential", "get"), ("help",), ("version",)]
-        ordered = [*sorted(calls), *unknown, *hot]
+        root_flags = [("--version",), ("--help",), ("--version", "--help")]
+        ordered = [*sorted(calls), *unknown, *root_flags, *hot]
         forms = {"--help": ("--help",), "--version": ("--version",), "-R o/r": ("-R", "o/r"), "an empty word": ("",),
                  "--": ("--",)}
         places = ("before the first word", "right after the first word")
@@ -4743,6 +4750,12 @@ class Tables(unittest.TestCase):
                 unread = sorted(call for call in {*calls, *hot} if not handed[call])
                 self.assertGreater(len(unread), 100, "the shim lets too few calls go unread to compare them with the "
                                                      "check")
+                variants = [(call, form, at, (*call[:at], *words, *call[at:])) for call in unread
+                            for form, words in forms.items()
+                            for at in ((0, 1) if call[0] not in singles else (0,))]
+                self.assertGreater(sum(1 for _, _, at, _ in variants if at), 550,
+                                   "too few unread calls take a form right after their first word")
+                held_spelled: dict[tuple[str, int], list[str]] = {(form, at): [] for form in forms for at in (0, 1)}
                 with mock.patch.dict(os.environ, env):
                     for call in unread:
                         with self.subTest(call=" ".join(call), gh_stack=data == installed):
@@ -4750,11 +4763,16 @@ class Tables(unittest.TestCase):
                                 self.assertEqual(module.gh_check(list(call)), 0)
                             else:
                                 self.assertIsNone(module.gh_command(list(call), env))
-                variants = [(call, form, at, (*call[:at], *words, *call[at:])) for call in unread
-                            for form, words in forms.items()
-                            for at in ((0, 1) if call[0] not in singles else (0,))]
-                self.assertGreater(sum(1 for _, _, at, _ in variants if at), 550,
-                                   "too few unread calls take a form right after their first word")
+                    for call, form, at, argv in variants:
+                        if call[0] == "api":
+                            let_go = module.gh_check(list(argv)) == 0
+                        else:
+                            try:
+                                let_go = module.gh_command(list(argv), env) is None
+                            except module.GhUnjudgedError:
+                                let_go = False
+                        if not let_go:
+                            held_spelled[form, at].append(" ".join(call))
                 spelled = self.handed_over([argv for *_, argv in variants], env, functions)
                 unread_spelled: dict[tuple[str, int], list[str]] = {(form, at): [] for form in forms for at in (0, 1)}
                 for call, form, at, argv in variants:
@@ -4763,8 +4781,14 @@ class Tables(unittest.TestCase):
                 for (form, at), missed in unread_spelled.items():
                     with self.subTest(form=form, place=places[at], gh_stack=data == installed):
                         self.assertEqual(missed, [], f"the shim lets {len(missed)} calls so spelled go to gh unread")
+                for (form, at), held in held_spelled.items():
+                    with self.subTest(form=form, place=places[at], gh_stack=data == installed, asked="the check"):
+                        self.assertEqual(held, [], f"the check does not let {len(held)} calls so spelled go")
                 for call in unknown:
                     with self.subTest(control=" ".join(call), gh_stack=data == installed):
+                        self.assertTrue(handed[call])
+                for call in root_flags:
+                    with self.subTest(root_flags=" ".join(call), gh_stack=data == installed):
                         self.assertTrue(handed[call])
                 for call in hot:
                     with self.subTest(read=" ".join(call), gh_stack=data == installed):
@@ -4866,8 +4890,9 @@ class Tables(unittest.TestCase):
 
 
 class Writes(unittest.TestCase):
-    """gh_shim_is_write names every call that changes something on GitHub, so the check reads its text, and never a
-    read."""
+    """gh_shim_is_write names every call whose first two words are a write's command and verb, and every `gh api` call
+    that changes something, so the check reads its text, and never a read. A call whose command or verb stands after an
+    option or an empty word is one gh_shim_may_send_text hands to the check whatever gh_shim_is_write answers."""
 
     @staticmethod
     def is_write(argv: list[str]) -> bool:
@@ -4877,10 +4902,19 @@ class Writes(unittest.TestCase):
         return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60,
                               check=False).returncode == 0
 
+    @staticmethod
+    def handed_over(argv: list[str]) -> bool:
+        """Whether gh_shim_may_send_text, lifted out as is_write lifts gh_shim_is_write, hands ARGV to the check, with
+        gh's config directory an empty one, so no alias of the user's config.yml makes it hand the call over."""
+        script = shim_functions() + "\ngh_shim_may_send_text " + " ".join(f"'{a}'" for a in argv)
+        with tempfile.TemporaryDirectory() as config:
+            return subprocess.run(["bash", "-c", script], env={**os.environ, "GH_CONFIG_DIR": config},
+                                  capture_output=True, text=True, timeout=60, check=False).returncode == 0
+
     def test_write_verbs_are_writes(self) -> None:
         for argv in (["issue", "comment"], ["issue", "create"], ["pr", "merge"], ["pr", "review"],
                      ["pr", "edit"], ["pr", "close"], ["release", "create"], ["workflow", "run"],
-                     ["issue", "artifact", "create"], ["issue", "-R", "o/r", "artifact", "edit"],
+                     ["issue", "artifact", "create"],
                      ["api", "-X", "POST", "repos/o/r/issues"],
                      ["api", "--method", "DELETE", "repos/o/r"],
                      ["api", "repos/o/r/issues", "-f", "title=x"]):
@@ -4894,15 +4928,20 @@ class Writes(unittest.TestCase):
             with self.subTest(argv=argv):
                 self.assertFalse(self.is_write(argv), f"{argv} should not be a write")
 
-    def test_an_empty_word_is_skipped_as_cobra_skips_it(self) -> None:
-        # cobra skips an empty word before the command and before its verb, and so does gh_shim_command_words; until the
-        # review of 053ef618 (finding 5) gh_shim_is_write read `pr '' comment 1` as the verb '' of `pr`, so no write.
-        # Control: `pr '' view 1` is no write.
-        for argv in (["pr", "", "comment", "1"], ["", "pr", "comment", "1"]):
+    def test_an_option_or_an_empty_word_before_or_between_the_words_hands_the_call_to_the_check(self) -> None:
+        # gh_shim_is_write reads the call's first two words exactly, as gh_shim_is_quiet does, so it names no write
+        # whose command or verb stands after an option or an empty word, where cobra finds it
+        # (`issue -R o/r artifact edit`, `pr '' comment 1`, `'' pr comment 1`). gh_shim_may_send_text hands each such
+        # call to the check all the same, since it is no quiet call, and the check reads it as gh does. Until 2026-11-28
+        # gh_shim_is_write found the words with the shim's own copy of how cobra finds a command, and this test held it
+        # to a write for each of these calls. `pr '' view 1` is handed over too: its second word is no verb of
+        # gh_shim_is_quiet. Control: `pr view 1`, a read gh_shim_is_quiet names, is not handed over.
+        for argv in (["issue", "-R", "o/r", "artifact", "edit"], ["pr", "", "comment", "1"], ["", "pr", "comment", "1"],
+                     ["pr", "", "view", "1"]):
             with self.subTest(argv=argv):
-                self.assertTrue(self.is_write(argv), f"{argv} should be a write")
-        with self.subTest(control=["pr", "", "view", "1"]):
-            self.assertFalse(self.is_write(["pr", "", "view", "1"]), "pr '' view 1 should not be a write")
+                self.assertTrue(self.handed_over(argv), f"{argv} should be handed to the check")
+        with self.subTest(control=["pr", "view", "1"]):
+            self.assertFalse(self.handed_over(["pr", "view", "1"]), "pr view 1 should not be handed to the check")
 
 
 class NestedAliases(unittest.TestCase):

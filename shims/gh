@@ -119,50 +119,18 @@ gh_shim_call_digest() {
     _digest="$(printf '%s\0' "$@" | sha256sum 2> /dev/null)" || _digest=""
     _digest="${_digest%% *}"
 }
-# gh_shim_command_words ARGV…: sets _group and _verb to the command and its verb as cobra finds them, past the options
-# before each (`gh -R o/r pr comment 1` and `gh pr -R o/r comment 1` are `gh pr comment`), an empty word skipped as
-# cobra skips it (`gh pr '' comment 1` is `gh pr comment`): an option written apart from any value, but --help and
-# --version, takes the next word as its value. `gh api` has no verb: the word after it is its endpoint. gh_shim_is_write
-# reads the command here, so it finds a write wherever the call's words stand; gh_shim_is_quiet does not, since a call
-# this reads apart from gh would go to gh unread there (gh_shim_is_quiet).
-gh_shim_command_words() {
-    local a skip=0
-    _group=""
-    _verb=""
-    for a in "$@"; do
-        if ((skip)); then
-            skip=0
-            continue
-        fi
-        case "$a" in
-            --) break ;;
-            '' | --help | --version | -*=*) ;;
-            --* | -?) skip=1 ;;
-            -*) ;;
-            *)
-                if [[ -z "$_group" ]]; then
-                    _group="$a"
-                    [[ "$a" != api ]] || break
-                else
-                    _verb="$a"
-                    break
-                fi
-                ;;
-        esac
-    done
-}
 # gh_shim_is_write ARGV…: true when this call changes something on GitHub, so gh_shim_may_send_text hands it to the
 # check before it asks anything else: `gh api` whose method, as gh reads it, is neither GET nor HEAD (a field or an
 # --input body with no method makes gh POST), and a call of one of the write verbs listed below. It is not the gate:
 # gh_shim_may_send_text hands the check every call gh_shim_is_quiet does not name, so a write verb missed here still
 # goes to the check, as does a command gh adds, read or write, which the check refuses as one no table of it names
-# until a table sorts it. The command and its verb are found as cobra finds them (gh_shim_command_words). `issue
-# artifact` and `repo autolink` count whatever their own verb: the check refuses their writes and lets their reads go,
-# as it lets `skill publish --dry-run` and an authentication key's `ssh-key add` go (scripts/leak-terms-check,
-# GH_REFUSED_COMMANDS).
+# until a table sorts it. The command and its verb are the call's first two words, read exactly, as gh_shim_is_quiet
+# reads them and for the reason given there; for `gh api` the method and the body are read wherever they stand among its
+# arguments. `issue artifact` and `repo autolink` count whatever their own verb: the check refuses their writes and lets
+# their reads go, as it lets `skill publish --dry-run` and an authentication key's `ssh-key add` go
+# (scripts/leak-terms-check, GH_REFUSED_COMMANDS).
 gh_shim_is_write() {
-    gh_shim_command_words "$@"
-    local a method="" group="$_group" verb="$_verb" letters value kind pending="" body=0
+    local a method="" group="${1:-}" verb="${2:-}" letters value kind pending="" body=0
     case "$group" in
         api)
             # gh api's options as gh's flag parser (pflag) reads them (`gh api --help`, gh 2.106.0): the method is the
@@ -244,13 +212,12 @@ gh_shim_is_write() {
 # command (gh's own --help and --version too: gh runs a gh alias and an installed extension with flag parsing off, so
 # one before its name is an argument of it), a gh alias of the user's that the check expands, an installed extension,
 # which the check reads as a command like any other (gh-stack by its GH_STACK_COMMANDS, any other refused as unknown),
-# or a command no table of the check
-# names, a command under which gh's config.yml may hold an alias (gh_shim_has_nested_alias), and any call of one of
-# those commands that gh_shim_is_quiet does not name, a verb gh does not have included, and `extension exec`, which
-# runs an installed extension the check reads as above (GH_EXEC_COMMANDS): the check refuses a command that no table of
-# it names. It may be wider than the check's own tables, never narrower
-# (shims/tests/test_gh_leak_terms.py); a call gh_shim_is_quiet names never starts the check, and it names no `gh stack`
-# call, so each one starts the check, which tells an installed gh-stack from gh's stub of it.
+# or a command no table of the check names, a command under which gh's config.yml may hold an alias
+# (gh_shim_has_nested_alias), and any call of one of those commands that gh_shim_is_quiet does not name, a verb gh does
+# not have included, and `extension exec`, which runs an installed extension the check reads as above
+# (GH_EXEC_COMMANDS): the check refuses a command that no table of it names. It may be wider than the check's own
+# tables, never narrower (shims/tests/test_gh_leak_terms.py); a call gh_shim_is_quiet names never starts the check, and
+# it names no `gh stack` call, so each one starts the check, which tells an installed gh-stack from gh's stub of it.
 gh_shim_may_send_text() {
     gh_shim_is_write "$@" && return 0
     (($#)) || return 1
@@ -271,15 +238,18 @@ gh_shim_may_send_text() {
 # word is `api`, whose writes gh_shim_is_write tells apart, or a one-word command of gh 2.106.0 that
 # scripts/leak-terms-check lets go whatever follows; or its first two words are a two-word command the check lets go
 # whatever the call gives, by its words or by gh's aliases of them (GH_QUIET_COMMANDS, GH_HIDDEN_COMMANDS). The words
-# are read exactly, as $1 and $2: until 2026-11-28 (dispatch://INFRA-4957/artifact/rulings-md v71, item 7) they were
-# found as gh_shim_is_write finds them (gh_shim_command_words), the shim's own copy of how cobra finds a command, and
-# where that copy read a call apart from gh the call went to gh unread. So an option, an empty word, --help, --version
-# or `--` as the first word, or as the second word after a group (`gh pr --help`, `gh pr -R o/r view 1`), makes the
-# call no quiet one: such a spelling of a quiet call costs one run of the check, which lets it go. Any other call goes
-# to the check, which refuses a command no table of it names: until the rulings on the tester's findings at 1c15219b
+# are read exactly, as $1 and $2, here and in gh_shim_is_write, never past an option or an empty word as cobra reads
+# past one: a call whose command stands after such a word is no quiet call, so gh_shim_may_send_text hands it to the
+# check, which reads it as gh does, and the shim keeps no reading of its own of where gh finds a command. Until
+# 2026-11-28 it had one, a copy of how cobra finds a command, by which gh_shim_is_write found the words, and this
+# function too until c5704922 (dispatch://INFRA-4957/artifact/rulings-md v71, item 7); a call could go to gh unread
+# where that copy found a quiet command and gh ran another one. So an option, an empty word, --help, --version or `--`
+# as the first word, or as the second word after a group (`gh pr --help`, `gh pr -R o/r view 1`), makes the call no
+# quiet one: such a spelling of a quiet call costs one run of the check, which lets it go. Any other call goes to the
+# check, which refuses a command no table of it names: until the rulings on the tester's findings at 1c15219b
 # (dispatch://INFRA-4957, item 2) every call that was no write passed here unread, and a command gh added went to gh
 # unchecked. shims/tests/test_gh_leak_terms.py checks that the check lets go each call this names, and that the shim
-# hands the check each such spelling of one.
+# hands the check each such spelling of one, which the check lets go.
 gh_shim_is_quiet() {
     local group="${1:-}" verb="${2:-}"
     case "$group" in
