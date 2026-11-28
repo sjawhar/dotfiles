@@ -660,6 +660,33 @@ class GhLeakTerms(unittest.TestCase):
                 self.setUp_calls()
                 self.assert_sent(self.run_gh(argv), argv)
 
+    def test_a_bare_gh_help_with_a_help_alias_key_in_any_yaml_form_goes_to_the_check(self) -> None:
+        # gh 2.106.0 reads config.yml with yaml.v3 and runs a `help` alias in place of a bare `gh help`
+        # (scripts/leak-terms-check, GH_LATE_COMMANDS), whatever YAML form spells the key: measured 2026-11-28 through
+        # shims/gh with gh 2.106.0, its HTTP sent to a unix socket by config.yml's http_unix_socket, each key below ran
+        # `api repos/o/pub/issues/1/comments -f body=<text>` and POSTed the text, while gh_shim_has_nested_alias found
+        # no `help` key, so the shim let the bare call go unread and the check never started. Once it starts, the check
+        # refuses each: an escaped key by the alias's text, a tagged or anchored key as a form it does not read.
+        # Control: the plain block key `help:`, which the shim finds.
+        config = self.tmp / "config" / "gh"
+        config.mkdir()
+        expansion = f"api repos/{PUBLIC}/issues/1/comments -f body=See-{CANARY.upper()}"
+        forms = {"double-quoted, \\x escape": f"\n    \"\\x68elp\": {expansion}\n",
+                 "double-quoted, \\u escape": f"\n    \"\\u0068elp\": {expansion}\n",
+                 "tagged": f"\n    !!str help: {expansion}\n",
+                 "anchored": f"\n    &a help: {expansion}\n",
+                 "flow, \\x escape": f" {{\"\\x68elp\": {expansion}}}\n",
+                 "flow, tagged": f" {{!!str help: {expansion}}}\n",
+                 "block (control)": f"\n    help: {expansion}\n"}
+        for form, aliases in forms.items():
+            (config / "config.yml").write_text(gh_config_yml(aliases), encoding="utf-8")
+            with self.subTest(form=form):
+                self.setUp_calls()
+                result = self.run_gh(["help"])
+                self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
+                self.assertEqual(self.gh_calls(), [])
+                self.assertIn("refused before gh ran, so nothing was sent", result.stderr.decode("utf-8", "replace"))
+
     # --- a term listed for some repositories only ---------------------------------------------------------------
 
     def test_a_scoped_term_is_refused_only_for_a_public_repository_of_its_scope(self) -> None:
