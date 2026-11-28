@@ -248,29 +248,28 @@ gh_shim_may_send_text() {
 # the check lets go whatever the call gives, by its words or by gh's aliases of them (GH_QUIET_COMMANDS,
 # GH_HIDDEN_COMMANDS). `help` is never one. Alone it runs a gh alias of the user's named `help` in place of gh's help,
 # since cobra adds `help` to gh's root only after gh registered the aliases (GH_LATE_COMMANDS), and the key of such an
-# alias can be spelled in YAML forms that yaml.v3 reads as `help` and no pattern of the shim's finds (`"\x68elp"`,
-# `!!str help`, `&a help`). With a word after it gh runs `gh help <extension> <words>` as `gh <extension> <words>
-# --help`, the extension's call (internal/ghcmd/cmd.go:189-193). The check reads each as gh does. `copilot` is never one
-# either: gh hands its words to the Copilot CLI unread, and the check refuses it but for gh's help of it. Until the
-# rulings on the tester's findings at b134dfbd (dispatch://INFRA-4957/artifact/rulings-md v72, items 1 and 2) both were
-# quiet whatever followed, and `gh help stack submit --` ran gh-stack's submit unread; until the tester's findings at
-# 75a41199 a bare `help` was quiet unless config.yml held a `help` key in a form the shim's pattern found (see
-# gh_shim_may_send_text). Of the one-word commands left, gh 2.106.0 reads the words of each itself (no
+# alias can be spelled in YAML forms that yaml.v3 reads as `help` and a pattern over config.yml's text misses
+# (`"\x68elp"`, `!!str help`, `&a help`). With a word after it, `gh help <extension> <words>` runs as `gh <extension>
+# <words> --help`, the extension's call (internal/ghcmd/cmd.go:189-193). The check reads each as gh does. `copilot` is
+# never one either: gh hands its words to the Copilot CLI unread, and the check refuses it but for gh's help of it.
+# Until the rulings on the tester's findings at b134dfbd (dispatch://INFRA-4957/artifact/rulings-md v72, items 1 and 2)
+# both were quiet whatever followed, and `gh help stack submit --` ran gh-stack's submit unread; until the tester's
+# findings at 75a41199 a bare `help` was quiet unless config.yml held a `help` key in a form the shim's pattern found
+# (see gh_shim_may_send_text). Of the one-word commands left, gh 2.106.0 reads the words of each itself (no
 # DisableFlagParsing) and none sends text to GitHub: `browse` opens in the browser a URL it makes, `status` reads, and
 # `completion`, `licenses` and `version` print (pkg/cmd/browse, status, completion, licenses, version). The words are
 # read exactly, as $1 and $2, here and in gh_shim_is_write, never past an option or an empty word as cobra reads past
 # one: a call whose command stands after such a word is no quiet call, so gh_shim_may_send_text hands it to the check,
 # which reads it as gh does, and the shim keeps no reading of its own of where gh finds a command. Until 2026-11-28 it
 # had one, a copy of how cobra finds a command, by which gh_shim_is_write found the words, and this function too until
-# c5704922
-# (dispatch://INFRA-4957/artifact/rulings-md v71, item 7); a call could go to gh unread where that copy found a quiet
-# command and gh ran another one, as it could where a quiet command hands its words to another program. So an option,
-# an empty word, --help, --version or `--` as the first word, or as the second word after a group (`gh pr --help`, `gh
-# pr -R o/r view 1`), makes the call no quiet one: such a spelling of a quiet call costs one run of the check, which
-# lets it go. Any other call goes to the check, which refuses a command no table of it names: until the rulings on the
-# tester's findings at 1c15219b (dispatch://INFRA-4957, item 2) every call that was no write passed here unread, and a
-# command gh added went to gh unchecked. shims/tests/test_gh_leak_terms.py checks that the check lets go each call this
-# names, and that the shim hands the check each such spelling of one, which the check lets go.
+# c5704922 (dispatch://INFRA-4957/artifact/rulings-md v71, item 7); a call could go to gh unread where that copy found a
+# quiet command and gh ran another one, as it could where a quiet command hands its words to another program. So an
+# option, an empty word, --help, --version or `--` as the first word, or as the second word after a group (`gh pr
+# --help`, `gh pr -R o/r view 1`), makes the call no quiet one: such a spelling of a quiet call costs one run of the
+# check, which lets it go. Any other call goes to the check, which refuses a command no table of it names: until the
+# rulings on the tester's findings at 1c15219b (dispatch://INFRA-4957, item 2) every call that was no write passed here
+# unread, and a command gh added went to gh unchecked. shims/tests/test_gh_leak_terms.py checks that the check lets go
+# each call this names, and that the shim hands the check each such spelling of one, which the check lets go.
 gh_shim_is_quiet() {
     local group="${1:-}" verb="${2:-}"
     case "$group" in
