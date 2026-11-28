@@ -16,7 +16,6 @@ import codecs
 import ctypes
 import errno
 import fnmatch
-import glob
 import html
 import io
 import json
@@ -487,14 +486,20 @@ def terminal_view(text: str) -> tuple[str, list[int]] | None:
     if "\x1b" not in text and "\x9b" not in text:
         return None
     kept: list[int] = []
+    pieces: list[str] = []
     last = 0
     for sequence in TERMINAL_SEQUENCE.finditer(text):
         kept.extend(range(last, sequence.start()))
+        pieces.append(text[last:sequence.start()])
         last = sequence.end()
     if last == 0:
         return None
     kept.extend(range(last, len(text)))
-    return "".join(text[index] for index in kept), kept
+    pieces.append(text[last:])
+    # Joined from the kept runs, not a character at a time: a binary file holds an ESC about every 256 bytes, and under
+    # cProfile the reading of a 4 MiB asset of random bytes (gh_file_views) took 5.0 s joined a character at a time and
+    # 2.6 s so (2026-11-27).
+    return "".join(pieces), kept
 
 
 
@@ -518,10 +523,12 @@ class TermMatcher:
                  allowed: Sequence[tuple[str, Sequence[str]]] = (), repositories: Sequence[str] | None = None):
         patterns: list[tuple[re.Pattern[str], int, str]] = []
         seen: set[tuple[str, str]] = set()
+        most_gaps = 0
         self.scopes = {scope.label: scope for scope, _ in scoped}
         for label, listed in (("", terms), *((scope.label, listed) for scope, listed in scoped)):
             for number, term in enumerate(listed, start=1):
                 pieces = re.split(TERM_SEPARATOR, term.casefold())
+                most_gaps = max(most_gaps, len(pieces) - 1)
                 pattern = TERM_SEPARATOR.join(re.escape(piece) for piece in pieces)
                 if pattern and (label, pattern) not in seen:
                     patterns.append((re.compile(pattern), number, label))
@@ -529,6 +536,14 @@ class TermMatcher:
         self._patterns = patterns
         self._allowed = [(pattern, allowed_token(token)) for pattern, tokens in allowed for token in tokens]
         self._repositories = tuple(repositories) if repositories else ()
+        # The longest term, folded, and the longest allowed token, in characters: what a match of a term written with
+        # one character between its words spans, and what a token that holds it spans; and the most gaps of a term, the
+        # places where whitespace (TERM_SEPARATOR) parts its words, at each of which a match may hold whitespace of any
+        # length (GhChunkScan).
+        self.longest_term = max((len(term.casefold()) for listed in (terms, *(listed for _, listed in scoped))
+                                 for term in listed), default=0)
+        self.longest_token = max((len(token) for _, tokens in allowed for token in tokens), default=0)
+        self.most_gaps = most_gaps
         named = [(scope, listed) for scope, listed in scoped if not scope.registry]
         self._names: TermMatcher = (self if len(named) == len(scoped)
                                     else TermMatcher(terms, named, allowed, repositories))
@@ -2885,10 +2900,10 @@ def scan_push(text: str, remote: str, url: str) -> list[Finding]:
     return findings
 
 
-# The text a gh call sends to GitHub, read before gh runs. shims/gh hands this check every call that can carry text, as
-# `gh -- ARGV…`, on the pass that runs gh. Until 2026-11-17 nothing read that text, and an agent's
-# `gh pr edit` put a listed term into a public pull request's body, where GitHub keeps it in the body's edit history,
-# which only an admin can delete (dispatch://INFRA-4102).
+# The text a gh call sends to GitHub, read before gh runs. shims/gh hands this check every call, as `gh -- ARGV…`, on
+# the pass that runs gh. Until 2026-11-17 nothing read that text, and an agent's `gh pr edit` put a listed term into a
+# public pull request's body, where GitHub keeps it in the body's edit history, which only an admin can delete
+# (dispatch://INFRA-4102).
 #
 # The threat is an agent's accidental leak of a listed term through gh. The check does not try to stop a deliberate
 # evasion: anyone set on leaking can use curl. So it reads where a call goes only in the plain case, where every host
@@ -2901,28 +2916,26 @@ def scan_push(text: str, remote: str, url: str) -> list[Finding]:
 # bytes when the check passes.
 GH_STDIN_EXIT = 7
 GH_STDIN = "DOTFILES_LEAK_TERMS_GH_STDIN"
-# Every gh command that sends text, with its options as `gh <command> <subcommand> --help` lists them at gh 2.98.0, the
-# version mise.toml pins: (the options that take a value, the options that take none), a short and a long spelling
-# joined by `/`. shims/tests/test_gh_leak_terms.py compares the tables with the gh on PATH, so an upgrade that adds an
-# option fails that test until the table has it. `gh api` is ("api", ""). `issue transfer` is not here: GitHub moves
-# an issue only within one owner and never from a private to a public repository ("You can only transfer issues between
-# repositories owned by the same user or organization account. A private repository issue cannot be transferred to a
-# public repository", docs.github.com, "Transferring an issue to another repository", read 2026-11-19), so a transfer
-# to a public repository moves text that was public already.
+# Every gh command whose text the check reads, with its options as `gh <command> <subcommand> --help` lists them at gh
+# 2.106.0, the version mise.toml pins: (the options that take a value, the options that take none), a short and a long
+# spelling joined by `/`. shims/tests/test_gh_leak_terms.py compares the tables with the gh on PATH, so an upgrade that
+# adds an option fails that test until the table has it. `gh api` is ("api", ""). Every other command `gh help` lists is
+# in GH_QUIET_COMMANDS, GH_REFUSED_COMMANDS or GH_EXEC_COMMANDS, each other command of gh the check lets go is in
+# GH_HIDDEN_COMMANDS, and a call of a command none of them names is refused (gh_command).
 GH_TEXT_COMMANDS: dict[tuple[str, str], tuple[str, str]] = {
     ("pr", "create"): (
-        "-a/--assignee -B/--base -b/--body -F/--body-file -H/--head -l/--label -m/--milestone -p/--project "
+        "-a/--assignee --attach -B/--base -b/--body -F/--body-file -H/--head -l/--label -m/--milestone -p/--project "
         "--recover -r/--reviewer -T/--template -t/--title -R/--repo",
         "-d/--draft --dry-run -e/--editor -f/--fill --fill-first --fill-verbose --no-maintainer-edit -w/--web "
         "--help",
     ),
     ("pr", "edit"): (
-        "--add-assignee --add-label --add-project --add-reviewer -B/--base -b/--body -F/--body-file "
+        "--add-assignee --add-label --add-project --add-reviewer --attach -B/--base -b/--body -F/--body-file "
         "-m/--milestone --remove-assignee --remove-label --remove-project --remove-reviewer -t/--title -R/--repo",
         "--remove-milestone --help",
     ),
     ("pr", "comment"): (
-        "-b/--body -F/--body-file -R/--repo",
+        "--attach -b/--body -F/--body-file -R/--repo",
         "--create-if-none --delete-last --edit-last -e/--editor -w/--web --yes --help",
     ),
     ("pr", "review"): (
@@ -2946,18 +2959,18 @@ GH_TEXT_COMMANDS: dict[tuple[str, str], tuple[str, str]] = {
         "-d/--draft --help",
     ),
     ("issue", "create"): (
-        "-a/--assignee --blocked-by --blocking -b/--body -F/--body-file -l/--label -m/--milestone --parent "
+        "-a/--assignee --attach --blocked-by --blocking -b/--body -F/--body-file -l/--label -m/--milestone --parent "
         "-p/--project --recover -T/--template -t/--title --type -R/--repo",
         "-e/--editor -w/--web --help",
     ),
     ("issue", "edit"): (
-        "--add-assignee --add-blocked-by --add-blocking --add-label --add-project --add-sub-issue -b/--body "
+        "--add-assignee --add-blocked-by --add-blocking --add-label --add-project --add-sub-issue --attach -b/--body "
         "-F/--body-file -m/--milestone --parent --remove-assignee --remove-blocked-by --remove-blocking "
         "--remove-label --remove-project --remove-sub-issue -t/--title --type -R/--repo",
         "--remove-milestone --remove-parent --remove-type --help",
     ),
     ("issue", "comment"): (
-        "-b/--body -F/--body-file -R/--repo",
+        "--attach -b/--body -F/--body-file -R/--repo",
         "--create-if-none --delete-last --edit-last -e/--editor -w/--web --yes --help",
     ),
     ("issue", "close"): (
@@ -2969,7 +2982,7 @@ GH_TEXT_COMMANDS: dict[tuple[str, str], tuple[str, str]] = {
         "--help",
     ),
     ("issue", "develop"): (
-        "-b/--base --branch-repo -n/--name -R/--repo",
+        "-b/--base --branch-repo -n/--name --worktree -R/--repo",
         "-c/--checkout -l/--list --help",
     ),
     ("release", "create"): (
@@ -3077,26 +3090,411 @@ GH_TEXT_COMMANDS: dict[tuple[str, str], tuple[str, str]] = {
         "--allow-escape-sequences -i/--include --paginate --silent --slurp --verbose --help",
     ),
 }
-# gh's own aliases of those commands, and its top-level commands with theirs: a first word that is none of them can be
-# a gh alias of the user's (config.yml's `aliases`), which is read as the command it expands to.
-GH_GROUP_ALIASES = {"agent": "agent-task", "agent-tasks": "agent-task", "agents": "agent-task"}
-GH_SUBCOMMAND_ALIASES = {
-    ("gist", "new"): "create", ("issue", "new"): "create", ("pr", "new"): "create", ("release", "new"): "create",
-    ("repo", "new"): "create",
+# Each other command of gh 2.106.0 that the check need not read, by its words as `gh <words> --help` names them, with
+# why: it sends GitHub no text, or only text that no reader of a public repository or a public page sees. Each reason
+# begins with its kind: `read` lists or shows, and sends no text; `local` touches only this machine (gh's config, an
+# alias, auth, an extension, a completion, a checkout); `no text` deletes, closes, archives or changes a state, and
+# sends no text; `private` writes where only the account, or the repository's admins or collaborators, see; `closed
+# list` sends only a value from a closed list. shims/tests/test_gh_leak_terms.py walks the command tree of the gh on
+# PATH, and fails for a command in none of GH_TEXT_COMMANDS, this table, GH_REFUSED_COMMANDS and GH_EXEC_COMMANDS, or in
+# more than one, and for an entry that gh does not list. When gh 2.106.0 added `issue artifact`, which uploads files,
+# nothing failed: no table listed every command, and neither shims/gh nor the check knew it. The check reads this table
+# as it runs: a call of a command in it goes to gh unread, and a call of a command no table names is refused
+# (gh_command), so a command gh adds is refused until a table sorts it. Until the rulings on the tester's findings at
+# 1c15219b (dispatch://INFRA-4957) nothing read this table at run time, and on a machine whose gh was not the pin a
+# command in none of the tables went to gh unchecked. Until the findings at 3e4d1931
+# (dispatch://INFRA-4957/artifact/rulings-md v76) shims/gh let the one- and two-word commands here go without starting
+# the check; it now hands the check every call.
+GH_QUIET_COMMANDS: dict[str, str] = {
+    "auth login": "local: signs in to a GitHub host and stores its token on this machine",
+    "auth logout": "local: revokes the account's gh token and removes it from this machine",
+    "auth refresh": "local: changes the scopes of the token stored on this machine",
+    "auth setup-git": "local: makes gh the credential helper of this machine's git",
+    "auth status": "read: shows the accounts and the authentication state of each known host",
+    "auth switch": "local: changes the active account of a host on this machine",
+    "auth token": "local: prints the token stored on this machine",
+    "browse": "read: opens a repository, an issue, a pull request or a file in the web browser",
+    "codespace code": "local: opens a codespace in Visual Studio Code",
+    "codespace cp": "private: copies files between this machine and a codespace, which only its account sees",
+    "codespace create": "private: creates a codespace, with its display name, which only its account sees",
+    "codespace delete": "no text: deletes codespaces",
+    "codespace edit": "private: sets the display name or the machine of a codespace, which only its account sees",
+    "codespace jupyter": "local: opens a codespace in JupyterLab",
+    "codespace list": "read: lists codespaces",
+    "codespace logs": "read: shows the logs of a codespace",
+    "codespace ports forward": "local: forwards ports of a codespace to this machine",
+    "codespace ports visibility": "closed list: sets the visibility of a forwarded port to public, private or org",
+    "codespace rebuild": "no text: makes a codespace again from its dev container",
+    "codespace ssh": "private: opens SSH to a codespace, which only its account sees",
+    "codespace stop": "no text: stops a codespace",
+    "codespace view": "read: shows a codespace",
+    "discussion list": "read: lists the discussions of a repository",
+    "discussion view": "read: shows a discussion and its comments",
+    "gist clone": "local: clones a gist to this machine",
+    "gist delete": "no text: deletes a gist",
+    "gist list": "read: lists the account's gists",
+    "gist view": "read: shows a gist",
+    "issue list": "read: lists the issues of a repository",
+    "issue status": "read: shows the status of relevant issues",
+    "issue artifact delete": "no text: deletes artifacts of an issue",
+    "issue artifact download": "read: downloads artifacts of an issue to files",
+    "issue artifact list": "read: lists the artifacts of an issue",
+    "issue artifact view": "read: shows an artifact of an issue",
+    "issue delete": "no text: deletes an issue",
+    "issue lock": "closed list: locks the conversation of an issue, --reason one of off_topic, resolved, spam, "
+                  "too_heated",
+    "issue pin": "no text: pins an issue to its repository",
+    # GitHub moves an issue only within one owner and never from a private to a public repository ("You can only
+    # transfer issues between repositories owned by the same user or organization account. A private repository issue
+    # cannot be transferred to a public repository", docs.github.com, "Transferring an issue to another repository",
+    # read 2026-11-19), so a transfer to a public repository moves text that was public already.
+    "issue transfer": "no text: moves an issue within its owner, never from a private repository to a public one",
+    "issue unlock": "no text: unlocks the conversation of an issue",
+    "issue unpin": "no text: unpins an issue from its repository",
+    "issue view": "read: shows an issue",
+    "org list": "read: lists the account's organizations",
+    "pr list": "read: lists the pull requests of a repository",
+    "pr status": "read: shows the status of relevant pull requests",
+    "pr checkout": "local: checks a pull request out in this machine's git",
+    "pr checks": "read: shows the CI status of a pull request",
+    "pr diff": "read: shows the changes of a pull request",
+    "pr lock": "closed list: locks the conversation of a pull request, --reason one of off_topic, resolved, spam, "
+               "too_heated",
+    "pr ready": "no text: marks a pull request ready for review, or a draft with --undo",
+    "pr unlock": "no text: unlocks the conversation of a pull request",
+    "pr update-branch": "no text: updates the branch of a pull request from its base branch, by a merge or a rebase",
+    "pr view": "read: shows a pull request",
+    "project close": "no text: closes a project, or opens it again with --undo",
+    "project delete": "no text: deletes a project",
+    "project field-delete": "no text: deletes a field of a project",
+    "project field-list": "read: lists the fields of a project",
+    "project item-add": "no text: adds an issue or a pull request, by its URL, to a project",
+    "project item-archive": "no text: archives an item of a project",
+    "project item-delete": "no text: deletes an item of a project",
+    "project item-list": "read: lists the items of a project",
+    "project link": "no text: links a project to a repository or a team",
+    "project list": "read: lists the projects of an owner",
+    "project mark-template": "no text: marks a project as a template",
+    "project unlink": "no text: unlinks a project from a repository or a team",
+    "project view": "read: shows a project",
+    "release list": "read: lists the releases of a repository",
+    "release delete": "no text: deletes a release",
+    "release delete-asset": "no text: deletes an asset of a release",
+    "release download": "read: downloads the assets of a release",
+    "release verify": "read: verifies the attestation of a release",
+    "release verify-asset": "read: verifies that a file is an asset of a release",
+    "release view": "read: shows a release",
+    "repo list": "read: lists the repositories of an owner",
+    "repo archive": "no text: archives a repository",
+    "repo autolink delete": "no text: deletes an autolink reference",
+    "repo autolink list": "read: lists the autolink references of a repository",
+    "repo autolink view": "read: shows an autolink reference",
+    "repo clone": "local: clones a repository to this machine",
+    "repo delete": "no text: deletes a repository",
+    "repo deploy-key add": "private: adds a deploy key, with its title, which only the repository's admins see",
+    "repo deploy-key delete": "no text: deletes a deploy key",
+    "repo deploy-key list": "read: lists the deploy keys of a repository",
+    "repo gitignore list": "read: lists the gitignore templates",
+    "repo gitignore view": "read: shows a gitignore template",
+    "repo license list": "read: lists common licenses",
+    "repo license view": "read: shows a license",
+    "repo read-dir": "read: lists a directory of a repository",
+    "repo read-file": "read: shows a file of a repository",
+    "repo set-default": "local: sets the default repository of this machine's clone",
+    "repo sync": "no text: updates a branch, of this clone or of a repository, to the branch of its source repository",
+    "repo unarchive": "no text: unarchives a repository",
+    "repo view": "read: shows the description and the README of a repository",
+    "skill install": "local: installs skills from a repository on this machine",
+    "skill list": "local: lists the skills installed on this machine",
+    "skill preview": "read: shows a skill of a repository",
+    "skill search": "read: searches public repositories for skills",
+    "skill update": "local: updates the skills installed on this machine",
+    "cache delete": "no text: deletes Actions caches",
+    "cache list": "read: lists Actions caches",
+    "run cancel": "no text: cancels a workflow run",
+    "run delete": "no text: deletes a workflow run",
+    "run download": "read: downloads the artifacts of a workflow run",
+    "run list": "read: lists workflow runs",
+    "run rerun": "no text: runs a workflow run, or its jobs, again",
+    "run view": "read: shows a workflow run",
+    "run watch": "read: shows the progress of a workflow run until it completes",
+    "workflow disable": "no text: disables a workflow",
+    "workflow enable": "no text: enables a workflow",
+    "workflow list": "read: lists workflows",
+    "workflow view": "read: shows a workflow",
+    "agent-task list": "read: lists agent tasks",
+    "agent-task view": "read: shows an agent task session",
+    "alias delete": "local: deletes aliases from gh's config on this machine",
+    "alias import": "local: adds aliases to gh's config on this machine",
+    "alias list": "local: prints the aliases of gh's config on this machine",
+    "alias set": "local: adds an alias to gh's config on this machine",
+    "attestation download": "read: downloads the attestations of an artifact",
+    "attestation trusted-root": "read: prints a trusted root for offline verification",
+    "attestation verify": "read: verifies the attestations of an artifact",
+    "completion": "local: prints a shell completion script",
+    "config clear-cache": "local: clears gh's cache on this machine",
+    "config get": "local: prints a key of gh's config on this machine",
+    "config list": "local: prints gh's config on this machine",
+    "config set": "local: sets a key of gh's config on this machine",
+    "event listen": "read: prints the events of a pull request as they happen",
+    "event subscription create": "private: subscribes the account to the events of a resource",
+    "event subscription delete": "no text: deletes an event subscription",
+    "event subscription list": "read: lists event subscriptions",
+    "event subscription view": "read: shows an event subscription",
+    "extension browse": "local: browses, installs and removes extensions on this machine",
+    "extension create": "local: makes the files of a new extension on this machine",
+    "extension install": "local: installs an extension on this machine",
+    "extension list": "local: lists the extensions installed on this machine",
+    "extension remove": "local: removes an extension from this machine",
+    "extension search": "read: searches for extensions",
+    "extension upgrade": "local: upgrades the extensions installed on this machine",
+    "gpg-key delete": "no text: deletes a GPG key",
+    "gpg-key list": "read: lists the account's GPG keys",
+    "label delete": "no text: deletes a label",
+    "label list": "read: lists the labels of a repository",
+    "licenses": "local: prints the licenses of gh's third-party libraries",
+    "preview prompter": "local: runs a test of gh's prompts",
+    "ruleset check": "read: shows the rules that apply to a branch",
+    "ruleset list": "read: lists rulesets",
+    "ruleset view": "read: shows a ruleset",
+    "search code": "read: searches code",
+    "search commits": "read: searches commits",
+    "search issues": "read: searches issues",
+    "search prs": "read: searches pull requests",
+    "search repos": "read: searches repositories",
+    "secret delete": "no text: deletes a secret",
+    "secret list": "read: lists secrets",
+    "secret set": "private: sets a secret, its value encrypted on this machine, its name seen only by collaborators",
+    "ssh-key delete": "no text: deletes an SSH key",
+    "ssh-key list": "read: lists the account's SSH keys",
+    "status": "read: shows the account's issues, pull requests, review requests and mentions",
+    "variable delete": "no text: deletes an Actions variable",
+    "variable get": "read: shows an Actions variable",
+    "variable list": "read: lists Actions variables",
+    "variable set": "private: sets an Actions variable, which only collaborators can read",
 }
-GH_COMMANDS = frozenset((
-    "agent", "agent-task", "agent-tasks", "agents", "alias", "api", "at", "attestation", "auth", "browse", "cache",
-    "codespace", "completion", "config", "copilot", "cs", "discussion", "ext", "extension", "extensions", "gist",
-    "gpg-key", "help", "issue", "label", "licenses", "org", "pr", "preview", "project", "release", "repo", "rs",
-    "ruleset", "run", "search", "secret", "skill", "skills", "ssh-key", "status", "variable", "version", "workflow",
-))
-# The options whose value names a file whose text gh sends, `-` naming standard input.
+# The gh 2.106.0 commands the check refuses before gh runs, whatever their target (gh_command, GhUnjudgedError), each
+# with the message of its refusal: each sends text that a public place shows, which the check does not read. `issue
+# artifact create` (its alias `new`) and `edit` upload Markdown and HTML documents, links and files (`[<file>[#<name>]
+# | <url>]...`, --attach, --body, --body-file). `label clone` copies the label names and descriptions of the source
+# repository onto the target. The key prefix and the URL template of `repo autolink create` (its alias `new`) show in
+# the rendered links of the repository's issues and pull requests. `skill publish` creates a GitHub release, with a tag
+# and auto-generated notes, and adds the `agent-skills` topic to the repository. GitHub shows anyone the title of a GPG
+# key and its armored text, which holds its user IDs ("Lists the GPG keys for a user. This information is accessible
+# by anyone", docs.github.com, "REST API endpoints for GPG keys", read 2026-11-27, its `name` and `raw_key`), and the
+# title of an SSH signing key: on 2026-11-27 an unauthenticated `GET users/sjawhar/ssh_signing_keys` gave each key's
+# `title`, and `GET users/sjawhar/keys`, the authentication keys, gave none. gh 2.106.0 hands `copilot`'s words to the
+# Copilot CLI unread (pkg/cmd/copilot/copilot.go:83-100, DisableFlagParsing, `opts.CopilotArgs = args`, then the CLI
+# runs), whose --enable-all-github-mcp-tools, --add-github-mcp-toolset and --add-github-mcp-tool turn on the write tools
+# of its GitHub MCP server ("`--enable-all-github-mcp-tools` flag now enables read-write GitHub MCP tools",
+# github/copilot-cli's changelog.md), which post with the CLI's own client. Until the rulings on the tester's findings
+# at b134dfbd (dispatch://INFRA-4957/artifact/rulings-md@v72, item 2) `copilot` was in GH_QUIET_COMMANDS, and `gh
+# copilot --add-github-mcp-tool '*' --allow-all-tools -p <text>` went to gh unread. A call of one with gh's help flag
+# on, which prints the command's help and sends nothing, goes out, read with the command's options
+# (GH_REFUSED_OPTIONS), `copilot`'s as gh reads them (gh_copilot_help), and so does a call of `skill publish` or
+# `ssh-key add` where it sends none of that (gh_refusal_lifted).
+GH_ARTIFACT_REFUSAL = ("gh 2.106.0's preview `issue artifact` uploads documents and files the check does not read, so "
+                       "the check refuses the call")
+GH_REFUSED_COMMANDS: dict[str, str] = {
+    "copilot": ("gh hands `copilot`'s words to the Copilot CLI unread, and with the write tools of its GitHub MCP "
+                "server on the CLI posts to GitHub with its own client, which the check does not read, so the check "
+                "refuses the call; `gh copilot --help` and `gh copilot -h` print gh's help of it and go out"),
+    "gpg-key add": ("`gpg-key add` sends a key's armored text, with its user IDs, which GitHub lists for anyone, and "
+                    "the check does not read it, so the check refuses the call"),
+    "issue artifact create": GH_ARTIFACT_REFUSAL,
+    "issue artifact edit": GH_ARTIFACT_REFUSAL,
+    "label clone": ("`label clone` copies the label names and descriptions of the source repository onto the target, "
+                    "and the check does not read them, so the check refuses the call"),
+    "repo autolink create": ("the key prefix and the URL template of `repo autolink create` show in the rendered links "
+                             "of the repository's issues and pull requests, and the check does not read them, so the "
+                             "check refuses the call"),
+    "skill publish": ("gh 2.106.0's preview `skill publish` creates a GitHub release, with a tag and auto-generated "
+                      "notes, and adds a topic to the repository, and the check reads none of them, so the check "
+                      "refuses the call; with --dry-run or --fix it only checks the skills on this machine"),
+    "ssh-key add": ("GitHub shows anyone the title of a signing key, which `ssh-key add --type signing` adds, and the "
+                    "check does not read it, so the check refuses the call; an authentication key, the default "
+                    "--type, goes out"),
+}
+# The options of each refused command, as GH_TEXT_COMMANDS gives them, from `gh <command> --help` at gh 2.106.0, which
+# gh_refusal_lifted reads: with them gh_help reads gh's help flag as gh does, so a bare `-h` is the help of a command
+# that gives no option that letter, which none of these gives (dispatch://INFRA-4957, rulings-md v66 item 3: "A bare -h
+# counts as help only where the command's option table says -h takes no value"); and they tell the calls of `skill
+# publish` with --dry-run or --fix on ("Validate without publishing", "Auto-fix issues where possible without
+# publishing", `gh skill publish --help`) and of `ssh-key add` of an authentication key, whose title only the account
+# sees, which send nothing a public place shows. Until rulings-md v66 only those two had their options here, and the
+# check read a bare `-h` of the other five as help without knowing their options. `copilot`'s entry is read by no code
+# of the check, since gh reads none of `copilot`'s words as flags and gh_copilot_help reads them as gh does: it holds
+# gh's own flags of `copilot` for the test. shims/tests/test_gh_leak_terms.py compares them with the gh on PATH, and
+# each refused command has its entry.
+GH_REFUSED_OPTIONS: dict[str, tuple[str, str]] = {
+    "copilot": ("", "--remove --help"),
+    "gpg-key add": ("-t/--title", "--help"),
+    "issue artifact create": ("--attach -b/--body -F/--body-file --name --type -R/--repo", "--help"),
+    "issue artifact edit": ("--attach -b/--body -F/--body-file --name --restore-version -R/--repo", "--help"),
+    "label clone": ("-R/--repo", "-f/--force --help"),
+    "repo autolink create": ("-R/--repo", "-n/--numeric --help"),
+    "skill publish": ("--tag", "--dry-run --fix --help"),
+    "ssh-key add": ("-t/--title --type", "--help"),
+}
+# The gh 2.106.0 command that runs another command the call names, which the check reads as a call of that command.
+# `extension exec <name> [args]` runs the installed extension NAME with the call's other words, which gh does not read
+# (pkg/cmd/extension/command.go:543-566: `Args: cobra.MinimumNArgs(1)`, `DisableFlagParsing: true`, then
+# `m.Dispatch(args, …)`), whatever command of gh's own has that name ("You can use this command when the short name
+# conflicts with a core gh command"): measured 2026-11-27 with gh 2.106.0, `gh extension exec label x --help` ran an
+# installed gh-label with `x --help`. Where the call names no installed extension, gh fails before it sends anything
+# (pkg/cmd/extension/manager.go:94-114): `gh extension exec` (`requires at least 1 arg(s), only received 0`), `gh
+# extension exec --help` (`extension "--help" not found`), `gh extension exec -- label` (`extension "--" not found`).
+# gh_command reads the call as one of that extension (gh_extension_command), gh-stack's by GH_STACK_COMMANDS and any
+# other refused as a command no table names. Until the review of 053ef618 (finding 1) it was in GH_QUIET_COMMANDS, and
+# `gh extension exec stack feedback …` sent its title unread. shims/tests/test_gh_leak_terms.py counts it with
+# GH_TEXT_COMMANDS, GH_QUIET_COMMANDS and GH_REFUSED_COMMANDS, each command `gh help` lists being in exactly one of the
+# four; it compares no options of it with gh's, since `gh extension exec --help` prints no help.
+GH_EXEC_COMMANDS: dict[str, str] = {
+    "extension exec": "runs the installed extension its first argument names, with the other arguments",
+}
+# gh 2.106.0's aliases of its commands, as the ALIASES section of `gh <command> --help` lists them: of a top-level
+# command (`gh cs` is `gh codespace`), and of a subcommand by the words of the command above it (`gh pr co` is `gh pr
+# checkout`). gh_command reads a call's words through them, so a call by an alias is judged as the command it names; an
+# alias missing here would be refused as a command no table names. shims/tests/test_gh_leak_terms.py compares them with
+# the gh on PATH.
+GH_GROUP_ALIASES = {
+    "a11y": "accessibility", "agent": "agent-task", "agent-tasks": "agent-task", "agents": "agent-task",
+    "at": "attestation", "cs": "codespace", "ext": "extension", "extensions": "extension", "rs": "ruleset",
+    "skills": "skill",
+}
+GH_SUBCOMMAND_ALIASES = {
+    ("alias", "ls"): "list", ("cache", "ls"): "list", ("codespace", "ls"): "list", ("config", "ls"): "list",
+    ("discussion", "ls"): "list", ("event subscription", "ls"): "list", ("extension", "ls"): "list",
+    ("extension", "uninstall"): "remove", ("gist", "ls"): "list", ("gist", "new"): "create", ("gpg-key", "ls"): "list",
+    ("issue", "ls"): "list", ("issue", "new"): "create", ("issue artifact", "ls"): "list",
+    ("issue artifact", "new"): "create", ("label", "ls"): "list", ("org", "ls"): "list", ("pr", "co"): "checkout",
+    ("pr", "ls"): "list", ("pr", "new"): "create", ("project", "ls"): "list", ("release", "ls"): "list",
+    ("release", "new"): "create", ("repo", "ls"): "list", ("repo", "new"): "create", ("repo autolink", "ls"): "list",
+    ("repo autolink", "new"): "create", ("repo deploy-key", "ls"): "list", ("repo gitignore", "ls"): "list",
+    ("repo license", "ls"): "list", ("ruleset", "ls"): "list", ("run", "ls"): "list", ("secret", "ls"): "list",
+    ("secret", "remove"): "delete", ("skill", "add"): "install", ("skill", "ls"): "list", ("skill", "show"): "preview",
+    ("ssh-key", "ls"): "list", ("variable", "ls"): "list", ("variable", "remove"): "delete", ("workflow", "ls"): "list",
+}
+# gh 2.106.0's commands that `gh help` lists in no COMMANDS section, so the walk of shims/tests/test_gh_leak_terms.py
+# finds none of them, each that the check lets go with why, as GH_QUIET_COMMANDS gives it: the commands its source
+# hides (`Hidden: true`), the help topics it lists under HELP TOPICS, and the commands cobra adds, `help` and the
+# `__complete` and `__completeNoDesc` that the scripts of `gh completion` run. gh runs `send-telemetry` as a child of
+# itself, by its own path, past shims/gh (internal/telemetry SpawnSendTelemetry), and the official extension stubs `aw`,
+# `stack` and `webhook` (pkg/extensions/official.go), which offer to install an extension and which gh registers only
+# where no extension of that name is installed (pkg/cmd/root/root.go:243-252), are unknown commands
+# (dispatch://INFRA-4957, rulings on the tester's findings at 1c15219b, item 4): a call of one of those four is refused.
+# An installed gh-stack is read by GH_STACK_COMMANDS. shims/tests/test_gh_leak_terms.py checks that the gh on PATH runs
+# each command here.
+GH_HIDDEN_COMMANDS: dict[str, str] = {
+    "__complete": "read: prints the completions of a partial command line, which may read GitHub",
+    "__completeNoDesc": "read: prints the completions of a partial command line, which may read GitHub",
+    "accessibility": "local: prints a help topic",
+    "actions": "local: prints a help topic",
+    "attestation inspect": "local: prints what a Sigstore bundle on this machine holds",
+    "auth git-credential": "local: answers git's credential requests with the token stored on this machine",
+    "codespace select": "read: prints the name of a codespace the account chooses",
+    "credits": "read: shows the contributors of gh",
+    "environment": "local: prints a help topic",
+    "exit-codes": "local: prints a help topic",
+    "formatting": "local: prints a help topic",
+    "help": ("local: prints the help of a command or a help topic; `gh help <extension> <words>` runs the extension, "
+             "read as its call (gh_help_of_extension)"),
+    "mintty": "local: prints a help topic",
+    "reference": "local: prints a help topic",
+    "repo credits": "read: shows the contributors of a repository",
+    "telemetry": "local: prints a help topic",
+    "version": "local: prints gh's version",
+}
+# The refusal of a call of a command that none of GH_TEXT_COMMANDS, GH_QUIET_COMMANDS, GH_REFUSED_COMMANDS,
+# GH_EXEC_COMMANDS, GH_HIDDEN_COMMANDS and GH_STACK_COMMANDS names, an installed extension other than gh-stack
+# included, and that is no gh alias (gh_unknown).
+GH_UNKNOWN_REFUSAL = ("no table of the check names this command of gh, and it is no gh alias, so the check does not "
+                      "know what the call sends and refuses it")
+# The places where gh 2.106.0 runs a gh alias of the user's in place of a command the tables name, which gh_command
+# reads through the alias (gh_alias_at): GH_LATE_COMMANDS, the commands cobra adds to gh's root only in
+# ExecuteC, after gh has registered the aliases (pkg/cmd/root/root.go:209-240), so that an alias of the same name is
+# registered and runs in their place: measured 2026-11-28 with gh 2.106.0, `gh alias set` takes `__complete` and
+# `__completeNoDesc`, and a `help:` key written into config.yml by hand ran in 6 of 6 runs of `gh help x y`; and
+# GH_ALIAS_PARENTS, the commands of the tables that gh does not run (no Run or RunE: the help topics,
+# pkg/cmd/root/help_topic.go NewCmdHelpTopic, and `actions`, pkg/cmd/actions/actions.go), under which gh's
+# ValidAliasNameFunc takes an alias one word below (pkg/cmd/alias/shared/validations.go:15-28: a name is valid where
+# cobra's Find finds a command that is not runnable with one word left), as it does under a group:
+# `gh alias set 'environment x' …` was taken, and `gh environment x <text>` posted its text. Until the review of
+# 845477ce (dispatch://INFRA-4957, its finding 1) these calls were read as gh's own commands, which send nothing, and
+# went out unread. shims/tests/test_gh_leak_terms.py checks GH_ALIAS_PARENTS with `gh alias set` on the gh on PATH.
+GH_LATE_COMMANDS = ("help", "__complete", "__completeNoDesc")
+GH_ALIAS_PARENTS = ("actions", "environment", "exit-codes", "formatting", "mintty", "reference", "telemetry")
+# gh-stack, `gh stack`, GitHub's official extension for stacked pull requests (github/gh-stack, gh 2.106.0's
+# pkg/extensions/official.go), which the skills opening-a-pr, squash-stack, running-the-merge-queue and sdd tell agents
+# to use, and whose source installers/omp.sh:277 clones unpinned (installers/lib.sh, ensure_vendor). gh runs an installed
+# extension with the words of the call after its name, which it does not read (pkg/cmd/root/extension.go,
+# DisableFlagParsing), and gh-stack sends its text with its own client (internal/github/github.go), so the check reads
+# it as a command like any other (dispatch://INFRA-4957, rulings-md v66, the tester's findings at c8d749df, item 4):
+# each of its subcommands by its name as `gh stack <name> --help` gives it at github/gh-stack GH_STACK_COMMIT
+# (2026-11-16), with (its class, why). `text`: the check reads what it sends (gh_stack_check), and refuses what of it
+# the check cannot read for a target not confirmed private, as it refuses a text it cannot read (gh_contents). `quiet`:
+# it sends GitHub no text, WHY beginning with its kind as GH_QUIET_COMMANDS gives it, or `git push` where its only text
+# is a push of the stack's branches, which git checks as it checks any push (shims/git, .gitconfig:136-141). With its
+# help flag on, a subcommand prints its help and sends nothing, and goes out (gh_help). A subcommand none names, as one
+# a newer gh-stack adds, is refused as a command no table names (gh_unknown). shims/tests/test_gh_leak_terms.py
+# compares the names with the source at GH_STACK_COMMIT and with the installed gh-stack.
+GH_STACK_COMMIT = "80b6d6e910cc1b7eaa26b961d7721ade21084fed"
+GH_STACK_COMMANDS: dict[str, tuple[str, str]] = {
+    "add": ("quiet", "local: makes a branch of the stack, and with -m or the editor a commit, in this machine's git "
+                     "(cmd/add.go:211, 400-405)"),
+    "alias": ("quiet", "local: writes a script that runs `gh stack` into ~/.local/bin (cmd/alias.go:97-98)"),
+    "bottom": ("quiet", "local: checks out the stack's bottom branch (cmd/navigate.go:93-104)"),
+    "checkout": ("quiet", "no text: checks a stack out on this machine, from GitHub's stack of a pull request too, and "
+                          "unstacks on GitHub a stack its local copy has left (cmd/checkout.go:271-277, 634)"),
+    "down": ("quiet", "local: checks out a branch further down the stack (cmd/navigate.go:45-68)"),
+    "feedback": ("text", "opens the launcher's browser at the discussion form of the public github/gh-stack, the words "
+                         "of the call its title (cmd/feedback.go:35-44)"),
+    "init": ("quiet", "local: makes a stack and its branches in this machine's git (cmd/init.go:306)"),
+    "link": ("text", "pushes the branch arguments with git and creates a pull request for each argument that has none: "
+                     "its head the argument, its title the argument with each `-` and `_` a space, its base --base or "
+                     "the argument before it, and its body the repository's pull request template "
+                     "(cmd/link.go:699-717, internal/pr/template.go:12-17)"),
+    "merge": ("quiet", "closed list: merges the stack's pull requests, --merge-method one of merge, squash, rebase "
+                       "(cmd/merge.go:88, 389; internal/github/merge_async.go:221-240)"),
+    "modify": ("quiet", "local: restructures the stack in this machine's git (cmd/modify.go:69)"),
+    "push": ("quiet", "git push: pushes the stack's branches with git (cmd/push.go:113)"),
+    "rebase": ("quiet", "local: rebases the stack's branches in this machine's git (cmd/rebase.go:121)"),
+    "submit": ("text", "pushes the stack's branches with git and creates a pull request for each branch of the current "
+                       "stack that has none: its head the branch, its base the nearest branch below it that is neither "
+                       "merged nor queued, else the trunk, its title the subject of the one commit `git log base..head` "
+                       "lists, else the branch with each `-` and `_` a space, and its body the repository's pull "
+                       "request template, else that commit's body and gh-stack's footer (cmd/submit.go:252-281, "
+                       "503-578; internal/stack/stack.go:170-184); without --auto, where its output is a terminal, it "
+                       "takes them from its editor (cmd/submit.go:229-243)"),
+    "switch": ("quiet", "local: checks out the branch of the stack the account picks (cmd/switch.go:90)"),
+    "sync": ("quiet", "git push: fetches, rebases and pushes the stack's branches with git, and adds their pull "
+                      "requests to the stack on GitHub by their numbers (cmd/sync.go:325, 381; cmd/submit.go:869)"),
+    "top": ("quiet", "local: checks out the stack's top branch (cmd/navigate.go:75-86)"),
+    "trunk": ("quiet", "local: checks out the stack's trunk branch (cmd/trunk.go:91)"),
+    "unstack": ("quiet", "no text: removes the stack from this machine and unstacks it on GitHub (cmd/unstack.go:181)"),
+    "up": ("quiet", "local: checks out a branch further up the stack (cmd/navigate.go:15-38)"),
+    "view": ("quiet", "read: shows the stack and its pull requests (cmd/view.go:62-105)"),
+}
+# gh-stack's aliases of its subcommands (cmd/unstack.go:24), which gh_extension_command reads as the subcommand they
+# name.
+GH_STACK_ALIASES = {"delete": "unstack"}
+# The options of each subcommand of GH_STACK_COMMANDS that gh_stack_check reads, as GH_TEXT_COMMANDS gives them: its
+# source's (cmd/feedback.go, cmd/link.go:84-87, cmd/submit.go:74-77) and the help flag cobra adds to every command,
+# `-h/--help`, with which the call goes out, so that `-h=false` turns it off (gh_help).
+GH_STACK_OPTIONS: dict[str, tuple[str, str]] = {
+    "feedback": ("", "-h/--help"),
+    "link": ("--base --remote", "-h/--help --no-atomic --open"),
+    "submit": ("--remote", "--auto -h/--help --no-atomic --open"),
+}
+# The options whose value names a file whose text gh sends, `-` naming standard input. `--attach` names one too, before
+# a `#` (gh_split_file_arg), and gh_texts reads it so.
 GH_FILE_OPTIONS = frozenset(("--body-file", "--notes-file", "--from-file", "--recover", "--input"))
-# Options whose value gh keeps to itself: a jq filter, a Go template or a format for its own output, a cache time.
+# Options whose value gh keeps to itself: a jq filter, a Go template or a format for its own output, a cache time, and
+# the local path `issue develop --worktree` checks the branch out into.
 GH_LOCAL_OPTIONS = frozenset((("api", "--jq"), ("api", "--template"), ("api", "--cache"), ("project", "--jq"),
-                              ("project", "--template"), ("project", "--format")))
+                              ("project", "--template"), ("project", "--format"), ("issue", "--worktree")))
 # The texts that name a ref (a branch or a tag) or an identity (a login, an e-mail), by (group, subcommand, option's
-# long name or `argument N`), as `gh <command> --help` at gh 2.98.0 describes them: the `<branch>` and `<tag>`
+# long name or `argument N`), as `gh <command> --help` at gh 2.106.0 describes them: the `<branch>` and `<tag>`
 # arguments of the usages, the branch, tag and target options, the assignees, reviewers and merge author, and the owner
 # logins, organization and team (`--owner`, "Login of the owner"; `repo fork --org`; `repo create --team`). Each is
 # read as a name (GhText.is_name, TermMatcher.names). A `gh api` field or endpoint is read as text, whatever it names.
@@ -3118,14 +3516,14 @@ GH_NAME_TEXTS = frozenset((
     ("project", "item-create", "--owner"), ("project", "item-edit", "--owner"), ("project", "copy", "--source-owner"),
     ("project", "copy", "--target-owner"), ("repo", "fork", "--org"), ("repo", "create", "--team"),
 ))
-# The commands whose first argument is the repository the call goes to, as the usage of gh 2.98.0 names it
+# The commands whose first argument is the repository the call goes to, as the usage of gh 2.106.0 names it
 # (`gh repo edit [<repository>]`, `gh repo fork [<repository>]`), by OWNER/REPO or by its URL; read so by
 # gh_argument_repository for gh_reach. Not `repo create [<name>]`, whose name a public create
 # publishes, nor `repo rename [<new-name>]`; and `repo edit --visibility public` publishes the name of the repository
 # it edits, which gh_check then reads (gh_made_public). shims/tests/test_gh_leak_terms.py compares it with the usage
 # the gh on PATH prints.
 GH_REPOSITORY_ARGUMENT = frozenset((("repo", "edit"), ("repo", "fork")))
-# The commands whose arguments the usage of gh 2.98.0 names by URL (`<url>`, `<urls>`, `<discussion-url>`,
+# The commands whose arguments the usage of gh 2.106.0 names by URL (`<url>`, `<urls>`, `<discussion-url>`,
 # `<comment-url>`, as in `gh pr comment [<number> | <url> | <branch>]` and `gh issue edit {<numbers> | <urls>}`): an
 # http or https URL argument of one names the repository the call goes to (gh_argument_repository). A URL in an
 # argument of any other command is text, such as the description `agent-task create` sends. A gist's URL names a gist,
@@ -3135,7 +3533,7 @@ GH_URL_ARGUMENT = frozenset((
     ("pr", "revert"), ("issue", "edit"), ("issue", "comment"), ("issue", "close"), ("issue", "reopen"),
     ("issue", "develop"), ("discussion", "edit"), ("discussion", "comment"), ("gist", "edit"), ("gist", "rename"),
 ))
-# The placeholders gh 2.98.0 fills in a `gh api` endpoint and in each -F value but a file's (`@path`), each with where
+# The placeholders gh 2.106.0 fills in a `gh api` endpoint and in each -F value but a file's (`@path`), each with where
 # gh takes its value from: `base`, the base repository (`{owner}` its owner, `{repo}` its name: the base placeholders),
 # GH_REPO's when that is set, else this directory's (gh_bases); `branch`, the current branch (gh_current_branch), which
 # no base repository gives. The list is gh's own, from `gh api --help`: "Placeholder values `{owner}`, `{repo}`, and
@@ -3168,6 +3566,12 @@ GH_PUBLISHING_FIELDS = frozenset((("visibility", "public"), ("private", "false")
 GH_GRAPHQL_MUTATION = re.compile(r"\bmutation\b")
 JSON_ESCAPE = re.compile(r'\\(?:u([0-9A-Fa-f]{4})|(["\\/bfnrt]))')
 JSON_SIMPLE_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+# The fields whose value a reader other than gh_findings takes whole (GhText.whole): `query`, a GraphQL document, which
+# gh_values reads by its grammar, and the fields that make a repository public, which gh_made_public reads.
+GH_WHOLE_FIELDS = frozenset(("query", *(name for name, _ in GH_PUBLISHING_FIELDS)))
+# The most bytes gh_contents reads of a file whose text a reader takes whole (GhText.whole): 64 MiB, the most shims/gh
+# buffers of standard input (gh_shim_buffer_stdin). A larger one is a text the check cannot read.
+GH_WHOLE_LIMIT = 64 << 20
 
 
 @dataclass(frozen=True)
@@ -3179,7 +3583,12 @@ class GhText:
     as JSON (an --input body, `workflow run --json`). BASES, for a text gh fills from the base repository (gh_filled),
     names the base repositories (GhBase.source) whose filling it is: gh sends that filling only when it takes one of
     them, so it goes only to a target the call reaches with one of them, or with none (gh_goes_to). IS_NAME says the
-    text names a ref or an identity (GH_NAME_TEXTS), which gh_findings reads as a name (TermMatcher.names)."""
+    text names a ref or an identity (GH_NAME_TEXTS), which gh_findings reads as a name (TermMatcher.names). CHUNKED,
+    for a file gh_contents leaves unread with "" for its text, is the file gh_findings reads in chunks (gh_file_views):
+    PATH, or for standard input the shim's buffer of it. gh_contents leaves so each file whose text no reader takes
+    whole (whole) and that holds any byte: a file a call sends may be a build output of any size, as a release asset
+    of up to 2 GiB, and gh_contents read each whole until rulings-md v66 item 2 ("The check reads a file in bounded
+    memory ... A file is scanned in chunks"; dispatch://INFRA-4957)."""
 
     option: str
     detail: str = ""
@@ -3191,21 +3600,29 @@ class GhText:
     json_body: bool = False
     bases: tuple[str, ...] = ()
     is_name: bool = False
+    chunked: str = ""
 
     def shown(self) -> str:
         detail = f" {c_escape(self.detail)}" if self.detail else ""
         return (f"{c_escape(self.option)}{detail}{' (standard input)' if self.path == '-' else ''}"
                 f"{f' ({self.part})' if self.part else ''}")
 
+    def whole(self) -> bool:
+        """Whether a reader other than gh_findings takes the text whole, so gh_contents reads its file whole: a body
+        GitHub reads as JSON (JSON_BODY), which json.loads parses (gh_stored_values, gh_made_public,
+        gh_new_visibility), and the value of a field of GH_WHOLE_FIELDS."""
+        return self.json_body or (self.key in GH_WHOLE_FIELDS and self.part != "key")
+
 
 def gh_options(table: tuple[str, str]) -> dict[str, bool]:
-    """Every spelling of each option of a GH_TEXT_COMMANDS entry: True for one that takes a value."""
+    """Every spelling of each option of a GH_TEXT_COMMANDS or GH_REFUSED_OPTIONS entry: True for one that takes a
+    value."""
     return {name: takes for takes, names in ((True, table[0]), (False, table[1])) for item in names.split()
             for name in item.split("/")}
 
 
 def gh_long_names(table: tuple[str, str]) -> dict[str, str]:
-    """The long spelling of each spelling of each option of a GH_TEXT_COMMANDS entry."""
+    """The long spelling of each spelling of each option of a GH_TEXT_COMMANDS or GH_REFUSED_OPTIONS entry."""
     return {name: item.split("/")[-1] for item in f"{table[0]} {table[1]}".split() for name in item.split("/")}
 
 
@@ -3443,17 +3860,124 @@ def gh_yaml_flow(line: str, start: int) -> tuple[dict[str, str], int] | None:
         index = gh_blanks_end(line, index + 1)
 
 
+def gh_shlex_split(text: str) -> list[str] | None:
+    """TEXT split into words as google/shlex's Split splits it (shlex.go scanStream, at the e7afc7fbc510 that gh
+    2.106.0's go.mod pins), which gh splits an alias's key with; None where Split returns an error, a quote left open
+    or an escape at the end, for which gh takes no alias. Its blanks are a space, a tab, a carriage return and a line
+    feed; a `\\` keeps the next character in the word outside quotes, and drops itself before any character inside
+    double quotes; single quotes keep every character; a `#` where a word would begin starts a comment to the end of
+    the line. Python's shlex keeps the `\\` inside double quotes before a character other than `\\`, `"`, `$` or a
+    backquote, and reads no comment, so it splits some keys otherwise than gh does."""
+    words: list[str] = []
+    value: list[str] = []
+    state = "start"
+    for character in text:
+        if state == "start":
+            if character in " \t\r\n":
+                continue
+            value = []
+            state = {'"': "double", "'": "single", "\\": "escape", "#": "comment"}.get(character, "word")
+            if state == "word":
+                value.append(character)
+        elif state == "word":
+            if character in " \t\r\n":
+                words.append("".join(value))
+                state = "start"
+            else:
+                state = {'"': "double", "'": "single", "\\": "escape"}.get(character, "word")
+                if state == "word":
+                    value.append(character)
+        elif state in ("escape", "double escape"):
+            value.append(character)
+            state = "word" if state == "escape" else "double"
+        elif state == "double":
+            if character == '"':
+                state = "word"
+            elif character == "\\":
+                state = "double escape"
+            else:
+                value.append(character)
+        elif state == "single":
+            if character == "'":
+                state = "word"
+            else:
+                value.append(character)
+        elif character == "\n":
+            state = "start"
+    if state == "word":
+        words.append("".join(value))
+    elif state != "start" and state != "comment":
+        return None
+    return words
+
+
+def gh_child(parent: str, word: str) -> str:
+    """The command WORD names under the command PARENT ("" for gh's root), as gh_commands names it: through gh's
+    aliases of it (GH_GROUP_ALIASES at the root, GH_SUBCOMMAND_ALIASES under a command), as cobra's Find finds it."""
+    if not parent:
+        return GH_GROUP_ALIASES.get(word, word)
+    return f"{parent} {GH_SUBCOMMAND_ALIASES.get((parent, word), word)}"
+
+
+def gh_alias_place(key: str, commands: frozenset[str]) -> tuple[str, str, bool] | None:
+    """(the command, "" for gh's root; the name; whether the name is the key's whole last word) under which gh 2.106.0
+    registers a gh alias of the user's whose config.yml key is KEY, as yaml.v3 decodes it, COMMANDS gh_commands; None
+    where gh registers none (pkg/cmd/root/root.go:209-241, pkg/cmd/alias/shared/validations.go:15-30). gh splits KEY
+    with google/shlex (gh_shlex_split) and finds with cobra's Find the command the words but the last lead to, each
+    through gh's aliases of it (gh_child). It takes the alias where that command runs nothing itself, gh's root, a
+    group or one of GH_ALIAS_PARENTS, and where the last word, whole, names no command under it but `help`,
+    `__complete` and `__completeNoDesc`, which cobra adds to the root after the aliases (GH_LATE_COMMANDS). An empty
+    word or an option (`-…`) before the last leaves cobra's Find more than one word, so gh takes none. The alias's
+    `Use` is the last word, and cobra names a command by its `Use` up to the first space (Command.Name): so `"version
+    x"` registers a command named `version` at the root, beside gh's own, and `pr "checks zz"` one named `checks` under
+    `pr`, and `environment  x` (two spaces) and `telemetry "y"` are `x` under `environment` and `y` under `telemetry`.
+    A name that is empty or an option is one no call reaches (cobra reads such a word as an option), and is None
+    here."""
+    words = gh_shlex_split(key)
+    if not words:
+        return None
+
+    def known(command: str) -> bool:
+        return command in commands or any(name.startswith(f"{command} ") for name in commands)
+
+    parent = ""
+    for word in words[:-1]:
+        if not word or word.startswith("-"):
+            return None
+        parent = gh_child(parent, word)
+        if parent not in GH_ALIAS_PARENTS and (parent in commands or not known(parent)):
+            return None
+    last = words[-1]
+    whole = gh_child(parent, last)
+    if known(whole) and not (not parent and whole in GH_LATE_COMMANDS):
+        return None
+    name = last.split(" ", 1)[0]
+    if not name or name.startswith("-"):
+        return None
+    return parent, name, name == last
+
+
+@dataclass(frozen=True)
+class GhAlias:
+    """A gh alias of the user's: KEY as config.yml decodes it, its EXPANSION, the 1-based LINE its key is on, and
+    WHOLE, whether the name gh registers it by is the key's whole last word (gh_alias_place)."""
+
+    key: str
+    expansion: str
+    line: int
+    whole: bool
+
+
 @dataclass(frozen=True)
 class GhAliases:
-    """gh's aliases in config.yml at PATH, as gh_aliases reads and refuses them: EXPANSIONS, the expansion of each
-    alias with the 1-based line of config.yml its key is on; or, where gh_aliases refuses config.yml, REFUSED, which
-    names the line and why, and TEXT, config.yml's text (gh_config_text), in which gh_alias_named looks for a call's
-    alias name. EXPANSIONS is then empty."""
+    """gh's aliases in config.yml at PATH, as gh_aliases reads and refuses them: EXPANSIONS, each alias gh registers,
+    under (the command it registers it under, "" for the root; its name) (gh_alias_place), more than one where several
+    keys take the same place; or, where gh_aliases refuses config.yml, REFUSED, which names the line and why, and
+    EXPANSIONS is then empty."""
 
     path: Path
-    expansions: dict[str, tuple[str, int]]
+    expansions: dict[tuple[str, str], tuple[GhAlias, ...]]
     refused: str = ""
-    text: str = ""
 
 
 @lru_cache(maxsize=None)
@@ -3464,35 +3988,50 @@ def gh_aliases(path: Path) -> GhAliases:
     alias delete` removed the last alias; each key and value plain (gh_yaml_plain) or quoted (gh_yaml_quoted, yaml.v3's
     escapes included), a key longer than yaml.v3's simple keys (128 bytes) after a `? `, and in a block mapping a value
     of several lines a `|` block scalar (gh_yaml_literal). gh reads each alias of these forms as the reader does. The
-    reader drops a byte order mark and reads each CRLF as one line feed, as yaml.v3 does (gh_config_text). A call
-    through an alias is judged as the command it expands to (gh_alias_command).
+    reader drops a byte order mark and reads each CRLF as one line feed, as yaml.v3 does (gh_config_text). Each alias
+    is kept under the command and the name gh registers it by (gh_alias_place), which its key's text alone does not
+    give: until the review of 3e4d1931 (its findings 1 and 2) the check looked an alias up by its key's text, and
+    `environment  x` (two spaces) and `telemetry "y"`, which `gh alias set` writes, ran in gh unread. A call through an
+    alias is judged as the command it expands to (gh_alias_command, gh_alias_at).
 
-    Refused, where the reader cannot read the aliases exactly: a call whose name stands nowhere in config.yml before a
-    `:` goes on; a name that stands anywhere there before a `:` is refused, whether it is an alias key, a word of
-    another alias's value, a key of gh's own config or a word of one of its comments (gh_alias_named). A refused call
-    exits TEXT_EXIT, the refusal naming the line and why (GhAliases.refused). Two causes count. One is a line break
-    other than a line feed (gh_config_break), which gh writes as itself in a `|` or a single-quoted value whose text
-    holds a line or a paragraph separator (U+2028, U+2029), measured with `gh alias set note -` and `gh config set
-    pager`: the reader looks for one in the whole file before it looks for the aliases key, which a break can hide from
-    a reader that splits at line feeds (`editor: vim<U+2028>aliases:`). The other is a form the reader does not read,
-    where it meets a value it does not read exactly, or a line it does not read where the aliases may end, so the
-    aliases never end short of where yaml.v3 ends them. gh writes such forms itself: the key of a name that holds a
-    line break, which gh runs as the words around the break (`gh trail` for `trail\\n\\n`), a `? |` block scalar in a
-    block mapping (`? |4-` for a first line feed) and a double-quoted key with yaml.v3's escape of the break in a block
-    or a flow mapping (`? "cr\\r"`, `{? "pr say\\n" : …}`). The others gh does not write: a folded `>` scalar, an
-    anchor, an alias or a tag, an escape yaml.v3 does not write, a key indented otherwise than the first, an aliases key
-    given twice, a line at column 0 that holds no key at the root, a flow mapping or a block scalar the reader does not
-    read, and a `|` block scalar that runs to the end of a file with no final line feed, which yaml.v3 reads with no
-    final break. A call through an alias whose expansion, with the call's arguments in place of its `$N`, shlex cannot
-    split is refused (gh_alias_command, gh_unsplit); one whose `$N` the arguments do not fill goes to gh, which refuses
-    it. A config.yml that cannot be read holds no alias: gh does not start with it, so it sends nothing."""
+    Refused, where the reader cannot read the aliases exactly: every call of a command is refused (gh_alias_at), since
+    the check cannot tell which name a key it does not read takes, and a key may take the name of any command of gh's
+    own (gh_alias_place). Until the review of 3e4d1931 a call whose name stood nowhere in config.yml's text went on, and
+    a key with yaml.v3's escapes, as `"environment \\x78"`, ran unread. A refused call exits TEXT_EXIT, the refusal
+    naming the line and why (GhAliases.refused). Two causes count. One is a line break other than a line feed
+    (gh_config_break), which gh writes as itself in a `|` or a single-quoted value whose text holds a line or a
+    paragraph separator (U+2028, U+2029), measured with `gh alias set note -` and `gh config set pager`: the reader
+    looks for one in the whole file before it looks for the aliases key, which a break can hide from a reader that
+    splits at line feeds (`editor: vim<U+2028>aliases:`). The other is a form the reader does not read, where it meets a
+    value it does not read exactly, or a line it does not read where the aliases may end, so the aliases never end short
+    of where yaml.v3 ends them. gh writes such forms itself: the key of a name that holds a line break, which gh runs as
+    the words around the break (`gh trail` for `trail\\n\\n`), a `? |` block scalar in a block mapping (`? |4-` for a
+    first line feed) and a double-quoted key with yaml.v3's escape of the break in a block or a flow mapping (`?
+    "cr\\r"`, `{? "pr say\\n" : …}`). The others gh does not write: a folded `>` scalar, an anchor, an alias or a tag,
+    an escape yaml.v3 does not write, a key indented otherwise than the first, an aliases key given twice, a line at
+    column 0 that holds no key at the root, a flow mapping or a block scalar the reader does not read, and a `|` block
+    scalar that runs to the end of a file with no final line feed, which yaml.v3 reads with no final break. A call
+    through an alias whose expansion, with the call's arguments in place of its `$N`, shlex cannot split is refused
+    (gh_alias_command, gh_unsplit); one whose `$N` the arguments do not fill goes to gh, which refuses it. A config.yml
+    that cannot be read holds no alias: gh does not start with it, so it sends nothing."""
     try:
         text = gh_config_text(path.read_bytes().decode("utf-8"))
     except (OSError, UnicodeDecodeError):
         return GhAliases(path, {})
 
     def refused(why: str) -> GhAliases:
-        return GhAliases(path, {}, f"{path} holds {why}, so the check cannot read gh's aliases: fix that line", text)
+        return GhAliases(path, {}, f"{path} holds {why}, so the check cannot read gh's aliases: fix that line")
+
+    commands = gh_commands()
+    places: dict[tuple[str, str], list[GhAlias]] = {}
+
+    def place(key: str, value: str, line: int) -> None:
+        found = gh_alias_place(key, commands)
+        if found is not None and value:
+            places.setdefault(found[:2], []).append(GhAlias(key, value, line, found[2]))
+
+    def read() -> GhAliases:
+        return GhAliases(path, {where: tuple(each) for where, each in places.items()})
 
     broken = gh_config_break(text)
     if broken is not None:
@@ -3518,10 +4057,11 @@ def gh_aliases(path: Path) -> GhAliases:
             return unread(start, "a flow mapping")
         if any(not breaks.isdisjoint(name) for name in found[0]):
             return unread(start, "an alias key that holds a line break")
-        return GhAliases(path, {name: (value, start + 1) for name, value in found[0].items() if value})
+        for name, value in found[0].items():
+            place(name, value, start + 1)
+        return read()
     if not re.fullmatch(r"aliases:(?:[ \t]+#.*)?[ \t]*", lines[start]):
         return unread(start, "an aliases key written otherwise than `aliases:` at column 0")
-    expansions: dict[str, tuple[str, int]] = {}
     indent = 0
     number = start + 1
     while number < len(lines):
@@ -3566,24 +4106,8 @@ def gh_aliases(path: Path) -> GhAliases:
             if value is None:
                 return unread(row, "a value")
             number = row + 1
-        if value:
-            expansions.setdefault(name, (value, key_line))
-    return GhAliases(path, expansions)
-
-
-def gh_alias_named(name: str, text: str) -> bool:
-    """Whether the alias name NAME, a call's first word or first two words, stands in TEXT, the text of a config.yml
-    gh_aliases refuses, before a `:`: whole, with nothing before it but a blank, a line break, a `{`, a `,`, a quote, a
-    `?` or yaml.v3's escape of a line break (`\\n`, `\\r`, `\\N`, `\\L`, `\\P`), in quotes or not, and between it and
-    the `:` any such escapes, a quote and any whitespace, line feeds and empty lines included: as gh writes the key of a
-    name that holds a line break (`? |+` with an empty line before the `:` for a name that ends with two line feeds,
-    `{? "pr say\\n" : …}`, `{? "\\nlead" : …}`). It is looked for wherever it stands, since the check cannot know
-    where yaml.v3 begins a line or a key there: a call whose name stands nowhere in config.yml before a `:` goes on; a
-    name that stands anywhere there before a `:` is refused, whether it is an alias key, a word of another alias's
-    value, a key of gh's own config or a word of one of its comments."""
-    escape = r"\\[nrNLP]"
-    return re.search(rf"""(?:(?<![^\s{{,'"?])|(?<={escape})){re.escape(name)}(?:{escape})*["']?\s*:""",
-                     text) is not None
+        place(name, value, key_line)
+    return read()
 
 
 def gh_expand_alias(expansion: str, arguments: Sequence[str]) -> list[str] | None:
@@ -3601,29 +4125,35 @@ def gh_expand_alias(expansion: str, arguments: Sequence[str]) -> list[str] | Non
     return [*shlex.split(expansion), *extra]
 
 
-def gh_next_command(arguments: Sequence[str]) -> tuple[str, list[str]] | None:
-    """cobra's reading of a command word in ARGUMENTS: the first word that is neither an option nor an option's value
-    (`gh -R o/r pr comment 1` and `gh pr -R o/r comment 1` are both `gh pr comment`), and the other words, which go on
-    to the command. As cobra's stripFlags does, an option written apart from any value, but --help and --version, is
-    taken to have its value in the next word."""
+def gh_next_command(arguments: Sequence[str], flags: Sequence[str] = ("--help", "--version")
+                    ) -> tuple[str, list[str]] | None:
+    """cobra's reading of a command word in ARGUMENTS: the first word that is neither an option, an option's value nor
+    empty (`gh -R o/r pr comment 1` and `gh pr -R o/r comment 1` are both `gh pr comment`, and so is `gh pr '' comment
+    1`), and the other words, which go on to the command. As cobra's stripFlags does, an option written apart from any
+    value, but FLAGS, which take none, is taken to have its value in the next word, and an empty word is skipped. gh's
+    FLAGS are --help and --version, which its root command defines; gh-stack's are none, since cobra adds the help and
+    version flags only once it has found the command (cobra v1.10.2 command.go: ExecuteC runs Find, then execute runs
+    InitDefaultHelpFlag and InitDefaultVersionFlag)."""
     index = 0
     while index < len(arguments):
         word = arguments[index]
         if word == "--":
             return None
-        if (word.startswith("-") and "=" not in word and word not in ("--help", "--version")
+        if (word.startswith("-") and "=" not in word and word not in flags
                 and (word.startswith("--") or len(word) == 2)):
             index += 2
-        elif word.startswith("-"):
+        elif not word or word.startswith("-"):
             index += 1
         else:
             return word, [*arguments[:index], *arguments[index + 1:]]
     return None
 
 
-class GhAliasError(Exception):
-    """A gh call that may run an alias the check cannot read, refused with TEXT_EXIT (gh_check): ARGS are the alias the
-    call names and why, with what to fix."""
+class GhUnjudgedError(Exception):
+    """A gh call the check cannot judge, refused with TEXT_EXIT before gh runs (gh_check): one that may run an alias the
+    check cannot read (gh_alias_command), a call of a command that sends text the check does not read
+    (GH_REFUSED_COMMANDS, gh_command), or a call of a command no table names (gh_unknown). ARGS are the alias or command
+    the call names and why it is refused, for an alias with what to fix."""
 
 
 def gh_unsplit(name: str, line: int, path: Path, error: ValueError, filled: bool) -> str:
@@ -3644,59 +4174,347 @@ def gh_unsplit(name: str, line: int, path: Path, error: ValueError, filled: bool
             "cannot judge a call through it: fix that line")
 
 
+def gh_commands() -> frozenset[str]:
+    """Each command the tables name (GH_TEXT_COMMANDS, `api` for ("api", ""); GH_QUIET_COMMANDS; GH_REFUSED_COMMANDS;
+    GH_EXEC_COMMANDS; GH_HIDDEN_COMMANDS), by its words as gh names them, read from the tables at each call."""
+    return frozenset((*(" ".join(word for word in key if word) for key in GH_TEXT_COMMANDS), *GH_QUIET_COMMANDS,
+                      *GH_REFUSED_COMMANDS, *GH_EXEC_COMMANDS, *GH_HIDDEN_COMMANDS))
+
+
 def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
-               depth: int = 0) -> tuple[str, str, list[str]] | None:
-    """(group, subcommand, the arguments the subcommand reads) of a gh call that can send text, after a gh alias; None
-    for any other call. GhAliasError for a call that may run an alias the check cannot read (gh_alias_command)."""
+               seen: tuple[str, ...] = ()) -> tuple[str, str, list[str]] | None:
+    """(group, subcommand, the arguments the subcommand reads) of a call of a GH_TEXT_COMMANDS command, after a gh
+    alias, or ("stack", subcommand, its arguments) of a gh-stack call gh_stack_check reads (gh_extension_command); None
+    for any other call the check lets go: of a GH_QUIET_COMMANDS or GH_HIDDEN_COMMANDS command, of a group with no
+    subcommand (`gh pr`, whose help gh prints; `gh codespace ports`, which lists ports), of no command, of a refused
+    command that gh_refusal_lifted lets go, of a quiet gh-stack command, and of `extension exec` whose first argument
+    names no installed extension, which gh refuses before it sends anything (GH_EXEC_COMMANDS). SEEN holds the gh
+    aliases the call ran through to reach ARGUMENTS, by their keys (gh_alias_command). The command is read word by word
+    as cobra finds it (gh_next_command), each word through gh's aliases of it (gh_child), until the tables name it, and
+    at each word the check asks whether gh runs a gh alias of the user's for it (gh_alias_at): one of a name no
+    command of gh's takes, of the first word (`co`) or under a command (`gh alias set 'pr say' 'pr comment'`), which gh
+    runs as what it expands to (gh_alias_command); one of `help`, `__complete` or `__completeNoDesc`, which gh runs in
+    place of its own command of that name (GH_LATE_COMMANDS); one a word under a command of GH_ALIAS_PARENTS takes
+    (`gh environment x`); and one whose key takes the name of gh's own command by the part of its last word before a
+    space (`"version x"`), which gh_alias_at refuses. A first word no command of gh's takes is an installed extension,
+    which gh runs in place of an alias whose key is that name (gh_extension, gh_extension_command), else a gh alias, or
+    else a command no table names (gh_unknown); so is `help`, `__complete` or `__completeNoDesc` where an extension of
+    that name is installed, which gh registers before cobra adds its own (pkg/cmd/root/root.go:197-206), and which the
+    check read as gh's own until the review of 3e4d1931 (finding 3). A name that is both a command of gh's and an
+    installed extension is read as gh's command, as gh runs it (gh_extension_command), but after `extension exec`,
+    which runs the extension (GH_EXEC_COMMANDS). Until 2026-11-17 only an alias of the first word was read, so `gh pr
+    say 11 --body …` went out unchecked; until the rulings on the tester's findings at 1c15219b (dispatch://INFRA-4957)
+    a command no table named went out unchecked, until rulings-md v66 an installed extension did, and until the review
+    of 053ef618 (finding 1) one run by `extension exec` did. GhUnjudgedError for a call the check cannot judge: one
+    that may run an alias it cannot read or cannot tell from another command (gh_alias_at, gh_alias_command), a call of
+    a command GH_REFUSED_COMMANDS lists, whatever its target, refused as the call writes it (`gh issue -R o/r artifact
+    new 4` is `issue artifact create`, refused as `issue artifact new`), and a call of a command no table names
+    (gh_unknown). A call whose first word is `help`, of an installed extension, is read as gh runs it
+    (gh_help_of_extension)."""
+    arguments = gh_help_of_extension(arguments, environment) if not seen else arguments
     found = gh_next_command(arguments)
     if found is None:
         return None
-    first, rest = found
-    if first not in GH_COMMANDS:
-        return gh_alias_command(first, rest, environment, depth)
-    group = GH_GROUP_ALIASES.get(first, first)
-    if group == "api":
-        return group, "", rest
-    found = gh_next_command(rest)
+    typed, rest = found
+    commands = gh_commands()
+    parent, word, command = "", typed, gh_child("", typed)
+    while True:
+        own = command in commands or any(name.startswith(f"{command} ") for name in commands)
+        late = not parent and command in GH_LATE_COMMANDS
+        extension = not parent and (late or not own) and gh_extension(word, environment)
+        alias = gh_alias_at(typed, parent, word, (own and not late) or extension, environment)
+        if alias is not None:
+            return gh_alias_command(typed, alias, rest, environment, seen)
+        if extension:
+            return gh_extension_command(word, rest)
+        if not own:
+            return gh_unknown(typed, rest)
+        if command in commands:
+            break
+        found = gh_next_command(rest)
+        if found is None:
+            return None
+        word, rest = found
+        typed, parent, command = f"{typed} {word}", command, gh_child(command, word)
+    if command in GH_ALIAS_PARENTS and (found := gh_next_command(rest)) is not None:
+        alias = gh_alias_at(f"{typed} {found[0]}", command, found[0], False, environment)
+        if alias is not None:
+            return gh_alias_command(f"{typed} {found[0]}", alias, found[1], environment, seen)
+    if command in GH_EXEC_COMMANDS:
+        return gh_extension_command(rest[0], rest[1:]) if rest and gh_extension(rest[0], environment) else None
+    if command in GH_REFUSED_COMMANDS:
+        if gh_refusal_lifted(command, rest):
+            return None
+        raise GhUnjudgedError(typed, GH_REFUSED_COMMANDS[command])
+    group, _, sub = command.partition(" ")
+    return (group, sub, rest) if (group, sub) in GH_TEXT_COMMANDS else None
+
+
+def gh_help_of_extension(arguments: Sequence[str], environment: Mapping[str, str]) -> Sequence[str]:
+    """ARGUMENTS as gh 2.106.0 runs them: where the first word is `help` and the words after it name an installed
+    extension, gh runs `<those words> --help`, the extension's call with `--help` put last ("translate `gh help
+    <command>` to `gh <command> --help` for extensions", internal/ghcmd/cmd.go:189-193, before cobra reads the call),
+    and hands the extension every word unread, so after a `--` among them the `--help` is an argument and not a help
+    flag: `gh help stack submit --` runs `gh stack submit`. gh asks cobra's Find (isExtensionCommand), which finds the
+    first word that is no flag as gh_next_command does; a word that names a command of gh's own, by gh's aliases of it
+    too, is never an extension. Only the call as written is read so, not what a gh alias expands to, which gh runs
+    with root.Execute and no such rewrite (pkg/cmd/root/alias.go:53-77). Until the rulings on the tester's findings at
+    b134dfbd (dispatch://INFRA-4957/artifact/rulings-md@v72, item 1) `help` was quiet whatever followed, and that call
+    went out unread. gh rewrites the call of an official extension's stub the same way (its GroupID is `extension`,
+    pkg/cmd/root/official_extension_stub.go), which offers to install the extension, or installs it in CI, and runs
+    none of the call's words; the check gives that call back as it is, and lets `help` go. Any other ARGUMENTS are
+    given back as they are."""
+    if len(arguments) < 2 or arguments[0] != "help":
+        return arguments
+    found = gh_next_command(arguments[1:])
     if found is None:
-        return None
-    word, rest = found
-    sub = GH_SUBCOMMAND_ALIASES.get((group, word), word)
-    if (group, sub) in GH_TEXT_COMMANDS:
-        return group, sub, rest
-    # An alias under a command (`gh alias set 'pr say' 'pr comment'`), which gh runs as what it expands to. Until
-    # 2026-11-17 only an alias of the first word was read, so `gh pr say 11 --body …` went out unchecked.
-    return gh_alias_command(f"{first} {word}", rest, environment, depth)
+        return arguments
+    commands = gh_commands()
+    command = GH_GROUP_ALIASES.get(found[0], found[0])
+    if command in commands or any(name.startswith(f"{command} ") for name in commands):
+        return arguments
+    return [*arguments[1:], "--help"] if gh_extension(found[0], environment) else arguments
 
 
-def gh_alias_command(name: str, rest: Sequence[str], environment: Mapping[str, str],
-                     depth: int) -> tuple[str, str, list[str]] | None:
-    """gh_command of what the gh alias NAME runs with REST; None for no such alias, for a shell alias (`!…`), which
-    runs a shell whose own gh calls come back through shims/gh, for one whose `$N` REST does not fill, which goes to
-    gh, which refuses it itself (`not enough arguments for alias`), and past three aliases in a row. GhAliasError,
-    refusing the call, where gh_aliases refuses config.yml and NAME stands in it (gh_alias_named), and where shlex
-    cannot split NAME's expansion with REST in place of its `$N` (gh_expand_alias, which tests the `$N` first): only
-    then is the expansion as config.yml holds it split on its own, to choose the refusal's message (gh_unsplit). gh
-    splits an alias with google/shlex, which splits text Python's shlex refuses, a `#` beginning a comment there."""
-    if depth >= 3:
-        return None
+def gh_alias_at(typed: str, parent: str, word: str, own: bool, environment: Mapping[str, str]) -> GhAlias | None:
+    """The gh alias of the user's that gh runs for WORD, a word of the call as cobra finds it under the command PARENT
+    ("" for gh's root), TYPED the call's words to WORD; OWN tells whether gh registered a command of its own there
+    before the aliases (a command or a group of the tables, by gh's aliases of it too, or at the root an installed
+    extension; not one of GH_LATE_COMMANDS, which cobra adds after them). None where gh runs none there: config.yml
+    holds no alias of that place (gh_aliases), or one whose key's whole last word is the name of gh's own command
+    there, which gh does not register (gh_alias_place). The check reads each call through this one lookup, so no way
+    of finding an alias is known to one reader and not to another. GhUnjudgedError, refusing the call, where gh_aliases
+    refuses config.yml (GhAliases.refused); where two keys or more take the place, as `environment x` and `environment
+    x` with two spaces, or `at zz` and `attestation zz`; and where OWN and a key takes it by the part of its last word
+    before a space (`"version x"`, `pr "checks zz"`). cobra then runs the first command of that name it meets, in the
+    order the Go map of the aliases and cobra's sort of the commands give: measured 2026-11-28 with gh 2.106.0, `gh
+    version` ran the alias of `"version x"` in 20 of 20 runs, `gh pr view 1` that of `"pr x"` in 3 of 20
+    (dispatch://INFRA-4957/artifact/space-key-probe-txt), and two keys of one name ran one or the other, 16 of 20
+    against 4 (the review of 3e4d1931, finding 1)."""
     aliases = gh_aliases(gh_config_directory(environment) / "config.yml")
     if aliases.refused:
-        if gh_alias_named(name, aliases.text):
-            raise GhAliasError(name, aliases.refused)
+        raise GhUnjudgedError(typed, aliases.refused)
+    found = [alias for alias in aliases.expansions.get((parent, word), ()) if not (own and alias.whole)]
+    if not found:
         return None
-    found = aliases.expansions.get(name)
-    if found is None or found[0].startswith("!"):
+    if len(found) > 1:
+        lines = ", ".join(str(alias.line) for alias in found)
+        raise GhUnjudgedError(typed, f"gh's aliases on lines {lines} of {aliases.path} each take the name {word}, and "
+                                     "gh runs one of them as the order of its aliases falls, so the check cannot judge "
+                                     "the call: fix those lines")
+    if own:
+        raise GhUnjudgedError(typed, f"gh's alias {found[0].key}, on line {found[0].line} of {aliases.path}, takes the "
+                                     f"name of gh's own command {typed}, and gh runs one or the other as the order of "
+                                     "its commands falls, so the check cannot judge the call: fix that line")
+    return found[0]
+
+
+def gh_refusal_lifted(command: str, rest: Sequence[str]) -> bool:
+    """Whether a call of the refused COMMAND, REST the words of the call but the command's own, sends nothing a public
+    place shows: one with gh's help flag on (gh_help), read with the command's options (GH_REFUSED_OPTIONS); `skill
+    publish` with --dry-run or --fix on (gh_flag); and `ssh-key add` whose last --type is `authentication`, or that
+    gives none, gh's default. Any other --type, as `signing` or a value gh refuses, keeps the refusal. `copilot`'s help
+    is read as gh reads it (gh_copilot_help), not with its options."""
+    if command == "copilot":
+        return gh_copilot_help(rest)
+    table = GH_REFUSED_OPTIONS[command]
+    if gh_help(rest, table):
+        return True
+    read = gh_walk(rest, gh_options(table))
+    long = gh_long_names(table)
+    if command == "skill publish":
+        return gh_flag(read, long, "--dry-run") or gh_flag(read, long, "--fix")
+    if command == "ssh-key add":
+        types = [value for option, value in read if option and long.get(option, option) == "--type"]
+        return not types or types[-1] == "authentication"
+    return False
+
+
+def gh_copilot_help(rest: Sequence[str]) -> bool:
+    """Whether gh prints the help of `copilot` for REST, the words of the call but `copilot`, and runs no Copilot CLI:
+    gh 2.106.0 reads none of them as flags (DisableFlagParsing) and prints the help where `--help` or `-h` stands, as a
+    whole word, among the words before the first `--`, after which every word goes to the CLI
+    (pkg/cmd/copilot/copilot.go:87-104, `slices.Contains(ghArgs, "--help") || slices.Contains(ghArgs, "-h")`). So
+    `--help=true` and a `--help` after `--` run the CLI."""
+    before = rest[:rest.index("--")] if "--" in rest else rest
+    return "--help" in before or "-h" in before
+
+
+# The values of a bool option that pflag reads as on, in lower case: Go's strconv.ParseBool takes 1, t, T, true, True
+# and TRUE.
+GH_TRUE = ("1", "t", "true")
+
+
+def gh_help(arguments: Sequence[str], table: tuple[str, str] | None) -> bool:
+    """Whether the command prints its help for ARGUMENTS, the words of a call but the command's own, and sends nothing:
+    cobra's Command.execute does where the help flag is on, the last one given winning, and where pflag meets `-h`
+    while the command gives no option that letter (pflag's ErrHelp, whatever follows). The help flag is `--help`: gh's
+    root command's persistent flag, and in gh-stack cobra's own `-h/--help` of each command, which `-h` turns on and
+    `-h=false` off. Read as pflag reads them with the command's options, TABLE (gh_options), a help flag counts only
+    where pflag reads an option: never as the value an option before it takes (`--title --help`, `-th`), and where it
+    may be one, after an option TABLE does not give, which may take the next word as its value, only where it turns the
+    help off. With TABLE None, for a command the check has no options of, every option but `--help` is read so, a bare
+    `-h` too: 12 commands of gh 2.106.0 give `-h` a value (`auth login -h/--hostname`, `repo edit -h/--homepage`, …),
+    so for a command whose options the check does not know `-h` may be such an option, and only `--help` counts
+    (dispatch://INFRA-4957, rulings-md v66; the tester's red test at 50aef475, `gh repo edit o/pub -h <url>` with `repo
+    edit` out of the tables). Measured 2026-11-27 with gh 2.106.0: `gh ssh-key add k -h`, `gh ssh-key add k
+    --help=false -h` and `gh ssh-key add -h=false k` print the help, and `gh ssh-key add k --title --help`, `gh ssh-key
+    add k -th` and `gh ssh-key add k --help=false` run the command."""
+    options = gh_options(table) if table else None
+    long = gh_long_names(table) if table else {}
+    on = False
+    # Where the word stands: where pflag reads an option ("option"), as the value of the option before it ("value"), or
+    # either ("either"), after an option the check does not know takes no value.
+    place = "option"
+    for word in arguments:
+        if place == "value":
+            place = "option"
+            continue
+        if word == "--":
+            break
+        if not word.startswith("-") or word == "-":
+            place = "option"
+            continue
+        name, attached, value = word.partition("=")
+        if name == "--help":
+            given = value.lower() in GH_TRUE if attached else True
+            if place == "option" or not given:
+                on = given
+            place = "option"
+            continue
+        if word.startswith("--"):
+            takes = None if attached or options is None else options.get(name)
+            after = "option" if attached or takes is False else "value" if takes else "either"
+        elif options is None:
+            after = "either"
+        else:
+            after, helped, given = gh_help_letters(word[1:], options, long)
+            if helped and place == "option":
+                return True
+            if given is not None and (place == "option" or not given):
+                on = given
+        place = after if place == "option" or after == "option" else "either"
+    return on
+
+
+def gh_help_letters(letters: str, options: Mapping[str, bool], long: Mapping[str, str]
+                    ) -> tuple[str, bool, bool | None]:
+    """pflag's reading of the cluster of short options LETTERS (`dt` of `-dt`) with OPTIONS (gh_options) and their long
+    spellings LONG (gh_long_names), for gh_help: where the next word stands ("option", or "value" where the last letter
+    takes it, or "either" after a letter OPTIONS does not give, which may take it); whether pflag meets `h` among
+    letters OPTIONS does not give (ErrHelp); and what the cluster sets the help flag to where a letter of it is the help
+    flag's (`-h` of gh-stack's `-h/--help`), on for the letter alone and as its value says for `-h=false`, else None. A
+    letter's value is the rest of the cluster, after a `=` too (`-t=x`), where there is one."""
+    given: bool | None = None
+    while letters:
+        name, letters = f"-{letters[0]}", letters[1:]
+        takes = options.get(name)
+        if takes is None:
+            return ("option", True, given) if name == "-h" else ("either", False, given)
+        attached = len(letters) > 1 and letters[0] == "="
+        if long.get(name) == "--help":
+            given = letters[1:].lower() in GH_TRUE if attached else True
+        if attached or (takes and letters):
+            return "option", False, given
+        if takes:
+            return "value", False, given
+    return "option", False, given
+
+
+def gh_extension(name: str, environment: Mapping[str, str]) -> bool:
+    """Whether the extension NAME is installed for gh, which then runs it as the top-level command NAME and through
+    `extension exec NAME` (GH_EXEC_COMMANDS): an entry `gh-NAME` in the `extensions` directory of gh's data directory
+    (gh 2.106.0, pkg/cmd/extension/manager.go Manager.list), which is XDG_DATA_HOME/gh, else ~/.local/share/gh under
+    HOME (go-gh's config.DataDir)."""
+    data = environment.get("XDG_DATA_HOME")
+    directory = Path(data) / "gh" if data else Path(environment.get("HOME", "")) / ".local" / "share" / "gh"
+    return bool(name) and "/" not in name and os.path.lexists(directory / "extensions" / f"gh-{name}")
+
+
+def gh_extension_command(name: str, rest: Sequence[str]) -> tuple[str, str, list[str]] | None:
+    """gh_command of a call of the installed extension NAME (gh_extension), REST the call's other words. gh runs it as
+    the top-level command NAME in place of an alias whose key is that name and of a stub of that name, and in place of
+    `help`, `__complete` and `__completeNoDesc`, which cobra adds to gh's root only after gh registered its extensions
+    (GH_LATE_COMMANDS; until the review of 3e4d1931, finding 3, the check read such a call as gh's own); never in place
+    of another command of its own: gh 2.106.0 registers no extension whose name one of those commands takes
+    (pkg/cmd/root/root.go:197-206, cmd.Find), refuses to install one (pkg/cmd/extension/command.go:694-701), takes an
+    alias whose key names an extension only by the part of its last word before a space, which gh_alias_at refuses
+    (gh_alias_place, pkg/cmd/alias/shared/validations.go:15-30), and registers a stub only where no extension has
+    (root.go:243-252). Through `extension exec NAME` gh runs it whatever command of its own has that name, an installed
+    gh-label in place of `gh label` (GH_EXEC_COMMANDS), and that call is read here the same. gh-stack's call is read by
+    GH_STACK_COMMANDS, its subcommand found as cobra finds it (gh_next_command, with no flags) through its aliases
+    (GH_STACK_ALIASES): ("stack", the subcommand, the words it reads) for a `text` one whose help flag is off (gh_help);
+    None for a `quiet` one, for one whose help flag is on, which prints its help and sends nothing (cobra v1.10.2, the
+    version gh-stack's go.mod pins, command.go:925-936: execute returns flag.ErrHelp before it runs the command;
+    gh-stack's help function only prints, cmd/root.go:96-106), and for a call that names none, which prints gh-stack's
+    help or its version. Any other extension is refused whatever its words, `--help` among them (GH_UNKNOWN_REFUSAL):
+    gh hands an extension its words unread (pkg/cmd/root/extension.go, DisableFlagParsing) and prints no help of its
+    own, and the check does not know what the extension does with `--help` (dispatch://INFRA-4957/artifact/rulings-md
+    v72 item 1 and v73 item 6; until then a call of one with `--help` went out). A subcommand of gh-stack no entry
+    names is a command no table names (gh_unknown), whose `--help` gh-stack's cobra reads."""
+    if name != "stack":
+        raise GhUnjudgedError(name, GH_UNKNOWN_REFUSAL)
+    found = gh_next_command(rest, ())
+    if found is None:
+        return None
+    word, arguments = found
+    sub = GH_STACK_ALIASES.get(word, word)
+    if sub not in GH_STACK_COMMANDS:
+        return gh_unknown(f"stack {word}", arguments)
+    if GH_STACK_COMMANDS[sub][0] == "quiet" or gh_help(arguments, GH_STACK_OPTIONS[sub]):
+        return None
+    return "stack", sub, arguments
+
+
+def gh_unknown(name: str, rest: Sequence[str]) -> None:
+    """None for a call of NAME, the words of a command no table names that is no gh alias, gh's own or a subcommand of
+    gh-stack's, REST the call's other words, with `--help` on, the help flag of gh's cobra and of gh-stack's, a bare
+    `-h` not counting since the check knows none of the command's options (gh_help, TABLE None): it prints the
+    command's help and sends nothing. GhUnjudgedError for any other: the check does not know what the command sends
+    (GH_UNKNOWN_REFUSAL). An installed extension other than gh-stack is refused whatever its words
+    (gh_extension_command). Until rulings-md v66 (dispatch://INFRA-4957, the tester's findings at c8d749df, item 4) a
+    call of an installed extension went out unread, as local, though an extension sends its text with its own
+    client."""
+    if gh_help(rest, None):
+        return None
+    raise GhUnjudgedError(name, GH_UNKNOWN_REFUSAL)
+
+
+def gh_alias_command(typed: str, alias: GhAlias, rest: Sequence[str], environment: Mapping[str, str],
+                     seen: tuple[str, ...]) -> tuple[str, str, list[str]] | None:
+    """gh_command of what ALIAS, the gh alias of the user's that gh runs for the call's words TYPED (gh_alias_at),
+    runs with REST, SEEN the keys of the aliases the call ran through to it, in order; None for a shell alias (`!…`),
+    which runs a shell whose own gh calls come back through shims/gh, and for one whose `$N` REST does not fill, which
+    goes to gh, which refuses it itself (`not enough arguments for alias`). An alias that runs another is followed
+    however many run in a row: gh 2.106.0 runs what an alias expands to as a call of its own, with no limit
+    (pkg/cmd/root/alias.go:53-77, `root.SetArgs(expandedArgs); return root.Execute()`), and on 2026-11-27 its `gh a1`,
+    config.yml holding `a4: version`, `a3: a4`, `a2: a3` and `a1: a2`, printed gh's version in 33 of 60 runs. gh
+    registers an alias only where what it runs is a command it has registered already (pkg/cmd/root/root.go:213-240,
+    pkg/cmd/alias/shared/validations.go:36-51), in the order of a Go map, which Go does not fix
+    (internal/config/config.go:815-826), so a chain runs in some runs only. Until the review of 053ef618 (finding 2) a
+    call past three aliases in a row went out unread. GhUnjudgedError, refusing the call, where the call comes back to
+    ALIAS (its key in SEEN), a loop of aliases, which gh 2.106.0 does not register (on 2026-11-27 `gh c1`, config.yml
+    holding `c1: c2` and `c2: c1`, failed with `unknown command "c1"` in 40 of 40 runs) and the check does not follow;
+    and where shlex cannot split ALIAS's expansion with REST in place of its `$N` (gh_expand_alias, which tests the `$N`
+    first): only then is the expansion as config.yml holds it split on its own, to choose the refusal's message
+    (gh_unsplit). gh splits an alias with google/shlex, which splits text Python's shlex refuses, a `#` beginning a
+    comment there."""
+    path = gh_config_directory(environment) / "config.yml"
+    if alias.key in seen:
+        raise GhUnjudgedError(typed, f"the call comes back to gh's alias {alias.key}, on line {alias.line} of {path}, "
+                                     f"after the aliases {', '.join(seen)}: a loop of aliases, which the check "
+                                     "cannot follow, so it cannot judge the call: fix the loop")
+    if alias.expansion.startswith("!"):
         return None
     try:
-        expanded = gh_expand_alias(found[0], rest)
+        expanded = gh_expand_alias(alias.expansion, rest)
     except ValueError as error:
         try:
-            shlex.split(found[0])
+            shlex.split(alias.expansion)
         except ValueError as own:
-            raise GhAliasError(name, gh_unsplit(name, found[1], aliases.path, own, filled=False)) from None
-        raise GhAliasError(name, gh_unsplit(name, found[1], aliases.path, error, filled=True)) from None
-    return gh_command(expanded, environment, depth + 1) if expanded else None
+            raise GhUnjudgedError(typed, gh_unsplit(alias.key, alias.line, path, own, filled=False)) from None
+        raise GhUnjudgedError(typed, gh_unsplit(alias.key, alias.line, path, error, filled=True)) from None
+    return gh_command(expanded, environment, seen + (alias.key,)) if expanded else None
 
 
 def gh_walk(arguments: Sequence[str], options: Mapping[str, bool]) -> list[tuple[str | None, str | None]]:
@@ -3880,16 +4698,211 @@ def gh_argument_texts(group: str, sub: str, number: int, value: str) -> list[GhT
         if value == "-":
             return [GhText(option, value, path=value)]
         texts: list[GhText] = []
-        for path in sorted(glob.glob(value)) or [value]:
+        for path in gh_glob_paths(value):
             texts += [GhText(option, path, path=path), GhText(f"{option} name", text=os.path.basename(path))]
         return texts
     if (group, sub) == ("gist", "edit") and number == 2:
         return [GhText(option, value, path=value)]
     if (group, sub) in (("release", "create"), ("release", "upload")) and number >= 2:
-        # An asset: gh sends its file name and the label after a `#`. Its content is a build output, not text.
-        path, _, label = value.partition("#")
-        return [GhText(f"{option} name", text=os.path.basename(path)), GhText(f"{option} label", text=label)]
+        # An asset, `<file>[#<label>]`, as gh 2.106.0 reads it (pkg/cmd/release/shared/upload.go AssetsFromArgs): a
+        # value that holds a `#` is the file before its first `#`, unless that is its first character, with the label
+        # after it; any other is a pattern gh expands into files (gh_glob_paths). gh uploads each file's bytes, with its
+        # base name and the label (uploadAsset), and a release of a public repository shows them to anyone. Until the
+        # rulings on the tester's findings at 1c15219b (dispatch://INFRA-4957, item 3) the bytes went out unread. The
+        # bytes, of up to 2 GiB, are read in chunks, as any file's (gh_contents).
+        index = value.find("#")
+        assets = ([(value[:index], value[index + 1:]) if index > 0 else (value, "")] if index >= 0
+                  else [(path, "") for path in gh_glob_paths(value)])
+        texts = []
+        for path, label in assets:
+            texts += [GhText(option, path, path=path),
+                      GhText(f"{option} name", text=os.path.basename(path)), GhText(f"{option} label", text=label)]
+        return texts
     return [GhText(option, text=value, is_name=(group, sub, option) in GH_NAME_TEXTS)]
+
+
+class GhBadPattern(ValueError):
+    """A file pattern that Go's path/filepath reads as malformed (ErrBadPattern), for which gh refuses the call."""
+
+
+def gh_glob_chunk(pattern: str) -> tuple[bool, str, str]:
+    """Go's scanChunk (path/filepath/match.go): whether PATTERN starts with a `*`, the chunk after its `*`s up to the
+    next `*` outside a character class, and the rest."""
+    star = pattern.startswith("*")
+    pattern = pattern.lstrip("*")
+    in_class = False
+    index = 0
+    while index < len(pattern):
+        character = pattern[index]
+        if character == "\\" and index + 1 < len(pattern):
+            index += 1
+        elif character == "[":
+            in_class = True
+        elif character == "]":
+            in_class = False
+        elif character == "*" and not in_class:
+            return star, pattern[:index], pattern[index:]
+        index += 1
+    return star, pattern, ""
+
+
+def gh_glob_escape(chunk: str) -> tuple[str, str]:
+    """Go's getEsc: the character that starts CHUNK, the bound of a class's range, a `\\` escaping it, and the rest;
+    GhBadPattern where there is none, it is a byte that is no UTF-8 (surrogateescape's U+DC80 to U+DCFF), or nothing
+    follows it."""
+    if not chunk or chunk[0] in "-]":
+        raise GhBadPattern(chunk)
+    if chunk[0] == "\\":
+        chunk = chunk[1:]
+        if not chunk:
+            raise GhBadPattern(chunk)
+    character, chunk = chunk[0], chunk[1:]
+    if not chunk or "\udc80" <= character <= "\udcff":
+        raise GhBadPattern(chunk)
+    return character, chunk
+
+
+def gh_glob_chunk_match(chunk: str, name: str) -> str | None:
+    """Go's matchChunk: the rest of NAME where CHUNK matches its start, else None; GhBadPattern for a CHUNK Go reads as
+    malformed, which is read to its end, after a failed match too."""
+    failed = False
+    while chunk:
+        failed = failed or not name
+        character = chunk[0]
+        if character == "[":
+            found = ""
+            if not failed:
+                found, name = name[0], name[1:]
+            chunk = chunk[1:]
+            negated = chunk.startswith("^")
+            if negated:
+                chunk = chunk[1:]
+            matched = False
+            ranges = 0
+            while True:
+                if chunk.startswith("]") and ranges:
+                    chunk = chunk[1:]
+                    break
+                low, chunk = gh_glob_escape(chunk)
+                high = low
+                if chunk[0] == "-":
+                    high, chunk = gh_glob_escape(chunk[1:])
+                matched = matched or low <= found <= high
+                ranges += 1
+            failed = failed or matched == negated
+        elif character == "?":
+            if not failed:
+                failed, name = name[0] == "/", name[1:]
+            chunk = chunk[1:]
+        else:
+            if character == "\\":
+                chunk = chunk[1:]
+                if not chunk:
+                    raise GhBadPattern(chunk)
+            if not failed:
+                failed, name = chunk[0] != name[0], name[1:]
+            chunk = chunk[1:]
+    return None if failed else name
+
+
+def gh_glob_match(pattern: str, name: str) -> bool:
+    """Go's filepath.Match on Linux: whether NAME matches all of PATTERN, whose `*` and `?` match no `/`, `[^…]` being a
+    class's complement and `\\` escaping the next character; GhBadPattern for a PATTERN Go reads as malformed."""
+    while pattern:
+        star, chunk, pattern = gh_glob_chunk(pattern)
+        if star and not chunk:
+            return "/" not in name
+        rest = gh_glob_chunk_match(chunk, name)
+        if rest is not None and (not rest or pattern):
+            name = rest
+            continue
+        if not star:
+            return False
+        for index in range(len(name)):
+            if name[index] == "/":
+                return False
+            rest = gh_glob_chunk_match(chunk, name[index + 1:])
+            if rest is not None and (pattern or not rest):
+                name = rest
+                break
+        else:
+            return False
+    return not name
+
+
+def gh_glob(pattern: str) -> list[str]:
+    """Go's filepath.Glob on Linux: PATTERN itself where it holds none of `*?[\\` and names something (os.Lstat), else
+    each path that matches it (gh_glob_match), a directory's names in sorted order and joined to it as filepath.Join
+    joins them, so `*` matches a name that begins with `.` too; GhBadPattern for a PATTERN Go reads as malformed."""
+    gh_glob_match(pattern, "")
+    if not any(character in pattern for character in "*?[\\"):
+        return [pattern] if os.path.lexists(pattern) else []
+    index = pattern.rfind("/")
+    directory, file = pattern[:index + 1], pattern[index + 1:]
+    directory = "." if not directory else directory if directory == "/" else directory[:-1]
+    if not any(character in directory for character in "*?[\\"):
+        return gh_glob_directory(directory, file)
+    if directory == pattern:
+        raise GhBadPattern(pattern)
+    return [path for found in gh_glob(directory) for path in gh_glob_directory(found, file)]
+
+
+def gh_glob_directory(directory: str, pattern: str) -> list[str]:
+    """Go's glob: each name in DIRECTORY that PATTERN matches, in sorted order, joined to DIRECTORY; none where
+    DIRECTORY is no directory or cannot be read."""
+    try:
+        if not stat.S_ISDIR(os.stat(directory).st_mode):
+            return []
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return []
+    return [os.path.normpath(os.path.join(directory, name)) for name in names if gh_glob_match(pattern, name)]
+
+
+def gh_glob_paths(pattern: str) -> list[str]:
+    """The files gh 2.106.0 takes for the file argument PATTERN of `gist create`, `release create` and `release upload`
+    (pkg/cmdutil/args.go GlobPaths, gh_glob); PATTERN itself where that gives none or Go reads it as malformed, for
+    which gh refuses the call, and which the check then reads as a path, as it reads any file (gh_contents)."""
+    try:
+        return gh_glob(pattern) or [pattern]
+    except GhBadPattern:
+        return [pattern]
+
+
+def gh_split_file_arg(value: str) -> tuple[str, str]:
+    """(the path of the file, the text after it) of a `--attach` VALUE, `<file>[#<alt text>]`, split as gh 2.106.0
+    splits it (internal/attachments/flags.go SplitFileArg), a `#` being legal in a file's name: VALUE whole, with no
+    text, when it names something that exists (os.Stat, which follows a link, from gh's working directory, which is the
+    check's); else, at each `#` after the first character from the last to the first, the part before it, with the text
+    after it, for the first such part that exists; else the two sides of the last `#` after the first character; else
+    VALUE whole, with no text. gh refuses a path that is "" or `-` itself."""
+
+    def exists(path: str) -> bool:
+        try:
+            os.stat(path)
+        except (OSError, ValueError):
+            return False
+        return True
+
+    if exists(value):
+        return value, ""
+    index = value.rfind("#")
+    while index > 0:
+        if exists(value[:index]):
+            return value[:index], value[index + 1:]
+        index = value.rfind("#", 0, index)
+    index = value.rfind("#")
+    return (value[:index], value[index + 1:]) if index > 0 else (value, "")
+
+
+def gh_attach_alt(path: str) -> str:
+    """The alt text gh 2.106.0 writes into the body for an image `--attach PATH` given none
+    (internal/attachments/userasset.go newImageAsset): the base name of PATH without its extension, each `.` in it a
+    space, which the value does not hold as written. A video's stands as its base name, which the value holds; the
+    check reads this text for a video too, one text more and never one less."""
+    base = os.path.basename(path.rstrip("/"))
+    dot = base.rfind(".")
+    return (base[:dot] if dot >= 0 else base).replace(".", " ")
 
 
 def gh_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]) -> list[GhText]:
@@ -3897,7 +4910,9 @@ def gh_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
     (GH_LOCAL_OPTIONS), and for a file gh reads, what the file holds; a field's key and its value are two texts, as
     GitHub stores them. The repository the call goes to (`-R`, a URL, an endpoint) is text too: a term inside the own
     name of a public destination counts for nothing there (gh_own_name). A `repo create --source DIR` given no name
-    names the new repository after DIR (gh_source_name), which is read as `--source name`."""
+    names the new repository after DIR (gh_source_name), which is read as `--source name`. A `--attach` value is text,
+    its file is read at the path gh takes (gh_split_file_arg), and the alt text gh makes from the file's name when the
+    value gives none (gh_attach_alt) is read as `--attach PATH (alt text)`."""
     long = gh_long_names(GH_TEXT_COMMANDS[(group, sub)])
     texts: list[GhText] = []
     number = 0
@@ -3917,6 +4932,15 @@ def gh_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
             texts.append(GhText(name, value, path=value, json_body=name == "--input"))
         elif (group, sub, name) == ("gist", "edit", "--add"):
             texts += [GhText(name, value, path=value), GhText(f"{name} name", text=os.path.basename(value))]
+        elif name == "--attach":
+            # gh uploads the file's bytes, and writes the alt text, else one made from the file's name, into the body.
+            # The bytes, of an image or a video, are read in chunks, as any file's (gh_contents).
+            path, alt = gh_split_file_arg(value)
+            texts.append(GhText(name, text=value))
+            if path not in ("", "-"):
+                texts.append(GhText(name, path, path=path))
+                if not alt:
+                    texts.append(GhText(name, path, part="alt text", text=gh_attach_alt(path)))
         elif (group, sub, name) == ("pr", "create", "--template"):
             # A template's name, which gh also reads as a file's path when there is such a file.
             texts += [GhText(name, text=value), GhText(name, value, path=value, optional=True)]
@@ -3940,7 +4964,7 @@ def gh_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
 def gh_flag(read: Sequence[tuple[str | None, str | None]], long: Mapping[str, str], name: str) -> bool:
     """Whether the bool option whose long spelling is NAME is on: the last one given wins, and one with no value is on."""
     values = [value for option, value in read if option and long.get(option, option) == name]
-    return bool(values) and (values[-1] or "true").lower() in ("1", "t", "true")
+    return bool(values) and (values[-1] or "true").lower() in GH_TRUE
 
 
 def gh_git(arguments: Sequence[str]) -> str | None:
@@ -4027,6 +5051,35 @@ def gh_local_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | 
     return contents, unreadable
 
 
+# The name of a repository's default pull request template as githubtemplate.FindLegacy reads it (cli/cli v2.97.0, which
+# gh-stack builds with, and v2.106.0 alike: pkg/githubtemplate/github_template.go): `pull_request_template`, a `-` or
+# a `_` between its words, in any letter case, then a `.` or nothing.
+GH_PR_TEMPLATE = re.compile(r"pull[_-]request[_-]template(?:\.|\Z)", re.IGNORECASE)
+
+
+def gh_pr_templates() -> list[str]:
+    """The path of each file `gh stack link` and `gh stack submit --auto` may send as the body of a pull request they
+    create: the repository's default pull request template (internal/pr/template.go:12-17; cmd/link.go:699-717,
+    cmd/submit.go:218-222), which githubtemplate.FindLegacy looks for under the root of this directory's checkout (`git
+    rev-parse --show-toplevel`, internal/git/gitops.go:131-133) in `.github`, the root and `docs`: a file that is
+    neither a directory nor a link and whose name GH_PR_TEMPLATE matches. FindLegacy takes the first it finds; every
+    one is read, and each whole, front matter too, where gh-stack sends what follows it, trimmed, and `submit` sends a
+    branch's commit body where that is empty. None outside a checkout."""
+    printed = gh_git(["rev-parse", "--show-toplevel"])
+    if printed is None:
+        return []
+    root = printed.removesuffix("\n")
+    found: list[str] = []
+    for directory in (os.path.join(root, ".github"), root, os.path.join(root, "docs")):
+        try:
+            entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+        except OSError:
+            continue
+        found += [entry.path for entry in entries if GH_PR_TEMPLATE.match(entry.name) and not entry.is_symlink()
+                  and not entry.is_dir(follow_symlinks=False)]
+    return found
+
+
 # The hosts of github.com's REST and GraphQL API, and of its release-asset uploads.
 GH_API_HOSTS = frozenset(("api.github.com", "uploads.github.com"))
 
@@ -4037,20 +5090,30 @@ GH_URL_HOST = "a host the check cannot read in a URL that is not GitHub's"
 
 
 def gh_config_condition(directory: Path) -> str | None:
-    """None when every host gh's config in DIRECTORY lists is github.com, as a simple reading reads it; else why not,
-    as a refusal names it. In hosts.yml each line at column 0 that is neither blank nor a comment is the key
-    `github.com`, plain or quoted, with its `:` (gh_yaml_key), and the first such line is at column 0; the lines
-    indented below a key are that host's. A hosts.yml that is absent, empty or holds only `{}`, which gh writes once
-    `gh auth logout` logged out of the last host (measured 2026-11-20 with gh 2.98.0, which then takes github.com),
-    lists none. config.yml holds no line break other than a line feed (gh_config_break): the check reads its lines at
-    its line feeds, and yaml.v3 begins a line at each break, so a key after such a break, a `hosts` key among them,
-    would be one the check does not see. Nor does it hold a `hosts` key at its root (gh_root_keys): gh takes the hosts
-    of that key before those of hosts.yml, and the check reads none of them, so such a key takes a call out of the
-    plain case; an alias named `hosts`, which `gh alias set hosts …` writes inside the aliases, is no such key. Any
-    layout this does not read is not plain: a host indented at the root, a flow mapping, a `---`, a file that cannot be
-    read. hosts.yml is split by str.splitlines, which splits at each break yaml.v3 reads and more. The agent config
-    directory of scripts/gh-agent-config, whose hosts.yml lists `github.com:` and whose config.yml is the user's, is
-    plain."""
+    """None when every host gh's config in DIRECTORY lists is github.com, and gives it no `api_host`, as a simple
+    reading reads it; else why not, as a refusal names it. In hosts.yml each line at column 0 that is neither blank nor
+    a comment is the key `github.com`, plain or quoted, with its `:` (gh_yaml_key) and nothing after it but blanks or a
+    comment, and the first such line is at column 0; the lines indented below a key are that host's, and each begins,
+    at its first character that is no blank, with a key gh_yaml_key reads, neither `api_host` nor the merge key `<<`.
+    gh 2.106.0 sends every REST and GraphQL call for a host to the host's `api_host` in place of its API host, which it
+    reads at `hosts.<host>.api_host` (internal/config/config.go APIHostForHost; go-gh v2.17.0 pkg/api/host.go apiHost),
+    so an `api_host`, plain or quoted, takes a call out of the plain case; so does one at any depth, under `users:` too,
+    where gh does not read it: a conservative reading. gh 2.106.0's `gh config get api_host --host github.com` read the
+    key plain, quoted, in a flow mapping and as an explicit key `? api_host`, and none under `users:` or behind `<<`
+    (measured 2026-11-27). A hosts.yml that is absent, empty or holds only `{}`, which gh writes once `gh auth logout`
+    logged out of the last host (measured 2026-11-20 with gh 2.98.0, which then takes github.com), lists none. A
+    config.yml that holds a line break other than a line feed, behind which yaml.v3 may begin a `hosts` key the check
+    does not see, refuses every call before this is read (gh_aliases, gh_alias_at; until the review of 3e4d1931 such a
+    break took a call out of the plain case here). config.yml holds no `hosts` key at its root (gh_root_keys): gh takes
+    the hosts of that key before those of hosts.yml, and the check reads none of them, so such a key takes a call out of
+    the plain case; an alias named `hosts`, which `gh alias set hosts …` writes inside the aliases, is no such key. Any
+    layout this does not read is not plain: a host indented at the root; a value on a host's line, such as a flow
+    mapping, an anchor or an alias; a merge key; an indented line that begins with no key gh_yaml_key reads, such as a
+    flow mapping, an explicit key `? …`, an anchor, an alias, a tag, a list item or a scalar's indented continuation; a
+    `---`; a file that cannot be read. hosts.yml is split by str.splitlines, which splits at each break yaml.v3 reads
+    and more. The hosts.yml gh writes is plain, and so is the agent config directory of scripts/gh-agent-config, whose
+    hosts.yml lists `github.com:` with `users`, `git_protocol`, `user` and `oauth_token` below it, and whose config.yml
+    is the user's."""
     texts: dict[str, str] = {}
     for name in ("hosts.yml", "config.yml"):
         try:
@@ -4059,22 +5122,29 @@ def gh_config_condition(directory: Path) -> str | None:
             texts[name] = ""
         except (OSError, UnicodeDecodeError) as error:
             return f"gh's {name} cannot be read ({error})"
+    layout = "gh's hosts.yml is not in the layout the check reads"
     lines = [line for line in texts["hosts.yml"].removeprefix("\ufeff").splitlines()
              if line.strip() and not line.lstrip(" \t").startswith("#")]
+    host = "a host"
     for number, line in enumerate(lines):
         if re.fullmatch(r"[ \t]*\{\}[ \t]*(?:#.*)?", line):
             continue
         if line[0] in " \t" and number:
+            entry = gh_yaml_key(line, gh_blanks_end(line, 0))
+            if entry is not None and entry[0] == "api_host":
+                return f"gh's hosts.yml gives {host} an api_host, where gh 2.106.0 sends its API calls"
+            if entry is None or entry[0] == "<<":
+                return layout
             continue
         entry = gh_yaml_key(line, 0)
         if entry is None:
-            return "gh's hosts.yml is not in the layout the check reads"
+            return layout
         if entry[0] != "github.com":
             return f"gh's config lists {entry[0]}"
+        if not re.fullmatch(r"[ \t]*(?:#.*)?", line[entry[1]:]):
+            return layout
+        host = entry[0]
     config = gh_config_text(texts["config.yml"])
-    broken = gh_config_break(config)
-    if broken is not None:
-        return f"gh's config.yml holds {broken}, a line break other than a line feed, which the check does not read"
     if gh_root_keys(newline_lines(config), "hosts"):
         return "gh's config.yml has a hosts key, which the check does not read"
     return None
@@ -4084,7 +5154,10 @@ def gh_plain_case(environment: Mapping[str, str]) -> str | None:
     """None when a call is in the plain case, where gh sends it to github.com unless the call itself names another
     host; else the condition that takes it out, as a refusal names it. The plain case holds when all three hold:
 
-    1. Every host gh's config lists is github.com (gh_config_condition).
+    1. Every host gh's config lists is github.com, and the config gives it no `api_host`, to which gh 2.106.0 sends
+       every REST and GraphQL call for that host (gh_config_condition; internal/config/config.go APIHostForHost and
+       go-gh v2.17.0 pkg/api/host.go). An `api_host` at any depth of hosts.yml, and a host line or an indented line in
+       a layout the check does not read, take the call out of the plain case.
     2. GH_HOST is unset, or names github.com as gh_host reads a host, as it reads --hostname: in any letter case, and
        `api.github.com` too, which go-gh's auth.NormalizeHostname makes github.com.
     3. Every remote of this directory that gh keeps (gh_remotes: by the repository of its fetch URL, else of its push
@@ -4349,50 +5422,70 @@ def gh_is_stdin(path: str) -> bool:
     return not stat.S_ISREG(standard.st_mode) and os.path.samestat(named, standard)
 
 
+def gh_stdin_texts(texts: Sequence[GhText], environment: Mapping[str, str]) -> list[GhText] | None:
+    """TEXTS, the texts of a call, with each file that is this call's standard input (gh_is_stdin) read as `-`, as
+    gh_contents takes them; None when one is standard input (`-`) and GH_STDIN in ENVIRONMENT does not name the shim's
+    buffer of it, for which the check exits GH_STDIN_EXIT and reads no base repository first (gh_bases)."""
+    read = [replace(piece, path="-") if piece.path not in (None, "-") and gh_is_stdin(piece.path) else piece
+            for piece in texts]
+    if not environment.get(GH_STDIN, "") and any(piece.path == "-" for piece in read):
+        return None
+    return read
+
+
 def gh_contents(texts: Sequence[GhText], environment: Mapping[str, str]
-                ) -> tuple[list[tuple[GhText, str]], list[tuple[GhText, str]]] | None:
-    """Each of TEXTS, the texts of a call, with what gh sends for it, and each file that cannot be read with why; None
-    when one is standard input (`-`) and GH_STDIN in ENVIRONMENT does not name the shim's buffer of it, for which the
-    check exits GH_STDIN_EXIT. A file that is this call's standard input (gh_is_stdin) is read as `-`. A pipe, a socket
-    or a device other than /dev/null is not read: reading a pipe takes the text gh reads after the check (until
-    2026-11-17 a `--body-file <(…)` went out empty, and a `gh pr edit --body-file /dev/stdin` emptied the body), and a
-    device may never end. Such a file cannot be read, so its text is refused for a target not confirmed private."""
-    texts = [replace(piece, path="-" if piece.path not in (None, "-") and gh_is_stdin(piece.path) else piece.path)
-             for piece in texts]
-    stdin: str | None = None
-    if any(piece.path == "-" for piece in texts):
-        pointer = environment.get(GH_STDIN)
-        if not pointer:
-            return None
-        try:
-            stdin = Path(pointer).read_bytes().decode("utf-8", errors="surrogateescape")
-        except OSError:
-            stdin = None
+                ) -> tuple[list[tuple[GhText, str]], list[tuple[GhText, str]]]:
+    """Each of TEXTS, the texts of a call as gh_stdin_texts gives them, with what gh sends for it, and each file that
+    cannot be read with why; standard input (`-`) is the shim's buffer of it, which GH_STDIN in ENVIRONMENT names. A
+    pipe, a socket or a device other than /dev/null is not read: reading a pipe takes the text gh reads after the check
+    (until 2026-11-17 a `--body-file <(…)` went out empty, and a `gh pr edit --body-file /dev/stdin` emptied the body),
+    and a device may never end. Such a file cannot be read, so its text is refused for a target not confirmed private.
+    A file whose text a reader takes whole (GhText.whole), a JSON body or a field json.loads, a GraphQL document's
+    grammar or gh_made_public reads, none of which reads in pieces, is read whole, up to GH_WHOLE_LIMIT bytes, which
+    bounds what the check holds of it, and a larger one cannot be read, whatever size the file says it has (a procfs
+    file says 0, and a file may grow); gh_findings then reads each value of it in chunks (gh_view_matches). Any other
+    file, and standard input from the shim's buffer, that holds any byte is left to gh_findings, with "" for its text
+    and the file to read (GhText.chunked), which reads it in chunks (gh_file_views), so the check holds none of it
+    whole (dispatch://INFRA-4957, rulings-md v66 item 2)."""
+    pointer = environment.get(GH_STDIN, "")
+    oversized = (f"it holds more than the {GH_WHOLE_LIMIT >> 20} MiB the check reads of a JSON body or a field it "
+                 "parses whole")
     contents: list[tuple[GhText, str]] = []
     unreadable: list[tuple[GhText, str]] = []
     for piece in texts:
         if piece.path is None:
             contents.append((piece, piece.text or ""))
-        elif piece.path == "-":
-            if stdin is None:
-                unreadable.append((piece, "standard input could not be read"))
-            else:
-                contents.append((piece, stdin))
-        else:
-            try:
-                mode = os.stat(piece.path).st_mode
-                if (stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode)) and \
-                        not os.path.samestat(os.stat(piece.path), os.stat(os.devnull)):
-                    if not piece.optional:
-                        unreadable.append((piece, "a pipe or a device, which the check cannot read without taking its "
-                                                  "text from gh: pass the text in a file, or on standard input as -"))
-                    continue
-                data = Path(piece.path).read_bytes()
-            except OSError as error:
+            continue
+        stdin = piece.path == "-"
+        path = pointer if stdin else piece.path
+        whole = piece.whole()
+        try:
+            mode = os.stat(path).st_mode
+            if (not stdin and (stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode))
+                    and not os.path.samestat(os.stat(path), os.stat(os.devnull))):
                 if not piece.optional:
-                    unreadable.append((piece, error.strerror or type(error).__name__))
+                    unreadable.append((piece, "a pipe or a device, which the check cannot read without taking its "
+                                              "text from gh: pass the text in a file, or on standard input as -"))
                 continue
+            with open(path, "rb") as handle:
+                # The size the file says it has spares reading a larger one; the read, one byte past the limit, finds
+                # one that holds more than it says.
+                if whole and os.fstat(handle.fileno()).st_size > GH_WHOLE_LIMIT:
+                    unreadable.append((piece, oversized))
+                    continue
+                data = handle.read(GH_WHOLE_LIMIT + 1 if whole else 1)
+        except OSError as error:
+            if stdin:
+                unreadable.append((piece, "standard input could not be read"))
+            elif not piece.optional:
+                unreadable.append((piece, error.strerror or type(error).__name__))
+            continue
+        if whole and len(data) > GH_WHOLE_LIMIT:
+            unreadable.append((piece, oversized))
+        elif whole or not data:
             contents.append((piece, data.decode("utf-8", errors="surrogateescape")))
+        else:
+            contents.append((replace(piece, chunked=path), ""))
     return contents, unreadable
 
 
@@ -4728,49 +5821,103 @@ def gh_values(piece: GhText, text: str, graphql: bool) -> list[tuple[str, str, b
 MARKDOWN_ESCAPE = re.compile(r"\\([!-/:-@\[-`{-~])|&(?:#[0-9]{1,7}|#[Xx][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]{0,31});")
 
 
+def markdown_shown(found: re.Match[str]) -> str:
+    """What GitHub shows for FOUND, a CommonMark escape (MARKDOWN_ESCAPE), as markdown_unescaped reads it."""
+    return found[1] or html.unescape(found[0])
+
+
 def markdown_unescaped(text: str) -> str:
     """TEXT as GitHub renders it once CommonMark's escapes are undone (MARKDOWN_ESCAPE), in one pass: `INFRA\\-1`,
     `INFRA&#45;1` and `INFRA&#x2D;1` show as INFRA-1. A reference is read as HTML5 reads it (html.unescape: an unknown
     name stays as written, and a code point that is 0 or past Unicode is U+FFFD), so `&hyphen;` is U+2010, which is not
     `-`. Inline markup that splits a term (`IN*FRA*-1`) is not undone."""
-    return MARKDOWN_ESCAPE.sub(lambda found: found[1] or html.unescape(found[0]), text)
+    return MARKDOWN_ESCAPE.sub(markdown_shown, text)
+
+
+# The longest text MARKDOWN_ESCAPE matches, `&`, a name of 32 characters and `;`: the most it reads from a place to tell
+# whether an escape starts there.
+MARKDOWN_ESCAPE_LONGEST = 34
+
+
+class MarkdownUnescaper:
+    """markdown_unescaped of a text that comes in pieces (feed), given back in pieces that join into it. A piece is
+    undone up to a place that is MARKDOWN_ESCAPE_LONGEST characters or more before the end of what has come, or the end
+    of an escape that starts before that, so MARKDOWN_ESCAPE reads every place before it as it reads it in the whole
+    text, and no escape spans it; the rest waits for the next piece, and the last one (FINAL) undoes all. CHANGED says
+    an escape was undone into other text, so that markdown_unescaped of the whole text is not the text."""
+
+    def __init__(self) -> None:
+        self.waiting = ""
+        self.changed = False
+
+    def feed(self, text: str, final: bool = False) -> str:
+        text = self.waiting + text
+        cut = len(text) if final else max(0, len(text) - MARKDOWN_ESCAPE_LONGEST)
+        pieces: list[str] = []
+        done = 0
+        for found in MARKDOWN_ESCAPE.finditer(text):
+            if found.start() >= cut:
+                break
+            shown = markdown_shown(found)
+            self.changed = self.changed or shown != found[0]
+            pieces += (text[done:found.start()], shown)
+            done = found.end()
+            cut = max(cut, done)
+        pieces.append(text[done:cut])
+        self.waiting = text[cut:]
+        return "".join(pieces)
 
 
 @dataclass(frozen=True)
 class GhMatch:
     """A listed term gh_findings finds in a value of a gh call's text: FINDING, what a refusal shows; SPAN, the match in
-    VIEW, the view of the value it is in, where gh_check reads the destination's own name (gh_own_name); TWINS, for a
-    match of a later view, the as-written view's matches of its term, list and allowed tokens, as (match, view); and
-    PIECE, the text, which says where it goes (gh_goes_to)."""
+    VIEW, the view of the value it is in, where gh_refusal reads the destination's own name (gh_own_name), or for a file
+    read in chunks the part of the view around the match where gh_own_name reads as in the whole view (gh_name_window);
+    PIECE, the text, which says where it goes (gh_goes_to); VALUE, the number of the value among the call's values,
+    which the matches of every view of one value share; and HOW, how its view reads the value, "" for as written, whose
+    matches of a term, list and allowed tokens are the twins of a later view's (gh_findings)."""
 
     finding: Finding
     span: Span
     view: str
-    twins: tuple[tuple[Span, str], ...]
     piece: GhText
+    value: int
+    how: str
+
+
+# A match of a view as gh_view_findings takes it: the line of the view it starts on, the match and its line as excerpt
+# shows them, the match in VIEW, and VIEW, the view or the part of it around the match (gh_name_window).
+GhViewMatch = tuple[int, str, str, Span, str]
 
 
 def gh_findings(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText], bool],
-                matcher: TermMatcher) -> list[GhMatch]:
+                matcher: TermMatcher) -> Iterator[GhMatch]:
     """A GhMatch for each listed term in each value of each text (gh_values, GRAPHQL saying which text is a GraphQL
     document or carries one), its Finding at the text's field or file, the value's path in it and the line in the
-    value.
+    value, given as each chunk of each view is read (GhChunkScan): the check holds no list of a call's matches, which
+    a text may hold by the hundred thousand (gh_refusal).
 
     A value is read as GitHub renders it, a paragraph at a time (paragraph_view): a line break inside a paragraph shows
     as a space, so a term of several words that a wrapped line (or a no-break space) splits is the term on the page.
     Until 2026-11-17 each line was read alone, and a body wrapped inside such a term went to a public repository. A
     value read both ways is read with its escapes decoded too, whatever the first view finds: a match counts only for a
-    target its list reaches, no allowed token of that target holds and whose own name does not hold it (gh_check), so
-    the first view's matches can all be dropped there while the second's count. Each of those views is read once more
-    with CommonMark's escapes undone (markdown_unescaped), where that changes it, since GitHub shows `INFRA\\-1` as
-    INFRA-1. The twins of a match of a later view are the matches of the first view that have its term, list and
-    allowed tokens: gh_check shows it only when no twin counts, since a twin that counts shows the same term. A text
-    that names a ref or an identity (GhText.is_name) is read as a name (TermMatcher.names)."""
-    found: list[GhMatch] = []
+    target its list reaches, no allowed token of that target holds and whose own name does not hold it (gh_refusal),
+    so the first view's matches can all be dropped there while the second's count. Each of those views is read once
+    more with CommonMark's escapes undone (markdown_unescaped), where that changes it, since GitHub shows `INFRA\\-1` as
+    INFRA-1. The views of a value come one after the other, as written first, and the twins of a match of a later view
+    are the matches of the first view that have its term, list and allowed tokens: gh_refusal shows it only when no
+    twin counts, since a twin that counts shows the same term. A text that names a ref or an identity (GhText.is_name)
+    is read as a name (TermMatcher.names). A file gh_contents left unread (GhText.chunked) is read in chunks, to the
+    same views (gh_file_views), and each view of any other text is read in chunks too (gh_view_matches). GhFileError
+    where such a file cannot be read again."""
+    number = 0
     for piece, text in contents:
         reader = matcher.names() if piece.is_name else matcher
+        if piece.chunked:
+            yield from gh_view_findings(piece, piece.shown(), number, gh_file_views(piece, reader))
+            number += 1
+            continue
         for path, value, both in gh_values(piece, text, graphql(piece)):
-            label = piece.shown() + (f" {c_escape(path)}" if path else "")
             views = [("", value)]
             if both and "\\" in value:
                 views.append(("escapes decoded", escapes_decoded(value)))
@@ -4778,18 +5925,213 @@ def gh_findings(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhTex
                 rendered = markdown_unescaped(view)
                 if all(rendered != seen for _, seen in views):
                     views.append((", ".join(filter(None, (how, "Markdown escapes undone"))), rendered))
-            written: dict[tuple[int, str, tuple[str, ...]], list[tuple[Span, str]]] = {}
-            for how, view in views:
-                for span in reader.spans(paragraph_view(view)):
-                    key = (span.term, span.scope, span.allowed_in)
-                    twins = tuple(written.get(key, [])) if how else ()
-                    if not how:
-                        written.setdefault(key, []).append((span, view))
-                    line = view.count("\n", 0, span.start) + 1
-                    place = f"{label}{f' ({how})' if how else ''} line {line}"
-                    found.append(GhMatch(Finding(place, *excerpt(view, span.start, span.end), span.scope), span, view,
-                                         twins, piece))
-    return found
+            matches = ((how, match) for how, view in views for match in gh_view_matches(reader, view))
+            yield from gh_view_findings(piece, piece.shown() + (f" {c_escape(path)}" if path else ""), number, matches)
+            number += 1
+
+
+def gh_view_matches(reader: TermMatcher, view: str) -> Iterator[GhViewMatch]:
+    """The matches of READER in VIEW, a view of a value, read as GitHub renders it (paragraph_view), GH_CHUNK characters
+    at a time (GhChunkScan), as a file's view is (gh_file_views), each given as its chunk is read: a text the check
+    holds whole, a JSON body of up to GH_WHOLE_LIMIT bytes among them, costs no more memory than its own copies, where
+    a reading of the whole view took about 100 bytes for each of its characters (GH_CHUNK). A view of no more than
+    GH_CHUNK characters and the overlap is read in one chunk, as a whole view is."""
+    scan = GhChunkScan(reader)
+    for start in range(0, len(view), GH_CHUNK):
+        yield from scan.feed(view[start:start + GH_CHUNK])
+    yield from scan.finish()
+
+
+def gh_view_findings(piece: GhText, label: str, number: int, matches: Iterator[tuple[str, GhViewMatch]]
+                     ) -> Iterator[GhMatch]:
+    """A GhMatch for each of MATCHES, (how its view reads value NUMBER of PIECE, "" for as written, which comes first;
+    the match), its Finding at LABEL, how and the line, each as it comes."""
+    for how, (line, matched, shown, span, view) in matches:
+        place = f"{label}{f' ({how})' if how else ''} line {line}"
+        yield GhMatch(Finding(place, matched, shown, span.scope), span, view, piece, number, how)
+
+
+# A file a call sends may be a build output of any size: gh takes a release asset of up to 2 GiB. gh_file_views reads
+# a file gh_contents left unread (GhText.chunked) GH_CHUNK bytes at a time, and each view of a text, of such a file's
+# and of every other, in chunks of GH_CHUNK characters, each overlapping the last (GhChunkScan), so the check's memory
+# grows with no file it does not hold, and by no more than a few copies with one it holds. Until the tester's red test
+# at 50aef475 (dispatch://INFRA-4957, rulings-md v66) every file was read whole, and the views of its text took about
+# 100 bytes for each of its bytes: 421 MiB for 4 MiB of random bytes, and past 4.3 GiB for 64 MiB.
+GH_CHUNK = 1 << 18
+# The characters a match as written may hold past what GhChunkScan's overlap gives its term and the whitespace between
+# its words (TermMatcher.longest_term, 4 CONTEXT for each gap): the terminal sequences inside it, and each run of
+# in-line whitespace past the two of a gap that such a sequence parts from them, each run kept to twice the context. A
+# match that holds more than this across a chunk's edge is not read.
+GH_CHUNK_SLACK = 4096
+# The characters a match needs on each side to be read as in the whole view: the EXCERPT_CONTEXT of its excerpt and the
+# line break past them, an allowed token that holds it (TermMatcher.longest_token too), and the own name gh_own_name may
+# find it in, with the search for where to begin reading it (gh_name_window).
+GH_CHUNK_CONTEXT = 512
+
+
+@lru_cache(maxsize=None)
+def gh_long_run(context: int) -> re.Pattern[str]:
+    """A run of in-line whitespace longer than 2 CONTEXT, which GhChunkScan keeps as its two ends, found whole from its
+    first character, which no such whitespace precedes. sub reads left to right, so it reaches each long run at its
+    first character, and the look-behind changes no match: it makes each later character of a shorter run fail at
+    once, where without it each would count the rest of the run again (0.03 s against 1.6 s for 300 runs of 1,000
+    spaces, 2026-11-27). The pattern begins with that character, not with the look-behind, so a search skips straight
+    to whitespace (55 ms against 140 ms for 4 MiB of prose, 2026-11-27)."""
+    return re.compile(rf"[^\S\n](?<![^\S\n]{{2}})[^\S\n]{{{2 * context},}}")
+
+
+# The most characters a destination's own name, and what gh_own_name reads past it, span from a match inside it: a
+# GitHub owner of 39 characters, `/`, a name of 100, then `.git` and one character.
+GH_NAME_REACH = 150
+# The last character before a place that no own name holds (gh_own_name): an own name that holds what follows it begins
+# past it, and a reading of own names that begins just past it finds them as a reading of the whole view does.
+GH_NAME_BREAK = re.compile(r"(?s:.*)[^A-Za-z0-9._/-]")
+
+
+class GhFileError(Exception):
+    """A file gh_contents could read that gh_file_views could not read again: ARGS are its GhText and why, an entry of
+    the texts that cannot be read (gh_refusal)."""
+
+
+def gh_file_texts(piece: GhText) -> Iterator[str]:
+    """The text of the file gh_contents left unread for PIECE (GhText.chunked), GH_CHUNK bytes at a time, decoded as
+    gh_contents decodes a file: UTF-8, each byte that does not decode kept (surrogateescape). GhFileError where it
+    cannot be read."""
+    decoder = codecs.getincrementaldecoder("utf-8")("surrogateescape")
+    try:
+        with open(piece.chunked, "rb") as handle:
+            while data := handle.read(GH_CHUNK):
+                yield decoder.decode(data)
+    except OSError as error:
+        raise GhFileError(piece, error.strerror or type(error).__name__) from None
+    yield decoder.decode(b"", True)
+
+
+def gh_file_views(piece: GhText, reader: TermMatcher) -> Iterator[tuple[str, GhViewMatch]]:
+    """Each of READER's matches in the views gh_findings reads of the file gh_contents left unread for PIECE
+    (GhText.chunked), which gh_values gives as itself, with how its view reads the file (gh_view_findings), each view
+    read in chunks (GhChunkScan) and each match given as its chunk is read: its text as written, then, where undoing
+    CommonMark's escapes changes it (MarkdownUnescaper), its text so undone, from a second reading of the file."""
+    written = GhChunkScan(reader)
+    unescaper = MarkdownUnescaper()
+    for text in gh_file_texts(piece):
+        yield from (("", match) for match in written.feed(text))
+        if not unescaper.changed:
+            unescaper.feed(text)
+    if not unescaper.changed:
+        unescaper.feed("", True)
+    yield from (("", match) for match in written.finish())
+    if not unescaper.changed:
+        return
+    how = "Markdown escapes undone"
+    rendered = GhChunkScan(reader)
+    unescaper = MarkdownUnescaper()
+    for text in gh_file_texts(piece):
+        yield from ((how, match) for match in rendered.feed(unescaper.feed(text)))
+    yield from ((how, match) for match in rendered.feed(unescaper.feed("", True)))
+    yield from ((how, match) for match in rendered.finish())
+
+
+class GhChunkScan:
+    """READER's matches (TermMatcher.spans) in one view of a text, which comes in pieces (feed), read as GitHub
+    renders it (paragraph_view) in chunks of GH_CHUNK characters, each overlapping the last by twice CONTEXT, the
+    longest term, 4 CONTEXT for each gap of the term with the most (TermMatcher.most_gaps) and GH_CHUNK_SLACK.
+
+    Each run of in-line whitespace (any whitespace but a line feed, all of which paragraph_view shows as a space, as
+    GitHub shows a run of spaces as one) longer than 2 CONTEXT is kept as its first and last CONTEXT characters, as it
+    comes: the run that ends what came so far waits for the next piece, kept so, and a run of any length, over any
+    number of pieces, costs no more memory than that. A kept run parts a term's words as the whole run does. It holds
+    no line feed, so every line feed of the view stays and a match keeps its line, and a line that holds only such a run
+    is still blank, so no paragraph is joined across it. No reading of a match's surroundings reaches more than CONTEXT
+    into a kept run: the MATCH_LIMIT of the match and the EXCERPT_CONTEXT of its line that excerpt shows, which a kept
+    run longer than either cuts where the whole run does, an allowed token that holds the match, and the own names
+    around it (gh_name_window). Between two words of a term paragraph_view shows at most two runs, one on each side of a
+    soft line break, since a line between two line feeds that held only whitespace would be blank; so a match, kept,
+    spans no more than its term and 4 CONTEXT for each gap, however much whitespace parts its words, but for the
+    terminal sequences inside it and each run past the two of a gap that one of them parts from the others, which
+    GH_CHUNK_SLACK holds.
+
+    A chunk gives the matches that start from CONTEXT past its start to CONTEXT past the next chunk's start, the first
+    from the view's start and the last to its end, so no match is given twice, and one so kept no longer than the
+    overlap less twice CONTEXT lies whole in the chunk that gives it, with CONTEXT on each side: its line, excerpt,
+    allowed tokens and own names read as in the whole view. feed and finish give them, in the view's order, as each
+    chunk is read, each with the part of the view around it (gh_name_window), and keep none of them: a text may hold a
+    term by the hundred thousand (GH_MATCH_LIMIT). A chunk's reading starts afresh at its start, so a run of matches of
+    a term that overlaps itself (`aa` in `aaaa…`), from before a chunk's start to more than CONTEXT past it, may be
+    found one character off from a reading of the whole view: the same term, one place over. Until the tester's red
+    test at 4ec5827e (dispatch://INFRA-4957, rulings-md v68 item 2) each run was kept whole, and a term whose words
+    10,000 spaces part was missed across a chunk's edge."""
+
+    def __init__(self, reader: TermMatcher) -> None:
+        self.reader = reader
+        self.context = max(GH_CHUNK_CONTEXT, reader.longest_token + 1)
+        self.overlap = 2 * self.context + reader.longest_term + 4 * self.context * reader.most_gaps + GH_CHUNK_SLACK
+        self.long_run = gh_long_run(self.context)
+        # The view from START on as kept, but RUN, the run of in-line whitespace that ends what came so far, kept, which
+        # may go on in the next piece; the line feeds before START, and where the matches the next chunk gives begin.
+        self.text = ""
+        self.run = ""
+        self.start = 0
+        self.lines = 0
+        self.owned = 0
+
+    def feed(self, text: str) -> Iterator[GhViewMatch]:
+        """Take TEXT, the next piece of the view, and give the matches of each chunk that is whole once it has come
+        (chunks)."""
+        text = self.run + text
+        if len(text) > 2 * self.context:
+            text = self.long_run.sub(self.kept, text)
+        # What follows the last character that is no whitespace, and the last line feed, is the run that waits.
+        settled = max(len(text.rstrip()), text.rfind("\n") + 1)
+        self.text += text[:settled]
+        self.run = text[settled:]
+        return self.chunks()
+
+    def kept(self, run: re.Match[str]) -> str:
+        """RUN, a run of in-line whitespace longer than 2 CONTEXT, as its first and last CONTEXT characters."""
+        start, end = run.span()
+        return run.string[start:start + self.context] + run.string[end - self.context:end]
+
+    def chunks(self) -> Iterator[GhViewMatch]:
+        """The matches of each whole chunk of what came so far, each chunk read as its matches are taken and dropped
+        once they all are, so a piece whose matches nobody took leaves them to the next."""
+        while len(self.text) >= GH_CHUNK + self.overlap:
+            yield from self.read(self.text[:GH_CHUNK + self.overlap], self.start + GH_CHUNK + self.context)
+            self.lines += self.text.count("\n", 0, GH_CHUNK)
+            self.start += GH_CHUNK
+            self.text = self.text[GH_CHUNK:]
+
+    def finish(self) -> Iterator[GhViewMatch]:
+        """The matches of the rest of the view, once all of it has come."""
+        self.text += self.run
+        self.run = ""
+        yield from self.chunks()
+        yield from self.read(self.text, self.start + len(self.text))
+
+    def read(self, chunk: str, until: int) -> Iterator[GhViewMatch]:
+        """The matches in CHUNK, the view from START on, that start from OWNED to UNTIL."""
+        line, counted = self.lines + 1, 0
+        for span in self.reader.spans(paragraph_view(chunk)):
+            if self.owned <= self.start + span.start < until:
+                line += chunk.count("\n", counted, span.start)
+                counted = span.start
+                yield (line, *excerpt(chunk, span.start, span.end), *gh_name_window(chunk, span, self.start == 0))
+        self.owned = until
+
+
+def gh_name_window(chunk: str, span: Span, opens: bool) -> tuple[Span, str]:
+    """SPAN, a match in CHUNK, a chunk of a view (GhChunkScan), in the part of CHUNK where gh_own_name reads the own
+    names around it as it reads them in the whole view, and that part: from just past the last character before SPAN
+    that no own name holds (GH_NAME_BREAK), within GH_CHUNK_CONTEXT of it, to GH_NAME_REACH past SPAN's end. An own
+    name that holds SPAN begins past that character, and a reading from there finds the occurrences a reading of the
+    whole view finds, since none holds it. Where there is no such character, CHUNK itself where it OPENS the view, whose
+    start begins a reading as the whole view's does, and which every such match of it shares; else SPAN and "": no own
+    name exempts the match, the safe direction."""
+    found = GH_NAME_BREAK.match(chunk, max(0, span.start - GH_CHUNK_CONTEXT), span.start)
+    if found:
+        start = found.end()
+        return replace(span, start=span.start - start, end=span.end - start), chunk[start:span.end + GH_NAME_REACH]
+    return span, chunk if opens else ""
 
 
 def gh_visibility(url: str) -> str:
@@ -5152,9 +6494,17 @@ def gh_own_name(target: GhTarget, view: str, span: Span) -> bool:
     owner, _, name = target.repository.partition("/")
     if not (target.public and owner and name):
         return False
-    whole = re.escape(target.repository) + r"(?=\.git(?![A-Za-z0-9_.-])|(?![A-Za-z0-9_.-]))"
-    own = re.compile(rf"(?<![A-Za-z0-9_-])(?:{whole}|{re.escape(owner)}(?![A-Za-z0-9_-]))", re.ASCII | re.IGNORECASE)
-    return any(found.start() <= span.start and span.end <= found.end() for found in own.finditer(view))
+    return any(found.start() <= span.start and span.end <= found.end()
+               for found in gh_own_name_pattern(target.repository).finditer(view))
+
+
+@lru_cache(maxsize=None)
+def gh_own_name_pattern(repository: str) -> re.Pattern[str]:
+    """The pattern that finds the own name of REPOSITORY, an `owner/name`, as gh_own_name reads it, compiled once for
+    each repository and not at each match gh_own_name judges in a text to that repository."""
+    owner = repository.partition("/")[0]
+    whole = re.escape(repository) + r"(?=\.git(?![A-Za-z0-9_.-])|(?![A-Za-z0-9_.-]))"
+    return re.compile(rf"(?<![A-Za-z0-9_-])(?:{whole}|{re.escape(owner)}(?![A-Za-z0-9_-]))", re.ASCII | re.IGNORECASE)
 
 
 # The one target of a raw GraphQL mutation, a call read as GraphQL on any host (gh_api_endpoint, GhAddress.graphql)
@@ -5448,21 +6798,36 @@ def gh_reach(call: GhCall, bases: Callable[[], Sequence[GhBase]]) -> list[GhTarg
                 add(f"{found[1]}/{found[2]}, filled in from {base.source}", address.host,
                     f"https://{address.host}/{found[1]}/{found[2]}", GhTie(base=base.source))
     elif not repositories:
-        repositories += [GhRepository(base.shown, base.host, base.url, base.repository, GhTie(base=base.source))
-                         for base in bases()]
+        repositories += gh_base_repositories(bases())
     # `issue develop --branch-repo R` makes the branch in R, one more target and never the call's repository: the
     # issue is in the call's repository (-R, else the issue's URL, else the base repository), which is always a target.
     for value in values.get("--branch-repo", []):
         if value:
             add(value, *gh_repository_address(value), GhTie(option=("--branch-repo", value)))
-    # One loop reads each repository: on another host, which the check reads nothing of, as public; else by its
-    # visibility. Each host is decided where the repository's name is read (GhRepository.host).
+    reached += gh_targets(repositories, call.made_public)
+    return reached or [GH_NO_REPOSITORY]
+
+
+# The one target of a call that reaches no repository the check finds, read as public.
+GH_NO_REPOSITORY = GhTarget("no GitHub repository found for the call, read as public", "", True)
+
+
+def gh_base_repositories(bases: Sequence[GhBase]) -> list[GhRepository]:
+    """A repository for each of BASES, the base repositories gh may take (gh_bases), tied to its base (GhTie.base)."""
+    return [GhRepository(base.shown, base.host, base.url, base.repository, GhTie(base=base.source)) for base in bases]
+
+
+def gh_targets(repositories: Sequence[GhRepository], made_public: bool = False) -> list[GhTarget]:
+    """A target for each of REPOSITORIES, in one loop: one on another host, which the check reads nothing of, as public;
+    else by its visibility (gh_visibility), every one open where the call makes it public (MADE_PUBLIC,
+    gh_made_public). Each host is decided where the repository's name is read (GhRepository.host)."""
+    reached: list[GhTarget] = []
     for candidate in repositories:
         if candidate.host != "github.com":
             reached.append(gh_elsewhere(candidate.host, tie=candidate.tie))
             continue
         visibility = gh_visibility(candidate.url)
-        if call.made_public:
+        if made_public:
             state, open_, public = "made public by the call", True, False
         elif visibility in ("private", "internal"):
             state, open_, public = visibility, False, False
@@ -5471,79 +6836,375 @@ def gh_reach(call: GhCall, bases: Callable[[], Sequence[GhBase]]) -> list[GhTarg
         else:
             state, open_, public = "visibility unread, so read as public", True, False
         reached.append(GhTarget(f"{candidate.shown} ({state})", candidate.repository, open_, public, candidate.tie))
-    return reached or [GhTarget("no GitHub repository found for the call, read as public", "", True)]
+    return reached
 
 
 def gh_terms(contents: Sequence[tuple[GhText, str]], graphql: Callable[[GhText], bool]
-             ) -> tuple[TermMatcher | None, str | None, list[GhMatch]]:
+             ) -> tuple[TermMatcher | None, str | None, Iterator[GhMatch]]:
     """The term list's matcher, the problem that kept the list from being read (None when it was read), and a GhMatch
-    for each listed term in CONTENTS (gh_findings, GRAPHQL saying which text is a GraphQL document or carries one).
-    The list is decrypted only when a text is not empty, with every scoped list, the knives registry's included: which
-    ones apply depends on where the text goes, which is read only once a term is found."""
-    if not any(text for _, text in contents):
-        return None, None, []
+    for each listed term in CONTENTS, given as it is found (gh_findings, GRAPHQL saying which text is a GraphQL document
+    or carries one). The list is decrypted only when a text is not empty, a file left to be read in chunks holding
+    bytes (GhText.chunked), with every scoped list, the knives registry's included: which ones apply depends on where
+    the text goes, which is read only once a term is found."""
+    if not any(text or piece.chunked for piece, text in contents):
+        return None, None, iter(())
     try:
         matcher = load_terms(repositories=EVERY_REPOSITORY)
     except ListError as error:
-        return None, c_escape(str(error)), []
+        return None, c_escape(str(error)), iter(())
     return matcher, None, gh_findings(contents, graphql, matcher)
 
 
-def gh_refusal(name: str, reached: Sequence[GhTarget], matcher: TermMatcher | None, findings: Sequence[GhMatch],
-               unreadable: Sequence[tuple[GhText, str]], list_problem: str | None, advice: str = "") -> int:
-    """The verdict on the call NAME (`gh pr comment`), whose targets are REACHED: 0 when no target is open, or when no
-    match of FINDINGS counts for an open target, every text was read (UNREADABLE empty) and so was the list
-    (LIST_PROBLEM None); else the refusal, printed with each match that counts, each text that cannot be read and the
-    list's problem, and ADVICE after the advice of a refusal for a term: FOUND_EXIT, LIST_EXIT or TEXT_EXIT."""
-    if not any(target.open for target in reached):
-        return 0
-    kept_findings = list(findings)
-    if matcher is not None:
-        # A match counts for an open target its value goes to (gh_goes_to), that its list's scope reaches, that no
-        # allowed token of that target holds, and whose own name, public already, does not hold it (gh_own_name); a
-        # match of a later view counts only when none of its twins does, since a twin that counts shows the same term
-        # (gh_findings).
-        def counts(span: Span, view: str, targets: Sequence[GhTarget]) -> bool:
-            return any((not span.scope or matcher.scopes[span.scope].reaches([target.repository]))
-                       and not span.allowed_for(target.repository) and not gh_own_name(target, view, span)
-                       for target in targets)
+# The most matches of one term, in one list, in one text, that a refusal shows (gh_refusal), which says how many more
+# it does not show. A text may hold a term by the hundred thousand, and until the review of 053ef618
+# (dispatch://INFRA-4957, rulings-md v66 item 2: "The check reads a file in bounded memory") the check held each match
+# it found: the review measured 231 MiB for an asset of 5 MB that holds a term 200,000 times, and 1,211 MiB for 8 MB of
+# one term. Holding only the matches it shows, the check took 69 MiB for 5 MB that holds the canary 200,000 times, and
+# its refusal showed 20 of them where it had shown all 200,000 (2026-11-27).
+GH_MATCH_LIMIT = 20
 
-        def kept(found: GhMatch) -> bool:
-            targets = [target for target in reached if target.open and gh_goes_to(found.piece, target.tie)]
-            return (counts(found.span, found.view, targets)
-                    and not any(counts(span, view, targets) for span, view in found.twins))
 
-        kept_findings = [found for found in findings if kept(found)]
-    if not kept_findings and list_problem is None and not unreadable:
+def gh_refusal(name: str, reach: Callable[[], Sequence[GhTarget]], contents: Sequence[tuple[GhText, str]],
+               graphql: Callable[[GhText], bool], unreadable: list[tuple[GhText, str]],
+               advice: Callable[[], str] = lambda: "") -> int:
+    """The verdict on the call NAME (`gh pr comment`) that sends CONTENTS (gh_terms, GRAPHQL saying which text is a
+    GraphQL document or carries one), whose targets REACH gives, read once a term is found, or a text or the list
+    cannot be read: 0 when no target is open, or when no match counts for an open target, every text was read
+    (UNREADABLE, the caller's texts that cannot be read, empty) and so was the list; else the refusal, printed with each
+    match that counts, up to GH_MATCH_LIMIT of each term of each list in each text and how many more there are, each
+    text that cannot be read and the list's problem, and ADVICE's after the advice of a refusal for a term: FOUND_EXIT,
+    LIST_EXIT or TEXT_EXIT.
+
+    Each match is judged as it is found (gh_findings), and none is kept but those the refusal shows, so a text that
+    holds a term by the hundred thousand is read in bounded memory: a call whose targets are all closed goes out at its
+    first match, read no further, and a match that counts for nothing takes none of the refusal's places, however many
+    such matches come before one that counts. Where a file cannot be read again (GhFileError), as when it is gone, it is
+    added to UNREADABLE, and no match is shown."""
+    matcher, list_problem, matches = gh_terms(contents, graphql)
+    scopes = matcher.scopes if matcher is not None else {}
+    reached: Sequence[GhTarget] | None = None
+    shown: list[Finding] = []
+    # How many matches of each text, term and list the refusal shows, and how many more count; the value the last match
+    # is in, the open targets that value goes to (gh_goes_to), and the term, list and allowed tokens of each match of
+    # its as-written view that counts, which every match of a later view that has them has for a twin (gh_findings).
+    taken: dict[tuple[GhText, int, str], int] = {}
+    more = 0
+    value = -1
+    targets: list[GhTarget] = []
+    counted: set[tuple[int, str, tuple[str, ...]]] = set()
+    try:
+        for found in matches:
+            if reached is None:
+                reached = reach()
+                if not any(target.open for target in reached):
+                    return 0
+            if found.value != value:
+                value, counted = found.value, set()
+                targets = [target for target in reached if target.open and gh_goes_to(found.piece, target.tie)]
+            # A match of a later view counts only when none of its twins does, since a twin that counts shows the same
+            # term, so it is passed over before its targets are read. A match counts for an open target its value goes
+            # to, that its list's scope reaches, that no allowed token of that target holds, and whose own name, public
+            # already, does not hold it (gh_own_name).
+            span = found.span
+            twin = (span.term, span.scope, span.allowed_in)
+            if found.how and twin in counted:
+                continue
+            if not any((not span.scope or scopes[span.scope].reaches([target.repository]))
+                       and not span.allowed_for(target.repository) and not gh_own_name(target, found.view, span)
+                       for target in targets):
+                continue
+            if not found.how:
+                counted.add(twin)
+            key = (found.piece, span.term, span.scope)
+            if taken.get(key, 0) < GH_MATCH_LIMIT:
+                taken[key] = taken.get(key, 0) + 1
+                shown.append(found.finding)
+            else:
+                more += 1
+    except GhFileError as error:
+        unreadable.append(error.args)
+        shown, more = [], 0
+    if not shown and list_problem is None and not unreadable:
         return 0
+    if reached is None:
+        reached = reach()
+        if not any(target.open for target in reached):
+            return 0
     target = ", ".join(c_escape(item.shown) for item in reached)
-    for found in kept_findings:
-        print(f"leak terms: {name} to {target}: {found.finding}", file=sys.stderr)
+    for finding in shown:
+        print(f"leak terms: {name} to {target}: {finding}", file=sys.stderr)
+    if more:
+        print(f"leak terms: {name} to {target}: {more} more matches of these terms, not shown: a refusal shows at most "
+              f"{GH_MATCH_LIMIT} of each term in each text", file=sys.stderr)
     for piece, reason in unreadable:
         print(f"leak terms: {name} to {target}: cannot read {piece.shown()}: {c_escape(reason)}", file=sys.stderr)
     if list_problem:
         print(list_problem, file=sys.stderr)
         print(f"leak terms: {name} to {target}: its text cannot be checked without the list", file=sys.stderr)
-    remedy = f" To send it, {REMOVE_ADVICE}.{advice}" if kept_findings else ""
+    remedy = f" To send it, {REMOVE_ADVICE}.{advice()}" if shown else ""
     print(f"leak terms: {name}: refused before gh ran, so nothing was sent.{remedy}", file=sys.stderr)
-    return FOUND_EXIT if kept_findings else LIST_EXIT if list_problem else TEXT_EXIT
+    return FOUND_EXIT if shown else LIST_EXIT if list_problem else TEXT_EXIT
+
+
+# Where `gh stack feedback` sends its title: the discussion form of github/gh-stack, a public repository, whatever
+# repository the call is in (cmd/feedback.go:13-14).
+GH_STACK_FEEDBACK = GhTarget("the discussion form of github/gh-stack (https://gh.io/stacks-feedback-form), read as "
+                             "public", "github/gh-stack", True)
+# gh-stack's humanize (cmd/submit.go:581-588), with which `gh stack link` makes a branch argument the title of the pull
+# request it creates, and `gh stack submit` a branch of other than one commit: each `-` and `_` a space.
+GH_STACK_TITLE = str.maketrans("-_", "  ")
+# The footer of the body gh-stack builds from a branch's commits where the repository has no pull request template
+# (cmd/submit.go:560-578; feedbackURL, cmd/feedback.go:13).
+GH_STACK_FOOTER = ('<sub>Stack created with <a href="https://github.com/github/gh-stack">GitHub Stacks CLI</a> • <a '
+                   'href="https://gh.io/stacks-feedback">Give Feedback 💬</a></sub>')
+# The characters Go's strings.TrimSpace trims, Unicode's White_Space (unicode.IsSpace), with which gh-stack trims a
+# commit's message, its subject and its body (internal/git/gitops.go:608-652, cmd/submit.go:552).
+GO_SPACE = ("\t\n\v\f\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029"
+            "\u202f\u205f\u3000")
+# The highest schema version of the stack file gh-stack at GH_STACK_COMMIT reads (internal/stack/stack.go:15, 342-344).
+GH_STACK_SCHEMA = 1
+# Why `gh stack submit` without --auto is refused for a target not confirmed private: the check cannot see whether
+# gh-stack's output is a terminal, where it opens its editor (cmd/submit.go:229-243; internal/config/config.go:229-231).
+GH_STACK_SUBMIT_EDITOR = ("without --auto gh-stack takes them from its editor where its output is a terminal "
+                          "(cmd/submit.go:230), which the check cannot tell: run gh stack submit --auto, whose titles "
+                          "and bodies the check reads from the stack's commits, or push the branches and run gh stack "
+                          "link, whose text the check reads")
+# What a refusal of `gh stack submit` names where the check cannot read the titles and bodies it builds.
+GH_STACK_SUBMIT_TEXTS = GhText("the titles and bodies of the pull requests it creates")
+
+
+class GhStackFileError(Exception):
+    """Why the check cannot find the stack `gh stack submit --auto` submits, as a refusal names it
+    (gh_stack_current)."""
+
+
+def gh_stack_member(value: object, name: str, kind: type, where: str) -> object:
+    """The member NAME of VALUE, a JSON object of the stack file at WHERE (`stacks[0]`, "" for its root), as
+    encoding/json's Unmarshal reads it into gh-stack's field of type KIND (internal/stack/stack.go:21-49, 229-239):
+    KIND's empty value where VALUE gives none, or null, which leaves the field as it was. GhStackFileError where the
+    check cannot read it so: VALUE is no object, or the member is no KIND, which Unmarshal refuses too; or VALUE names
+    it more than once, or in another letter case: Unmarshal takes the last member whose name is the field's in any
+    letter case (bytes.EqualFold, `ſ` as `s` and the Kelvin sign as `k`), and the check reads only one member, spelled
+    as gh-stack writes it."""
+    place = f"{where}.{name}" if where else name
+    if not isinstance(value, JsonObject):
+        raise GhStackFileError(f"{where or 'its root'} is no JSON object")
+    named = [(key, member) for key, member in value if key.replace("\u017f", "s").lower() == name.lower()]
+    if len(named) > 1 or any(key != name for key, _ in named):
+        raise GhStackFileError(f"it gives {place} more than once, or in another letter case")
+    member = named[0][1] if named else None
+    if member is None:
+        return kind()
+    if (not isinstance(member, kind) or (kind is list and isinstance(member, JsonObject))
+            or (kind is int and isinstance(member, bool))):
+        raise GhStackFileError(f"its {place} is no JSON {'array' if kind is list else kind.__name__}")
+    return member
+
+
+def gh_stack_current() -> tuple[str, list[str]]:
+    """(trunk, branches from the bottom up) of the stack `gh stack submit` submits, found as gh-stack at
+    GH_STACK_COMMIT finds it: in the stack file, `gh-stack` in git's common directory (`git rev-parse
+    --path-format=absolute --git-common-dir`; cmd/submit.go:83-97, cmd/worktree_utils.go:18-33, 62-93, 210-278,
+    internal/stack/stack.go:309-349), the one stack whose trunk or one of whose branches is the current branch, `git
+    symbolic-ref --quiet HEAD` without `refs/heads/` (gh_current_branch; cmd/submit.go:99-118, internal/stack/
+    stack.go:81-87, 241-250). GhStackFileError, saying why, where the check cannot find it so: git names no common
+    directory or no current branch; a linked worktree's administration directory in it holds a stack file, or a
+    migration is pending (`gh-stack-migration`), so that gh-stack would first merge them into the file
+    (internal/stack/migration.go:61-74, cmd/worktree_utils.go:274), or, for a legacy modify journal of that worktree,
+    read its stack file in place of the file (cmd/worktree_utils.go:224-267), which the check does not read; the file
+    is missing, is no regular file, cannot be read, holds more than GH_WHOLE_LIMIT bytes, is not JSON, is of a schema
+    version gh-stack does not read, or is in a layout gh_stack_member does not read; or no stack, or more than one,
+    holds the current branch. gh-stack submits nothing where it finds no stack, but the check does not read what else
+    it may read then."""
+    printed = gh_git(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    if printed is None:
+        raise GhStackFileError("git names no common Git directory here, which holds the stack file")
+    common = printed.removesuffix("\n")
+    try:
+        entries = os.listdir(os.path.join(common, "worktrees"))
+    except FileNotFoundError:
+        entries = []
+    except OSError as error:
+        raise GhStackFileError(f"the worktrees of {common} cannot be listed: {error.strerror}") from None
+    if os.path.lexists(os.path.join(common, "gh-stack-migration")) or any(
+            os.path.lexists(os.path.join(common, "worktrees", entry, "gh-stack")) for entry in entries):
+        raise GhStackFileError(f"gh-stack would first merge into {common}/gh-stack the stack files of linked worktrees "
+                               "(internal/stack/migration.go:61-74), which the check does not read")
+    path = os.path.join(common, "gh-stack")
+    try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            raise GhStackFileError(f"the stack file {path} is no regular file")
+        with open(path, "rb") as handle:
+            data = handle.read(GH_WHOLE_LIMIT + 1)
+    except FileNotFoundError:
+        raise GhStackFileError(f"the stack file {path} does not exist") from None
+    except OSError as error:
+        raise GhStackFileError(f"the stack file {path} cannot be read: {error.strerror or type(error).__name__}"
+                               ) from None
+    if len(data) > GH_WHOLE_LIMIT:
+        raise GhStackFileError(f"the stack file {path} holds more than the {GH_WHOLE_LIMIT >> 20} MiB the check reads "
+                               "of a file it parses whole")
+    try:
+        decoded = json.loads(data.decode("utf-8", errors="replace"), object_pairs_hook=JsonObject)
+    except (ValueError, RecursionError) as error:
+        raise GhStackFileError(f"the stack file {path} is not JSON: {error}") from None
+    try:
+        version = cast(int, gh_stack_member(decoded, "schemaVersion", int, ""))
+        if version > GH_STACK_SCHEMA:
+            raise GhStackFileError(f"it has schema version {version}, which gh-stack at {GH_STACK_COMMIT[:8]} does not "
+                                   "read")
+        stacks: list[tuple[str, list[str]]] = []
+        for number, entry in enumerate(cast(list, gh_stack_member(decoded, "stacks", list, ""))):
+            where = f"stacks[{number}]"
+            trunk = gh_stack_member(entry, "trunk", JsonObject, where)
+            listed = cast(list, gh_stack_member(entry, "branches", list, where))
+            stacks.append((cast(str, gh_stack_member(trunk, "branch", str, f"{where}.trunk")),
+                           [cast(str, gh_stack_member(item, "branch", str, f"{where}.branches[{index}]"))
+                            for index, item in enumerate(listed)]))
+    except GhStackFileError as error:
+        raise GhStackFileError(f"the stack file {path} is not one the check reads as gh-stack does: {error}") from None
+    branch = gh_current_branch()
+    if branch is None:
+        raise GhStackFileError("git names no current branch, as on a detached HEAD, so gh-stack finds no stack "
+                               "(cmd/submit.go:99-103)")
+    found = [(trunk, branches) for trunk, branches in stacks if branch == trunk or branch in branches]
+    if len(found) != 1:
+        raise GhStackFileError(f"the stack file {path} names {'no stack' if not found else 'more than one stack'} that "
+                               f"holds the current branch {branch}, so gh-stack submits none (cmd/submit.go:109-117)")
+    return found[0]
+
+
+def gh_stack_one_commit(base: str, head: str) -> tuple[str, str, str] | None:
+    """(commit, subject, body) of the one commit of HEAD that BASE does not hold, from which gh-stack's
+    defaultPRTitleBody takes a pull request's title and body (cmd/submit.go:546-555): what `git log BASE..HEAD
+    --format=%H%x01%B%x01%at%x00` prints, trimmed of Go's spaces (GO_SPACE), split at each NUL into records, each
+    trimmed and split at its first two U+0001 into three parts, one of fewer skipped; of the one record, the message
+    trimmed, its subject its first line and its body the rest trimmed, and the commit the last line before the message,
+    where log.showSignature puts lines above it (internal/git/gitops.go:608-652). None where git lists other than one
+    commit, or fails, where gh-stack takes the branch's name for the title and no body: the check runs the call gh-stack
+    runs, in the same directory, so a range git cannot list for the check it cannot list for gh-stack."""
+    printed = gh_git(["log", f"{base}..{head}", "--format=%H%x01%B%x01%at%x00"])
+    if printed is None:
+        return None
+    records = [record.strip(GO_SPACE).split("\x01", 2) for record in printed.strip(GO_SPACE).split("\0")]
+    commits = [parts for parts in records if len(parts) == 3]
+    if len(commits) != 1:
+        return None
+    subject, _, body = commits[0][1].strip(GO_SPACE).partition("\n")
+    return commits[0][0].rpartition("\n")[2], subject, body.strip(GO_SPACE)
+
+
+def gh_stack_branch_texts(option: str, detail: str, branch: str) -> list[GhText]:
+    """The texts gh-stack sends for BRANCH, the head of a pull request it creates, given as OPTION and DETAIL (GhText):
+    the branch, a name, and where gh-stack's humanize changes it, the branch with each `-` and `_` a space
+    (GH_STACK_TITLE), a title it may give the pull request, read as a text."""
+    title = branch.translate(GH_STACK_TITLE)
+    return [GhText(option, detail, text=branch, is_name=True),
+            *([GhText(option, detail, part="title", text=title)] if title != branch else [])]
+
+
+def gh_stack_submit_texts(trunk: str, branches: Sequence[str]) -> list[GhText]:
+    """Every text `gh stack submit --auto` may send in the pull requests it creates for the stack of TRUNK and BRANCHES
+    (gh_stack_current; cmd/submit.go:503-578), for each branch, whether or not it has one already, which only GitHub
+    knows: the trunk, a base, and each branch, a head, each a name; the branch with each `-` and `_` a space
+    (GH_STACK_TITLE), its title where `git log base..head` lists other than one commit, read as a text where it is not
+    the name; for each base the branch may take, the trunk or any branch below it, since its base is the nearest one
+    below it that GitHub has not said is merged or queued (internal/stack/stack.go:170-184, cmd/submit.go:268), the
+    subject of the one commit that lists (gh_stack_one_commit), its title, and the commit's body with gh-stack's
+    footer, its body, as generatePRBody joins them; and the footer alone, the body of a pull request of other than one
+    commit. gh-stack sends the repository's pull request template in place of either body, which gh_stack_check reads
+    as `link`'s (gh_pr_templates), the commit's body read too."""
+    pieces = [GhText("--auto", f"trunk {trunk}", text=trunk, is_name=True),
+              GhText("--auto", "footer", text=GH_STACK_FOOTER)]
+    seen: set[str] = set()
+    for index, branch in enumerate(branches):
+        pieces += gh_stack_branch_texts("--auto", f"branch {branch}", branch)
+        for base in (trunk, *branches[:index]):
+            one = gh_stack_one_commit(base, branch)
+            if one is None or one[0] in seen:
+                continue
+            commit, subject, body = one
+            seen.add(commit)
+            pieces.append(GhText("--auto", f"commit {commit[:12]}", part="title", text=subject))
+            pieces.append(GhText("--auto", f"commit {commit[:12]}", part="body",
+                                 text=f"{body}\n\n---\n\n{GH_STACK_FOOTER}" if body else GH_STACK_FOOTER))
+    return pieces
+
+
+def gh_stack_check(sub: str, arguments: Sequence[str], environment: Mapping[str, str]) -> int:
+    """The verdict on `gh stack SUB ARGUMENTS…`, of a `text` subcommand of GH_STACK_COMMANDS, as gh_check gives it for
+    a call of gh's own (gh_refusal), ARGUMENTS read as pflag reads them with SUB's options (GH_STACK_OPTIONS,
+    gh_walk). `feedback` sends the words of the call, joined by spaces, as the title of a discussion of the public
+    github/gh-stack (GH_STACK_FEEDBACK, cmd/feedback.go:38-44), whatever repository the call is in. `link` sends each
+    argument, a branch, as the head of a pull request, a name, and with each `-` and `_` a space as its title
+    (GH_STACK_TITLE), the --base branch, a name, and the repository's pull request template as its body
+    (gh_pr_templates), each read whether or not the argument has a pull request already, which only GitHub knows
+    (cmd/link.go:577-593, 699-717). `submit` with --auto sends the titles and bodies it builds from the current stack's
+    commits (gh_stack_current, gh_stack_submit_texts) or the template; where the check cannot find the stack it cannot
+    read them, and without --auto it cannot (GH_STACK_SUBMIT_EDITOR). The skill gh-stack, vendored at vendor/gh-stack
+    (skills-sources.json), tells agents to run `submit --auto`.
+    gh-stack sends the pull requests of `link` and `submit` to the repository go-gh's repository.Current takes
+    (internal/config/config.go:233-249; go-gh v2.16.2 pkg/repository/repository.go:119-170), whatever --remote names
+    to push to: GH_REPO's, else one of the remotes, by its `gh-resolved` or else in an order of its own, each of which
+    gh_bases gives, read as gh_reach reads a base repository; outside the plain case (gh_plain_case), one target read
+    as public."""
+    table = GH_STACK_OPTIONS[sub]
+    read = gh_walk(arguments, gh_options(table))
+    long = gh_long_names(table)
+    words = [value or "" for option, value in read if option is None]
+    pieces: list[GhText] = []
+    unreadable: list[tuple[GhText, str]] = []
+    if sub == "feedback":
+        pieces += [GhText("title", text=" ".join(words))] if words else []
+    elif sub == "link" or (sub == "submit" and gh_flag(read, long, "--auto")):
+        if sub == "link":
+            for number, word in enumerate(words, 1):
+                pieces += gh_stack_branch_texts(f"argument {number}", "", word)
+            pieces += [GhText("--base", text=value, is_name=True) for option, value in read
+                       if option and long.get(option, option) == "--base" and value is not None]
+        else:
+            try:
+                pieces += gh_stack_submit_texts(*gh_stack_current())
+            except GhStackFileError as error:
+                unreadable.append((GH_STACK_SUBMIT_TEXTS, str(error)))
+        pieces += [GhText("pull request template", path, path=path) for path in gh_pr_templates()]
+    else:
+        unreadable.append((GH_STACK_SUBMIT_TEXTS, GH_STACK_SUBMIT_EDITOR))
+    texts = gh_stdin_texts(pieces, environment)
+    if texts is None:
+        return GH_STDIN_EXIT
+    contents, unread = gh_contents(texts, environment)
+    unreadable += unread
+
+    def reach() -> list[GhTarget]:
+        """Where gh-stack sends the call, read once a term is found (gh_refusal)."""
+        if sub == "feedback":
+            return [GH_STACK_FEEDBACK]
+        if (condition := gh_plain_case(environment)) is not None:
+            return [GhTarget(f"wherever gh-stack sends it, read as public, since {condition}", "", True)]
+        return gh_targets(gh_base_repositories(gh_bases(environment, True))) or [GH_NO_REPOSITORY]
+
+    return gh_refusal(f"gh stack {sub}", reach, contents, lambda piece: False, unreadable)
 
 
 def gh_check(arguments: Sequence[str]) -> int:
     """`gh -- ARGV…`: refuse a gh call that sends a listed term to anything not confirmed private (exit 3), whose text
-    cannot be checked because the list cannot be read (exit 2), that names a file nobody can read (exit 4), or that
-    may run a gh alias the check cannot read (exit 4); exit GH_STDIN_EXIT to ask for standard input. Any other call
-    exits 0 untouched, and the text of a call that reaches only private or internal repositories is not checked, nor
-    are their visibilities, nor the facts of the plain case (gh_plain_case), read before a term is found. Outside the
-    plain case a call that holds a listed term is one target read as public, as a raw GraphQL mutation is.
+    cannot be checked because the list cannot be read (exit 2), that names a file nobody can read (exit 4), that may
+    run a gh alias the check cannot read (exit 4), that is of a command that sends text a public place shows and the
+    check does not read, as `issue artifact create` (exit 4, GH_REFUSED_COMMANDS), or that is of a command no table
+    names (exit 4, gh_unknown); exit GH_STDIN_EXIT to ask for standard input. A call of gh-stack's that the check reads
+    is judged by gh_stack_check. Any other call exits 0 untouched, and the text of a call that reaches only private or
+    internal repositories is not checked, nor are their visibilities, nor the facts of the plain case (gh_plain_case),
+    read before a term is found. Outside the plain case a call that holds a listed term is one target read as public,
+    as a raw GraphQL mutation is.
 
     A call through a gh alias is read as the command it expands to. Where the check cannot read gh's aliases exactly,
     or cannot split what an alias runs, a call that may run one is refused with exit 4 before gh runs, the refusal
-    naming why and what to fix (GhAliasError); gh_aliases states which calls and why."""
+    naming why and what to fix (GhUnjudgedError); gh_aliases states which calls and why."""
     environment = os.environ
     try:
         command = gh_command(arguments, environment)
-    except GhAliasError as error:
+    except GhUnjudgedError as error:
         name, problem = (c_escape(str(part)) for part in error.args)
         print(f"leak terms: gh {name}: {problem}", file=sys.stderr)
         print(f"leak terms: gh {name}: refused before gh ran, so nothing was sent.", file=sys.stderr)
@@ -5551,6 +7212,8 @@ def gh_check(arguments: Sequence[str]) -> int:
     if command is None:
         return 0
     group, sub, rest = command
+    if group == "stack":
+        return gh_stack_check(sub, rest, environment)
     long = gh_long_names(GH_TEXT_COMMANDS[(group, sub)])
     read = gh_walk(rest, gh_options(GH_TEXT_COMMANDS[(group, sub)]))
     if group == "api" and not gh_api_sends(read):
@@ -5575,10 +7238,11 @@ def gh_check(arguments: Sequence[str]) -> int:
             # fillPlaceholders), so a call with such a value passes, whatever else it holds. One whose endpoint alone
             # holds the branch is read as GraphQL instead, failing closed (gh_api_endpoint).
             return 0
-    texts = gh_contents(pieces, environment)
+    # A call that reads standard input asks shims/gh for its buffer of it before the check reads where the call goes,
+    # so that pass reads no base repository (gh_stdin_texts).
+    texts = gh_stdin_texts(pieces, environment)
     if texts is None:
         return GH_STDIN_EXIT
-    contents, unreadable = texts
     # Each repository gh may take as the base repository (gh_bases), read at most once, and only for a reading that
     # takes one: an endpoint that holds a base placeholder (gh_api_endpoint), a text gh fills that holds one
     # (gh_filled), the repository a `repo edit` that names none makes public (gh_published_names), and, once a term is
@@ -5596,8 +7260,10 @@ def gh_check(arguments: Sequence[str]) -> int:
     # that is not `gh api` goes to github.com in the plain case, and to the repositories it reaches (gh_reach).
     address = gh_api_endpoint(read, branch, bases) if group == "api" else GhAddress("github.com")
     if gh_is_upload(group, sub, address):
-        # A release asset's body is its bytes: never read as JSON (gh_is_upload).
-        contents = [(replace(piece, json_body=False), text) for piece, text in contents]
+        # A release asset's body is its bytes: never read as JSON (gh_is_upload), and so read in chunks, as any file
+        # whose text no reader takes whole (gh_contents).
+        texts = [replace(piece, json_body=False) for piece in texts]
+    contents, unreadable = gh_contents(texts, environment)
     if group == "api":
         # What gh sends once it has filled the placeholders of the endpoint and of its -F values (gh_filled).
         contents = gh_filled(contents, bases, branch)
@@ -5625,24 +7291,25 @@ def gh_check(arguments: Sequence[str]) -> int:
         """Whether PIECE is a GraphQL call's document (its `query` field) or carries one (its JSON body's `.query`)."""
         return graphql_call and (piece.json_body or piece.key == "query")
 
-    matcher, list_problem, findings = gh_terms(contents, graphql)
-    if not findings and list_problem is None and not unreadable:
-        return 0
-    if graphql_call:
-        # A call judged as GraphQL, on any host, is one target read as public: GH_GRAPHQL_TARGET for a mutation, else
-        # GH_GRAPHQL_UNREAD_TARGET, since the text that cannot be read may be the mutation.
-        reached = [GhTarget(GH_GRAPHQL_TARGET if mutation else GH_GRAPHQL_UNREAD_TARGET, "", True)]
-    elif (condition := gh_plain_case(environment)) is not None:
-        # Outside the plain case the check does not read where gh sends the call: it is one target read as public,
-        # with no repository, so every list counts and no own name is exempt, as for a raw GraphQL mutation.
-        reached = [GhTarget(f"wherever gh sends it, read as public, since {condition}", "", True)]
-    else:
+    def reach() -> list[GhTarget]:
+        """Where gh sends the call, read once a term is found (gh_refusal)."""
+        if graphql_call:
+            # A call judged as GraphQL, on any host, is one target read as public: GH_GRAPHQL_TARGET for a mutation,
+            # else GH_GRAPHQL_UNREAD_TARGET, since the text that cannot be read may be the mutation.
+            return [GhTarget(GH_GRAPHQL_TARGET if mutation else GH_GRAPHQL_UNREAD_TARGET, "", True)]
+        if (condition := gh_plain_case(environment)) is not None:
+            # Outside the plain case the check does not read where gh sends the call: it is one target read as public,
+            # with no repository, so every list counts and no own name is exempt, as for a raw GraphQL mutation.
+            return [GhTarget(f"wherever gh sends it, read as public, since {condition}", "", True)]
         new_visibility = gh_new_visibility(read, address, contents) if group == "api" else ""
-        reached = gh_reach(GhCall(group, sub, tuple(read), address, made_public, new_visibility), bases)
-    # The refusal of a raw GraphQL mutation for a term names what to use instead (gh_graphql_advice); a GraphQL call
-    # that is not known to be a mutation (GH_GRAPHQL_UNREAD_TARGET), and a refusal with no term, get none.
-    advice = f" {gh_graphql_advice(gh_graphql_documents(contents, graphql))}." if mutation else ""
-    return gh_refusal(f"gh {group} {sub}".rstrip(), reached, matcher, findings, unreadable, list_problem, advice)
+        return gh_reach(GhCall(group, sub, tuple(read), address, made_public, new_visibility), bases)
+
+    def advice() -> str:
+        """The refusal of a raw GraphQL mutation for a term names what to use instead (gh_graphql_advice); a GraphQL
+        call that is not known to be a mutation (GH_GRAPHQL_UNREAD_TARGET), and a refusal with no term, get none."""
+        return f" {gh_graphql_advice(gh_graphql_documents(contents, graphql))}." if mutation else ""
+
+    return gh_refusal(f"gh {group} {sub}".rstrip(), reach, contents, graphql, unreadable, advice)
 
 
 # `diff` and `message` --repository: a GitHub repository as OWNER/NAME. A value of any other shape (a bare name, a URL,

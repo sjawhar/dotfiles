@@ -8,6 +8,8 @@ model: ["@review"]
 
 Review only the supplied diff and changed-file context. Return findings with file and line evidence.
 
+If a skill disagrees with the code, a command's output or its `--help`, follow those and say which line of the skill is wrong.
+
 ## Process
 
 1. Read `https://raw.githubusercontent.com/sjawhar/legion/main/skills/thermonuclear-deep-review/SKILL.md` and use its complete rubric. A failed read or an empty body blocks the review: report it, never review from memory.

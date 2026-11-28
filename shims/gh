@@ -119,158 +119,6 @@ gh_shim_call_digest() {
     _digest="$(printf '%s\0' "$@" | sha256sum 2> /dev/null)" || _digest=""
     _digest="${_digest%% *}"
 }
-# gh_shim_is_write ARGV…: true when this call changes something on GitHub. `gh api` counts when
-# it names a method other than GET, which is how gh itself decides; every other verb is listed,
-# because a verb this misses is a write whose text goes out unchecked. Read verbs are never listed, so a
-# new read command keeps working without an edit here. The command and its verb are found as cobra
-# finds them, past the options before each (`gh -R o/r pr comment 1` and `gh pr -R o/r comment 1`
-# are `gh pr comment`): an option written apart from any value, but --help and --version, takes the
-# next word as its value.
-gh_shim_is_write() {
-    local a method="" group="" verb="" skip=0 letters value kind pending="" body=0
-    for a in "$@"; do
-        if ((skip)); then
-            skip=0
-            continue
-        fi
-        case "$a" in
-            --) break ;;
-            --help | --version | -*=*) ;;
-            --* | -?) skip=1 ;;
-            -*) ;;
-            *)
-                if [[ -z "$group" ]]; then
-                    group="$a"
-                    [[ "$a" != api ]] || break
-                else
-                    verb="$a"
-                    break
-                fi
-                ;;
-        esac
-    done
-    case "$group" in
-        api)
-            # gh api's options as gh's flag parser (pflag) reads them (`gh api --help`, gh 2.98.0): the method is the
-            # last -X/--method given, and with none, a field (-f/-F) or an --input body makes gh POST. A value option
-            # takes the rest of its word (`-XPOST`, `-X=POST`, `--method=POST`) or else the next word, also at the end
-            # of a cluster after -i, gh api's one short flag that takes none (`-iXPOST`, `-if k=v`), and a word an
-            # option takes is never read as an option (`-t -XGET` is a template). Until 2026-11-17 neither a cluster
-            # nor a taken word was read, so `gh api -X GET -iXPOST …`, `gh api … -if body=…` and
-            # `gh api … -f body=… -t -XGET` were reads here, and gh POSTed their text without the leak-term check.
-            for a in "$@"; do
-                if [[ -n "$pending" ]]; then
-                    case "$pending" in method) method="$a" ;; body) body=1 ;; esac
-                    pending=""
-                    continue
-                fi
-                case "$a" in
-                    --) break ;;
-                    --method=*) method="${a#--method=}" ;;
-                    --field=* | --raw-field=* | --input=*) body=1 ;;
-                    --method) pending=method ;;
-                    --field | --raw-field | --input) pending=body ;;
-                    --cache | --header | --hostname | --jq | --preview | --template) pending=other ;;
-                    --*) ;;
-                    -?*)
-                        letters="${a#-}"
-                        while [[ "$letters" == i* ]]; do
-                            letters="${letters#i}"
-                            [[ "$letters" != =* ]] || letters=""
-                        done
-                        case "${letters:0:1}" in
-                            X) kind=method ;;
-                            f | F) kind=body ;;
-                            H | p | q | t) kind=other ;;
-                            *) continue ;;
-                        esac
-                        value="${letters:1}"
-                        [[ ${#value} -le 1 || "${value:0:1}" != = ]] || value="${value:1}"
-                        if [[ -z "$value" ]]; then
-                            pending="$kind"
-                        elif [[ "$kind" == method ]]; then
-                            method="$value"
-                        elif [[ "$kind" == body ]]; then
-                            body=1
-                        fi
-                        ;;
-                esac
-            done
-            if [[ -n "$method" ]]; then
-                [[ "${method^^}" == GET || "${method^^}" == HEAD ]] && return 1
-                return 0
-            fi
-            ((body)) && return 0
-            return 1
-            ;;
-        issue | pr | discussion)
-            case "$verb" in
-                create | new | comment | edit | close | reopen | merge | review | ready | delete | lock \
-                    | unlock | pin | unpin | transfer | develop | checkout | revert) return 0 ;;
-            esac
-            ;;
-        release | repo | label | secret | variable | gist | ruleset | project | codespace)
-            case "$verb" in
-                create | new | edit | delete | upload | set | remove | rename | archive | sync | fork \
-                    | clone | deploy-key | copy | close | stop | field-create | item-create | item-edit) return 0 ;;
-            esac
-            ;;
-        agent-task | agent-tasks | agent | agents) case "$verb" in create) return 0 ;; esac ;;
-        workflow) case "$verb" in run | enable | disable) return 0 ;; esac ;;
-        run) case "$verb" in rerun | cancel | delete) return 0 ;; esac ;;
-        cache) case "$verb" in delete) return 0 ;; esac ;;
-    esac
-    return 1
-}
-# gh_shim_may_send_text ARGV…: true when scripts/leak-terms-check must read this call, and it then
-# decides: a write (gh_shim_is_write), a first word that is not one of gh 2.98.0's own commands,
-# which can be an option before the command or a gh alias of the user's that the check expands, or a
-# command under which gh's config.yml may hold an alias (gh_shim_has_nested_alias). It may be wider
-# than the check's own table, never narrower (shims/tests/test_gh_leak_terms.py); a read never
-# starts the check.
-gh_shim_may_send_text() {
-    gh_shim_is_write "$@" && return 0
-    case "${1:-}" in
-        '' | --help | --version) return 1 ;;
-        agent | agent-task | agent-tasks | agents | alias | api | at | attestation \
-            | auth | browse | cache | codespace | completion | config | copilot | cs | discussion | ext \
-            | extension | extensions | gist | gpg-key | help | issue | label | licenses | org | pr | preview \
-            | project | release | repo | rs | ruleset | run | search | secret | skill | skills | ssh-key \
-            | status | variable | version | workflow)
-            gh_shim_has_nested_alias "$1"
-            return
-            ;;
-    esac
-    return 0
-}
-# gh_shim_has_nested_alias COMMAND: true when gh's config.yml (in gh's own config dir) may hold an
-# alias under COMMAND, such as `gh alias set 'pr say' 'pr comment'`, which gh runs as what it
-# expands to; the check then reads the call and decides. The alias's key starts an indented line of
-# a block mapping, or follows the `{` or a `,` of the flow mapping gh writes once the last alias was
-# deleted (`aliases: {pr say: pr comment}`). It is true too when config.yml holds a line break other
-# than a line feed, matched as bytes in any locale (a carriage return, and UTF-8's next line, line
-# separator and paragraph separator): yaml.v3 begins a line at each, so a key after one starts no
-# line the pattern below finds. Until 2026-11-17 `gh pr say 11 --body …` was a read here, and its
-# text went out unchecked. It is true too when config.yml holds a `? ` key, at a line's start or
-# after a `{` or a `,`, matched as bytes the same way: gh writes `? ` before a key yaml.v3 does not
-# write as a simple key, one past 128 bytes or one whose name holds a line break (`? |`, `? "cr\r"`,
-# `{? "pr say\n" : …}`), in a block and in a flow mapping, so the check starts for every such key
-# gh writes. The check judges a call through an alias as the command it expands to; where it cannot
-# read config.yml exactly, it refuses each call whose name stands there before a `:`
-# (scripts/leak-terms-check, gh_aliases). A line that only looks like an alias starts the check,
-# which on a config.yml it reads exactly finds no alias and lets the call go.
-gh_shim_has_nested_alias() {
-    local config="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/config.yml" text pattern
-    local LC_ALL=C
-    [[ -r "$config" ]] || return 1
-    text="$(< "$config")" || return 1
-    [[ "$text" == *$'\r'* || "$text" == *$'\xc2\x85'* || "$text" == *$'\xe2\x80\xa8'* || "$text" == *$'\xe2\x80\xa9'* ]] &&
-        return 0
-    pattern=$'(^|\n)[ \t]*\\?[ \t]|[{,][ \t]*\\?[ \t]'
-    [[ "$text" =~ $pattern ]] && return 0
-    pattern=$'((^|\n)[ \t]+|[{,][ \t\n]*)["\']?'"$1"$'[ \t][^:\n]*:'
-    [[ "$text" =~ $pattern ]]
-}
 # The text of a call that reads stdin (`--input -`, `--body-file -`, `-F name=@-`, …) is read by the checks below
 # before gh runs, and gh then gets the same bytes. gh_shim_buffer_stdin reads all of stdin (at most 64 MiB), once a
 # call, into a private file (mktemp, mode 0600), opened once to write and then twice more through that descriptor
@@ -326,10 +174,12 @@ gh_shim_stdin_to_gh() {
 # left to the checks. A read or write error, or more than 64 MiB, refuses the call.
 gh_shim_buffer_fds() {
     local max=$((64 * 1024 * 1024)) option fd_path stdin_path a name fd key value flags buffer w size
-    # The path is the whole argument, or follows a short option (`-F/dev/fd/63`), a long one's `=`, or a field's `=@`.
+    # The path is the whole argument, or follows a short option (`-F/dev/fd/63`), a long one's `=`, or a field's `=@`;
+    # after it, a `#` may begin the alt text of an --attach file or the label of a release asset (`--attach <(…)#alt`),
+    # which gh splits from the path it reads (gh 2.106.0's SplitFileArg and AssetsFromArgs).
     option='^(-[A-Za-z]+|--[A-Za-z][A-Za-z0-9-]*=|.*=@)?'
-    fd_path="$option"'(/dev/fd/|/proc/self/fd/)(0|[1-9][0-9]*)$'
-    stdin_path="$option"'/dev/stdin$'
+    fd_path="$option"'(/dev/fd/|/proc/self/fd/)(0|[1-9][0-9]*)(#.*)?$'
+    stdin_path="$option"'/dev/stdin(#.*)?$'
     for a in "$@"; do
         if [[ "$a" =~ $fd_path ]]; then
             name="${BASH_REMATCH[2]}${BASH_REMATCH[3]}" fd="${BASH_REMATCH[3]}"
@@ -492,36 +342,41 @@ if [[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" && "${1:-}" != auth ]] && ! agent_cont
     unset _host_token
 fi
 
-# Listed leak terms (leak-terms.sops.yaml) in the text a gh call sends, for every caller, as for a commit or a push:
-# on 2026-11-17 an agent's `gh pr edit` put a listed term into a public pull request's body, where GitHub keeps it in
-# the body's edit history (dispatch://INFRA-4102). A call that can carry text (gh_shim_may_send_text) goes to
-# `scripts/leak-terms-check gh` before gh runs (for an agent, after the public text gate), on exactly the arguments
-# gh then gets. The check reads every text the call sends, files and stdin included, and
-# refuses one that holds a listed term when the call can reach anything not confirmed private, a visibility it cannot
-# read counting as public; a text it cannot read, or a list it cannot decrypt, is refused the same way. A refused call
-# exits 2, and gh never runs. When the check needs stdin (its exit 7), it gets the buffer the public text gate shares.
-# DOTFILES_LEAK_TERMS_GH_STDIN is this block's alone, for the reason PUBLIC_LEAK_CHECK_STDIN is the gate's.
+# Listed leak terms (leak-terms.sops.yaml) in the text a gh call sends, for every caller, as for a commit or a push: on
+# 2026-11-17 an agent's `gh pr edit` put a listed term into a public pull request's body, where GitHub keeps it in the
+# body's edit history (dispatch://INFRA-4102). Every call goes to `scripts/leak-terms-check gh` before gh runs (for an
+# agent, after the public text gate), on exactly the arguments gh then gets, and the check decides what the call runs
+# and what it sends. The check reads every text the call sends, files and stdin included, and refuses one that holds a
+# listed term when the call can reach anything not confirmed private, a visibility it cannot read counting as public; a
+# text it cannot read, or a list it cannot decrypt, is refused the same way. A refused call exits 2, and gh never runs.
+# When the check needs stdin (its exit 7), it gets the buffer the public text gate shares. DOTFILES_LEAK_TERMS_GH_STDIN
+# is this block's alone, for the reason PUBLIC_LEAK_CHECK_STDIN is the gate's. Until the review of 3e4d1931
+# (dispatch://INFRA-4957/artifact/rulings-md v76) the shim let a call go to gh unchecked where its first one or two
+# words named a command that sends no text. gh 2.106.0 runs a gh alias of the user's in place of such a command where
+# the alias's key ends in a word that holds a space: gh names the alias by the part of that word before the space
+# (pkg/cmd/root/root.go:209-241, cobra's Command.Name), and `gh alias set '"version x"' …` made `gh version` run the
+# alias in 20 of 20 runs (dispatch://INFRA-4957/artifact/space-key-probe-txt). The check reads gh's aliases as gh
+# registers them (scripts/leak-terms-check, gh_aliases). A call that sends no text costs one run of the check, which
+# reads no term list for it: some 0.4 s in a Legion pod (2026-11-28).
 unset DOTFILES_LEAK_TERMS_GH_STDIN
-if gh_shim_may_send_text "$@"; then
-    # The check of this shim's own checkout, found through a link to the shim as the agent block finds it.
-    _term_check="${BASH_SOURCE[0]}"
-    [[ ! -L "$_term_check" ]] || _term_check="$(command -p readlink -f -- "$_term_check")"
-    _term_check="${_term_check%/*}/../scripts/leak-terms-check"
-    _term_rc=0
-    if [[ -n "$_stdin_g" ]]; then
+# The check of this shim's own checkout, found through a link to the shim as the agent block finds it.
+_term_check="${BASH_SOURCE[0]}"
+[[ ! -L "$_term_check" ]] || _term_check="$(command -p readlink -f -- "$_term_check")"
+_term_check="${_term_check%/*}/../scripts/leak-terms-check"
+_term_rc=0
+if [[ -n "$_stdin_g" ]]; then
+    DOTFILES_LEAK_TERMS_GH_STDIN="/dev/fd/$_stdin_g" "$_term_check" gh -- "$@" || _term_rc=$?
+else
+    "$_term_check" gh -- "$@" || _term_rc=$?
+    if ((_term_rc == 7)); then
+        gh_shim_buffer_stdin
+        _term_rc=0
         DOTFILES_LEAK_TERMS_GH_STDIN="/dev/fd/$_stdin_g" "$_term_check" gh -- "$@" || _term_rc=$?
-    else
-        "$_term_check" gh -- "$@" || _term_rc=$?
-        if ((_term_rc == 7)); then
-            gh_shim_buffer_stdin
-            _term_rc=0
-            DOTFILES_LEAK_TERMS_GH_STDIN="/dev/fd/$_stdin_g" "$_term_check" gh -- "$@" || _term_rc=$?
-        fi
     fi
-    if ((_term_rc != 0)); then
-        ((_term_rc < 126)) || echo "gh shim: refusing: the leak-term check $_term_check could not run (exit $_term_rc)" >&2
-        exit 2
-    fi
+fi
+if ((_term_rc != 0)); then
+    ((_term_rc < 126)) || echo "gh shim: refusing: the leak-term check $_term_check could not run (exit $_term_rc)" >&2
+    exit 2
 fi
 gh_shim_stdin_to_gh
 

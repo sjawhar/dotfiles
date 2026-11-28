@@ -2,7 +2,7 @@
 
 A preference of Sami's is not a company rule. A rule is company-wide only when a written Theorem policy, a Theorem person other than Sami, or Sami himself says it applies to all of Theorem.
 
-- One repository's design, taste or workflow: its AGENTS.md, `docs/` or a repo skill, by a PR under its rules (in the dotfiles, `scripts/dotfiles-publish`, which waits for the code owner on these files).
+- One repository's design, taste or workflow: its AGENTS.md, `docs/` or a repo skill, by a PR under its rules (in the dotfiles, `scripts/dotfiles-publish`, which waits for the code owner on AGENTS.md and a skill's files, not on `docs/`).
 - A company-wide Theorem rule: the `working-at-theorem` skill in theorem-labs/verification-skills. Every PR bumps the version; tag after the merge.
 - Sami's rule or preference beyond one repository: `~/.dotfiles/.claude/CLAUDE.md`, after his yes. No Theorem name, repository, person, operations contact or Dispatch project there. Quote Sami in the commit message, and publish with `scripts/dotfiles-publish`, which waits for his review.
 - A fact about Sami's people, places or phrasing, or Theorem's people, places or tools: memory, with `retain`.
