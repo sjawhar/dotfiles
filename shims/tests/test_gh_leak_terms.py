@@ -596,6 +596,40 @@ class GhLeakTerms(unittest.TestCase):
             self.setUp_calls()
             self.assert_sent(self.run_gh(["copilot", "--help"]), ["copilot", "--help"])
 
+    def test_copilot_goes_out_only_where_gh_prints_its_help(self) -> None:
+        # gh 2.106.0 prints `copilot`'s help, and runs no Copilot CLI, only where `--help` or `-h` stands as a whole
+        # word before the first `--` (pkg/cmd/copilot/copilot.go:87-104); every other call runs the CLI, which the
+        # check refuses (GH_REFUSED_COMMANDS). So `gh copilot -h` and `gh --help copilot -p x`, whose `--help` gh hands
+        # to `copilot` among its words, go out, and a bare `gh copilot`, a `--help` after `--` and `--help=true` are
+        # refused, as gh runs the CLI for each.
+        message = ("gh hands `copilot`'s words to the Copilot CLI unread, and with the write tools of its GitHub MCP "
+                   "server on the CLI posts to GitHub with its own client, which the check does not read, so the check "
+                   "refuses the call; `gh copilot --help` and `gh copilot -h` print gh's help of it and go out")
+        for argv in (["copilot", "-h"], ["--help", "copilot", "-p", "x"], ["copilot", "-p", "x", "-h", "--", "y"]):
+            with self.subTest(sent=" ".join(argv)):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+        for argv in (["copilot"], ["copilot", "--", "--help"], ["copilot", "--help=true", "-p", "x"],
+                     ["copilot", "-p", "x", "--", "-h"]):
+            with self.subTest(refused=" ".join(argv)):
+                self.assert_command_refused(argv, "copilot", message)
+
+    def test_help_before_another_installed_extension_is_refused_and_gh_s_own_help_goes_out(self) -> None:
+        # gh 2.106.0 runs `gh help foo x` as `gh foo x --help` (internal/ghcmd/cmd.go:189-193), and `gh --help foo x`
+        # hands gh-foo `--help x`: gh prints no help of an extension of its own and hands it its words unread, so a
+        # call of an installed extension other than gh-stack is refused with `--help` as without it (rulings-md v72
+        # item 1). Only the first word is so read: `gh -R o/r help foo` runs cobra's help command, which prints help.
+        # Controls: `gh help pr comment` and `gh help` print gh's own help and go out.
+        self.env["XDG_DATA_HOME"] = str(self.tmp / "data")
+        self.install_extension("foo")
+        for argv in (["help", "foo", "x"], ["--help", "foo", "x"], ["help", "-R", PRIVATE, "foo"]):
+            with self.subTest(refused=" ".join(argv)):
+                self.assert_command_refused(argv, "foo", self.UNKNOWN)
+        for argv in (["help", "pr", "comment"], ["help"], ["-R", PRIVATE, "help", "foo"]):
+            with self.subTest(control=" ".join(argv)):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+
     # --- a term listed for some repositories only ---------------------------------------------------------------
 
     def test_a_scoped_term_is_refused_only_for_a_public_repository_of_its_scope(self) -> None:
@@ -3543,14 +3577,16 @@ class GhLeakTerms(unittest.TestCase):
         path.write_text(json.dumps(stack, indent=2), encoding="utf-8")
         return path
 
-    def test_an_installed_extension_no_table_names_is_refused_and_its_help_goes_out(self) -> None:
+    def test_an_installed_extension_no_table_names_is_refused_with_its_help_too(self) -> None:
         # gh runs an installed extension as the top-level command of its name, and the extension sends its text with
         # its own client, so the check reads it as a command like any other: one no table names is refused before gh
-        # runs as a command no table names, and with `--help` it goes to gh; so is a subcommand of gh-stack that
-        # GH_STACK_COMMANDS does not name. gh runs an extension in place of a gh alias of its name, which gh takes only
-        # where no command has that name (pkg/cmd/alias/shared/validations.go:15-29), and in place of gh's stub of an
-        # official extension (`aw`). Until rulings-md v66 a call of any installed extension went out unread. Controls:
-        # with gh-foo gone, the alias `foo` of `pr view`, a quiet command, runs and goes out; gh-stack's `view` goes out.
+        # runs as a command no table names, with `--help` too, since gh hands the extension its words unread and prints
+        # no help of its own (rulings-md v72 item 1 and v73 item 6; until then `gh foo --help` went out). A subcommand
+        # of gh-stack that GH_STACK_COMMANDS does not name is refused too, and with `--help` it goes out: gh-stack's
+        # cobra reads it. gh runs an extension in place of a gh alias of its name, which gh takes only where no command
+        # has that name (pkg/cmd/alias/shared/validations.go:15-29), and in place of gh's stub of an official extension
+        # (`aw`). Until rulings-md v66 a call of any installed extension went out unread. Controls: with gh-foo gone,
+        # the alias `foo` of `pr view`, a quiet command, runs and goes out; gh-stack's `view` goes out.
         self.env["XDG_DATA_HOME"] = str(self.tmp / "data")
         config = self.tmp / "config" / "gh"
         config.mkdir()
@@ -3562,8 +3598,11 @@ class GhLeakTerms(unittest.TestCase):
             with self.subTest(call=" ".join(argv)):
                 self.assert_command_refused(argv, name, self.UNKNOWN)
             with self.subTest(call=" ".join(argv), help="--help"):
-                self.setUp_calls()
-                self.assert_sent(self.run_gh([*argv, "--help"]), [*argv, "--help"])
+                if name == "stack bogus":
+                    self.setUp_calls()
+                    self.assert_sent(self.run_gh([*argv, "--help"]), [*argv, "--help"])
+                else:
+                    self.assert_command_refused([*argv, "--help"], name, self.UNKNOWN)
         for argv in (["stack", "view"], ["stack", "-R", PRIVATE, "view"]):
             with self.subTest(control=" ".join(argv)):
                 self.setUp_calls()
@@ -3889,13 +3928,13 @@ class GhLeakTerms(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
                 self.assertEqual(self.gh_calls(), [])
 
-    def test_extension_exec_of_another_extension_is_refused_and_its_help_goes_out(self) -> None:
+    def test_extension_exec_of_another_extension_is_refused_with_its_help_too(self) -> None:
         # Through `extension exec` gh runs any installed extension, one whose name a command of gh's own takes too: on
         # 2026-11-27 gh 2.106.0's `gh extension exec label x --help` ran an installed gh-label with `x --help`, where
         # `gh label` stays gh's own command (pkg/cmd/root/root.go:197-206). So `extension exec` of an installed
-        # extension other than gh-stack is refused as a command no table names, gh-label in place of `gh label` too, and
-        # with `--help` it goes to gh, as `gh foo --help` does. Control: `gh label list`, gh's own read, goes out, and
-        # the check lets it go.
+        # extension other than gh-stack is refused as a command no table names, gh-label in place of `gh label` too,
+        # with `--help` too, as `gh foo --help` is (rulings-md v73 item 6). Control: `gh label list`, gh's own read,
+        # goes out, and the check lets it go.
         self.env["XDG_DATA_HOME"] = str(self.tmp / "data")
         for name in ("foo", "label"):
             self.install_extension(name)
@@ -3903,8 +3942,7 @@ class GhLeakTerms(unittest.TestCase):
             with self.subTest(call=" ".join(argv)):
                 self.assert_command_refused(argv, name, self.UNKNOWN)
             with self.subTest(call=" ".join(argv), help="--help"):
-                self.setUp_calls()
-                self.assert_sent(self.run_gh([*argv, "--help"]), [*argv, "--help"])
+                self.assert_command_refused([*argv, "--help"], name, self.UNKNOWN)
         argv = ["label", "list", "-R", PUBLIC]
         with self.subTest(control=" ".join(argv)):
             checked = self.check(argv, self.env)

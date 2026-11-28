@@ -3235,7 +3235,6 @@ GH_QUIET_COMMANDS: dict[str, str] = {
     "config get": "local: prints a key of gh's config on this machine",
     "config list": "local: prints gh's config on this machine",
     "config set": "local: sets a key of gh's config on this machine",
-    "copilot": "local: runs the Copilot CLI on this machine, which gh downloads first when it is not installed",
     "event listen": "read: prints the events of a pull request as they happen",
     "event subscription create": "private: subscribes the account to the events of a resource",
     "event subscription delete": "no text: deletes an event subscription",
@@ -3283,12 +3282,22 @@ GH_QUIET_COMMANDS: dict[str, str] = {
 # key and its armored text, which holds its user IDs ("Lists the GPG keys for a user. This information is accessible
 # by anyone", docs.github.com, "REST API endpoints for GPG keys", read 2026-11-27, its `name` and `raw_key`), and the
 # title of an SSH signing key: on 2026-11-27 an unauthenticated `GET users/sjawhar/ssh_signing_keys` gave each key's
-# `title`, and `GET users/sjawhar/keys`, the authentication keys, gave none. A call of one with gh's help flag on, which
-# prints the command's help and sends nothing, goes out, read with the command's options (GH_REFUSED_OPTIONS), and so
-# does a call of `skill publish` or `ssh-key add` where it sends none of that (gh_refusal_lifted).
+# `title`, and `GET users/sjawhar/keys`, the authentication keys, gave none. gh 2.106.0 hands `copilot`'s words to the
+# Copilot CLI unread (pkg/cmd/copilot/copilot.go:83-100, DisableFlagParsing, `opts.CopilotArgs = args`, then the CLI
+# runs), whose --enable-all-github-mcp-tools, --add-github-mcp-toolset and --add-github-mcp-tool turn on the write tools
+# of its GitHub MCP server ("`--enable-all-github-mcp-tools` flag now enables read-write GitHub MCP tools",
+# github/copilot-cli's changelog.md), which post with the CLI's own client. Until the rulings on the tester's findings
+# at b134dfbd (dispatch://INFRA-4957/artifact/rulings-md@v72, item 2) `copilot` was in GH_QUIET_COMMANDS, and `gh
+# copilot --add-github-mcp-tool '*' --allow-all-tools -p <text>` went to gh unread. A call of one with gh's help flag
+# on, which prints the command's help and sends nothing, goes out, read with the command's options
+# (GH_REFUSED_OPTIONS), `copilot`'s as gh reads them (gh_copilot_help), and so does a call of `skill publish` or
+# `ssh-key add` where it sends none of that (gh_refusal_lifted).
 GH_ARTIFACT_REFUSAL = ("gh 2.106.0's preview `issue artifact` uploads documents and files the check does not read, so "
                        "the check refuses the call")
 GH_REFUSED_COMMANDS: dict[str, str] = {
+    "copilot": ("gh hands `copilot`'s words to the Copilot CLI unread, and with the write tools of its GitHub MCP "
+                "server on the CLI posts to GitHub with its own client, which the check does not read, so the check "
+                "refuses the call; `gh copilot --help` and `gh copilot -h` print gh's help of it and go out"),
     "gpg-key add": ("`gpg-key add` sends a key's armored text, with its user IDs, which GitHub lists for anyone, and "
                     "the check does not read it, so the check refuses the call"),
     "issue artifact create": GH_ARTIFACT_REFUSAL,
@@ -3315,6 +3324,7 @@ GH_REFUSED_COMMANDS: dict[str, str] = {
 # check read a bare `-h` of the other five as help without knowing their options. shims/tests/test_gh_leak_terms.py
 # compares them with the gh on PATH, and each refused command has its entry.
 GH_REFUSED_OPTIONS: dict[str, tuple[str, str]] = {
+    "copilot": ("", "--remove --help"),
     "gpg-key add": ("-t/--title", "--help"),
     "issue artifact create": ("--attach -b/--body -F/--body-file --name --type -R/--repo", "--help"),
     "issue artifact edit": ("--attach -b/--body -F/--body-file --name --restore-version -R/--repo", "--help"),
@@ -3384,7 +3394,8 @@ GH_HIDDEN_COMMANDS: dict[str, str] = {
     "environment": "local: prints a help topic",
     "exit-codes": "local: prints a help topic",
     "formatting": "local: prints a help topic",
-    "help": "local: prints the help of a command or a help topic",
+    "help": ("local: prints the help of a command or a help topic; `gh help <extension> <words>` runs the extension, "
+             "read as its call (gh_help_of_extension)"),
     "mintty": "local: prints a help topic",
     "reference": "local: prints a help topic",
     "repo credits": "read: shows the contributors of a repository",
@@ -4067,7 +4078,9 @@ def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
     did, and until the review of 053ef618 (finding 1) one run by `extension exec` did. GhUnjudgedError for a call the
     check cannot judge: one that may run an alias it cannot read (gh_alias_command), a call of a command
     GH_REFUSED_COMMANDS lists, whatever its target, refused as the call writes it (`gh issue -R o/r artifact new 4` is
-    `issue artifact create`, refused as `issue artifact new`), and a call of a command no table names (gh_unknown)."""
+    `issue artifact create`, refused as `issue artifact new`), and a call of a command no table names (gh_unknown).
+    A call whose first word is `help`, of an installed extension, is read as gh runs it (gh_help_of_extension)."""
+    arguments = gh_help_of_extension(arguments, environment) if not seen else arguments
     found = gh_next_command(arguments)
     if found is None:
         return None
@@ -4094,11 +4107,40 @@ def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
     return (group, sub, rest) if (group, sub) in GH_TEXT_COMMANDS else None
 
 
+def gh_help_of_extension(arguments: Sequence[str], environment: Mapping[str, str]) -> Sequence[str]:
+    """ARGUMENTS as gh 2.106.0 runs them: where the first word is `help` and the words after it name an installed
+    extension, gh runs `<those words> --help`, the extension's call with `--help` put last ("translate `gh help
+    <command>` to `gh <command> --help` for extensions", internal/ghcmd/cmd.go:189-193, before cobra reads the call),
+    and hands the extension every word unread, so after a `--` among them the `--help` is an argument and not a help
+    flag: `gh help stack submit --` runs `gh stack submit`. gh asks cobra's Find (isExtensionCommand), which finds the
+    first word that is no flag as gh_next_command does; a word that names a command of gh's own, by gh's aliases of it
+    too, is never an extension. Only the call as written is read so, not what a gh alias expands to, which gh runs
+    with root.Execute and no such rewrite (pkg/cmd/root/alias.go:53-77). Until the rulings on the tester's findings at
+    b134dfbd (dispatch://INFRA-4957/artifact/rulings-md@v72, item 1) `help` was quiet whatever followed, and that call
+    went out unread. gh rewrites the call of an official extension's stub the same way (its GroupID is `extension`,
+    pkg/cmd/root/official_extension_stub.go), which offers to install the extension, or installs it in CI, and runs
+    none of the call's words; the check gives that call back as it is, and lets `help` go. Any other ARGUMENTS are
+    given back as they are."""
+    if len(arguments) < 2 or arguments[0] != "help":
+        return arguments
+    found = gh_next_command(arguments[1:])
+    if found is None:
+        return arguments
+    commands = gh_commands()
+    command = GH_GROUP_ALIASES.get(found[0], found[0])
+    if command in commands or any(name.startswith(f"{command} ") for name in commands):
+        return arguments
+    return [*arguments[1:], "--help"] if gh_extension(found[0], environment) else arguments
+
+
 def gh_refusal_lifted(command: str, rest: Sequence[str]) -> bool:
     """Whether a call of the refused COMMAND, REST the words of the call but the command's own, sends nothing a public
     place shows: one with gh's help flag on (gh_help), read with the command's options (GH_REFUSED_OPTIONS); `skill
     publish` with --dry-run or --fix on (gh_flag); and `ssh-key add` whose last --type is `authentication`, or that
-    gives none, gh's default. Any other --type, as `signing` or a value gh refuses, keeps the refusal."""
+    gives none, gh's default. Any other --type, as `signing` or a value gh refuses, keeps the refusal. `copilot`'s help
+    is read as gh reads it (gh_copilot_help), not with its options."""
+    if command == "copilot":
+        return gh_copilot_help(rest)
     table = GH_REFUSED_OPTIONS[command]
     if gh_help(rest, table):
         return True
@@ -4110,6 +4152,16 @@ def gh_refusal_lifted(command: str, rest: Sequence[str]) -> bool:
         types = [value for option, value in read if option and long.get(option, option) == "--type"]
         return not types or types[-1] == "authentication"
     return False
+
+
+def gh_copilot_help(rest: Sequence[str]) -> bool:
+    """Whether gh prints the help of `copilot` for REST, the words of the call but `copilot`, and runs no Copilot CLI:
+    gh 2.106.0 reads none of them as flags (DisableFlagParsing) and prints the help where `--help` or `-h` stands, as a
+    whole word, among the words before the first `--`, after which every word goes to the CLI
+    (pkg/cmd/copilot/copilot.go:87-104, `slices.Contains(ghArgs, "--help") || slices.Contains(ghArgs, "-h")`). So
+    `--help=true` and a `--help` after `--` run the CLI."""
+    before = rest[:rest.index("--")] if "--" in rest else rest
+    return "--help" in before or "-h" in before
 
 
 # The values of a bool option that pflag reads as on, in lower case: Go's strconv.ParseBool takes 1, t, T, true, True
@@ -4216,10 +4268,13 @@ def gh_extension_command(name: str, rest: Sequence[str]) -> tuple[str, str, list
     None for a `quiet` one, for one whose help flag is on, which prints its help and sends nothing (cobra v1.10.2, the
     version gh-stack's go.mod pins, command.go:925-936: execute returns flag.ErrHelp before it runs the command;
     gh-stack's help function only prints, cmd/root.go:96-106), and for a call that names none, which prints gh-stack's
-    help or its version. Any other extension, and a subcommand of gh-stack no entry names, is a command no table names
-    (gh_unknown)."""
+    help or its version. Any other extension is refused whatever its words, `--help` among them (GH_UNKNOWN_REFUSAL):
+    gh hands an extension its words unread (pkg/cmd/root/extension.go, DisableFlagParsing) and prints no help of its
+    own, and the check does not know what the extension does with `--help` (dispatch://INFRA-4957/artifact/rulings-md
+    v72 item 1 and v73 item 6; until then a call of one with `--help` went out). A subcommand of gh-stack no entry
+    names is a command no table names (gh_unknown), whose `--help` gh-stack's cobra reads."""
     if name != "stack":
-        return gh_unknown(name, rest)
+        raise GhUnjudgedError(name, GH_UNKNOWN_REFUSAL)
     found = gh_next_command(rest, ())
     if found is None:
         return None
@@ -4233,14 +4288,14 @@ def gh_extension_command(name: str, rest: Sequence[str]) -> tuple[str, str, list
 
 
 def gh_unknown(name: str, rest: Sequence[str]) -> None:
-    """None for a call of NAME, the words of a command no table names that is no gh alias, an installed extension other
-    than gh-stack among them, REST the call's other words, with `--help` on, gh's help flag, a bare `-h` not counting
-    since the check knows none of the command's options (gh_help, TABLE None): it prints the command's help and sends
-    nothing, gh's own command as gh reads the flag, and an extension, which gh hands the flag unread
-    (pkg/cmd/root/extension.go, DisableFlagParsing), as its own flag parser reads it, as gh-stack's cobra does.
-    GhUnjudgedError for any other: the check does not know what the command sends (GH_UNKNOWN_REFUSAL). Until
-    rulings-md v66 (dispatch://INFRA-4957, the tester's findings at c8d749df, item 4) a call of an installed extension
-    went out unread, as local, though an extension sends its text with its own client."""
+    """None for a call of NAME, the words of a command no table names that is no gh alias, gh's own or a subcommand of
+    gh-stack's, REST the call's other words, with `--help` on, the help flag of gh's cobra and of gh-stack's, a bare
+    `-h` not counting since the check knows none of the command's options (gh_help, TABLE None): it prints the
+    command's help and sends nothing. GhUnjudgedError for any other: the check does not know what the command sends
+    (GH_UNKNOWN_REFUSAL). An installed extension other than gh-stack is refused whatever its words
+    (gh_extension_command). Until rulings-md v66 (dispatch://INFRA-4957, the tester's findings at c8d749df, item 4) a
+    call of an installed extension went out unread, as local, though an extension sends its text with its own
+    client."""
     if gh_help(rest, None):
         return None
     raise GhUnjudgedError(name, GH_UNKNOWN_REFUSAL)
