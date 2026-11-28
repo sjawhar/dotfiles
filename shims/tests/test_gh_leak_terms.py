@@ -506,6 +506,24 @@ class GhLeakTerms(unittest.TestCase):
             with self.subTest(call=argv[0]):
                 self.assert_alias_refused(argv, self.env, shown)
 
+    def test_help_or_version_before_a_gh_alias_is_read_as_a_call_of_the_alias(self) -> None:
+        # gh 2.106.0 runs a gh alias with flag parsing off (pkg/cmd/root/alias.go, DisableFlagParsing), so `--help` or
+        # `--version` written before the alias's name is not gh's help or version flag: it is an argument of the alias,
+        # which its expansion may put anywhere. With config.yml holding `p: api repos/o/pub/issues/1/comments -f
+        # body=$2 --jq $1`, `gh --version p <text>` POSTs <text> as the comment's body and only then fails on the jq
+        # filter `--version` (measured 2026-11-28 through shims/gh with gh 2.106.0, its HTTP sent to a unix socket by
+        # config.yml's http_unix_socket). The check reads such a call through the alias and refuses it, so shims/gh
+        # must hand it to the check. Control: `gh p x <text>`, the same alias with no flag first, is refused.
+        config = self.tmp / "config" / "gh"
+        config.mkdir()
+        (config / "config.yml").write_text(gh_config_yml(
+            f"\n    p: api repos/{PUBLIC}/issues/1/comments -f body=$2 --jq $1\n"), encoding="utf-8")
+        text = f"See-{CANARY.upper()}"
+        for argv in (["--version", "p", text], ["--help", "p", text], ["p", "x", text]):
+            with self.subTest(call=" ".join(argv[:2])):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(argv), "--raw-field body", line=1)
+
     # --- a term listed for some repositories only ---------------------------------------------------------------
 
     def test_a_scoped_term_is_refused_only_for_a_public_repository_of_its_scope(self) -> None:
