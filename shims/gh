@@ -240,8 +240,10 @@ gh_shim_is_write() {
 }
 # gh_shim_may_send_text ARGV…: true when scripts/leak-terms-check must read this call, and it then decides: a write
 # (gh_shim_is_write), a first word that is not one of gh 2.106.0's own commands, which can be an option before the
-# command, a gh alias of the user's that the check expands, an installed extension, which the check reads as a command
-# like any other (gh-stack by its GH_STACK_COMMANDS, any other refused as unknown), or a command no table of the check
+# command (gh's own --help and --version too: gh runs a gh alias and an installed extension with flag parsing off, so
+# one before its name is an argument of it), a gh alias of the user's that the check expands, an installed extension,
+# which the check reads as a command like any other (gh-stack by its GH_STACK_COMMANDS, any other refused as unknown),
+# or a command no table of the check
 # names, a command under which gh's config.yml may hold an alias (gh_shim_has_nested_alias), and any call of one of
 # those commands that gh_shim_is_quiet does not name, a verb gh does not have included, and `extension exec`, which
 # runs an installed extension the check reads as above (GH_EXEC_COMMANDS): the check refuses a command that no table of
@@ -252,7 +254,6 @@ gh_shim_may_send_text() {
     gh_shim_is_write "$@" && return 0
     (($#)) || return 1
     case "$1" in
-        --help | --version) return 1 ;;
         agent | agent-task | agent-tasks | agents | alias | api | at | attestation \
             | auth | browse | cache | codespace | completion | config | copilot | cs | discussion | event | ext \
             | extension | extensions | gist | gpg-key | help | issue | label | licenses | org | pr | preview \

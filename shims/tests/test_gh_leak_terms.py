@@ -524,6 +524,35 @@ class GhLeakTerms(unittest.TestCase):
                 self.setUp_calls()
                 self.assert_refused(self.run_gh(argv), "--raw-field body", line=1)
 
+    def test_version_before_an_installed_extension_or_a_command_no_table_names_is_read_as_a_call_of_it(self) -> None:
+        # gh 2.106.0 runs an installed extension with flag parsing off too (pkg/cmd/root/extension.go,
+        # DisableFlagParsing), so a `--version` before its name is an argument of it, and the check reads the call as
+        # one of the extension. `gh --version stack x submit` hands gh-stack `--version x submit`, where cobra takes
+        # `x` as the value of `--version` (gh_next_command): to a public repository, of a clean stack, it is refused as
+        # `gh stack submit` without --auto is. `gh --version zz-no-such x` is refused as a command no table names.
+        # Until 2026-11-28 shims/gh let a call whose first word is --help or --version go to gh unread. Controls:
+        # `gh zz-no-such x` is refused alike, and `gh stack submit` is refused in
+        # test_gh_stack_submit_without_auto_is_refused_as_a_text_the_check_cannot_read.
+        for argv in (["--version", "zz-no-such", "x"], ["zz-no-such", "x"]):
+            with self.subTest(call=" ".join(argv)):
+                self.assert_unknown_refused(argv, "zz-no-such", self.env)
+        self.stack_repo(("feat-a", ["Add the parser"]))
+        self.setUp_calls()
+        result = self.run_gh(["--version", "stack", "x", "submit"], env=self.stack_env(PUBLIC))
+        stderr = result.stderr.decode("utf-8", "replace")
+        self.assertEqual(result.returncode, 2, stderr)
+        self.assertEqual(self.gh_calls(), [])
+        self.assertIn("cannot read the titles and bodies of the pull requests it creates: without --auto", stderr)
+
+    def test_gh_s_own_help_and_version_flags_go_out_unchanged(self) -> None:
+        # gh's own --help and --version, alone, together and before one of gh's own commands, send no text: shims/gh
+        # hands each such call to the check, which lets it go, and gh gets it once with the same arguments.
+        for argv in (["--version"], ["--help"], ["--version", "--help"], ["--help", "pr"], ["--version", "status"],
+                     ["--help", "pr", "view", "1"]):
+            with self.subTest(call=" ".join(argv)):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+
     # --- a term listed for some repositories only ---------------------------------------------------------------
 
     def test_a_scoped_term_is_refused_only_for_a_public_repository_of_its_scope(self) -> None:
