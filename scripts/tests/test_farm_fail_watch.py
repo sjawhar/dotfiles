@@ -966,7 +966,7 @@ class APodNamedDirectly(unittest.TestCase):
 
     def test_a_pod_no_worker_has_says_so_and_does_not_claim_it_is_running(self) -> None:
         text = self.main(["--pod", "builds-bet/gone"], None)
-        self.assertIn("not on dispatch or theorem-us-central1", text)
+        self.assertIn("no worker holds this pod (dispatch or theorem-us-central1 read)", text)
         self.assertNotIn("still running", text)
 
     def test_a_pod_with_no_kill_says_there_is_nothing_to_explain(self) -> None:
@@ -1031,12 +1031,55 @@ class APodIsReadOnTheWorkerThatRunsIt(unittest.TestCase):
         asked, got = self.run_main([], None)
         self.assertEqual(asked, [self.DISPATCH, self.CENTRAL])
         self.assertFalse(got["evidence"]["pod_found"])
-        self.assertIn("not on dispatch or theorem-us-central1", got["message"])
+        self.assertIn("no worker holds this pod (dispatch or theorem-us-central1 read)", got["message"])
 
     def test_a_context_given_is_the_only_one_read(self) -> None:
         asked, got = self.run_main(["--context", self.CENTRAL], self.CENTRAL)
         self.assertEqual(asked, [self.CENTRAL])
         self.assertTrue(got["evidence"]["pod_found"])
+
+
+class APodNoWorkerHoldsIsSaidToBeGone(unittest.TestCase):
+    """A pod that no worker holds is the usual state of a pod whose Job ended, not a wrong name: Kueue deletes the
+    Job's copy on the worker, and its pods, seconds after the Job ends. So each message that says the pod was not
+    read says that, and names where the evidence remains: the farm's record (result.json) and Cloud Logging (the
+    architect's condition, dispatch://INFRA-5858/comment/c1a9cbcd-928e-47a3-955b-d0becfcfb3e1)."""
+
+    GONE = "Kueue deletes the Job's copy on the worker, and its pods, seconds after the Job ends"
+
+    def assert_says_gone(self, text: str) -> None:
+        self.assertIn(self.GONE, text)
+        self.assertIn("the farm's record (result.json)", text)
+        self.assertIn("Cloud Logging", text)
+
+    def test_a_pod_named_directly_and_its_missing_entry(self) -> None:
+        with patch.object(WATCH, "read_pod", return_value=None):
+            found, missing = WATCH.collect_pod("builds-ossv/gone", list(WATCH.BUILD_WORKERS))
+        self.assertFalse(found["pod_found"])
+        [entry] = missing
+        self.assertTrue(entry.startswith("the pod builds-ossv/gone, which no worker holds"
+                                         " (dispatch or theorem-us-central1 read)"), entry)
+        self.assert_says_gone(entry)
+
+    def test_the_failed_pod_of_a_farm_run_and_its_missing_entry(self) -> None:
+        with patch.object(WATCH, "read_object", side_effect=[job_record(), result_record(2025984000, 21106288640)]), \
+                patch.object(WATCH, "read_pod", return_value=None):
+            _, missing = WATCH.collect("farm/20261104t210028z-2d717d", list(WATCH.BUILD_WORKERS))
+        [entry] = [m for m in missing if m.startswith("the pod ")]
+        self.assertTrue(entry.startswith("the pod ossv-farm-20261104t210028z-2d717d-kx45t-qw6vn, which no worker"
+                                         " holds"), entry)
+        self.assert_says_gone(entry)
+
+    def test_the_pod_not_found_notice(self) -> None:
+        import contextlib
+        import io
+        out = io.StringIO()
+        with patch.object(WATCH, "read_pod", return_value=None), \
+                patch.object(WATCH, "run_text", return_value=""), contextlib.redirect_stdout(out):
+            self.assertEqual(WATCH.main(["--pod", "builds-ossv/gone"]), 0)
+        headline = out.getvalue().splitlines()[0]
+        self.assertTrue(headline.startswith("builds-ossv/gone: no worker holds this pod"), headline)
+        self.assert_says_gone(headline)
 
 
 if __name__ == "__main__":

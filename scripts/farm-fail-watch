@@ -849,6 +849,15 @@ def cluster_names(contexts: Sequence[str]) -> str:
     return " or ".join(context.rsplit("_", 1)[-1] for context in contexts)
 
 
+def pod_gone(pod: str, contexts: Sequence[str]) -> str:
+    """What a message says of a pod that no worker of contexts holds: why it is gone, and where
+    its evidence remains (dispatch://INFRA-5858/comment/c1a9cbcd-928e-47a3-955b-d0becfcfb3e1).
+    A missing pod is not a wrong name: it is the usual state of a pod whose Job ended."""
+    return (f"the pod {pod}, which no worker holds ({cluster_names(contexts)} read): Kueue deletes"
+            " the Job's copy on the worker, and its pods, seconds after the Job ends, and the"
+            " evidence remains in the farm's record (result.json) and in Cloud Logging")
+
+
 def read_pod(namespace: str, pod: str, contexts: Sequence[str]) -> dict | None:
     """The pod, from the first of contexts that holds it.
 
@@ -856,7 +865,9 @@ def read_pod(namespace: str, pod: str, contexts: Sequence[str]) -> dict | None:
     worker that the Job's Workload names. This tool has the pod's name (result.json's
     failed_pods, or --pod) and not the manager Job's uid, which finds the Workload. A lane that
     deletes a killed Job also deletes its Workload. So the pod is read by its name on each
-    worker in turn: one name is one pod, of one Job, on one worker.
+    worker in turn: one name is one pod, of one Job, on one worker. Kueue deletes the worker's
+    copy of a Job, and its pods, seconds after the Job ends, so a pod of an ended Job is on no
+    worker (pod_gone).
     """
     for context in contexts:
         text = run_text(["kubectl", "--context", context, "-n", namespace, "get", "pod", pod, "-o", "json"])
@@ -890,7 +901,7 @@ def collect_pod(ref: str, contexts: Sequence[str]) -> tuple[dict, list[str]]:
     missing: list[str] = []
     pod = read_pod(namespace, name, contexts)
     if pod is None:
-        missing.append(f"the pod {namespace}/{name} (not on {cluster_names(contexts)})")
+        missing.append(pod_gone(f"{namespace}/{name}", contexts))
     found = evidence(None, None, pod)
     found.setdefault("namespace", namespace)
     found["pod_found"] = pod is not None
@@ -925,7 +936,7 @@ def collect(run_id: str, contexts: Sequence[str]) -> tuple[dict, list[str]]:
     if names:
         pod = read_pod(namespace, names[-1], contexts)
         if pod is None:
-            missing.append(f"the pod {names[-1]} (gone from {cluster_names(contexts)})")
+            missing.append(pod_gone(names[-1], contexts))
     else:
         missing.append("the pod (no failed pod recorded)")
     found = evidence(job, result, pod)
@@ -989,9 +1000,10 @@ def main(argv: list[str] | None = None) -> int:
                       else collect(options.job, contexts))
     call = verdict(found)
     if options.pod and not found.get("pod_found"):
-        text = (f"{options.pod}: not on {cluster_names(contexts)}, so there is nothing to read."
-                " A pod that has been deleted keeps its kill only in the farm's record, which exists for"
-                " OSS Verify runs; for another namespace the evidence is gone with the pod."
+        text = (f"{options.pod}: no worker holds this pod ({cluster_names(contexts)} read), so there is"
+                " nothing to read. Kueue deletes the Job's copy on the worker, and its pods, seconds"
+                " after the Job ends. The evidence remains in the farm's record (result.json), which"
+                " OSS Verify runs write, and in Cloud Logging."
                 "\nCatch the next one while it is still there, or keep the kill yourself: the"
                 " kernel's own line in the node's journal survives the pod.")
     elif options.pod and not found.get("reason") and found.get("exit_code") is None:
@@ -1004,7 +1016,7 @@ def main(argv: list[str] | None = None) -> int:
                    else f", and it finished at {found['finished_at']}.")
                 + "\nIf you expected a kill here, the pod you want is a previous one: a"
                 " restarted container's kill lives in its last state, and a deleted pod's"
-                " lives only in the farm's record.")
+                " lives in the farm's record and in Cloud Logging.")
     else:
         text = message(found, call)
     if missing:

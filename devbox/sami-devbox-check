@@ -314,14 +314,15 @@ github_check() {
 #      (not shallow, not partial), on the state disk;
 #   2. the build bucket and its URL signer: ACCOUNT reads one object of gs://theorem-build-io (the
 #      team set) and signs as build-io-signer@ (census row U23's exception);
-#   3. what the farm's own pods do now (n6_routes_check): ACCOUNT mints no token of ossv-runs-signer@,
-#      lists nothing in gs://theorem-ossv-runs and creates no Job in builds-ossv;
+#   3. the farm's routes (n6_routes_check): ACCOUNT mints no token of ossv-runs-signer@ and lists
+#      nothing in gs://theorem-ossv-runs, which the farm's own pods use, and creates Jobs in
+#      builds-ossv on the MultiKueue manager;
 #   4. a release asset of the repository through shims/gh and the GitHub App;
 #   5. disk-gate on /mnt/nvme: status, and a reserve and release round trip; in a box also the
 #      farm's work root and run index bound from the host (scripts/agentbox, agentbox/mounts).
 OVPI_DIR="$HOME/src/oss-verify-proofs-internal"
 OVPI_REPO=theorem-labs/oss-verify-proofs-internal
-# The farm's namespace (its own pods submit there now) and the account the farm signs its URLs with.
+# The farm's namespace, where a box creates the farm's Jobs on the MultiKueue manager.
 N6_NAMESPACE=builds-ossv
 # A refusal, told apart from any other failure: an error that is not a refusal says nothing about
 # the grant, so it fails the line.
@@ -342,7 +343,8 @@ n6_check() {
     n="$(gcloud storage cat -r 0-63 "$obj" 2>/dev/null | wc -c)"
     [[ -n "$obj" && "$n" -gt 0 ]] && ok "N6 bucket $where: read $n bytes of $obj" \
         || fail "N6 bucket $where: gs://theorem-build-io: no object read under out/ossv/ (newest prefix '${prefix:-none}', object '${obj:-none}')"
-    # 3. The box's own URL signer, and what moved to the farm's own pods.
+    # 3. The box's own URL signer, the farm's signer and run bucket, which the farm's own pods use,
+    #    and the farm's Jobs on the manager.
     n6_box_signer_check "$where"
     n6_routes_check "$where"
     # 4. A release asset through shims/gh, as an agent session's call (the App's token; the marker

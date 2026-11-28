@@ -5,7 +5,10 @@ Scripts written on sami-rocqperf name KUBECONFIG=/mnt/nvme/<user>/boxid/infra-ku
 that names no context reads dispatch, as before. A box creates and reads its build Jobs on the Kueue
 MultiKueue manager theorem-multikueue (dispatch://INFRA-5858, R3), so the file holds the manager's
 context too. Both come from ~/.kube/config, where installers/gcloud-sdk.sh writes them, and neither
-holds a credential: gke-gcloud-auth-plugin takes its token from gcloud.
+holds a credential: gke-gcloud-auth-plugin takes its token from gcloud. A ~/.kube/config that an
+earlier gcloud-sdk.sh wrote has no context of the manager: the run then exits 0, says so, and writes
+dispatch's context alone, because installers/agent-identity.sh takes back its account switch when
+this installer fails.
 
 Technique: a byte copy of the real installer, in a scratch tree beside two stand-ins, for
 installers/gcloud-box.sh (its gcloud configuration is test_gcloud_box.py's) and for
@@ -106,14 +109,26 @@ class GcloudBoxidKubeconfig(unittest.TestCase):
         self.assertNotIn("wrote", again.stdout)
         self.assertEqual(self.file.read_bytes(), before)
 
-    def test_a_kube_config_without_the_managers_context_fails_and_leaves_the_file(self) -> None:
-        """Before installers/gcloud-sdk.sh writes the manager's context, the run fails and keeps the file it had."""
-        self.file.parent.mkdir(mode=0o700)
-        self.file.write_text("the file of an earlier run\n", encoding="utf-8")
+    def test_a_kube_config_without_the_managers_context_gives_dispatch_alone_and_says_so(self) -> None:
+        """An earlier installers/gcloud-sdk.sh wrote no context of the manager. The run exits 0, names the missing
+        context and the installer to run, and writes dispatch's context alone as the current one. A run after
+        gcloud-sdk.sh writes the manager's context adds it."""
         self.write_kube_config(CONTEXTS[:3])
         result = self.run_installer()
-        self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertEqual(self.file.read_text(encoding="utf-8"), "the file of an earlier run\n")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"gcloud-boxid: ~/.kube/config has no context {MANAGER}; run installers/gcloud-sdk.sh, then this"
+                      " installer again", result.stdout.splitlines())
+        self.assertIn(f"wrote {self.file} (context {DISPATCH})", result.stdout)
+        self.assertEqual(self.kubectl("config", "get-contexts", "-o", "name").split(), [DISPATCH])
+        self.assertEqual(self.kubectl("config", "current-context").strip(), DISPATCH)
+        self.assertEqual(stat.S_IMODE(self.file.stat().st_mode), 0o600)
+        self.assertNotIn("wrote", self.run_installer().stdout)
+        self.write_kube_config(CONTEXTS)
+        later = self.run_installer()
+        self.assertEqual(later.returncode, 0, later.stdout + later.stderr)
+        self.assertNotIn("has no context", later.stdout)
+        self.assertEqual(sorted(self.kubectl("config", "get-contexts", "-o", "name").split()), sorted((DISPATCH, MANAGER)))
+        self.assertEqual(self.kubectl("config", "current-context").strip(), DISPATCH)
 
 
 if __name__ == "__main__":
