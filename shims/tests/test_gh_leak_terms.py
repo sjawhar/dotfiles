@@ -124,23 +124,43 @@ def load_check():
     return module
 
 
-# The functions of shims/gh that decide whether a call goes to the check: gh_shim_may_send_text calls the other three.
-SHIM_GATE = ("gh_shim_is_write", "gh_shim_may_send_text", "gh_shim_is_quiet", "gh_shim_has_nested_alias")
+# The functions of shims/gh that decide whether a call goes to the check: gh_shim_may_send_text calls gh_shim_is_write,
+# gh_shim_is_quiet and gh_shim_has_nested_alias, and the first two read the call's command with gh_shim_command_words.
+SHIM_GATE = ("gh_shim_command_words", "gh_shim_is_write", "gh_shim_may_send_text", "gh_shim_is_quiet",
+             "gh_shim_has_nested_alias")
+
+
+def shim_sources(text: str | None = None) -> dict[str, str]:
+    """Each gh_shim_* function of shims/gh, or of TEXT, by its name: its definition, lifted out by text from its
+    `gh_shim_…() {` line to its closing `}` line. Fails where any function of SHIM_GATE is not found, so it cannot lift
+    nothing."""
+    text = GH.read_text(encoding="utf-8") if text is None else text
+    sources = {match[1]: match[0]
+               for match in re.finditer(r"^(gh_shim_[a-z0-9_]+)\(\) \{$.*?^\}$", text, re.MULTILINE | re.DOTALL)}
+    missing = sorted(set(SHIM_GATE) - set(sources))
+    if missing:
+        raise AssertionError(f"shims/gh holds no definition of {', '.join(missing)} that the tests can lift out")
+    return sources
 
 
 def shim_functions(text: str | None = None) -> str:
-    """Every gh_shim_* function of shims/gh, or of TEXT, lifted out by text for a test to run (sourcing shims/gh runs
-    it): each definition from its `gh_shim_…() {` line to its closing `}` line. All of them, so no function one of them
-    calls is missing: a test that lifted gh_shim_may_send_text without gh_shim_is_quiet ran `! gh_shim_is_quiet` as a
-    command bash does not find (exit 127, so true), and every call under a command the shim knows read as handed to the
-    check, `gh pr view 1` too (review of 053ef618, finding 4). Fails where any function of SHIM_GATE is not found, so it
-    cannot lift nothing."""
-    text = GH.read_text(encoding="utf-8") if text is None else text
-    found = list(re.finditer(r"^(gh_shim_[a-z0-9_]+)\(\) \{$.*?^\}$", text, re.MULTILINE | re.DOTALL))
-    missing = sorted(set(SHIM_GATE) - {match[1] for match in found})
-    if missing:
-        raise AssertionError(f"shims/gh holds no definition of {', '.join(missing)} that the tests can lift out")
-    return "".join(f"{match[0]}\n" for match in found)
+    """Every gh_shim_* function of shims/gh, or of TEXT (shim_sources), for a test to run (sourcing shims/gh runs it).
+    All of them, so no function one of them calls is missing: a test that lifted gh_shim_may_send_text without
+    gh_shim_is_quiet ran `! gh_shim_is_quiet` as a command bash does not find (exit 127, so true), and every call under
+    a command the shim knows read as handed to the check, `gh pr view 1` too (review of 053ef618, finding 4)."""
+    return "".join(f"{source}\n" for source in shim_sources(text).values())
+
+
+def spellings(module, name: str) -> list[list[str]]:
+    """The command NAME of the check MODULE's tables (`codespace list`) in each spelling gh runs it by: its words, and
+    its words with gh's aliases of them in their place (GH_GROUP_ALIASES, GH_SUBCOMMAND_ALIASES: `cs list`, `codespace
+    ls`, `cs ls`)."""
+    words = name.split()
+    spelled = [words, *([alias, *words[1:]] for alias, group in module.GH_GROUP_ALIASES.items() if group == words[0])]
+    for (parent, alias), sub in module.GH_SUBCOMMAND_ALIASES.items():
+        if parent.split() == words[:-1] and sub == words[-1]:
+            spelled += [[*each[:-1], alias] for each in spelled]
+    return spelled
 
 
 class GhLeakTerms(unittest.TestCase):
@@ -470,15 +490,19 @@ class GhLeakTerms(unittest.TestCase):
         # is a command it has registered already (pkg/cmd/root/root.go:213-240), so it registers no alias of a loop: on
         # 2026-11-27 its `gh c1`, config.yml holding `c1: c2` and `c2: c1`, failed with `unknown command "c1"` in 40 of
         # 40 runs. An alias that runs itself is a loop too.
+        # The refusal names the aliases in the order the call ran through them, not sorted: `b, a` for `b: a`, `a: b`.
         config = self.tmp / "config" / "gh"
         config.mkdir()
         path = config / "config.yml"
-        path.write_text(gh_config_yml(f"\n    c1: c2\n    c2: c1 -R {PUBLIC}\n    s: s --body\n"), encoding="utf-8")
+        path.write_text(gh_config_yml(f"\n    c1: c2\n    c2: c1 -R {PUBLIC}\n    s: s --body\n    b: a\n    a: b\n"),
+                        encoding="utf-8")
         for argv, shown in (
                 (["c1", "--body", TEXT], f"gh c1: the call comes back to gh's alias c1, on line 8 of {path}, after "
                                          "the aliases c1, c2: a loop of aliases"),
                 (["s", TEXT], f"gh s: the call comes back to gh's alias s, on line 10 of {path}, after the aliases s: "
-                              "a loop of aliases")):
+                              "a loop of aliases"),
+                (["b", "--body", TEXT], f"gh b: the call comes back to gh's alias b, on line 11 of {path}, after the "
+                                        "aliases b, a: a loop of aliases")):
             with self.subTest(call=argv[0]):
                 self.assert_alias_refused(argv, self.env, shown)
 
@@ -4458,9 +4482,7 @@ class Tables(unittest.TestCase):
                  for group, sub in module.GH_TEXT_COMMANDS]
         calls.extend(name.split() for name in module.GH_REFUSED_COMMANDS)
         for name in module.GH_EXEC_COMMANDS:
-            group, *words = name.split()
-            spellings = [group, *(alias for alias, named in module.GH_GROUP_ALIASES.items() if named == group)]
-            calls.extend([spelled, *words] for spelled in spellings)
+            calls.extend(spellings(module, name))
         calls.extend(["stack", name] for name, (kind, _) in module.GH_STACK_COMMANDS.items() if kind != "quiet")
         with tempfile.TemporaryDirectory() as config:
             def answer(argv: list[str]) -> str:
@@ -4604,32 +4626,26 @@ class Tables(unittest.TestCase):
         # gh-stack is installed, where the check reads its table, and where it is not, where `gh stack` is gh's stub of
         # it, which the check refuses: the shim hands every `gh stack` call to the check today, and a list of quiet
         # gh-stack calls in the shim must hold to both. `gh api` is the one text command gh_shim_is_quiet names, since
-        # gh_shim_is_write tells its writes from its reads: an unread `gh api` call must be no write there and one the
-        # check lets go (gh_check exits 0). Until the review of 053ef618 (finding 4) every unread call was held only to
-        # gh_check exiting 0, which a text command called with no text does too, so a text command moved to
-        # gh_shim_is_quiet passed here.
+        # gh_shim_is_write tells its writes from its reads, and gh_shim_may_send_text hands every write to the check:
+        # an unread `gh api` call is a read, which must be one the check lets go (gh_check exits 0). Until the review
+        # of 053ef618 (finding 4) every unread call was held only to gh_check exiting 0, which a text command called
+        # with no text does too, so a text command moved to gh_shim_is_quiet passed here.
         # Controls: a verb gh does not have, under a group, a group's alias, a group of a group and after an empty word,
         # a top-level name gh does not have, after an empty word too, and an official extension stub are handed to the
         # check; the reads agents run most, git's credential helper, `gh help` and `gh version` are not.
         module = self.scanner()
         text = GH.read_text(encoding="utf-8")
         functions = shim_functions(text)
+        sources = shim_sources(text)
         calls: set[tuple[str, ...]] = set()
         for name in module.gh_commands():
-            words = name.split()
-            spellings = [words, *([alias, *words[1:]] for alias, group in module.GH_GROUP_ALIASES.items()
-                                  if group == words[0])]
-            for (parent, alias), sub in module.GH_SUBCOMMAND_ALIASES.items():
-                if parent.split() == words[:-1] and sub == words[-1]:
-                    spellings += [[*spelled[:-1], alias] for spelled in spellings]
-            calls.update(tuple(spelled) for spelled in spellings)
+            calls.update(tuple(spelled) for spelled in spellings(module, name))
         listed = re.search(r"\n\s+(agent \|.*?)\)\n\s+gh_shim_has_nested_alias \"\$1\"",
-                           text[text.index("gh_shim_may_send_text() {"):], re.DOTALL)
+                           sources["gh_shim_may_send_text"], re.DOTALL)
         self.assertIsNotNone(listed, "the top-level words of gh_shim_may_send_text were not found")
         assert listed is not None
         tops = [word for word in re.split(r"[\s|\\]+", listed[1]) if word]
-        start = text.index("gh_shim_is_quiet() {")
-        held = set(re.findall(r"[a-z][a-z0-9-]*", text[start:text.index("\n}\n", start)]))
+        held = set(re.findall(r"[a-z][a-z0-9-]*", sources["gh_shim_is_quiet"]))
         self.assertIn("checks", held)
         calls.update((top, word) for top in tops for word in held)
         calls.update((top,) for top in tops)
@@ -4642,23 +4658,18 @@ class Tables(unittest.TestCase):
         ordered = [*sorted(calls), *unknown, *hot]
         with tempfile.TemporaryDirectory() as config, tempfile.TemporaryDirectory() as installed:
             (Path(installed) / "gh" / "extensions" / "gh-stack").mkdir(parents=True)
-            apis = [call for call in ordered if call[0] == "api"]
             script = functions
             for call in ordered:
                 quoted = " ".join(f"'{a}'" for a in call)
                 script += f"\ngh_shim_may_send_text {quoted} && echo yes || echo no"
-            for call in apis:
-                quoted = " ".join(f"'{a}'" for a in call)
-                script += f"\ngh_shim_is_write {quoted} && echo yes || echo no"
             for data in (config, installed):
                 env = {"GH_CONFIG_DIR": config, "HOME": config, "XDG_DATA_HOME": data}
                 # The script, some 440 KB, goes on standard input: Linux refuses one argument past 128 KiB
                 # (MAX_ARG_STRLEN), and a CI runner's `bash -c` of it failed with E2BIG.
                 answers = subprocess.run(["bash", "-s"], input=script, env={**os.environ, **env}, capture_output=True,
                                          text=True, timeout=120).stdout.split()
-                self.assertEqual(len(answers), len(ordered) + len(apis))
+                self.assertEqual(len(answers), len(ordered))
                 handed = dict(zip(ordered, (answer == "yes" for answer in answers)))
-                writes = dict(zip(apis, (answer == "yes" for answer in answers[len(ordered):])))
                 unread = sorted(call for call in {*calls, *hot} if not handed[call])
                 self.assertGreater(len(unread), 100, "the shim lets too few calls go unread to compare them with the "
                                                      "check")
@@ -4666,7 +4677,6 @@ class Tables(unittest.TestCase):
                     for call in unread:
                         with self.subTest(call=" ".join(call), gh_stack=data == installed):
                             if call[0] == "api":
-                                self.assertFalse(writes[call])
                                 self.assertEqual(module.gh_check(list(call)), 0)
                             else:
                                 self.assertIsNone(module.gh_command(list(call), env))

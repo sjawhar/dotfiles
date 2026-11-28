@@ -4047,7 +4047,7 @@ def gh_commands() -> frozenset[str]:
 
 
 def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
-               seen: frozenset[str] = frozenset()) -> tuple[str, str, list[str]] | None:
+               seen: tuple[str, ...] = ()) -> tuple[str, str, list[str]] | None:
     """(group, subcommand, the arguments the subcommand reads) of a call of a GH_TEXT_COMMANDS command, after a gh
     alias, or ("stack", subcommand, its arguments) of a gh-stack call gh_stack_check reads (gh_extension_command); None
     for any other call the check lets go: of a GH_QUIET_COMMANDS or GH_HIDDEN_COMMANDS command, of a group with no
@@ -4247,8 +4247,8 @@ def gh_unknown(name: str, rest: Sequence[str]) -> None:
 
 
 def gh_alias_command(name: str, rest: Sequence[str], environment: Mapping[str, str],
-                     seen: frozenset[str]) -> tuple[str, str, list[str]] | None:
-    """gh_command of what the gh alias NAME runs with REST, SEEN the aliases the call ran through to reach NAME;
+                     seen: tuple[str, ...]) -> tuple[str, str, list[str]] | None:
+    """gh_command of what the gh alias NAME runs with REST, SEEN the aliases the call ran through to NAME, in order;
     gh_unknown for no such alias; None for a shell alias (`!…`), which runs a shell whose own gh calls come back through
     shims/gh, and for one whose `$N` REST does not fill, which goes to gh, which refuses it itself (`not enough
     arguments for alias`). An alias that runs another is followed however many run in a row: gh 2.106.0 runs what an
@@ -4274,7 +4274,7 @@ def gh_alias_command(name: str, rest: Sequence[str], environment: Mapping[str, s
         return gh_unknown(name, rest)
     if name in seen:
         raise GhUnjudgedError(name, f"the call comes back to gh's alias {name}, on line {found[1]} of {aliases.path}, "
-                                    f"after the aliases {', '.join(sorted(seen))}: a loop of aliases, which the check "
+                                    f"after the aliases {', '.join(seen)}: a loop of aliases, which the check "
                                     "cannot follow, so it cannot judge the call: fix the loop")
     if found[0].startswith("!"):
         return None
@@ -4286,7 +4286,7 @@ def gh_alias_command(name: str, rest: Sequence[str], environment: Mapping[str, s
         except ValueError as own:
             raise GhUnjudgedError(name, gh_unsplit(name, found[1], aliases.path, own, filled=False)) from None
         raise GhUnjudgedError(name, gh_unsplit(name, found[1], aliases.path, error, filled=True)) from None
-    return gh_command(expanded, environment, seen | {name}) if expanded else None
+    return gh_command(expanded, environment, seen + (name,)) if expanded else None
 
 
 def gh_walk(arguments: Sequence[str], options: Mapping[str, bool]) -> list[tuple[str | None, str | None]]:
@@ -6268,9 +6268,17 @@ def gh_own_name(target: GhTarget, view: str, span: Span) -> bool:
     owner, _, name = target.repository.partition("/")
     if not (target.public and owner and name):
         return False
-    whole = re.escape(target.repository) + r"(?=\.git(?![A-Za-z0-9_.-])|(?![A-Za-z0-9_.-]))"
-    own = re.compile(rf"(?<![A-Za-z0-9_-])(?:{whole}|{re.escape(owner)}(?![A-Za-z0-9_-]))", re.ASCII | re.IGNORECASE)
-    return any(found.start() <= span.start and span.end <= found.end() for found in own.finditer(view))
+    return any(found.start() <= span.start and span.end <= found.end()
+               for found in gh_own_name_pattern(target.repository).finditer(view))
+
+
+@lru_cache(maxsize=None)
+def gh_own_name_pattern(repository: str) -> re.Pattern[str]:
+    """The pattern that finds the own name of REPOSITORY, an `owner/name`, as gh_own_name reads it, compiled once for
+    each repository and not at each match gh_own_name judges in a text to that repository."""
+    owner = repository.partition("/")[0]
+    whole = re.escape(repository) + r"(?=\.git(?![A-Za-z0-9_.-])|(?![A-Za-z0-9_.-]))"
+    return re.compile(rf"(?<![A-Za-z0-9_-])(?:{whole}|{re.escape(owner)}(?![A-Za-z0-9_-]))", re.ASCII | re.IGNORECASE)
 
 
 # The one target of a raw GraphQL mutation, a call read as GraphQL on any host (gh_api_endpoint, GhAddress.graphql)
@@ -6667,19 +6675,20 @@ def gh_refusal(name: str, reach: Callable[[], Sequence[GhTarget]], contents: Seq
             if found.value != value:
                 value, counted = found.value, set()
                 targets = [target for target in reached if target.open and gh_goes_to(found.piece, target.tie)]
-            # A match counts for an open target its value goes to, that its list's scope reaches, that no allowed token
-            # of that target holds, and whose own name, public already, does not hold it (gh_own_name); a match of a
-            # later view counts only when none of its twins does, since a twin that counts shows the same term.
+            # A match of a later view counts only when none of its twins does, since a twin that counts shows the same
+            # term, so it is passed over before its targets are read. A match counts for an open target its value goes
+            # to, that its list's scope reaches, that no allowed token of that target holds, and whose own name, public
+            # already, does not hold it (gh_own_name).
             span = found.span
+            twin = (span.term, span.scope, span.allowed_in)
+            if found.how and twin in counted:
+                continue
             if not any((not span.scope or scopes[span.scope].reaches([target.repository]))
                        and not span.allowed_for(target.repository) and not gh_own_name(target, found.view, span)
                        for target in targets):
                 continue
-            twin = (span.term, span.scope, span.allowed_in)
             if not found.how:
                 counted.add(twin)
-            elif twin in counted:
-                continue
             key = (found.piece, span.term, span.scope)
             if taken.get(key, 0) < GH_MATCH_LIMIT:
                 taken[key] = taken.get(key, 0) + 1
@@ -6693,8 +6702,8 @@ def gh_refusal(name: str, reach: Callable[[], Sequence[GhTarget]], contents: Seq
         return 0
     if reached is None:
         reached = reach()
-    if not any(target.open for target in reached):
-        return 0
+        if not any(target.open for target in reached):
+            return 0
     target = ", ".join(c_escape(item.shown) for item in reached)
     for finding in shown:
         print(f"leak terms: {name} to {target}: {finding}", file=sys.stderr)
